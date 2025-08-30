@@ -366,7 +366,7 @@ fn knapsack_coin_algorithm(
         let mut target_reached = false;
         while n_pass < 2 && !target_reached {
             for coin in smaller_coins {
-                if (n_pass == 0 && rand.gen::<bool>())
+                if (n_pass == 0 && rand.random::<bool>())
                     || (n_pass == 1 && !selected_coins.contains(coin))
                 {
                     if selected_coins.len() > max_num_coins {
