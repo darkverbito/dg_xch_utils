@@ -104,12 +104,12 @@ impl Wallet<MemoryWalletStore, MemoryWalletConfig> for PlotNFTWallet {
             let ph = puzzle_hash_for_pk(pub_key)?;
             puzzle_hashes.push(ph);
         }
-        let (spend, unspent) =
+        let (spent, unspent) =
             scrounge_for_standard_coins(self.fullnode_client.clone(), &puzzle_hashes).await?;
         let store = self.info.wallet_store.lock().await;
         let coins = store.standard_coins();
-        coins.lock().await.extend(spend.into_iter());
-        coins.lock().await.extend(unspent.into_iter());
+        coins.lock().await.extend(spent);
+        coins.lock().await.extend(unspent);
         Ok(true)
     }
 
