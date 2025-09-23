@@ -248,9 +248,9 @@ impl ConditionWithArgs {
                 ConditionOpcode::SendMessage,
                 vec![mode.to_sexp(), puzzle_hash.to_sexp(), msg.to_sexp()],
             ),
-            ConditionWithArgs::ReceiveMessage(puzzle_hash, mode, msg) => (
+            ConditionWithArgs::ReceiveMessage(mode, puzzle_hash, msg) => (
                 ConditionOpcode::ReceiveMessage,
-                vec![puzzle_hash.to_sexp(), mode.to_sexp(), msg.to_sexp()],
+                vec![mode.to_sexp(), puzzle_hash.to_sexp(), msg.to_sexp()],
             ),
             ConditionWithArgs::AssertMyCoinId(puzzle_hash) => {
                 (ConditionOpcode::AssertMyCoinId, vec![puzzle_hash.to_sexp()])

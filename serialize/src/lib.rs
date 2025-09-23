@@ -5,7 +5,7 @@ use std::fmt::{Display, Formatter};
 use std::hash::Hash;
 use std::io::{Cursor, Error, ErrorKind, Read, Write};
 use std::str::FromStr;
-use time::OffsetDateTime;
+use time::{OffsetDateTime, PrimitiveDateTime};
 
 #[derive(
     Default,
@@ -145,6 +145,28 @@ impl ChiaSerialize for bool {
                 format!("Failed to parse bool, invalid value: {:?}", bool_buf[0]),
             )),
         }
+    }
+}
+
+impl ChiaSerialize for PrimitiveDateTime {
+    fn to_bytes(&self, _version: ChiaProtocolVersion) -> Result<Vec<u8>, Error>
+    where
+        Self: Sized,
+    {
+        self.assume_utc().to_bytes(ChiaProtocolVersion::default())
+    }
+    fn from_bytes<T: AsRef<[u8]>>(
+        bytes: &mut Cursor<T>,
+        _version: ChiaProtocolVersion,
+    ) -> Result<Self, Error>
+    where
+        Self: Sized,
+    {
+        let offset_datatime = OffsetDateTime::from_bytes(bytes, ChiaProtocolVersion::default())?;
+        Ok(PrimitiveDateTime::new(
+            offset_datatime.date(),
+            offset_datatime.time(),
+        ))
     }
 }
 
@@ -315,6 +337,43 @@ impl_primitives!(
     u128, 16;
     f32, 4;
     f64, 8
+);
+
+macro_rules! impl_arrays {
+    ($($name: ty, $size:expr);*) => {
+        $(
+            impl ChiaSerialize for $name {
+                fn to_bytes(&self, _version: ChiaProtocolVersion) -> Result<Vec<u8>, Error> {
+                    Ok(self.to_vec())
+                }
+                fn from_bytes<T: AsRef<[u8]>>(bytes: &mut Cursor<T>, _version: ChiaProtocolVersion) -> Result<Self, std::io::Error> where Self: Sized,
+                {
+                    let remaining = bytes.get_ref().as_ref().len().saturating_sub(bytes.position() as usize);
+                    if remaining < $size {
+                        Err(Error::new(std::io::ErrorKind::InvalidInput, format!("Failed to Parse {}, expected length {}, found {}", stringify!($name), stringify!($size), remaining)))
+                    } else {
+                        let mut buffer: $name = [0; $size];
+                        bytes.read_exact(&mut buffer)?;
+                        Ok(buffer)
+                    }
+                }
+            }
+        )*
+    };
+    ()=>{};
+}
+impl_arrays!(
+    [u8; 4], 4;
+    [u8; 8], 8;
+    [u8; 16], 16;
+    [u8; 24], 24;
+    [u8; 32], 32;
+    [u8; 48], 48;
+    [u8; 64], 64;
+    [u8; 96], 96;
+    [u8; 128], 128;
+    [u8; 256], 256;
+    [u8; 512], 512
 );
 
 const MAX_DECODE_SIZE: u64 = 0x0004_0000_0000;
