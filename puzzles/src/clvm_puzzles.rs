@@ -14,39 +14,28 @@ use lazy_static::lazy_static;
 use log::debug;
 use num_traits::{ToPrimitive, Zero};
 use std::io::{Cursor, Error, ErrorKind};
+use dg_xch_core::puzzles::singleton_launcher::SINGLETON_LAUNCHER_HASH;
+use dg_xch_core::puzzles::singleton_top_layer::{SINGLETON_TOP_LAYER, SINGLETON_TOP_LAYER_HASH};
+use dg_xch_core::puzzles::singleton_top_layer_v1_1::{SINGLETON_TOP_LAYER_V1_1, SINGLETON_TOP_LAYER_V1_1_HASH};
 
-const SINGLETON_LAUNCHER_HEX: &str = "ff02ffff01ff04ffff04ff04ffff04ff05ffff04ff0bff80808080ffff04ffff04ff0affff04ffff02ff0effff04ff02ffff04ffff04ff05ffff04ff0bffff04ff17ff80808080ff80808080ff808080ff808080ffff04ffff01ff33ff3cff02ffff03ffff07ff0580ffff01ff0bffff0102ffff02ff0effff04ff02ffff04ff09ff80808080ffff02ff0effff04ff02ffff04ff0dff8080808080ffff01ff0bffff0101ff058080ff0180ff018080";
-const SINGLETON_MOD_HEX: &str = "ff02ffff01ff02ffff03ffff18ff2fffff010180ffff01ff02ff36ffff04ff02ffff04ff05ffff04ff17ffff04ffff02ff26ffff04ff02ffff04ff0bff80808080ffff04ff2fffff04ff0bffff04ff5fff808080808080808080ffff01ff088080ff0180ffff04ffff01ffffffff4602ff3304ffff0101ff02ffff02ffff03ff05ffff01ff02ff5cffff04ff02ffff04ff0dffff04ffff0bff2cffff0bff24ff3880ffff0bff2cffff0bff2cffff0bff24ff3480ff0980ffff0bff2cff0bffff0bff24ff8080808080ff8080808080ffff010b80ff0180ff02ffff03ff0bffff01ff02ff32ffff04ff02ffff04ff05ffff04ff0bffff04ff17ffff04ffff02ff2affff04ff02ffff04ffff02ffff03ffff09ff23ff2880ffff0181b3ff8080ff0180ff80808080ff80808080808080ffff01ff02ffff03ff17ff80ffff01ff088080ff018080ff0180ffffffff0bffff0bff17ffff02ff3affff04ff02ffff04ff09ffff04ff2fffff04ffff02ff26ffff04ff02ffff04ff05ff80808080ff808080808080ff5f80ff0bff81bf80ff02ffff03ffff20ffff22ff4fff178080ffff01ff02ff7effff04ff02ffff04ff6fffff04ffff04ffff02ffff03ff4fffff01ff04ff23ffff04ffff02ff3affff04ff02ffff04ff09ffff04ff53ffff04ffff02ff26ffff04ff02ffff04ff05ff80808080ff808080808080ffff04ff81b3ff80808080ffff011380ff0180ffff02ff7cffff04ff02ffff04ff05ffff04ff1bffff04ffff21ff4fff1780ff80808080808080ff8080808080ffff01ff088080ff0180ffff04ffff09ffff18ff05ffff010180ffff010180ffff09ff05ffff01818f8080ff0bff2cffff0bff24ff3080ffff0bff2cffff0bff2cffff0bff24ff3480ff0580ffff0bff2cffff02ff5cffff04ff02ffff04ff07ffff04ffff0bff24ff2480ff8080808080ffff0bff24ff8080808080ffffff02ffff03ffff07ff0580ffff01ff0bffff0102ffff02ff26ffff04ff02ffff04ff09ff80808080ffff02ff26ffff04ff02ffff04ff0dff8080808080ffff01ff0bffff0101ff058080ff0180ff02ff5effff04ff02ffff04ff05ffff04ff0bffff04ffff02ff3affff04ff02ffff04ff09ffff04ff17ffff04ffff02ff26ffff04ff02ffff04ff05ff80808080ff808080808080ffff04ff17ffff04ff2fffff04ff5fffff04ff81bfff80808080808080808080ffff04ffff04ff20ffff04ff17ff808080ffff02ff7cffff04ff02ffff04ff05ffff04ffff02ff82017fffff04ffff04ffff04ff17ff2f80ffff04ffff04ff5fff81bf80ffff04ff0bff05808080ff8202ff8080ffff01ff80808080808080ffff02ff2effff04ff02ffff04ff05ffff04ff0bffff04ffff02ffff03ff3bffff01ff02ff22ffff04ff02ffff04ff05ffff04ff17ffff04ff13ffff04ff2bffff04ff5bffff04ff5fff808080808080808080ffff01ff02ffff03ffff09ff15ffff0bff13ff1dff2b8080ffff01ff0bff15ff17ff5f80ffff01ff088080ff018080ff0180ffff04ff17ffff04ff2fffff04ff5fffff04ff81bfffff04ff82017fff8080808080808080808080ff02ffff03ff05ffff011bffff010b80ff0180ff018080";
-const SINGLETON_MOD_V1_1_HEX: &str = "ff02ffff01ff02ffff03ffff18ff2fff3480ffff01ff04ffff04ff20ffff04ff2fff808080ffff04ffff02ff3effff04ff02ffff04ff05ffff04ffff02ff2affff04ff02ffff04ff27ffff04ffff02ffff03ff77ffff01ff02ff36ffff04ff02ffff04ff09ffff04ff57ffff04ffff02ff2effff04ff02ffff04ff05ff80808080ff808080808080ffff011d80ff0180ffff04ffff02ffff03ff77ffff0181b7ffff015780ff0180ff808080808080ffff04ff77ff808080808080ffff02ff3affff04ff02ffff04ff05ffff04ffff02ff0bff5f80ffff01ff8080808080808080ffff01ff088080ff0180ffff04ffff01ffffffff4947ff0233ffff0401ff0102ffffff20ff02ffff03ff05ffff01ff02ff32ffff04ff02ffff04ff0dffff04ffff0bff3cffff0bff34ff2480ffff0bff3cffff0bff3cffff0bff34ff2c80ff0980ffff0bff3cff0bffff0bff34ff8080808080ff8080808080ffff010b80ff0180ffff02ffff03ffff22ffff09ffff0dff0580ff2280ffff09ffff0dff0b80ff2280ffff15ff17ffff0181ff8080ffff01ff0bff05ff0bff1780ffff01ff088080ff0180ff02ffff03ff0bffff01ff02ffff03ffff02ff26ffff04ff02ffff04ff13ff80808080ffff01ff02ffff03ffff20ff1780ffff01ff02ffff03ffff09ff81b3ffff01818f80ffff01ff02ff3affff04ff02ffff04ff05ffff04ff1bffff04ff34ff808080808080ffff01ff04ffff04ff23ffff04ffff02ff36ffff04ff02ffff04ff09ffff04ff53ffff04ffff02ff2effff04ff02ffff04ff05ff80808080ff808080808080ff738080ffff02ff3affff04ff02ffff04ff05ffff04ff1bffff04ff34ff8080808080808080ff0180ffff01ff088080ff0180ffff01ff04ff13ffff02ff3affff04ff02ffff04ff05ffff04ff1bffff04ff17ff8080808080808080ff0180ffff01ff02ffff03ff17ff80ffff01ff088080ff018080ff0180ffffff02ffff03ffff09ff09ff3880ffff01ff02ffff03ffff18ff2dffff010180ffff01ff0101ff8080ff0180ff8080ff0180ff0bff3cffff0bff34ff2880ffff0bff3cffff0bff3cffff0bff34ff2c80ff0580ffff0bff3cffff02ff32ffff04ff02ffff04ff07ffff04ffff0bff34ff3480ff8080808080ffff0bff34ff8080808080ffff02ffff03ffff07ff0580ffff01ff0bffff0102ffff02ff2effff04ff02ffff04ff09ff80808080ffff02ff2effff04ff02ffff04ff0dff8080808080ffff01ff0bffff0101ff058080ff0180ff02ffff03ffff21ff17ffff09ff0bff158080ffff01ff04ff30ffff04ff0bff808080ffff01ff088080ff0180ff018080";
 const POOL_WAITING_ROOM_MOD_HEX: &str = "ff02ffff01ff02ffff03ff82017fffff01ff04ffff04ff1cffff04ff5fff808080ffff04ffff04ff12ffff04ff8205ffffff04ff8206bfff80808080ffff04ffff04ff08ffff04ff17ffff04ffff02ff1effff04ff02ffff04ffff04ff8205ffffff04ff8202ffff808080ff80808080ff80808080ff80808080ffff01ff02ff16ffff04ff02ffff04ff05ffff04ff8204bfffff04ff8206bfffff04ff8202ffffff04ffff0bffff19ff2fffff18ffff019100ffffffffffffffffffffffffffffffffff8205ff8080ff0bff8202ff80ff808080808080808080ff0180ffff04ffff01ffff32ff3d52ffff333effff04ffff04ff12ffff04ff0bffff04ff17ff80808080ffff04ffff04ff12ffff04ff05ffff04ff2fff80808080ffff04ffff04ff1affff04ff5fff808080ffff04ffff04ff14ffff04ffff0bff5fffff012480ff808080ff8080808080ff02ffff03ffff07ff0580ffff01ff0bffff0102ffff02ff1effff04ff02ffff04ff09ff80808080ffff02ff1effff04ff02ffff04ff0dff8080808080ffff01ff0bffff0101ff058080ff0180ff018080";
 const POOL_MEMBER_MOD_HEX: &str = "ff02ffff01ff02ffff03ff8202ffffff01ff02ff16ffff04ff02ffff04ff05ffff04ff8204bfffff04ff8206bfffff04ff82017fffff04ffff0bffff19ff2fffff18ffff019100ffffffffffffffffffffffffffffffffff8202ff8080ff0bff82017f80ff8080808080808080ffff01ff04ffff04ff08ffff04ff17ffff04ffff02ff1effff04ff02ffff04ff82017fff80808080ff80808080ffff04ffff04ff1cffff04ff5fffff04ff8206bfff80808080ff80808080ff0180ffff04ffff01ffff32ff3d33ff3effff04ffff04ff1cffff04ff0bffff04ff17ff80808080ffff04ffff04ff1cffff04ff05ffff04ff2fff80808080ffff04ffff04ff0affff04ff5fff808080ffff04ffff04ff14ffff04ffff0bff5fffff012480ff808080ff8080808080ff02ffff03ffff07ff0580ffff01ff0bffff0102ffff02ff1effff04ff02ffff04ff09ff80808080ffff02ff1effff04ff02ffff04ff0dff8080808080ffff01ff0bffff0101ff058080ff0180ff018080";
 const P2_SINGLETON_OR_DELAYED_MOD_HEX: &str = "ff02ffff01ff02ffff03ff82017fffff01ff04ffff04ff38ffff04ffff0bffff02ff2effff04ff02ffff04ff05ffff04ff81bfffff04ffff02ff3effff04ff02ffff04ffff04ff05ffff04ff0bff178080ff80808080ff808080808080ff82017f80ff808080ffff04ffff04ff3cffff01ff248080ffff04ffff04ff28ffff04ff82017fff808080ff80808080ffff01ff04ffff04ff24ffff04ff2fff808080ffff04ffff04ff2cffff04ff5fffff04ff81bfff80808080ffff04ffff04ff10ffff04ff81bfff808080ff8080808080ff0180ffff04ffff01ffffff49ff463fffff5002ff333cffff04ff0101ffff02ff02ffff03ff05ffff01ff02ff36ffff04ff02ffff04ff0dffff04ffff0bff26ffff0bff2aff1280ffff0bff26ffff0bff26ffff0bff2aff3a80ff0980ffff0bff26ff0bffff0bff2aff8080808080ff8080808080ffff010b80ff0180ffff0bff26ffff0bff2aff3480ffff0bff26ffff0bff26ffff0bff2aff3a80ff0580ffff0bff26ffff02ff36ffff04ff02ffff04ff07ffff04ffff0bff2aff2a80ff8080808080ffff0bff2aff8080808080ff02ffff03ffff07ff0580ffff01ff0bffff0102ffff02ff3effff04ff02ffff04ff09ff80808080ffff02ff3effff04ff02ffff04ff0dff8080808080ffff01ff0bffff0101ff058080ff0180ff018080";
 lazy_static! {
-    pub static ref SINGLETON_LAUNCHER: Program =
-        SerializedProgram::from_hex(SINGLETON_LAUNCHER_HEX)
-            .unwrap()
-            .to_program();
-    pub static ref SINGLETON_LAUNCHER_HASH: Bytes32 = SINGLETON_LAUNCHER.tree_hash();
-    pub static ref SINGLETON_MOD: Program = SerializedProgram::from_hex(SINGLETON_MOD_HEX)
-        .unwrap()
-        .to_program();
-    pub static ref SINGLETON_MOD_V1_1: Program =
-        SerializedProgram::from_hex(SINGLETON_MOD_V1_1_HEX)
-            .unwrap()
-            .to_program();
-    pub static ref SINGLETON_MOD_HASH: Bytes32 = SINGLETON_MOD.tree_hash();
-    pub static ref SINGLETON_MOD_V1_1_HASH: Bytes32 = SINGLETON_MOD_V1_1.tree_hash();
     pub static ref POOL_WAITING_ROOM_MOD: Program =
         SerializedProgram::from_hex(POOL_WAITING_ROOM_MOD_HEX)
             .unwrap()
             .to_program();
+    pub static ref POOL_WAITING_ROOM_MOD_HASH: Bytes32 = POOL_WAITING_ROOM_MOD.tree_hash();
     pub static ref POOL_MEMBER_MOD: Program = SerializedProgram::from_hex(POOL_MEMBER_MOD_HEX)
         .unwrap()
         .to_program();
+    pub static ref POOL_MEMBER_MOD_HASH: Bytes32 = POOL_MEMBER_MOD.tree_hash();
     pub static ref P2_SINGLETON_OR_DELAYED_MOD: Program =
         SerializedProgram::from_hex(P2_SINGLETON_OR_DELAYED_MOD_HEX)
             .unwrap()
             .to_program();
+    pub static ref P2_SINGLETON_OR_DELAYED_MOD_HASH: Bytes32 = P2_SINGLETON_OR_DELAYED_MOD.tree_hash();
 }
 
 pub fn launcher_coin_spend_to_extra_data(
@@ -58,19 +47,19 @@ pub fn launcher_coin_spend_to_extra_data(
             "Provided coin spend is not launcher coin spend",
         ));
     }
-    PlotNftExtraData::from_program(&coin_spend.solution.to_program().rest()?.rest()?.first()?)
+    PlotNftExtraData::from_program(&coin_spend.solution.rest()?.rest()?.first()?)
 }
 
 pub fn puzzle_for_singleton(launcher_id: Bytes32, inner_puz: &Program) -> Result<Program, Error> {
     let args = vec![
         (
-            (*SINGLETON_MOD_HASH).into(),
+            (*SINGLETON_TOP_LAYER_HASH).into(),
             (launcher_id.into(), (*SINGLETON_LAUNCHER_HASH).into()).try_into()?,
         )
             .try_into()?,
         inner_puz.clone(),
     ];
-    SINGLETON_MOD.curry(&args)
+    SINGLETON_TOP_LAYER.curry(&args)
 }
 
 pub fn puzzle_for_singleton_v1_1(
@@ -79,13 +68,13 @@ pub fn puzzle_for_singleton_v1_1(
 ) -> Result<Program, Error> {
     let args = vec![
         (
-            (*SINGLETON_MOD_V1_1_HASH).into(),
+            (*SINGLETON_TOP_LAYER_V1_1_HASH).into(),
             (launcher_id.into(), (*SINGLETON_LAUNCHER_HASH).into()).try_into()?,
         )
             .try_into()?,
         inner_puz.clone(),
     ];
-    SINGLETON_MOD_V1_1.curry(&args)
+    SINGLETON_TOP_LAYER_V1_1.curry(&args)
 }
 
 pub fn create_waiting_room_inner_puzzle(
@@ -163,7 +152,7 @@ pub fn launcher_id_to_p2_puzzle_hash(
     delayed_puzzle_hash: Bytes32,
 ) -> Result<Bytes32, Error> {
     let as_prog = create_p2_singleton_puzzle(
-        *SINGLETON_MOD_HASH,
+        *SINGLETON_TOP_LAYER_HASH,
         launcher_id,
         seconds_delay,
         delayed_puzzle_hash,
@@ -174,11 +163,10 @@ pub fn launcher_id_to_p2_puzzle_hash(
 pub fn get_delay_puzzle_info_from_launcher_spend(
     coin_solution: &CoinSpend,
 ) -> Result<(u64, Bytes32), Error> {
-    let program = Program::new(coin_solution.solution.to_bytes());
-    let extra_data = program.rest()?.rest()?.first()?;
+    let extra_data = coin_solution.solution.rest()?.rest()?.first()?;
     let as_map = extra_data.to_map()?;
-    let seconds_vec = as_map.get(&Program::new("t".as_bytes().to_vec())).unwrap();
-    let hash_vec = as_map.get(&Program::new("h".as_bytes().to_vec())).unwrap();
+    let seconds_vec = as_map.get(&Program::to("t")).unwrap();
+    let hash_vec = as_map.get(&Program::to("h")).unwrap();
     Ok((
         number_from_slice(&seconds_vec.as_vec().unwrap())
             .to_u64()
@@ -206,10 +194,10 @@ pub fn get_seconds_and_delayed_puzhash_from_p2_singleton_puzzle(
             Ok((
                 seconds_delay_int,
                 Bytes32::parse(
-                    &delayed_puzzle_hash
+                    delayed_puzzle_hash
                         .as_atom()
-                        .unwrap_or_else(|| Program::new(Vec::new()))
-                        .serialized,
+                        .unwrap_or_else(|| Program::default())
+                        .serialized.as_ref(),
                 )?,
             ))
         }
@@ -266,8 +254,7 @@ pub fn create_absorb_spend(
                 launcher_coin.amount.to_sexp(),
             ])
         } else {
-            let p = last_coin_spend.puzzle_reveal.to_program();
-            if let Some(last_coin_spend_inner_puzzle) = get_inner_puzzle_from_puzzle(&p)? {
+            if let Some(last_coin_spend_inner_puzzle) = get_inner_puzzle_from_puzzle(&last_coin_spend.puzzle_reveal)? {
                 Program::to(vec![
                     last_coin_spend.coin.parent_coin_info.to_sexp(),
                     last_coin_spend_inner_puzzle.tree_hash().to_sexp(),
@@ -297,12 +284,13 @@ pub fn create_absorb_spend(
         let reward_parent = pool_parent_id(height, genesis_challenge);
         let p2_singleton_puzzle: SerializedProgram =
             SerializedProgram::from(create_p2_singleton_puzzle(
-                *SINGLETON_MOD_HASH,
+                *SINGLETON_TOP_LAYER_HASH,
                 launcher_coin.name(),
                 delay_time,
                 delay_ph,
             )?);
-        let p2_singleton_puzzle_tree_hash = p2_singleton_puzzle.to_program().tree_hash();
+        let p2_singleton_puzzle_program = p2_singleton_puzzle.to_program();
+        let p2_singleton_puzzle_tree_hash = p2_singleton_puzzle_program.tree_hash();
         let reward_coin = Coin {
             parent_coin_info: reward_parent,
             puzzle_hash: p2_singleton_puzzle_tree_hash,
@@ -328,13 +316,13 @@ pub fn create_absorb_spend(
         let coin_spends = vec![
             CoinSpend {
                 coin,
-                puzzle_reveal: full_puzzle,
-                solution: full_solution,
+                puzzle_reveal: full_puzzle_program,
+                solution: full_solution.to_program(),
             },
             CoinSpend {
                 coin: reward_coin,
-                puzzle_reveal: p2_singleton_puzzle,
-                solution: p2_singleton_solution,
+                puzzle_reveal: p2_singleton_puzzle_program,
+                solution: p2_singleton_solution.to_program(),
             },
         ];
         Ok(coin_spends)
@@ -411,8 +399,9 @@ pub fn create_travel_spend(
             launcher_coin.amount.to_sexp(),
         ])
     } else {
-        let p = last_coin_spend.puzzle_reveal.to_program();
-        let last_coin_spend_inner_puzzle = get_inner_puzzle_from_puzzle(&p)?.ok_or(Error::new(
+        let last_coin_spend_inner_puzzle = get_inner_puzzle_from_puzzle(
+            &last_coin_spend.puzzle_reveal
+        )?.ok_or(Error::new(
             ErrorKind::InvalidInput,
             "Failed to get inner puzzle for last_coin_spend_inner_puzzle",
         ))?;
@@ -431,8 +420,8 @@ pub fn create_travel_spend(
     Ok((
         CoinSpend {
             coin: current_singleton,
-            puzzle_reveal: SerializedProgram::from_bytes(&full_puzzle.serialized),
-            solution: SerializedProgram::from_bytes(&full_solution.serialized),
+            puzzle_reveal: full_puzzle,
+            solution: full_solution,
         },
         inner_puzzle,
     ))
@@ -453,7 +442,7 @@ pub fn get_pubkey_from_member_inner_puzzle(inner_puzzle: &Program) -> Result<Byt
     match uncurry_pool_member_inner_puzzle(inner_puzzle) {
         Ok((_, _, _, pubkey_program, _, _)) => Ok(pubkey_program
             .as_atom()
-            .unwrap_or_else(|| Program::new(Vec::new()))
+            .unwrap_or_else(|| Program::default())
             .try_into()?),
         Err(_) => Err(Error::other("Unable to extract pubkey")),
     }
@@ -567,15 +556,14 @@ pub fn pool_state_from_extra_data(extra_data: Program) -> Result<Option<PoolStat
 }
 
 pub fn solution_to_pool_state(coin_solution: &CoinSpend) -> Result<Option<PoolState>, Error> {
-    let full_solution = Program::new(coin_solution.solution.to_bytes());
     let extra_data: Program;
     if coin_solution.coin.puzzle_hash == *SINGLETON_LAUNCHER_HASH {
         //Launcher spend
-        extra_data = full_solution.rest()?.rest()?.first()?;
+        extra_data = coin_solution.solution.rest()?.rest()?.first()?;
         return pool_state_from_extra_data(extra_data);
     }
     // Not launcher spend
-    let inner_solution: Program = full_solution.rest()?.rest()?.first()?;
+    let inner_solution: Program = coin_solution.solution.rest()?.rest()?.first()?;
     // Spend which is not absorb, and is not the launcher
     let inner_map = inner_solution.clone().to_map()?;
     let num_args = inner_map.len();

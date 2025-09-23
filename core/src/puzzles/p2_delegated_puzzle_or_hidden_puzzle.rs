@@ -4,7 +4,7 @@ use crate::clvm::sexp::IntoSExp;
 use crate::constants::NULL_SEXP;
 use crate::curry_and_treehash::{calculate_hash_of_quoted_mod_hash, curry_and_treehash};
 use crate::formatting::hex_to_bytes;
-use crate::puzzles::p2_conditions::puzzle_for_conditions;
+// use crate::puzzles::p2_conditions::puzzle_for_conditions;
 use crate::traits::SizedBytes;
 use crate::utils::hash_256;
 use blst::min_pk::{AggregatePublicKey, SecretKey};
@@ -14,6 +14,7 @@ use num_integer::Integer;
 use std::io::{Error, ErrorKind};
 
 const P2_DELEGATED_PUZZLE_OR_HIDDEN_PUZZLE_HEX: &str = "ff02ffff01ff02ffff03ff0bffff01ff02ffff03ffff09ff05ffff1dff0bffff1effff0bff0bffff02ff06ffff04ff02ffff04ff17ff8080808080808080ffff01ff02ff17ff2f80ffff01ff088080ff0180ffff01ff04ffff04ff04ffff04ff05ffff04ffff02ff06ffff04ff02ffff04ff17ff80808080ff80808080ffff02ff17ff2f808080ff0180ffff04ffff01ff32ff02ffff03ffff07ff0580ffff01ff0bffff0102ffff02ff06ffff04ff02ffff04ff09ff80808080ffff02ff06ffff04ff02ffff04ff0dff8080808080ffff01ff0bffff0101ff058080ff0180ff018080";
+const P2_DELEGATED_PUZZLE_HEX: &str = "ff02ffff01ff04ffff04ff04ffff04ff05ffff04ffff02ff06ffff04ff02ffff04ff0bff80808080ff80808080ffff02ff0bff178080ffff04ffff01ff32ff02ffff03ffff07ff0580ffff01ff0bffff0102ffff02ff06ffff04ff02ffff04ff09ff80808080ffff02ff06ffff04ff02ffff04ff0dff8080808080ffff01ff0bffff0101ff058080ff0180ff018080";
 
 #[tokio::test]
 pub async fn test_default_hash() {
@@ -34,17 +35,23 @@ lazy_static! {
         &hex_to_bytes("0x73EDA753299D7D483339D80809A1D80553BDA402FFFE5BFEFFFFFFFF00000001")
             .unwrap()
     );
-    pub static ref MOD: Program =
+    pub static ref P2_DELEGATED_PUZZLE: Program =
+        SerializedProgram::from_hex(P2_DELEGATED_PUZZLE_HEX)
+            .unwrap()
+            .to_program();
+    pub static ref P2_DELEGATED_PUZZLE_HASH: Bytes32 = P2_DELEGATED_PUZZLE.tree_hash();
+    pub static ref P2_DELEGATED_PUZZLE_OR_HIDDEN_PUZZLE: Program =
         SerializedProgram::from_hex(P2_DELEGATED_PUZZLE_OR_HIDDEN_PUZZLE_HEX)
             .unwrap()
             .to_program();
-    pub static ref QUOTED_MOD_HASH: Bytes32 = calculate_hash_of_quoted_mod_hash(&MOD.tree_hash());
+    pub static ref P2_DELEGATED_PUZZLE_OR_HIDDEN_PUZZLE_HASH: Bytes32 =
+        P2_DELEGATED_PUZZLE_OR_HIDDEN_PUZZLE.tree_hash();
+    pub static ref QUOTED_MOD_HASH: Bytes32 = calculate_hash_of_quoted_mod_hash(&P2_DELEGATED_PUZZLE_OR_HIDDEN_PUZZLE.tree_hash());
 }
 
 #[tokio::test]
 pub async fn test_calculate_synthetic_offset() {
-    use std::str::FromStr;
-    let key = Bytes48::from_str("97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb").unwrap();
+    let key = Bytes48::const_hex("97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb");
     let result = calculate_synthetic_offset(key, *DEFAULT_HIDDEN_PUZZLE_HASH);
     assert_eq!(
         "19134605735515143581103004370522950503760660832695882105316807119860397047163",
@@ -97,7 +104,7 @@ pub fn calculate_synthetic_secret_key(
 }
 
 pub fn puzzle_for_synthetic_public_key(synthetic_public_key: Bytes48) -> Result<Program, Error> {
-    MOD.curry(&[Program::from(synthetic_public_key)])
+    P2_DELEGATED_PUZZLE_OR_HIDDEN_PUZZLE.curry(&[Program::from(synthetic_public_key)])
 }
 
 pub fn puzzle_hash_for_synthetic_public_key(
@@ -140,11 +147,9 @@ pub fn puzzle_hash_for_pk(public_key: Bytes48) -> Result<Bytes32, Error> {
 
 #[tokio::test]
 pub async fn test_puzzle_hash_for_pk() {
-    use std::str::FromStr;
-    let key = Bytes48::from_str("97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb").unwrap();
+    let key = Bytes48::const_hex("97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb");
     let expected_puzzlehash =
-        Bytes32::from_str("48068eb6150f738fe90a001c562f0c4b769b7d64a59915aa8c0886b978e38137")
-            .unwrap();
+        Bytes32::const_hex("48068eb6150f738fe90a001c562f0c4b769b7d64a59915aa8c0886b978e38137");
     let result = puzzle_hash_for_pk(key).unwrap();
     assert_eq!(expected_puzzlehash, result);
 }
@@ -170,10 +175,10 @@ pub fn solution_for_hidden_puzzle(
     ])
 }
 
-pub fn solution_for_conditions<T: IntoSExp>(conditions: T) -> Result<Program, Error> {
-    let delegated_puzzle = puzzle_for_conditions(conditions)?;
-    Ok(solution_for_delegated_puzzle(
-        delegated_puzzle,
-        Program::to(0),
-    ))
-}
+// pub fn solution_for_conditions<T: IntoSExp>(conditions: T) -> Result<Program, Error> {
+//     let delegated_puzzle = puzzle_for_conditions(conditions)?;
+//     Ok(solution_for_delegated_puzzle(
+//         delegated_puzzle,
+//         Program::to(0),
+//     ))
+// }

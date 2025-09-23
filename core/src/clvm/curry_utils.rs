@@ -9,7 +9,7 @@ pub fn concat(sexps: &[SExp]) -> Result<SExp, Error> {
     for sexp in sexps {
         match sexp {
             SExp::Atom(a) => {
-                buf.data.extend(&a.data);
+                buf.extend(a);
             }
             SExp::Pair(_) => {
                 return Err(Error::new(
@@ -33,7 +33,7 @@ pub fn curry(program: &Program, args: &[Program]) -> Program {
     }
     Program::to(vec![
         Program::to(2),
-        Program::to((1.to_sexp(), program.to_sexp())),
+        Program::to((1.to_sexp(), program.sexp.to_owned())),
         fixed_args,
     ])
 }

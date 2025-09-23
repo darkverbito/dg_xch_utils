@@ -1,20 +1,14 @@
-use dg_xch_core::clvm::program::Program;
-use dg_xch_core::clvm::program::SerializedProgram;
+use dg_xch_core::clvm::program::{Program};
 use dg_xch_core::clvm::sexp::IntoSExp;
 use dg_xch_core::clvm::utils::INFINITE_COST;
-use lazy_static::lazy_static;
 use std::io::Error;
+use dg_parser_macro::parse_program_hex;
 
-const P2_CONDITIONS_HEX: &str = "ff04ffff0101ff0280";
+pub const P2_CONDITIONS_PROGRAM: Program = parse_program_hex!("ff04ffff0101ff0280");
 
-lazy_static! {
-    pub static ref MOD: Program = SerializedProgram::from_hex(P2_CONDITIONS_HEX)
-        .unwrap()
-        .to_program();
-}
 
 pub fn puzzle_for_conditions<T: IntoSExp>(conditions: T) -> Result<Program, Error> {
-    let (_cost, result) = MOD.run(INFINITE_COST, 0, &Program::to(vec![conditions]))?;
+    let (_cost, result) = P2_CONDITIONS_PROGRAM.run(INFINITE_COST, 0, &Program::to(vec![conditions]))?;
     Ok(result)
 }
 

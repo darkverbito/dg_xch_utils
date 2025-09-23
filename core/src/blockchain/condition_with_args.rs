@@ -1253,26 +1253,26 @@ pub fn op_code_with_args_from_sexp(sexp: &SExp) -> Result<(ConditionOpcode, Vec<
     let mut opcode = ConditionOpcode::Unknown;
     let mut vars = vec![];
     let mut first = true;
-    for arg in sexp.iter().take(4) {
+    for (index, arg) in sexp.iter().take(4).enumerate() {
         match arg {
             SExp::Atom(arg) => {
                 if first {
                     first = false;
-                    if arg.data.len() != 1 {
+                    if arg.as_ref().len() != 1 {
                         return Err(Error::new(
                             ErrorKind::InvalidData,
                             "Invalid OpCode for Condition",
                         ));
                     }
-                    opcode = ConditionOpcode::from(arg.data[0]);
+                    opcode = ConditionOpcode::from(arg.as_ref()[0]);
                 } else {
-                    vars.push(arg.data.clone());
+                    vars.push(arg.as_ref().to_vec());
                 }
             }
             SExp::Pair(_) => {
                 if opcode == ConditionOpcode::Remark {
-                    vars.push(sexp_to_bytes(arg)?);
-                } else {
+                    vars.push(sexp_to_bytes(arg)?.as_ref().to_vec());
+                } else if index != 3 && opcode != ConditionOpcode::CreateCoin {
                     warn!("Got pair in opcode({opcode}) args: {arg:?}");
                     break;
                 }
@@ -1282,7 +1282,7 @@ pub fn op_code_with_args_from_sexp(sexp: &SExp) -> Result<(ConditionOpcode, Vec<
     if vars.is_empty() {
         Err(Error::new(
             ErrorKind::InvalidData,
-            "Invalid Condition No Vars",
+            format!("Invalid Condition {opcode} No Vars: - {sexp:#?}"),
         ))
     } else {
         Ok((opcode, vars))

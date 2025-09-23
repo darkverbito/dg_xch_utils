@@ -36,7 +36,7 @@ impl Dialect for ChiaDialect {
     fn op(&self, o: SExp, argument_list: SExp, max_cost: u64) -> Result<(u64, SExp), Error> {
         match &o {
             SExp::Atom(buf) => {
-                let b = &buf.data;
+                let b = buf.as_ref();
                 if b.len() != 1 {
                     return if (self.flags & NO_UNKNOWN_OPS) != 0 {
                         return Err(Error::new(

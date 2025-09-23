@@ -13,8 +13,10 @@ async-trait = "0.1.89"
 bls12_381 = "0.8.0"
 blst = { version = "0.3.15", features = ["portable"] }
 bytes = "1.10.1"
+const-hex = "1.16.0"
 der = "0.7.9"
 dg_xch_macros = {path = "../macros", version="2.2.0"}
+dg_parser_macro = {path = "../parser_macro", version="2.2.0"}
 dg_xch_serialize = {path = "../serialize", version="2.2.0"}
 futures-util = "0.3.31"
 hex = "0.4.3"

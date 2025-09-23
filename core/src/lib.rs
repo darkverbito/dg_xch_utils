@@ -13,6 +13,7 @@ pub mod puzzles;
 pub mod ssl;
 pub mod traits;
 pub mod utils;
+mod tests;
 
 fn _version() -> &'static str {
     env!("CARGO_PKG_VERSION")

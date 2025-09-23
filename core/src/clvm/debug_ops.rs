@@ -45,7 +45,6 @@ fn test_print_ops() {
     use crate::clvm::utils::INFINITE_COST;
     use dg_logger::DruidGardenLogger;
     use log::Level;
-    use std::io::ErrorKind;
     // (mod (num)
     //   (defun print (l x) (i (all "$print$" l x) x x))
     //

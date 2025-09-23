@@ -15,7 +15,7 @@ use std::io::{Error, ErrorKind};
 pub fn assemble_text(s: &str) -> Result<SerializedProgram, Error> {
     let mut reader = Reader::new(s.as_bytes());
     let sexp = tokenize_exp(&mut reader)?;
-    Ok(SerializedProgram::from_bytes(&sexp_to_bytes(&sexp)?))
+    Ok(sexp_to_bytes(&sexp)?)
 }
 
 pub fn tokenize_exp(tokens: &mut Reader) -> Result<SExp, Error> {

@@ -98,10 +98,7 @@ pub fn load_certs(filename: &str) -> Result<Vec<CertificateDer<'static>>, Error>
     let mut reader = BufReader::new(cert_file);
     let mut output = vec![];
     for cert in certs(&mut reader) {
-        match cert {
-            Ok(cert) => output.push(cert.to_owned()),
-            Err(err) => return Err(Error::other(err)),
-        }
+        output.push(cert.map_err(Error::other)?.to_owned());
     }
     Ok(output)
 }
@@ -110,10 +107,7 @@ pub fn load_certs_from_bytes(bytes: &[u8]) -> Result<Vec<CertificateDer<'static>
     let mut reader = BufReader::new(bytes);
     let mut output = vec![];
     for cert in certs(&mut reader) {
-        match cert {
-            Ok(cert) => output.push(cert.to_owned()),
-            Err(err) => return Err(Error::other(err)),
-        }
+        output.push(cert.map_err(Error::other)?.to_owned());
     }
     Ok(output)
 }

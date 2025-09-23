@@ -5,7 +5,7 @@ use crate::blockchain::sized_bytes::{Bytes32, Bytes48};
 use crate::clvm::condition_utils::{
     agg_sig_additional_data_for_opcode, conditions_for_solution, created_outputs_for_conditions,
 };
-use crate::clvm::program::SerializedProgram;
+use crate::clvm::program::{Program};
 use crate::consensus::constants::ConsensusConstants;
 use crate::formatting::u64_to_bytes;
 use crate::traits::SizedBytes;
@@ -15,8 +15,8 @@ use std::io::Error;
 
 pub fn additions_for_solution(
     coin_name: Bytes32,
-    puzzle_reveal: &SerializedProgram,
-    solution: &SerializedProgram,
+    puzzle_reveal: &Program,
+    solution: &Program,
     max_cost: u64,
 ) -> Result<Vec<Coin>, Error> {
     let (map, _cost) = conditions_for_solution(puzzle_reveal, solution, max_cost)?;
@@ -25,8 +25,8 @@ pub fn additions_for_solution(
 
 #[must_use]
 pub fn fee_for_solution(
-    puzzle_reveal: &SerializedProgram,
-    solution: &SerializedProgram,
+    puzzle_reveal: &Program,
+    solution: &Program,
     max_cost: u64,
 ) -> BigInt {
     match conditions_for_solution(puzzle_reveal, solution, max_cost) {
@@ -115,7 +115,7 @@ pub fn verify_agg_sig_unsafe_message(
     message: &Message,
     consensus_constants: &ConsensusConstants,
 ) -> Result<(), Error> {
-    let mut buffer = consensus_constants.agg_sig_me_additional_data.clone();
+    let mut buffer = consensus_constants.agg_sig_me_additional_data.bytes().to_vec();
     let mut forbidden_message_suffix;
     for code in [
         ConditionOpcode::AggSigParent,

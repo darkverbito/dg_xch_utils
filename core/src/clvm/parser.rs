@@ -5,11 +5,13 @@ use bytes::Buf;
 use std::io::Read;
 use std::io::{Cursor, Write};
 use std::io::{Error, ErrorKind};
+use crate::clvm::program::SerializedProgram;
 
 const MAX_SINGLE_BYTE: u8 = 0x7f;
 const CONS_BOX_MARKER: u8 = 0xff;
 const MAX_DECODE_SIZE: u64 = 0x0004_0000_0000;
 
+#[derive(Debug, Copy, Clone)]
 enum ParserOp {
     Exp,
     Cons,
@@ -69,29 +71,30 @@ pub fn sexp_from_bytes<T: AsRef<[u8]>>(stream: &mut Cursor<T>) -> Result<SExp, E
         .ok_or_else(|| Error::new(ErrorKind::InvalidData, "Failed to Parse SExp"))
 }
 
-pub fn sexp_to_bytes(sexp: &SExp) -> std::io::Result<Vec<u8>> {
+pub fn sexp_to_bytes(sexp: &SExp) -> std::io::Result<SerializedProgram> {
     let mut buffer = Cursor::new(Vec::new());
     let mut stack: Vec<&SExp> = vec![sexp];
     while let Some(v) = stack.pop() {
         match v {
             SExp::Atom(atom) => {
-                if atom.data.is_empty() {
+                let data = atom.as_ref();
+                if data.is_empty() {
                     buffer.write_all(&[0x80_u8])?;
-                } else if atom.data.len() == 1 && (atom.data[0] <= MAX_SINGLE_BYTE) {
-                    buffer.write_all(&[atom.data[0]])?;
+                } else if data.len() == 1 && (data[0] <= MAX_SINGLE_BYTE) {
+                    buffer.write_all(&[data[0]])?;
                 } else {
-                    encode_size(&mut buffer, atom.data.len() as u64)?;
-                    buffer.write_all(&atom.data)?;
+                    encode_size(&mut buffer, data.len() as u64)?;
+                    buffer.write_all(&data)?;
                 }
             }
             SExp::Pair(pair) => {
                 buffer.write_all(&[CONS_BOX_MARKER])?;
-                stack.push(pair.rest.as_ref());
-                stack.push(pair.first.as_ref());
+                stack.push(pair.rest());
+                stack.push(pair.first());
             }
         }
     }
-    Ok(buffer.into_inner())
+    Ok(buffer.into_inner().into())
 }
 
 #[allow(clippy::cast_possible_truncation)]

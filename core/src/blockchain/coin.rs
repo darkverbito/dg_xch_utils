@@ -4,12 +4,23 @@ use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use sha2::Sha256;
 use std::hash::{Hash, Hasher};
+use crate::clvm::sexp::{IntoSExp, SExp};
 
 #[derive(ChiaSerial, Copy, Clone, PartialEq, Eq, Serialize, Deserialize, Debug)]
 pub struct Coin {
     pub parent_coin_info: Bytes32,
     pub puzzle_hash: Bytes32,
     pub amount: u64,
+}
+impl IntoSExp for Coin {
+    fn to_sexp(self) -> SExp {
+        vec![
+            self.parent_coin_info.to_sexp(),
+            self.puzzle_hash.to_sexp(),
+            self.amount.to_sexp(),
+        ]
+            .to_sexp()
+    }
 }
 impl Coin {
     #[must_use]

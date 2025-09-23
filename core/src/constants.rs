@@ -1,9 +1,8 @@
 use crate::clvm::assemble::reader::Token;
 use crate::clvm::program::Program;
-use crate::clvm::sexp::{AtomBuf, IntoSExp, SExp};
+use crate::clvm::sexp::{AtomBuf, IntoSExp, SExp, SExpSource};
 use num_bigint::BigUint;
 use once_cell::sync::Lazy;
-use std::clone::Clone;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -88,12 +87,12 @@ pub static B_KEYWORD_TO_ATOM: Lazy<HashMap<&[u8], Vec<u8>>> =
 pub static CONS_SEXP: Lazy<SExp> = Lazy::new(|| SExp::Atom(AtomBuf::new(vec![CONS])));
 pub static APPLY_SEXP: Lazy<SExp> = Lazy::new(|| SExp::Atom(AtomBuf::new(vec![APPLY])));
 pub static QUOTE_SEXP: Lazy<SExp> = Lazy::new(|| SExp::Atom(AtomBuf::new(vec![QUOTE])));
-pub static NULL_SEXP: Lazy<SExp> = Lazy::new(|| SExp::Atom(vec![].into()));
+pub const NULL_SEXP: SExp = SExp::Atom(AtomBuf::Borrowed(&[]));
 pub static NULL_CELL: Lazy<Arc<SExp>> = Lazy::new(|| Arc::new(SExp::Atom(vec![].into())));
 pub static ONE_SEXP: Lazy<SExp> = Lazy::new(|| SExp::Atom(AtomBuf::new(vec![1])));
 pub static NULL_PROG: Lazy<Program> = Lazy::new(|| Program {
-    sexp: NULL_SEXP.clone(),
-    serialized: vec![],
+    sexp: SExpSource::Borrowed(&NULL_SEXP),
+    serialized: vec![].into(),
 });
 
 //Assembler + Compiler

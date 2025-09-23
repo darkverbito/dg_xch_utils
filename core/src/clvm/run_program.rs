@@ -110,9 +110,9 @@ fn traverse_path(node_index: &[u8], args: &SExp) -> Result<(u64, SExp), Error> {
             }
             SExp::Pair(pair) => {
                 arg_list = if is_bit_set {
-                    &*pair.rest
+                    pair.rest()
                 } else {
-                    &*pair.first
+                    pair.first()
                 };
             }
         }
@@ -156,10 +156,7 @@ impl<D: Dialect> RunProgramContext<D> {
     fn cons_op(&mut self) -> Result<u64, Error> {
         let v1 = self.pop()?;
         let v2 = self.pop()?;
-        let p = SExp::Pair(PairBuf {
-            first: Arc::new(v1),
-            rest: Arc::new(v2),
-        });
+        let p = SExp::Pair(PairBuf::Owned((Arc::new(v1), Arc::new(v2))));
         self.push(p);
         Ok(0)
     }
@@ -173,7 +170,7 @@ impl<D: Dialect> RunProgramContext<D> {
         args: &SExp,
     ) -> Result<u64, Error> {
         let op_atom = operator_node.atom()?;
-        if op_atom.data == self.dialect.quote_kw() {
+        if op_atom.as_ref() == self.dialect.quote_kw() {
             self.push(operand_list.clone());
             Ok(QUOTE_COST)
         } else {
@@ -183,7 +180,7 @@ impl<D: Dialect> RunProgramContext<D> {
             loop {
                 match operands {
                     SExp::Atom(buf) => {
-                        if buf.data.is_empty() {
+                        if buf.as_ref().is_empty() {
                             break;
                         }
                         return Err(Error::new(
@@ -194,8 +191,8 @@ impl<D: Dialect> RunProgramContext<D> {
                     SExp::Pair(pair) => {
                         self.op_stack.push(Operation::SwapEval);
                         self.push(args.clone());
-                        self.push(pair.first.as_ref().clone());
-                        operands = pair.rest.as_ref();
+                        self.push(pair.first().clone());
+                        operands = pair.rest();
                     }
                 }
             }
@@ -207,16 +204,16 @@ impl<D: Dialect> RunProgramContext<D> {
     fn eval_pair(&mut self, program: &SExp, args: &SExp) -> Result<u64, Error> {
         let (op_node, op_list) = match program {
             SExp::Atom(path) => {
-                let r = traverse_path(&path.data, args)?;
+                let r = traverse_path(&path.as_ref(), args)?;
                 self.push(r.1.clone());
                 return Ok(r.0);
             }
-            SExp::Pair(pair) => (&*pair.first, &*pair.rest),
+            SExp::Pair(pair) => (pair.first(), pair.rest()),
         };
         if let SExp::Pair(pair) = &op_node {
-            if let SExp::Atom(_) = pair.first.as_ref() {
-                if pair.rest.nullp() {
-                    self.push(pair.first.as_ref().clone());
+            if let SExp::Atom(_) = pair.first() {
+                if pair.rest().nullp() {
+                    self.push(pair.first().clone());
                     self.push(op_list.clone());
                     self.op_stack.push(Operation::Apply);
                     return Ok(APPLY_COST);
@@ -258,14 +255,14 @@ impl<D: Dialect> RunProgramContext<D> {
             SExp::Pair(pair) => {
                 let post_eval = match self.pre_eval {
                     None => None,
-                    Some(ref pre_eval) => pre_eval(&pair.first, &pair.rest)?,
+                    Some(ref pre_eval) => pre_eval(pair.first(), pair.rest())?,
                 };
                 if let Some(post_eval) = post_eval {
                     self.posteval_stack.push(post_eval);
                     self.op_stack.push(Operation::PostEval);
                 };
 
-                self.eval_pair(&pair.first, &pair.rest)
+                self.eval_pair(pair.first(), pair.rest())
             }
         }
     }
@@ -280,7 +277,7 @@ impl<D: Dialect> RunProgramContext<D> {
             ));
         }
         let op_atom = operator.atom()?;
-        if op_atom.data == self.dialect.apply_kw() {
+        if op_atom.as_ref() == self.dialect.apply_kw() {
             if operand_list.arg_count_is(2) {
                 let (new_program, arg_wrap) = operand_list.split()?;
                 let (new_args, _) = arg_wrap.split()?;

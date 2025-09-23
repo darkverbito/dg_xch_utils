@@ -9,7 +9,7 @@ use crate::clvm::compile::tokenizer::{Token, TokenType, Tokenizer};
 use crate::clvm::compile::utils::{
     concat_args, get_arg_pointer, get_const_pointer, get_function_pointer, parse_value,
 };
-use crate::clvm::program::Program;
+use crate::clvm::program::{Program, SerializedProgram};
 use crate::clvm::sexp::{IntoSExp, SExp};
 use crate::constants::{
     APPLY_SEXP, B_KEYWORD_TO_SEXP, CONS_SEXP, INLINE_CONSTS, INLINE_DEFUNS, NULL_SEXP, QUOTE_SEXP,
@@ -109,7 +109,7 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
     fn post_process(&'a self, program: Program) -> Result<Program, Error> {
-        assemble_text(&format!("{program:?}")).map(|v| v.to_program())
+        assemble_text(&format!("{program:?}")).map(|v: SerializedProgram| v.to_program())
     }
     fn process(&'a self) -> Result<Program, Error> {
         let mut output = None;

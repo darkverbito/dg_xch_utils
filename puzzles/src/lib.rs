@@ -4,6 +4,9 @@ pub mod p2_conditions;
 pub mod p2_delegated_puzzle_or_hidden_puzzle;
 pub mod singleton;
 pub mod utils;
+pub mod nft;
+pub mod dids;
+mod lineage_proof;
 
 fn _version() -> &'static str {
     env!("CARGO_PKG_VERSION")

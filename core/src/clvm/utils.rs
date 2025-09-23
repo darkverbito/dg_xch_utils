@@ -43,7 +43,7 @@ pub fn check_arg_count(args: &SExp, expected: usize, name: &str) -> Result<(), E
 }
 
 pub fn int_atom<'a>(args: &'a SExp, op_name: &str) -> Result<&'a [u8], Error> {
-    args.atom().map(|b| b.data.as_slice()).map_err(|_| {
+    args.atom().map(|b| b.as_ref()).map_err(|_| {
         Error::new(
             ErrorKind::InvalidInput,
             format!("{op_name} requires int args: Got {args}"),
@@ -53,7 +53,7 @@ pub fn int_atom<'a>(args: &'a SExp, op_name: &str) -> Result<&'a [u8], Error> {
 
 pub fn atom<'a>(args: &'a SExp, op_name: &str) -> Result<&'a [u8], Error> {
     args.atom()
-        .map(|b| b.data.as_slice())
+        .map(|b| b.as_ref())
         .map_err(|_| Error::new(ErrorKind::InvalidInput, format!("{op_name} on list")))
 }
 
@@ -78,7 +78,7 @@ pub fn i32_atom(args: &SExp, op_name: &str) -> Result<i32, Error> {
             format!("{op_name} requires int32 args"),
         ));
     };
-    match i32_from_slice(&buf.data) {
+    match i32_from_slice(buf.as_ref()) {
         Some(v) => Ok(v),
         _ => Err(Error::new(
             ErrorKind::InvalidData,

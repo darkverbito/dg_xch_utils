@@ -14,13 +14,130 @@ use serde::de::Visitor;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::cmp::min;
 use std::io::{Cursor, Error, ErrorKind, Read};
-use std::ops::{BitXor, Index, IndexMut, Range};
+use std::ops::{BitAnd, BitOr, BitXor, Index, IndexMut, Range, Shl, ShlAssign, Shr, ShrAssign};
 use std::str::FromStr;
+use const_hex::const_decode_to_array;
 
 #[derive(Copy, Clone)]
 pub struct SizedBytesImpl<const SIZE: usize> {
     bytes: [u8; SIZE],
 }
+impl<const SIZE: usize> SizedBytesImpl<SIZE> {
+    pub const fn const_new(bytes: [u8; SIZE]) -> Self {
+        Self { bytes }
+    }
+}
+macro_rules! impl_const_sized_bytes {
+    ($($n:literal),+ $(,)?) => {$(
+        impl SizedBytesImpl<$n>  {
+            #[track_caller]
+            pub const fn const_hex(hex: &str) -> Self {
+                let bytes = hex.as_bytes();
+                let has_prefix = bytes.len() >= 2
+                    && bytes[0] == b'0'
+                    && (bytes[1] == b'x' || bytes[1] == b'X');
+                let modifier = has_prefix as usize * 2;
+                if bytes.len() != $n * 2 + modifier{
+                    panic!(concat!("hex length is wrong for Bytes", stringify!($n)));
+                }
+                match const_decode_to_array::<$n>(bytes) {
+                    Ok(bytes) => Self { bytes },
+                    Err(_) => panic!(concat!("invalid hex for Bytes", stringify!($n))),
+                }
+            }
+            pub const fn const_bitand(self, rhs: SizedBytesImpl<$n>) -> SizedBytesImpl<$n> {
+                let mut out = [0u8; $n];
+                let mut i = 0;
+                while i < $n {
+                    out[i] = self.bytes[i] & rhs.bytes[i];
+                    i += 1;
+                }
+                Self { bytes: out }
+            }
+            pub const fn const_shl(self, rhs: usize) -> Self {
+                if $n == 0 { return self; }
+
+                let byte_shift = rhs / 8;
+                let bit_shift  = rhs % 8;
+
+                if byte_shift >= $n {
+                    return Self { bytes: [0u8; $n] };
+                }
+
+                let mut out = [0u8; $n];
+                // was: for i in 0..$n { ... }
+                let mut i = 0;
+                while i < $n {
+                    let j = i + byte_shift;
+                    if j >= $n { break; }
+
+                    let mut b = self.bytes[j] << bit_shift;
+                    if bit_shift != 0 && j + 1 < $n {
+                        b |= self.bytes[j + 1] >> (8 - bit_shift);
+                    }
+                    out[i] = b;
+                    i += 1;
+                }
+
+                Self { bytes: out }
+            }
+            pub const fn const_shr(self, rhs: usize) -> Self {
+                if $n == 0 { return self; }
+
+                let byte_shift = rhs / 8;
+                let bit_shift  = rhs % 8;
+
+                if byte_shift >= $n {
+                    return Self { bytes: [0u8; $n] };
+                }
+
+                let mut out = [0u8; $n];
+                // iterate from end using while (const-friendly)
+                let mut k = $n;
+                while k > 0 {
+                    let i = k - 1;
+                    if i < byte_shift { break; }
+                    let j = i - byte_shift;
+
+                    let mut b = self.bytes[j] >> bit_shift;
+                    if bit_shift != 0 && j > 0 {
+                        b |= self.bytes[j - 1] << (8 - bit_shift);
+                    }
+                    out[i] = b;
+                    k -= 1;
+                }
+
+                Self { bytes: out }
+            }
+        }
+        impl Shl<usize> for SizedBytesImpl<$n> {
+            type Output = Self;
+
+            fn shl(self, rhs: usize) -> Self::Output {
+                self.const_shl(rhs)
+            }
+        }
+        impl ShlAssign<usize> for SizedBytesImpl<$n> {
+            fn shl_assign(&mut self, rhs: usize) {
+                *self = *self << rhs;
+            }
+        }
+        impl Shr<usize> for SizedBytesImpl<$n> {
+            type Output = Self;
+
+            fn shr(self, rhs: usize) -> Self::Output {
+                self.const_shr(rhs)
+            }
+        }
+
+        impl ShrAssign<usize> for SizedBytesImpl<$n> {
+            fn shr_assign(&mut self, rhs: usize) {
+                *self = *self >> rhs;
+            }
+        }
+    )+};
+}
+impl_const_sized_bytes!(4, 8, 32, 48, 96, 100, 480);
 impl<const SIZE: usize> SizedBytes<'_, SIZE> for SizedBytesImpl<SIZE> {
     const SIZE: usize = SIZE;
     fn new(bytes: [u8; SIZE]) -> Self {
@@ -50,6 +167,7 @@ impl<const SIZE: usize> SizedBytes<'_, SIZE> for SizedBytesImpl<SIZE> {
         self.bytes
     }
 }
+
 impl<const SIZE: usize> BitXor for SizedBytesImpl<SIZE> {
     type Output = Self;
 
@@ -68,22 +186,41 @@ impl<const SIZE: usize> BitXor<[u8; SIZE]> for SizedBytesImpl<SIZE> {
         Self::new(output)
     }
 }
-#[tokio::test]
-pub async fn test() {
-    let first: [u8; 32] = rand::random();
-    let second: [u8; 32] = rand::random();
-    let first = Bytes32::new(first);
-    let second = Bytes32::new(second);
-    let product = first ^ second;
-    let should_be_second = product ^ first;
-    let should_be_first = product ^ second;
-    println!("first: {:?}", first);
-    println!("second: {:?}", second);
-    println!("product: {:?}", product);
-    println!("should_be_second: {:?}", should_be_second);
-    println!("should_be_first: {:?}", should_be_first);
-    assert_eq!(first, should_be_first);
-    assert_eq!(second, should_be_second);
+impl<const SIZE: usize> BitAnd for SizedBytesImpl<SIZE> {
+    type Output = Self;
+
+    fn bitand(self, rhs: Self) -> Self::Output {
+        self & rhs.bytes
+    }
+}
+impl<const SIZE: usize> BitAnd<[u8; SIZE]> for SizedBytesImpl<SIZE> {
+    type Output = Self;
+
+    fn bitand(self, rhs: [u8; SIZE]) -> Self::Output {
+        let mut output: [u8; SIZE] = [0; SIZE];
+        for ((x, y), o) in self.bytes.iter().zip(rhs.iter()).zip(output.iter_mut()) {
+            *o = x & y;
+        }
+        Self::new(output)
+    }
+}
+impl<const SIZE: usize> BitOr for SizedBytesImpl<SIZE> {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        self | rhs.bytes
+    }
+}
+impl<const SIZE: usize> BitOr<[u8; SIZE]> for SizedBytesImpl<SIZE> {
+    type Output = Self;
+
+    fn bitor(self, rhs: [u8; SIZE]) -> Self::Output {
+        let mut output: [u8; SIZE] = [0; SIZE];
+        for ((x, y), o) in self.bytes.iter().zip(rhs.iter()).zip(output.iter_mut()) {
+            *o = x | y;
+        }
+        Self::new(output)
+    }
 }
 impl<const SIZE: usize> Fill for SizedBytesImpl<SIZE> {
     fn fill<R: Rng + ?Sized>(&mut self, rng: &mut R) {

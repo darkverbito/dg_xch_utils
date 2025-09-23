@@ -6,7 +6,7 @@ use crate::clvm::curry_utils::curry;
 use crate::clvm::dialect::{ChiaDialect, NO_UNKNOWN_OPS};
 use crate::clvm::parser::{sexp_from_bytes, sexp_to_bytes};
 use crate::clvm::run_program::run_program;
-use crate::clvm::sexp::SExp;
+use crate::clvm::sexp::{SExp, SExpSource};
 use crate::clvm::sexp::{AtomBuf, IntoSExp};
 use crate::clvm::utils::MEMPOOL_MODE;
 use crate::constants::NULL_SEXP;
@@ -26,72 +26,92 @@ use std::hash::Hasher;
 use std::io::{Cursor, Error, ErrorKind};
 use std::path::Path;
 
-#[derive(Eq, Serialize, Deserialize)]
-pub struct Program {
-    pub serialized: Vec<u8>,
-    pub sexp: SExp,
+#[derive(Eq)]
+pub struct Program{
+    pub serialized: SerializedProgram,
+    pub sexp: SExpSource,
+}
+
+impl ChiaSerialize for Program {
+    fn to_bytes(&self, _: ChiaProtocolVersion) -> Result<Vec<u8>, Error>
+    where
+        Self: Sized
+    {
+        Ok(self.serialized.buffer.as_ref().to_vec())
+    }
+
+    fn from_bytes<T: AsRef<[u8]>>(bytes: &mut Cursor<T>, _: ChiaProtocolVersion) -> Result<Self, Error>
+    where
+        Self: Sized
+    {
+        let sexp = sexp_from_bytes(bytes)?;
+        let serialized = sexp_to_bytes(&sexp)?;
+        Ok(Self { serialized, sexp: SExpSource::Owned(sexp) })
+    }
 }
 
 impl Display for Program {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", &self.sexp)
+        write!(f, "{}", self.sexp.as_ref())
     }
 }
 
 impl Debug for Program {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?}", &self.sexp)
+        write!(f, "{:?}", self.sexp.as_ref())
     }
 }
-
 impl Program {
-    pub fn new(serialized: Vec<u8>) -> Self {
-        let mut stream = Cursor::new(&serialized);
-        match sexp_from_bytes(&mut stream) {
-            Ok(sexp) => Program { serialized, sexp },
-            Err(e) => {
-                println!("Error building Program: {e:?}");
-                Program {
-                    serialized: vec![],
-                    sexp: NULL_SEXP.clone(),
-                }
-            }
-        }
+    pub fn from_sexp(sexp: SExp) -> Result<Program, Error> {
+        let serial = sexp_to_bytes(&sexp)?;
+        Ok(Program { serialized: serial, sexp: SExpSource::Owned(sexp) })
+    }
+    pub fn to<T: IntoSExp>(vals: T) -> Program {
+        let sexp = vals.to_sexp();
+        let serial = sexp_to_bytes(&sexp).unwrap_or_default();
+        Program { serialized: serial, sexp: SExpSource::Owned(sexp) }
     }
     pub fn null() -> Self {
         let serial = sexp_to_bytes(&NULL_SEXP).unwrap_or_default();
         Program {
-            serialized: serial,
-            sexp: NULL_SEXP.clone(),
+            serialized: serial.into(),
+            sexp: SExpSource::Borrowed(&NULL_SEXP)
         }
     }
-    pub fn to<T: IntoSExp>(vals: T) -> Self {
-        let sexp = vals.to_sexp();
-        let serialized = sexp_to_bytes(&sexp).unwrap_or_default();
-        Program { serialized, sexp }
+}
+
+impl Program {
+    pub fn new(serialized: SerializedProgram) -> Self {
+        let mut stream = Cursor::new(&serialized);
+        match sexp_from_bytes(&mut stream) {
+            Ok(sexp) => Program { serialized: serialized.to_owned(), sexp: SExpSource::Owned(sexp) },
+            Err(e) => {
+                println!("Error building Program: {e:?}");
+                Program {
+                    serialized: SerializedProgram{ buffer: SerializedSource::Heap(vec![])},
+                    sexp: SExpSource::Borrowed(&NULL_SEXP)
+                }
+            }
+        }
     }
-    pub fn from_sexp(sexp: SExp) -> Result<Self, Error> {
-        let serialized = sexp_to_bytes(&sexp)?;
-        Ok(Program { serialized, sexp })
-    }
-    pub fn first(&self) -> Result<Self, Error> {
+    pub fn first(&self) -> Result<Program, Error> {
         let first = self.sexp.first()?;
-        let serialized = sexp_to_bytes(first).unwrap_or_default();
+        let serial = sexp_to_bytes(first).unwrap_or_default();
         Ok(Program {
-            serialized,
-            sexp: first.clone(),
+            serialized: serial.into(),
+            sexp: SExpSource::Owned(first.clone()),
         })
     }
-    pub fn rest(&self) -> Result<Self, Error> {
+    pub fn rest(&self) -> Result<Program, Error> {
         let rest = self.sexp.rest()?;
-        let serialized = sexp_to_bytes(rest).unwrap_or_default();
+        let serial = sexp_to_bytes(rest).unwrap_or_default();
         Ok(Program {
-            serialized,
-            sexp: rest.clone(),
+            serialized: serial.into(),
+            sexp: SExpSource::Owned(rest.clone()),
         })
     }
     pub fn at(&self, path: &str) -> Result<Program, Error> {
-        let mut rtn = &self.sexp;
+        let mut rtn = self.sexp.as_ref();
         for c in path.chars() {
             if c == 'f' || c == 'F' {
                 rtn = rtn.first()?;
@@ -104,10 +124,10 @@ impl Program {
                 ));
             }
         }
-        let serialized = sexp_to_bytes(rtn)?;
+        let serial = sexp_to_bytes(rtn)?;
         Ok(Program {
-            serialized,
-            sexp: rtn.clone(),
+            serialized: serial.into(),
+            sexp: SExpSource::Owned(rtn.clone()),
         })
     }
 
@@ -191,7 +211,7 @@ impl Program {
             .into_iter()
             .filter_map(|m| {
                 if let (Ok(p1), Ok(p2)) = (sexp_to_bytes(&m.0), sexp_to_bytes(&m.1)) {
-                    Some((Program::new(p1), Program::new(p2)))
+                    Some((Program::new(p1.into()), Program::new(p2.into())))
                 } else {
                     None
                 }
@@ -201,19 +221,19 @@ impl Program {
 
     #[must_use]
     pub fn is_atom(&self) -> bool {
-        matches!(self.sexp, SExp::Atom(_))
+        matches!(self.sexp.as_ref(), SExp::Atom(_))
     }
 
     #[must_use]
     pub fn is_pair(&self) -> bool {
-        matches!(self.sexp, SExp::Pair(_))
+        matches!(self.sexp.as_ref(), SExp::Pair(_))
     }
 
     #[must_use]
     pub fn as_atom(&self) -> Option<Program> {
-        match self.sexp {
-            SExp::Atom(_) => match sexp_to_bytes(&self.sexp) {
-                Ok(s) => Some(Program::new(s)),
+        match self.sexp.as_ref() {
+            SExp::Atom(_) => match sexp_to_bytes(self.sexp.as_ref()) {
+                Ok(s) => Some(Program::new(s.into())),
                 Err(_) => None,
             },
             SExp::Pair(_) => None,
@@ -227,15 +247,15 @@ impl Program {
 
     #[must_use]
     pub fn as_pair(&self) -> Option<(Program, Program)> {
-        match &self.sexp {
+        match self.sexp.as_ref() {
             SExp::Pair(pair) => {
-                let left = match sexp_to_bytes(&pair.first) {
-                    Ok(serial_data) => Program::new(serial_data),
-                    Err(_) => Program::new(Vec::new()),
+                let left = match sexp_to_bytes(pair.first()) {
+                    Ok(serial_data) => Program::new(serial_data.into()),
+                    Err(_) => Program::new(Vec::new().into()),
                 };
-                let right = match sexp_to_bytes(&pair.rest) {
-                    Ok(serial_data) => Program::new(serial_data),
-                    Err(_) => Program::new(Vec::new()),
+                let right = match sexp_to_bytes(pair.rest()) {
+                    Ok(serial_data) => Program::new(serial_data.into()),
+                    Err(_) => Program::new(Vec::new().into()),
                 };
                 Some((left, right))
             }
@@ -245,8 +265,8 @@ impl Program {
 
     #[must_use]
     pub fn cons(&self, other: &Program) -> Program {
-        match sexp_to_bytes(&SExp::Pair((&self.sexp, &other.sexp).into())) {
-            Ok(bytes) => Program::new(bytes),
+        match sexp_to_bytes(&SExp::Pair((self.sexp.as_ref(), other.sexp.as_ref()).into())) {
+            Ok(bytes) => Program::new(bytes.into()),
             Err(e) => {
                 println!("{e:?}");
                 Program::null()
@@ -273,6 +293,18 @@ impl Program {
         }
     }
 
+    pub fn run_mempool_with_cost(
+        &self,
+        max_cost: u64,
+        args: &Program,
+    ) -> Result<(u64, Program), Error> {
+        self.run(max_cost, MEMPOOL_MODE, args)
+    }
+
+    pub fn run_with_cost(&self, max_cost: u64, args: &Program) -> Result<(u64, Program), Error> {
+        self.run(max_cost, 0, args)
+    }
+
     pub fn run(&self, max_cost: u64, flags: u32, args: &Program) -> Result<(u64, Program), Error> {
         let mut stream = Cursor::new(&self.serialized);
         let program = sexp_from_bytes(&mut stream)?;
@@ -285,10 +317,10 @@ impl Program {
                 return Err(e);
             }
         };
-        let serialized = sexp_to_bytes(&result)?;
-        let mut stream = Cursor::new(&serialized);
+        let serial = sexp_to_bytes(&result)?;
+        let mut stream = Cursor::new(&serial);
         let sexp = sexp_from_bytes(&mut stream)?;
-        Ok((cost, Program { serialized, sexp }))
+        Ok((cost, Program { serialized: serial.into(), sexp: SExpSource::Owned(sexp) }))
     }
 }
 
@@ -305,8 +337,8 @@ impl TryFrom<&Vec<u8>> for Program {
     fn try_from(bytes: &Vec<u8>) -> Result<Self, Self::Error> {
         let atom = SExp::Atom(AtomBuf::from(bytes));
         Ok(Program {
-            serialized: sexp_to_bytes(&atom)?,
-            sexp: atom,
+            serialized: sexp_to_bytes(&atom)?.into(),
+            sexp: SExpSource::Owned(atom),
         })
     }
 }
@@ -316,8 +348,8 @@ impl TryFrom<&[u8]> for Program {
     fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
         let atom = SExp::Atom(AtomBuf::from(bytes));
         Ok(Program {
-            serialized: sexp_to_bytes(&atom)?,
-            sexp: atom,
+            serialized: sexp_to_bytes(&atom)?.into(),
+            sexp: SExpSource::Owned(atom),
         })
     }
 }
@@ -332,14 +364,14 @@ impl TryFrom<(Program, Program)> for Program {
         let sexp = SExp::Pair((&first, &rest).into());
         let bytes = sexp_to_bytes(&sexp)?;
         Ok(Program {
-            serialized: bytes,
-            sexp,
+            serialized: bytes.into(),
+            sexp: SExpSource::Owned(sexp),
         })
     }
 }
 
-impl Clone for Program {
-    fn clone(&self) -> Self {
+impl Clone for Program{
+    fn clone(&self) -> Program {
         Program::new(self.serialized.clone())
     }
 }
@@ -353,6 +385,15 @@ impl Hash for Program {
 impl PartialEq for Program {
     fn eq(&self, other: &Self) -> bool {
         self.serialized == other.serialized
+    }
+}
+
+impl Default for Program {
+    fn default() -> Self {
+        Self {
+            serialized: Default::default(),
+            sexp: SExpSource::Owned(Default::default()),
+        }
     }
 }
 
@@ -386,7 +427,7 @@ macro_rules! impl_ints {
                 type Error = std::io::Error;
                 fn try_from(int_val: $name) -> Result<Self, Self::Error> {
                     if int_val == 0 {
-                        return Ok(Program::new(Vec::new()));
+                        return Ok(Program::new(Vec::new().into()));
                     }
                     let as_ary = int_val.to_be_bytes();
                     let mut as_bytes = as_ary.as_slice();
@@ -432,18 +473,57 @@ impl_ints!(
 );
 
 #[derive(Clone, PartialEq, Eq)]
+pub enum SerializedSource {
+    Static(&'static [u8]),
+    Heap(Vec<u8>),
+}
+impl<'a> From<&'a SerializedSource> for Cursor<&'a [u8]> {
+    fn from(value: &'a SerializedSource) -> Self {
+        Cursor::new(value.as_ref())
+    }
+}
+impl AsRef<[u8]> for SerializedSource {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            SerializedSource::Static(buffer) => &buffer,
+            SerializedSource::Heap(buffer) => buffer.as_slice(),
+        }
+    }
+}
+impl From<Vec<u8>> for SerializedProgram {
+    fn from(value: Vec<u8>) -> Self {
+        Self {
+            buffer: SerializedSource::Heap(value),
+        }
+    }
+}
+impl Hash for SerializedProgram {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        let as_bytes: &[u8] = self.as_ref();
+        as_bytes.hash(state);
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
 pub struct SerializedProgram {
-    buffer: Vec<u8>,
+    buffer: SerializedSource,
+}
+impl Default for SerializedProgram {
+    fn default() -> Self {
+        SerializedProgram {
+            buffer: SerializedSource::Static(&[]),
+        }
+    }
 }
 impl ChiaSerialize for SerializedProgram {
     fn to_bytes(&self, _version: ChiaProtocolVersion) -> Result<Vec<u8>, Error>
     where
         Self: Sized,
     {
-        let mut stream = Cursor::new(&self.buffer);
+        let mut stream: Cursor<&[u8]> = (&self.buffer).into();
         let claim_sexp = sexp_from_bytes(&mut stream)?;
         let as_bytes = sexp_to_bytes(&claim_sexp)?;
-        Ok(as_bytes)
+        Ok(as_bytes.as_ref().to_vec())
     }
 
     fn from_bytes<T: AsRef<[u8]>>(
@@ -454,8 +534,7 @@ impl ChiaSerialize for SerializedProgram {
         Self: Sized,
     {
         let claim_sexp = sexp_from_bytes(bytes)?;
-        let buffer = sexp_to_bytes(&claim_sexp)?;
-        Ok(Self { buffer })
+        sexp_to_bytes(&claim_sexp)
     }
 }
 impl Display for SerializedProgram {
@@ -465,7 +544,10 @@ impl Display for SerializedProgram {
 }
 impl AsRef<[u8]> for SerializedProgram {
     fn as_ref(&self) -> &[u8] {
-        &self.buffer
+        match &self.buffer {
+            SerializedSource::Heap(buffer) => buffer.as_slice(),
+            SerializedSource::Static(buffer) => *buffer,
+        }
     }
 }
 impl Debug for SerializedProgram {
@@ -473,11 +555,12 @@ impl Debug for SerializedProgram {
         write!(f, "0x{}", encode(&self.buffer))
     }
 }
+
 impl SerializedProgram {
     pub async fn from_file(path: &Path) -> Result<SerializedProgram, Error> {
         if path.ends_with("bin") {
             Ok(Self {
-                buffer: tokio::fs::read(path).await?,
+                buffer: SerializedSource::Heap(tokio::fs::read(path).await?),
             })
         } else if path.ends_with("hex") {
             SerializedProgram::from_hex(tokio::fs::read_to_string(&path).await?.trim())
@@ -493,58 +576,103 @@ impl SerializedProgram {
     #[must_use]
     pub fn from_bytes(bytes: &[u8]) -> SerializedProgram {
         SerializedProgram {
-            buffer: bytes.to_owned(),
+            buffer: SerializedSource::Heap(bytes.to_owned()),
         }
     }
     pub fn from_hex(hex_str: &str) -> Result<SerializedProgram, Error> {
         Ok(SerializedProgram {
-            buffer: hex_to_bytes(hex_str.trim()).map_err(|_| {
+            buffer: SerializedSource::Heap(hex_to_bytes(hex_str.trim()).map_err(|_| {
                 Error::new(
                     ErrorKind::InvalidData,
                     "Failed to convert str to SerializedProgram",
                 )
-            })?,
+            })?),
         })
     }
-    //pub fn uncurry(&self) -> (SerializedProgram, SerializedProgram) {}
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
-        self.buffer.clone()
+        match self.buffer {
+            SerializedSource::Heap(ref bytes) => bytes.clone(),
+            SerializedSource::Static(ref bytes) => bytes.to_vec(),
+        }
     }
-
-    pub fn run_mempool_with_cost(
-        &self,
-        max_cost: u64,
-        args: &Program,
-    ) -> Result<(u64, Program), Error> {
-        self.run(max_cost, MEMPOOL_MODE, args)
-    }
-
-    pub fn run_with_cost(&self, max_cost: u64, args: &Program) -> Result<(u64, Program), Error> {
-        self.run(max_cost, 0, args)
+    #[must_use]
+    pub fn buffer(&self) -> &SerializedSource {
+        &self.buffer
     }
 
     #[must_use]
-    pub fn to_program(&self) -> Program {
-        Program::new(self.buffer.clone())
+    pub const fn const_from_bytes(bytes: &'static [u8]) -> SerializedProgram {
+        SerializedProgram {
+            buffer: SerializedSource::Static(bytes),
+        }
     }
+}
 
-    pub fn run(&self, max_cost: u64, flags: u32, args: &Program) -> Result<(u64, Program), Error> {
-        let mut stream = Cursor::new(&self.buffer);
-        let program = sexp_from_bytes(&mut stream)?;
-        let mut stream = Cursor::new(&args.serialized);
-        let args = sexp_from_bytes(&mut stream)?;
-        let dialect = ChiaDialect::new(flags);
-        let (cost, result) = match run_program(dialect, &program, &args, max_cost, None) {
-            Ok(reduct) => reduct,
-            Err(e) => {
-                return Err(e);
-            }
+#[inline]
+pub const fn strip_prefix(bytes: &[u8]) -> &[u8] {
+    match bytes {
+        [b'0', b'x', rest @ ..] => rest,
+        _ => bytes,
+    }
+}
+
+pub const fn hex_bytes_len(s: &str) -> usize {
+    let b = s.as_bytes();
+    let has_prefix = b.len() >= 2 && b[0] == b'0' && (b[1] | 0x20) == b'x';
+    let start = if has_prefix { 2 } else { 0 };
+    (b.len() - start) / 2
+}
+
+#[macro_export]
+macro_rules! parse_program {
+    ($hex:expr) => {
+        const __STRIP: &'static [u8] = $crate::clvm::program::strip_prefix($hex.as_bytes());
+        const __N: usize = __STRIP.len() / 2;
+        const __ARR: [u8; __N] = match const_hex::const_decode_to_array::<__N>(__STRIP) {
+            Ok(a) => a,
+            Err(e) => match e {
+                const_hex::FromHexError::InvalidHexCharacter { .. } => {
+                    panic!("Invalid Hex Character")
+                },
+                const_hex::FromHexError::OddLength => {
+                    panic!("Odd Length")
+                },
+                const_hex::FromHexError::InvalidStringLength => {
+                    panic!("Invalid String Length")
+                }
+            },
         };
-        let serialized = sexp_to_bytes(&result)?;
-        let mut stream = Cursor::new(&serialized);
-        let sexp = sexp_from_bytes(&mut stream)?;
-        Ok((cost, Program { serialized, sexp }))
+        const __AS_SEXP_BUFFER: [std::mem::MaybeUninit<$crate::clvm::sexp::SExp>; 1024] =
+            $crate::clvm::parser::const_sexp_from_bytes::<1024, 1024, 1024>(__ARR.as_slice());
+        const __AS_SEXP: $crate::clvm::sexp::SExp = unsafe { __AS_SEXP_BUFFER[1].assume_init_read() };
+        const P2_CONDITIONS_PROGRAM: Program = $crate::clvm::program::Program {
+            serialized: $crate::clvm::program::SerializedProgram {
+                buffer: $crate::clvm::program::SerializedSource::Static(&__ARR),
+            },
+            sexp: $crate::clvm::sexp::SExpSource::Borrowed(&__AS_SEXP),
+        };
+    };
+}
+
+impl SerializedProgram {
+    #[must_use]
+    pub fn to_program(self) -> Program {
+        Program::new(self)
+    }
+    pub fn to_owned(self) -> SerializedProgram {
+        match self.buffer {
+            SerializedSource::Static(s) => {
+                SerializedProgram {
+                    buffer: SerializedSource::Heap(s.to_vec()),
+                }
+            }
+            SerializedSource::Heap(s) => {
+                SerializedProgram {
+                    buffer: SerializedSource::Heap(s),
+                }
+            }
+        }
     }
 }
 impl TryFrom<String> for SerializedProgram {
@@ -565,7 +693,7 @@ impl TryFrom<&str> for SerializedProgram {
 
 impl From<Program> for SerializedProgram {
     fn from(prog: Program) -> Self {
-        SerializedProgram::from_bytes(&prog.serialized)
+        prog.serialized
     }
 }
 struct SerializedProgramVisitor;
@@ -610,5 +738,52 @@ impl<'a> Deserialize<'a> for SerializedProgram {
             Ok(hex) => Ok(hex),
             Err(er) => Err(er),
         }
+    }
+}
+
+struct ProgramVisitor;
+
+impl Visitor<'_> for ProgramVisitor {
+    type Value = Program;
+
+    fn expecting(&self, formatter: &mut Formatter) -> fmt::Result {
+        formatter.write_str("Expecting a hex String, or byte array")
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        let serial: SerializedProgram = value.try_into().map_err(serde::de::Error::custom)?;
+        Ok(Program::new(serial))
+    }
+
+    fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        let serial: SerializedProgram = value.try_into().map_err(serde::de::Error::custom)?;
+        Ok(Program::new(serial))
+    }
+}
+
+impl<'a> Deserialize<'a> for Program {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'a>,
+    {
+        match deserializer.deserialize_string(ProgramVisitor) {
+            Ok(prog) => Ok(prog),
+            Err(er) => Err(er),
+        }
+    }
+}
+
+impl Serialize for Program {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.serialized.to_string().as_str())
     }
 }

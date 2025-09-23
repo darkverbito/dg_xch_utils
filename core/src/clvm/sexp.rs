@@ -1,12 +1,10 @@
 use crate::blockchain::condition_opcode::ConditionOpcode;
-use crate::blockchain::sized_bytes::{
-    Bytes100, Bytes32, Bytes4, Bytes48, Bytes480, Bytes8, Bytes96,
-};
+use crate::blockchain::sized_bytes::{Bytes100, Bytes32, Bytes4, Bytes48, Bytes480, Bytes8, Bytes96};
 use crate::clvm::assemble::is_hex;
 use crate::clvm::parser::{sexp_from_bytes, sexp_to_bytes};
 use crate::clvm::program::Program;
 use crate::constants::{
-    ADD, APPLY, CONS, DIV, DIVMOD, KEYWORD_FROM_ATOM, MUL, NULL_CELL, NULL_SEXP, ONE_SEXP, QUOTE,
+    ADD, APPLY, CONS, DIV, DIVMOD, KEYWORD_FROM_ATOM, MUL, NULL_SEXP, ONE_SEXP, QUOTE,
     SUB,
 };
 use crate::formatting::{number_from_slice, u32_from_slice, u64_from_bigint};
@@ -22,12 +20,75 @@ use std::fmt::{Debug, Display, Formatter};
 use std::io::{Cursor, Error, ErrorKind};
 use std::mem::replace;
 use std::sync::Arc;
+use serde::de::Visitor;
+
+#[derive(Hash, PartialEq, Eq)]
+pub enum SExpSource {
+    Owned(SExp),
+    Borrowed(&'static SExp),
+}
+impl AsRef<SExp> for SExpSource {
+    fn as_ref(&self) -> &SExp {
+        match self {
+            SExpSource::Owned(owned) => owned,
+            SExpSource::Borrowed(borrowed) => *borrowed,
+        }
+    }
+}
+impl SExpSource {
+    pub fn is_owned(&self) -> bool {
+        matches!(self, SExpSource::Owned(_))
+    }
+    pub fn to_owned(&self) -> SExp {
+        match self {
+            SExpSource::Owned(owned) => owned.clone(),
+            SExpSource::Borrowed(borrowed) => (*borrowed).clone(),
+        }
+    }
+    pub fn atom(&self) -> Result<&AtomBuf, Error> {
+        match self {
+            SExpSource::Owned(owned) => owned.atom(),
+            SExpSource::Borrowed(borrowed) => borrowed.atom(),
+        }
+    }
+    pub fn pair(&self) -> Result<&PairBuf, Error> {
+        match self {
+            SExpSource::Owned(owned) => owned.pair(),
+            SExpSource::Borrowed(borrowed) => borrowed.pair(),
+        }
+    }
+    pub fn first(&self) -> Result<&SExp, Error> {
+        match self {
+            SExpSource::Owned(owned) => owned.first(),
+            SExpSource::Borrowed(borrowed) => borrowed.first(),
+        }
+    }
+    pub fn rest(&self) -> Result<&SExp, Error> {
+        match self {
+            SExpSource::Owned(owned) => owned.rest(),
+            SExpSource::Borrowed(borrowed) => borrowed.rest(),
+        }
+    }
+    pub fn as_vec(&self) -> Option<Vec<u8>> {
+        match self {
+            SExpSource::Owned(owned) => owned.as_vec(),
+            SExpSource::Borrowed(borrowed) => borrowed.as_vec(),
+        }
+    }
+    pub fn to_map(&self) -> Result<HashMap<&SExp, &SExp>, Error> {
+        match self {
+            SExpSource::Owned(owned) => owned.to_map(),
+            SExpSource::Borrowed(borrowed) => borrowed.to_map(),
+        }
+    }
+}
 
 #[derive(Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SExp {
     Atom(AtomBuf),
     Pair(PairBuf),
 }
+
 impl<'a> IntoIterator for &'a SExp {
     type Item = &'a SExp;
     type IntoIter = SExpIter<'a>;
@@ -66,7 +127,7 @@ impl SExp {
                 ErrorKind::Unsupported,
                 "Expected Pair, got Atom",
             )),
-            SExp::Pair(p) => Ok(&p.first),
+            SExp::Pair(p) => Ok(p.first()),
         }
     }
     pub fn rest(&self) -> Result<&SExp, Error> {
@@ -75,29 +136,26 @@ impl SExp {
                 ErrorKind::Unsupported,
                 "Expected Pair, got Atom",
             )),
-            SExp::Pair(p) => Ok(&p.rest),
+            SExp::Pair(p) => Ok(p.rest()),
         }
     }
     #[must_use]
     pub fn as_vec(&self) -> Option<Vec<u8>> {
         match &self {
-            SExp::Atom(vec) => Some(vec.data.clone()),
+            SExp::Atom(vec) => Some(vec.as_ref().to_vec()),
             SExp::Pair(_) => None,
         }
     }
 
     pub fn as_int(&self) -> Result<BigInt, Error> {
         match self {
-            SExp::Atom(atom) => Ok(BigInt::from_signed_bytes_be(&atom.data)),
+            SExp::Atom(atom) => Ok(BigInt::from_signed_bytes_be(atom.as_ref())),
             SExp::Pair(_) => Err(Error::new(ErrorKind::Unsupported, "SExp is Pair not Atom")),
         }
     }
     #[must_use]
     pub fn cons(self, other: SExp) -> SExp {
-        SExp::Pair(PairBuf {
-            first: Arc::new(self),
-            rest: Arc::new(other),
-        })
+        SExp::Pair(PairBuf::Owned((Arc::new(self), Arc::new(other))))
     }
     pub fn split(&self) -> Result<(&SExp, &SExp), Error> {
         match self {
@@ -105,14 +163,14 @@ impl SExp {
                 ErrorKind::Unsupported,
                 "Expected Pair, got Atom",
             )),
-            SExp::Pair(p) => Ok((&*p.first, &*p.rest)),
+            SExp::Pair(p) => Ok((p.first(), p.rest())),
         }
     }
 
     #[must_use]
     pub fn nullp(&self) -> bool {
         match &self {
-            SExp::Atom(a) => a.data.is_empty(),
+            SExp::Atom(a) => a.as_ref().is_empty(),
             SExp::Pair(_) => false,
         }
     }
@@ -123,10 +181,10 @@ impl SExp {
             SExp::Atom(_) => {
                 vec![]
             }
-            SExp::Pair(pair) => match pair.first.as_ref() {
+            SExp::Pair(pair) => match pair.first() {
                 SExp::Atom(buf) => {
-                    let mut rtn: Vec<Vec<u8>> = vec![buf.data.clone()];
-                    rtn.extend(pair.rest.as_atom_list());
+                    let mut rtn: Vec<Vec<u8>> = vec![buf.as_ref().to_vec()];
+                    rtn.extend(pair.rest().as_atom_list());
                     rtn
                 }
                 SExp::Pair(_) => {
@@ -136,20 +194,20 @@ impl SExp {
         }
     }
 
-    pub fn to_map(&self) -> Result<HashMap<Arc<SExp>, Arc<SExp>>, Error> {
-        let mut rtn: HashMap<Arc<SExp>, Arc<SExp>> = HashMap::new();
+    pub fn to_map(&self) -> Result<HashMap<&SExp, &SExp>, Error> {
+        let mut rtn: HashMap<&SExp, &SExp> = HashMap::new();
         let mut cur_node = self;
         loop {
             match cur_node {
                 SExp::Atom(_) => break,
                 SExp::Pair(pair) => {
-                    cur_node = &pair.rest;
-                    match pair.first.as_ref() {
+                    cur_node = pair.rest();
+                    match pair.first() {
                         SExp::Atom(_) => {
-                            rtn.insert(pair.first.clone(), NULL_CELL.clone());
+                            rtn.insert(pair.first(), &NULL_SEXP);
                         }
                         SExp::Pair(inner_pair) => {
-                            rtn.insert(inner_pair.first.clone(), inner_pair.rest.clone());
+                            rtn.insert(inner_pair.first(), inner_pair.rest());
                         }
                     }
                 }
@@ -167,7 +225,7 @@ impl SExp {
             }
             match ptr {
                 SExp::Pair(pair) => {
-                    ptr = &pair.rest;
+                    ptr = pair.rest();
                 }
                 SExp::Atom(_) => return false,
             }
@@ -180,7 +238,7 @@ impl SExp {
         let mut count = 0;
         let mut ptr = self;
         while let Ok(pair) = ptr.pair() {
-            ptr = &pair.rest;
+            ptr = pair.rest();
             count += 1;
             if count > return_early_if_exceeds {
                 break;
@@ -195,14 +253,14 @@ impl SExp {
             SExp::Pair(pair) => {
                 let mut byte_buf = Vec::new();
                 byte_buf.push(2);
-                byte_buf.extend(pair.first.tree_hash());
-                byte_buf.extend(pair.rest.tree_hash());
+                byte_buf.extend(pair.first().tree_hash());
+                byte_buf.extend(pair.rest().tree_hash());
                 hash_256(&byte_buf).into()
             }
             SExp::Atom(atom) => {
                 let mut byte_buf = Vec::new();
                 byte_buf.push(1);
-                byte_buf.extend(&atom.data);
+                byte_buf.extend(atom.as_ref());
                 hash_256(&byte_buf).into()
             }
         }
@@ -216,7 +274,7 @@ impl SExp {
     #[must_use]
     pub fn as_bool(&self) -> bool {
         match self.atom() {
-            Ok(v0) => !v0.data.is_empty(),
+            Ok(v0) => !v0.as_ref().is_empty(),
             _ => true,
         }
     }
@@ -245,9 +303,9 @@ impl SExp {
                 }
                 SExp::Pair(buf) => {
                     if store {
-                        args.push(buf.first.as_ref().clone());
+                        args.push(buf.first().clone());
                     }
-                    args_sexp = &buf.rest;
+                    args_sexp = buf.rest();
                 }
             }
         }
@@ -257,12 +315,12 @@ impl SExp {
     pub fn non_nil(&self) -> bool {
         match self {
             SExp::Pair(_) => true,
-            SExp::Atom(b) => !b.data.is_empty(),
+            SExp::Atom(b) => !b.as_ref().is_empty(),
         }
     }
 
     pub fn substr(&self, start: usize, end: usize) -> Result<SExp, Error> {
-        let atom = &self.atom()?.data;
+        let atom = &self.atom()?.as_ref();
         if start > atom.len() {
             return Err(Error::new(
                 ErrorKind::InvalidData,
@@ -281,9 +339,7 @@ impl SExp {
                 format!("substr invalid bounds: {start} is > {end}"),
             ));
         }
-        let sub = SExp::Atom(AtomBuf {
-            data: atom[start..end].to_vec(),
-        });
+        let sub = SExp::Atom(AtomBuf::Owned(atom[start..end].to_vec()));
         Ok(sub)
     }
 
@@ -291,9 +347,9 @@ impl SExp {
         let mut buf = vec![];
         for node in nodes {
             let atom = node.atom()?;
-            buf.extend(&atom.data);
+            buf.extend(atom.as_ref());
         }
-        let new_atom = SExp::Atom(AtomBuf { data: buf });
+        let new_atom = SExp::Atom(AtomBuf::Owned(buf));
         Ok(new_atom)
     }
 }
@@ -355,7 +411,7 @@ impl<'a> Iterator for SExpIter<'a> {
         } else {
             match self.c {
                 SExp::Atom(a) => {
-                    if a.data.is_empty() {
+                    if a.as_ref().is_empty() {
                         None
                     } else {
                         let rtn = replace(&mut self.c, &NULL_SEXP);
@@ -363,17 +419,73 @@ impl<'a> Iterator for SExpIter<'a> {
                     }
                 }
                 SExp::Pair(pair) => {
-                    self.c = &pair.rest;
-                    Some(&pair.first)
+                    self.c = pair.rest();
+                    Some(pair.first())
                 }
             }
         }
     }
 }
 
-#[derive(Hash, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AtomBuf {
-    pub data: Vec<u8>,
+#[derive(Hash, Clone, Eq)]
+pub enum AtomBuf{
+    Owned(Vec<u8>),
+    Borrowed(&'static [u8]),
+}
+
+impl AsRef<[u8]> for AtomBuf {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            AtomBuf::Owned(buf) => buf,
+            AtomBuf::Borrowed(buf) => *buf,
+        }
+    }
+}
+
+impl Serialize for AtomBuf {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.as_ref().serialize(serializer)
+    }
+}
+struct AtomBufVisitor;
+impl Visitor<'_> for AtomBufVisitor {
+    type Value = AtomBuf;
+
+    fn expecting(&self, formatter: &mut Formatter) -> fmt::Result {
+        formatter
+            .write_str("Expecting a hex String, or byte array")
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        let data = hex::decode(value).map_err(|e| E::custom(format!("{}", e)))?;
+        Ok(Self::Value::new(data))
+    }
+
+    fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        let data = hex::decode(value.as_str()).map_err(|e| E::custom(format!("{}", e)))?;
+        Ok(Self::Value::new(data))
+    }
+}
+
+impl<'de> Deserialize<'de> for AtomBuf {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match deserializer.deserialize_string(AtomBufVisitor) {
+            Ok(hex) => Ok(hex),
+            Err(er) => Err(er),
+        }
+    }
 }
 
 impl Debug for AtomBuf {
@@ -384,23 +496,7 @@ impl Debug for AtomBuf {
 
 impl Display for AtomBuf {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        display_atom(&self.data, f)
-    }
-}
-
-pub struct AtomRef<'a> {
-    pub data: &'a [u8],
-}
-
-impl Debug for AtomRef<'_> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "{self}")
-    }
-}
-
-impl Display for AtomRef<'_> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        display_atom(self.data, f)
+        display_atom(self.as_ref(), f)
     }
 }
 
@@ -439,80 +535,88 @@ fn display_atom(data: &[u8], f: &mut Formatter<'_>) -> fmt::Result {
 impl AtomBuf {
     #[must_use]
     pub fn new(v: Vec<u8>) -> Self {
-        AtomBuf { data: v }
+        AtomBuf::Owned(v)
+    }
+    pub fn extend(&mut self, other: &AtomBuf) {
+        match self {
+            AtomBuf::Owned(data) => {
+                data.extend(other.as_ref());
+            }
+            AtomBuf::Borrowed(data) => {
+                let mut new_buffer = data.to_vec();
+                new_buffer.extend(other.as_ref());
+                *self = AtomBuf::Owned(new_buffer);
+            }
+        }
     }
     pub fn as_bytes32(&self) -> Result<Bytes32, Error> {
-        if self.data.len() == Bytes32::SIZE {
-            Bytes32::parse(self.data.as_slice())
+        let data: &[u8] = self.as_ref();
+        if data.len() == Bytes32::SIZE {
+            Bytes32::parse(data)
         } else {
             Err(Error::new(
                 ErrorKind::InvalidInput,
-                format!("Invalid Length for Bytes32: {}", self.data.len()),
+                format!("Invalid Length for Bytes32: {}", data.len()),
             ))
         }
     }
     pub fn as_int(&self) -> BigInt {
-        number_from_slice(&self.data)
+        number_from_slice(self.as_ref())
     }
     pub fn as_u64(&self) -> Result<u64, Error> {
-        u64_from_bigint(&number_from_slice(&self.data))
+        u64_from_bigint(&number_from_slice(self.as_ref()))
     }
     pub fn as_u32(&self) -> Option<u32> {
-        u32_from_slice(&self.data)
+        u32_from_slice(self.as_ref())
     }
     pub fn as_i32(&self) -> Option<u32> {
-        u32_from_slice(&self.data)
+        u32_from_slice(self.as_ref())
     }
 }
-
-impl<'a> AtomRef<'a> {
-    #[must_use]
-    pub fn new(v: &'a [u8]) -> AtomRef<'a> {
-        AtomRef { data: v }
-    }
-    pub fn as_bytes32(&self) -> Result<Bytes32, Error> {
-        if self.data.len() == Bytes32::SIZE {
-            Bytes32::parse(self.data)
-        } else {
-            Err(Error::new(
-                ErrorKind::InvalidInput,
-                format!("Invalid Length for Bytes32: {}", self.data.len()),
-            ))
-        }
-    }
-    pub fn as_int(&self) -> BigInt {
-        number_from_slice(self.data)
-    }
-    pub fn as_u64(&self) -> Result<u64, Error> {
-        u64_from_bigint(&number_from_slice(self.data))
-    }
-    pub fn as_u32(&self) -> Option<u32> {
-        u32_from_slice(self.data)
-    }
-    pub fn as_i32(&self) -> Option<u32> {
-        u32_from_slice(self.data)
+impl From<Vec<u8>> for AtomBuf {
+    fn from(v: Vec<u8>) -> Self {
+        Self::new(v)
     }
 }
-impl<T: AsRef<[u8]>> From<T> for AtomBuf {
-    fn from(v: T) -> Self {
-        Self::new(v.as_ref().to_vec())
+impl From<&Vec<u8>> for AtomBuf {
+    fn from(v: &Vec<u8>) -> Self {
+        Self::new(v.clone())
+    }
+}
+impl From<&[u8]> for AtomBuf {
+    fn from(v: &[u8]) -> Self {
+        Self::new(v.to_vec())
     }
 }
 impl<T: AsRef<[u8]>> PartialEq<T> for AtomBuf {
     fn eq(&self, other: &T) -> bool {
-        self.data == other.as_ref()
+        self.as_ref() == other.as_ref()
     }
 }
 
 impl PartialEq<[u8]> for &AtomBuf {
     fn eq(&self, other: &[u8]) -> bool {
-        self.data == other
+        self.as_ref() == other
     }
 }
 #[derive(Hash, Clone, PartialEq, Eq)]
-pub struct PairBuf {
-    pub first: Arc<SExp>,
-    pub rest: Arc<SExp>,
+pub enum PairBuf {
+    Owned((Arc<SExp>, Arc<SExp>)),
+    Borrowed((&'static SExp, &'static SExp)),
+}
+impl PairBuf {
+    pub fn first(&self) -> &SExp {
+        match self {
+            PairBuf::Owned((first, _)) => first.as_ref(),
+            PairBuf::Borrowed((first, _)) => *first
+        }
+    }
+    pub fn rest(&self) -> &SExp {
+        match self {
+            PairBuf::Owned((_, rest)) => rest.as_ref(),
+            PairBuf::Borrowed((_, rest)) => *rest
+        }
+    }
 }
 
 impl Serialize for PairBuf {
@@ -520,7 +624,7 @@ impl Serialize for PairBuf {
     where
         S: Serializer,
     {
-        (&*self.first, &*self.rest).serialize(serializer)
+        (self.first(), self.rest()).serialize(serializer)
     }
 }
 
@@ -530,32 +634,29 @@ impl<'de> Deserialize<'de> for PairBuf {
         D: Deserializer<'de>,
     {
         let (first, rest): (SExp, SExp) = Deserialize::deserialize(deserializer)?;
-        Ok(PairBuf {
-            first: Arc::new(first),
-            rest: Arc::new(rest),
-        })
+        Ok(PairBuf::Owned((Arc::new(first), Arc::new(rest))))
     }
 }
 
 impl Display for PairBuf {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         let mut buffer = String::from("(");
-        match &*self.first {
+        match self.first() {
             SExp::Atom(a) => {
-                if let Some(kw) = KEYWORD_FROM_ATOM.get(&a.data) {
+                if let Some(kw) = KEYWORD_FROM_ATOM.get(a.as_ref()) {
                     buffer += kw;
                 } else {
-                    buffer += &format!("{}", self.first);
+                    buffer += &format!("{}", self.first());
                 }
             }
             SExp::Pair(_) => {
-                buffer += &format!("{}", self.first);
+                buffer += &format!("{}", self.first());
             }
         }
-        let mut current = &self.rest;
+        let mut current = self.rest();
         while let Ok(p) = current.pair() {
-            buffer += &format!(" {}", &p.first.as_ref());
-            current = &p.rest;
+            buffer += &format!(" {}", p.first());
+            current = p.rest();
         }
         if current.non_nil() {
             buffer += &format!(" . {}", *current);
@@ -570,19 +671,20 @@ impl Debug for PairBuf {
         let mut buffer = String::from("(");
         let mut is_quote = false;
         let mut is_op_format = false;
-        match &*self.first {
+        match self.first() {
             SExp::Atom(a) => {
-                if a.data.len() == 1 {
-                    is_quote = a.data.first() == Some(&QUOTE);
-                    is_op_format = a.data.first() == Some(&CONS);
-                    is_op_format = is_op_format || a.data.first() == Some(&APPLY);
-                    is_op_format = is_op_format || a.data.first() == Some(&ADD);
-                    is_op_format = is_op_format || a.data.first() == Some(&SUB);
-                    is_op_format = is_op_format || a.data.first() == Some(&MUL);
-                    is_op_format = is_op_format || a.data.first() == Some(&DIV);
-                    is_op_format = is_op_format || a.data.first() == Some(&DIVMOD);
+                let data = a.as_ref();
+                if data.len() == 1 {
+                    is_quote = data.first() == Some(&QUOTE);
+                    is_op_format = data.first() == Some(&CONS);
+                    is_op_format = is_op_format || data.first() == Some(&APPLY);
+                    is_op_format = is_op_format || data.first() == Some(&ADD);
+                    is_op_format = is_op_format || data.first() == Some(&SUB);
+                    is_op_format = is_op_format || data.first() == Some(&MUL);
+                    is_op_format = is_op_format || data.first() == Some(&DIV);
+                    is_op_format = is_op_format || data.first() == Some(&DIVMOD);
                 }
-                if let Some(kw) = KEYWORD_FROM_ATOM.get(&a.data) {
+                if let Some(kw) = KEYWORD_FROM_ATOM.get(data) {
                     buffer += kw;
                 } else {
                     buffer += &format!("{a:?}");
@@ -593,22 +695,22 @@ impl Debug for PairBuf {
             }
         }
         if is_quote {
-            let mut current = &self.rest;
-            match current.as_ref() {
+            let mut current = self.rest();
+            match current {
                 SExp::Atom(a) => {
                     buffer += &format!(" . {a:?}");
                 }
                 SExp::Pair(_) => {
                     while let Ok(p) = current.pair() {
-                        buffer += &format!(" {:?}", &p.first.as_ref());
-                        current = &p.rest;
+                        buffer += &format!(" {:?}", p.first());
+                        current = p.rest();
                     }
-                    match current.as_ref() {
+                    match current {
                         SExp::Pair(pair) => {
                             buffer += &format!(" {:?}", &pair);
                         }
                         SExp::Atom(atom) => {
-                            if !atom.data.is_empty() {
+                            if !atom.as_ref().is_empty() {
                                 buffer += &format!(" {:?}", &atom);
                             }
                         }
@@ -617,17 +719,17 @@ impl Debug for PairBuf {
             }
             buffer += ")";
         } else if is_op_format {
-            let cons_pair = &self.rest;
-            match cons_pair.as_ref() {
+            let cons_pair = self.rest();
+            match cons_pair {
                 SExp::Pair(pair) => {
-                    buffer += &format!(" {:?}", &pair.first);
-                    match pair.rest.as_ref() {
+                    buffer += &format!(" {:?}", pair.first());
+                    match pair.rest() {
                         SExp::Atom(a) => {
                             buffer += &format!(" {a:?}");
                         }
                         SExp::Pair(p) => {
-                            if p.rest.nullp() {
-                                buffer += &format!(" {:?}", &p.first);
+                            if p.rest().nullp() {
+                                buffer += &format!(" {:?}", p.first());
                             } else {
                                 buffer += &format!(" {:?}", &p);
                             }
@@ -635,12 +737,12 @@ impl Debug for PairBuf {
                     }
                 }
                 SExp::Atom(_) => {
-                    buffer += &format!(" {:?} {:?}", cons_pair, &*NULL_SEXP);
+                    buffer += &format!(" {:?} {:?}", cons_pair, &NULL_SEXP);
                 }
             }
             buffer += ")";
         } else {
-            buffer += &format!(" {:?}", &self.rest);
+            buffer += &format!(" {:?}", self.rest());
             buffer += ")";
         }
         write!(f, "{buffer}")
@@ -649,19 +751,13 @@ impl Debug for PairBuf {
 
 impl From<(&SExp, &SExp)> for PairBuf {
     fn from(v: (&SExp, &SExp)) -> Self {
-        PairBuf {
-            first: Arc::new(v.0.clone()),
-            rest: Arc::new(v.1.clone()),
-        }
+        PairBuf::Owned((Arc::new(v.0.clone()), Arc::new(v.1.clone())))
     }
 }
 
 impl From<(SExp, SExp)> for PairBuf {
     fn from(v: (SExp, SExp)) -> Self {
-        PairBuf {
-            first: Arc::new(v.0),
-            rest: Arc::new(v.1),
-        }
+        PairBuf::Owned((Arc::new(v.0.clone()), Arc::new(v.1.clone())))
     }
 }
 
@@ -749,13 +845,13 @@ impl IntoSExp for String {
 
 impl IntoSExp for Program {
     fn to_sexp(self) -> SExp {
-        self.sexp.clone()
+        self.sexp.as_ref().clone()
     }
 }
 
 impl IntoSExp for &Program {
     fn to_sexp(self) -> SExp {
-        self.sexp.clone()
+        self.sexp.as_ref().clone()
     }
 }
 
@@ -827,7 +923,7 @@ impl ChiaSerialize for SExp {
     where
         Self: Sized,
     {
-        sexp_to_bytes(self)
+        sexp_to_bytes(self).map(|v| v.as_ref().to_vec())
     }
 
     fn from_bytes<T: AsRef<[u8]>>(

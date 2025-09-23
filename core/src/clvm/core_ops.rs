@@ -72,13 +72,13 @@ pub fn op_raise<D: Dialect>(
     match args {
         SExp::Atom(atom) => Err(Error::other(format!("clvm raise: {atom:?}"))),
         SExp::Pair(pair) => {
-            if pair.rest.nullp() {
+            if pair.rest().nullp() {
                 Err(Error::other(format!(
                     "clvm raise: {:?}",
-                    pair.first.atom()?
+                    pair.first().atom()?
                 )))
             } else {
-                Err(Error::other(format!("clvm raise: {:?}", &pair.rest)))
+                Err(Error::other(format!("clvm raise: {:?}", &pair.rest())))
             }
         }
     }

@@ -100,7 +100,7 @@ fn new_atom_and_cost(cost: u64, buf: &[u8]) -> (u64, SExp) {
 }
 
 fn malloc_cost(cost: u64, ptr: SExp) -> Result<(u64, SExp), Error> {
-    let c = ptr.atom()?.data.len() as u64 * MALLOC_COST_PER_BYTE;
+    let c = ptr.atom()?.as_ref().len() as u64 * MALLOC_COST_PER_BYTE;
     Ok((cost + c, ptr))
 }
 
@@ -110,7 +110,7 @@ pub fn op_unknown<D: Dialect>(
     max_cost: u64,
     _dialect: &D,
 ) -> Result<(u64, SExp), Error> {
-    let op = &o.atom()?.data;
+    let op = o.atom()?.as_ref();
     if op.is_empty() || (op.len() >= 2 && op[0] == 0xff && op[1] == 0xff) {
         return Err(Error::new(
             ErrorKind::Unsupported,
@@ -333,7 +333,7 @@ pub fn op_divmod<D: Dialect>(
         let q1 = SExp::try_from(&q)?;
         let r1 = SExp::try_from(&r)?;
 
-        let c = (q1.atom()?.data.len() + r1.atom()?.data.len()) as u64 * MALLOC_COST_PER_BYTE;
+        let c = (q1.atom()?.as_ref().len() + r1.atom()?.as_ref().len()) as u64 * MALLOC_COST_PER_BYTE;
         let r: SExp = q1.cons(r1);
         Ok((cost + c, r))
     }
@@ -449,7 +449,7 @@ pub fn op_concat<D: Dialect>(
                     format!("concat on list: {arg:?}"),
                 ));
             }
-            SExp::Atom(b) => total_size += b.data.len(),
+            SExp::Atom(b) => total_size += b.as_ref().len(),
         };
         terms.push(arg);
     }
@@ -607,7 +607,7 @@ pub fn op_all<D: Dialect>(args: &SExp, max_cost: u64, dialect: &D) -> Result<(u6
     match args.first() {
         Ok(arg) => {
             //Check for Special Print Case
-            if arg.atom().map(|d| d.data.as_slice()).unwrap_or(&[]) == dialect.print_kw() {
+            if arg.atom().map(|d| d.as_ref()).unwrap_or(&[]) == dialect.print_kw() {
                 let mut out = NULL_SEXP.clone();
                 for arg in args.iter().skip(1) {
                     out = arg.clone().cons(out);
@@ -640,7 +640,7 @@ pub fn op_softfork<D: Dialect>(
 ) -> Result<(u64, SExp), Error> {
     match args.pair() {
         Ok(pair) => {
-            let n: BigInt = number_from_slice(int_atom(&pair.first, "softfork")?);
+            let n: BigInt = number_from_slice(int_atom(pair.first(), "softfork")?);
             if n.sign() == Sign::Plus {
                 if n > BigInt::from(max_cost) {
                     return Err(Error::new(

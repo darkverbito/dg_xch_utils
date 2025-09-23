@@ -34,7 +34,7 @@ struct PlotCounts {
     compressed_total: Arc<AtomicUsize>,
 }
 pub struct NewSignagePointHarvesterHandle<T: PlotManagerAsync> {
-    pub constants: &'static ConsensusConstants,
+    pub constants: ConsensusConstants,
     pub plot_manager: Arc<RwLock<T>>,
     pub plots_ready: Arc<AtomicBool>,
 }

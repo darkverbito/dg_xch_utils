@@ -2,7 +2,7 @@ use crate::blockchain::coin::Coin;
 use crate::blockchain::condition_opcode::{ConditionCost, ConditionOpcode};
 use crate::blockchain::sized_bytes::Bytes32;
 use crate::blockchain::utils::{additions_for_solution, fee_for_solution};
-use crate::clvm::program::{Program, SerializedProgram};
+use crate::clvm::program::{Program};
 use crate::clvm::utils::INFINITE_COST;
 use crate::traits::SizedBytes;
 use dg_xch_macros::ChiaSerial;
@@ -14,8 +14,8 @@ use std::io::Error;
 #[derive(ChiaSerial, Clone, PartialEq, Eq, Serialize, Deserialize, Debug)]
 pub struct CoinSpend {
     pub coin: Coin,
-    pub puzzle_reveal: SerializedProgram,
-    pub solution: SerializedProgram,
+    pub puzzle_reveal: Program,
+    pub solution: Program,
 }
 
 impl CoinSpend {
@@ -36,7 +36,7 @@ impl CoinSpend {
         let mut ret: Vec<Coin> = vec![];
         let (mut cost, r) = self
             .puzzle_reveal
-            .run_with_cost(max_cost, &self.solution.to_program())?;
+            .run_with_cost(max_cost, &self.solution)?;
         for cond in Program::to(r).as_list() {
             if cost > max_cost {
                 return Err(Error::other(

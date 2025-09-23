@@ -1,6 +1,3 @@
-use crate::clvm_puzzles::{
-    SINGLETON_LAUNCHER, SINGLETON_LAUNCHER_HASH, SINGLETON_MOD, SINGLETON_MOD_HASH,
-};
 use dg_xch_core::blockchain::coin::Coin;
 use dg_xch_core::blockchain::coin_spend::CoinSpend;
 use dg_xch_core::blockchain::condition_opcode::ConditionOpcode;
@@ -9,6 +6,8 @@ use dg_xch_core::clvm::sexp::IntoSExp;
 use dg_xch_core::traits::SizedBytes;
 use dg_xch_core::utils::hash_256;
 use std::io::{Error, ErrorKind};
+use dg_xch_core::puzzles::singleton_launcher::{SINGLETON_LAUNCHER, SINGLETON_LAUNCHER_HASH};
+use dg_xch_core::puzzles::singleton_top_layer::{SINGLETON_TOP_LAYER, SINGLETON_TOP_LAYER_HASH};
 
 #[must_use]
 pub fn generate_launcher_coin(coin: &Coin, amount: u64) -> Coin {
@@ -34,7 +33,7 @@ pub fn launch_conditions_and_coin_spend(
     let launcher_coin: Coin = generate_launcher_coin(&coin, amount);
     let args = vec![
         Program::to((
-            SINGLETON_MOD_HASH.to_sexp(),
+            SINGLETON_TOP_LAYER_HASH.to_sexp(),
             (
                 launcher_coin.name().to_sexp(),
                 SINGLETON_LAUNCHER_HASH.to_sexp(),
@@ -43,7 +42,7 @@ pub fn launch_conditions_and_coin_spend(
         )),
         Program::to(inner_puzzle),
     ];
-    let curried_singleton: Program = SINGLETON_MOD.curry(&args)?;
+    let curried_singleton: Program = SINGLETON_TOP_LAYER.curry(&args)?;
     let launcher_solution = Program::to(vec![
         curried_singleton.tree_hash().to_sexp(),
         amount.to_sexp(),

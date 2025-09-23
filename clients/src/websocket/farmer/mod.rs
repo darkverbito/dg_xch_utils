@@ -1,14 +1,15 @@
 use crate::websocket::farmer::request_signed_values::RequestSignedValuesHandle;
 use crate::websocket::farmer::signage_point::NewSignagePointHandle;
 use crate::websocket::{WsClient, WsClientConfig};
-use dg_xch_core::consensus::constants::{ConsensusConstants, CONSENSUS_CONSTANTS_MAP, MAINNET};
+use dg_xch_core::consensus::constants::{ChiaNetwork, ConsensusConstants, CONSENSUS_CONSTANTS};
 use dg_xch_core::constants::{CHIA_CA_CRT, CHIA_CA_KEY};
 use dg_xch_core::protocols::farmer::FarmerSharedState;
 use dg_xch_core::protocols::{
     ChiaMessageFilter, ChiaMessageHandler, NodeType, ProtocolMessageTypes,
 };
 use std::collections::HashMap;
-use std::io::Error;
+use std::io::{Error, ErrorKind};
+use std::str::FromStr;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -28,10 +29,9 @@ impl<T> FarmerClient<T> {
         run: Arc<AtomicBool>,
         timeout: u64,
     ) -> Result<Self, Error> {
-        let constants = CONSENSUS_CONSTANTS_MAP
-            .get(&client_config.network_id)
-            .cloned()
-            .unwrap_or(MAINNET.clone());
+        let network = ChiaNetwork::from_str(&client_config.network_id)
+            .map_err(|e| Error::new(ErrorKind::InvalidData, e))?;
+        let constants = CONSENSUS_CONSTANTS[network as usize];
         let handles = Arc::new(RwLock::new(handles(constants, &shared_state)));
         let client = WsClient::with_ca(
             client_config,
@@ -62,7 +62,7 @@ impl<T> FarmerClient<T> {
 }
 
 fn handles<T>(
-    constants: Arc<ConsensusConstants>,
+    constants: ConsensusConstants,
     shared_state: &FarmerSharedState<T>,
 ) -> HashMap<Uuid, Arc<ChiaMessageHandler>> {
     HashMap::from([

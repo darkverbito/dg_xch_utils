@@ -152,7 +152,7 @@ impl From<&Program> for ConditionOpcode {
             .sexp
             .atom()
             .map(|a| {
-                if let Some(v) = a.data.first() {
+                if let Some(v) = a.as_ref().first() {
                     ConditionOpcode::from(*v)
                 } else {
                     ConditionOpcode::Unknown

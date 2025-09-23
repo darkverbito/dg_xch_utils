@@ -113,7 +113,7 @@ impl SpendBundle {
         for spend in &self.coin_spends {
             let (_, output) = spend
                 .puzzle_reveal
-                .run_with_cost(u64::MAX, &spend.solution.to_program())?;
+                .run_with_cost(u64::MAX, &spend.solution)?;
             conditions.extend(output.as_list());
         }
         Ok(conditions)
@@ -170,7 +170,7 @@ impl SpendBundle {
         F: Fn(&Bytes48) -> Fut,
         Fut: Future<Output = Result<SecretKey, Error>>,
     {
-        let constants = constants.unwrap_or(&*MAINNET);
+        let constants = constants.unwrap_or(&MAINNET);
         let mut signatures: Vec<Signature> = vec![];
         let mut pk_list: Vec<Bytes48> = vec![];
         let mut msg_list: Vec<Vec<u8>> = vec![];
@@ -187,7 +187,7 @@ impl SpendBundle {
             for (code, pk_bytes, msg) in pkm_pairs_for_conditions(
                 &conditions,
                 coin_spend.coin,
-                &constants.agg_sig_me_additional_data,
+                &constants.agg_sig_me_additional_data.as_ref(),
             )? {
                 let pk = PublicKey::from_bytes(pk_bytes.as_ref()).map_err(|e| {
                     Error::other(format!(
@@ -232,9 +232,9 @@ impl SpendBundle {
         let mut max_cost = max_cost.unwrap_or(INFINITE_COST);
         let mut create_conditions = vec![];
         let mut state = ValidationState::default();
-        let additional_data = Bytes32::parse(&consensus_constants.agg_sig_me_additional_data)?;
+        let additional_data = consensus_constants.agg_sig_me_additional_data;
         for spend in &self.coin_spends {
-            if spend.coin.puzzle_hash != spend.puzzle_reveal.to_program().tree_hash() {
+            if spend.coin.puzzle_hash != spend.puzzle_reveal.tree_hash() {
                 return Err(Error::new(
                     ErrorKind::InvalidInput,
                     "Puzzle Hash does not match Puzzle Reveal for Spend",
@@ -243,7 +243,7 @@ impl SpendBundle {
             let (cost, output_conditions_program) = spend.puzzle_reveal.run(
                 max_cost,
                 NO_UNKNOWN_OPS | flags,
-                &spend.solution.to_program(),
+                &spend.solution,
             )?;
             state.total_cost += cost;
             state.total_removed += spend.coin.amount;
@@ -261,7 +261,7 @@ impl SpendBundle {
                 ));
             }
             let conditions_with_args: Vec<ConditionWithArgs> =
-                (&output_conditions_program.sexp).try_into()?;
+                (output_conditions_program.sexp.as_ref()).try_into()?;
             for condition_with_args in &conditions_with_args {
                 if print {
                     info!("{condition_with_args}");
