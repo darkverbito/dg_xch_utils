@@ -123,7 +123,7 @@ pub enum ConditionWithArgs {
     AssertPuzzleAnnouncement(Bytes32),
     AssertConcurrentSpend(Bytes32),
     AssertConcurrentPuzzle(Bytes32),
-    SendMessage(u8, Bytes32, Message),
+    SendMessage(u8, Message, Bytes32),
     ReceiveMessage(u8, Bytes32, Message),
     AssertMyCoinId(Bytes32),
     AssertMyParentId(Bytes32),
@@ -244,9 +244,9 @@ impl ConditionWithArgs {
                 ConditionOpcode::AssertConcurrentPuzzle,
                 vec![puzzle_hash.to_sexp()],
             ),
-            ConditionWithArgs::SendMessage(mode, puzzle_hash, msg) => (
+            ConditionWithArgs::SendMessage(mode, msg, puzzle_hash) => (
                 ConditionOpcode::SendMessage,
-                vec![mode.to_sexp(), puzzle_hash.to_sexp(), msg.to_sexp()],
+                vec![mode.to_sexp(), msg.to_sexp(), puzzle_hash.to_sexp()],
             ),
             ConditionWithArgs::ReceiveMessage(mode, puzzle_hash, msg) => (
                 ConditionOpcode::ReceiveMessage,
@@ -572,7 +572,7 @@ impl ChiaSerialize for ConditionWithArgs {
                 bytes.extend(ChiaSerialize::to_bytes(&vars, version)?);
                 Ok(bytes)
             }
-            ConditionWithArgs::SendMessage(mode, puzzle_hash, msg) => {
+            ConditionWithArgs::SendMessage(mode, msg, puzzle_hash) => {
                 let mut bytes = vec![];
                 bytes.extend(ChiaSerialize::to_bytes(
                     &ConditionOpcode::SendMessage,
@@ -580,8 +580,8 @@ impl ChiaSerialize for ConditionWithArgs {
                 )?);
                 let vars = vec![
                     ChiaSerialize::to_bytes(mode, version)?,
-                    ChiaSerialize::to_bytes(puzzle_hash, version)?,
                     ChiaSerialize::to_bytes(msg, version)?,
+                    ChiaSerialize::to_bytes(puzzle_hash, version)?,
                 ];
                 bytes.extend(ChiaSerialize::to_bytes(&vars, version)?);
                 Ok(bytes)
@@ -994,8 +994,8 @@ fn from_opcode_with_args(
                     "Invalid Vars for SendMessage",
                 ));
             } else {
-                let message = Message::new(args.pop().unwrap_or_default())?;
                 let puzzle_hash = Bytes32::from(args.pop().unwrap_or_default());
+                let message = Message::new(args.pop().unwrap_or_default())?;
                 let mode = args.pop().unwrap_or_default();
                 if mode.len() != 1 {
                     return Err(Error::new(
@@ -1004,7 +1004,7 @@ fn from_opcode_with_args(
                     ));
                 }
                 let mode = mode[0];
-                ConditionWithArgs::SendMessage(mode, puzzle_hash, message)
+                ConditionWithArgs::SendMessage(mode, message, puzzle_hash)
             }
         }
         ConditionOpcode::ReceiveMessage => {

@@ -241,6 +241,9 @@ impl SpendBundle {
         let mut state = ValidationState::default();
         let additional_data = Bytes32::parse(&consensus_constants.agg_sig_me_additional_data)?;
         for spend in &self.coin_spends {
+            if print {
+                info!("Coin: {}", spend.coin.coin_id());
+            }
             if spend.coin.puzzle_hash != spend.puzzle_reveal.to_program().tree_hash() {
                 return Err(Error::new(
                     ErrorKind::InvalidInput,
@@ -451,7 +454,7 @@ impl SpendBundle {
                             ));
                         }
                     }
-                    ConditionWithArgs::SendMessage(m_type, message_address, message) => {
+                    ConditionWithArgs::SendMessage(m_type, message, message_address) => {
                         state.messages_sent.push((
                             *m_type,
                             *message_address,
