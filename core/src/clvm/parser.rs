@@ -1,3 +1,4 @@
+use crate::clvm::program::SerializedProgram;
 use crate::clvm::sexp::AtomBuf;
 use crate::clvm::sexp::SExp;
 use crate::constants::NULL_SEXP;
@@ -5,7 +6,6 @@ use bytes::Buf;
 use std::io::Read;
 use std::io::{Cursor, Write};
 use std::io::{Error, ErrorKind};
-use crate::clvm::program::SerializedProgram;
 
 const MAX_SINGLE_BYTE: u8 = 0x7f;
 const CONS_BOX_MARKER: u8 = 0xff;
@@ -84,7 +84,7 @@ pub fn sexp_to_bytes(sexp: &SExp) -> std::io::Result<SerializedProgram> {
                     buffer.write_all(&[data[0]])?;
                 } else {
                     encode_size(&mut buffer, data.len() as u64)?;
-                    buffer.write_all(&data)?;
+                    buffer.write_all(data)?;
                 }
             }
             SExp::Pair(pair) => {

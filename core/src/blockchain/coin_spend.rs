@@ -2,7 +2,7 @@ use crate::blockchain::coin::Coin;
 use crate::blockchain::condition_opcode::{ConditionCost, ConditionOpcode};
 use crate::blockchain::sized_bytes::Bytes32;
 use crate::blockchain::utils::{additions_for_solution, fee_for_solution};
-use crate::clvm::program::{Program};
+use crate::clvm::program::{Program, SerializedProgram};
 use crate::clvm::utils::INFINITE_COST;
 use crate::traits::SizedBytes;
 use dg_xch_macros::ChiaSerial;
@@ -14,29 +14,28 @@ use std::io::Error;
 #[derive(ChiaSerial, Clone, PartialEq, Eq, Serialize, Deserialize, Debug)]
 pub struct CoinSpend {
     pub coin: Coin,
-    pub puzzle_reveal: Program,
-    pub solution: Program,
+    pub puzzle_reveal: SerializedProgram,
+    pub solution: SerializedProgram,
 }
 
 impl CoinSpend {
     pub fn additions(&self) -> Result<Vec<Coin>, Error> {
-        additions_for_solution(
-            self.coin.name(),
-            &self.puzzle_reveal,
-            &self.solution,
-            INFINITE_COST,
-        )
+        let reveal = self.puzzle_reveal.to_program()?;
+        let solution = self.solution.to_program()?;
+        additions_for_solution(self.coin.name(), &reveal, &solution, INFINITE_COST)
     }
-    #[must_use]
-    pub fn reserved_fee(self) -> BigInt {
-        fee_for_solution(&self.puzzle_reveal, &self.solution, INFINITE_COST)
+
+    pub fn reserved_fee(self) -> Result<BigInt, Error> {
+        let reveal = self.puzzle_reveal.to_program()?;
+        let solution = self.solution.to_program()?;
+        fee_for_solution(&reveal, &solution, INFINITE_COST)
     }
     pub fn compute_additions_with_cost(&self, max_cost: u64) -> Result<(Vec<Coin>, u64), Error> {
         let parent_coin_info = self.coin.name();
         let mut ret: Vec<Coin> = vec![];
-        let (mut cost, r) = self
-            .puzzle_reveal
-            .run_with_cost(max_cost, &self.solution)?;
+        let reveal = self.puzzle_reveal.to_program()?;
+        let solution = self.solution.to_program()?;
+        let (mut cost, r) = reveal.run_with_cost(max_cost, &solution)?;
         for cond in Program::to(r).as_list() {
             if cost > max_cost {
                 return Err(Error::other(

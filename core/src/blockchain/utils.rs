@@ -5,7 +5,7 @@ use crate::blockchain::sized_bytes::{Bytes32, Bytes48};
 use crate::clvm::condition_utils::{
     agg_sig_additional_data_for_opcode, conditions_for_solution, created_outputs_for_conditions,
 };
-use crate::clvm::program::{Program};
+use crate::clvm::program::Program;
 use crate::consensus::constants::ConsensusConstants;
 use crate::formatting::u64_to_bytes;
 use crate::traits::SizedBytes;
@@ -23,27 +23,22 @@ pub fn additions_for_solution(
     created_outputs_for_conditions(&map, coin_name)
 }
 
-#[must_use]
 pub fn fee_for_solution(
     puzzle_reveal: &Program,
     solution: &Program,
     max_cost: u64,
-) -> BigInt {
-    match conditions_for_solution(puzzle_reveal, solution, max_cost) {
-        Ok((conditions, _cost)) => {
-            let mut total: BigInt = 0.into();
-            for condition in conditions {
-                match condition {
-                    ConditionWithArgs::ReserveFee(fee) => {
-                        total += fee;
-                    }
-                    _ => continue,
-                }
+) -> Result<BigInt, Error> {
+    let (conditions, _cost) = conditions_for_solution(puzzle_reveal, solution, max_cost)?;
+    let mut total: BigInt = 0.into();
+    for condition in conditions {
+        match condition {
+            ConditionWithArgs::ReserveFee(fee) => {
+                total += fee;
             }
-            total
+            _ => continue,
         }
-        Err(_error) => 0.into(),
     }
+    Ok(total)
 }
 
 pub fn pkm_pairs_for_conditions(
@@ -115,7 +110,10 @@ pub fn verify_agg_sig_unsafe_message(
     message: &Message,
     consensus_constants: &ConsensusConstants,
 ) -> Result<(), Error> {
-    let mut buffer = consensus_constants.agg_sig_me_additional_data.bytes().to_vec();
+    let mut buffer = consensus_constants
+        .agg_sig_me_additional_data
+        .bytes()
+        .to_vec();
     let mut forbidden_message_suffix;
     for code in [
         ConditionOpcode::AggSigParent,

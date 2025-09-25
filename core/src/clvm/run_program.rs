@@ -204,7 +204,7 @@ impl<D: Dialect> RunProgramContext<D> {
     fn eval_pair(&mut self, program: &SExp, args: &SExp) -> Result<u64, Error> {
         let (op_node, op_list) = match program {
             SExp::Atom(path) => {
-                let r = traverse_path(&path.as_ref(), args)?;
+                let r = traverse_path(path.as_ref(), args)?;
                 self.push(r.1.clone());
                 return Ok(r.0);
             }

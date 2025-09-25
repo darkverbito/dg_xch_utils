@@ -333,7 +333,8 @@ pub fn op_divmod<D: Dialect>(
         let q1 = SExp::try_from(&q)?;
         let r1 = SExp::try_from(&r)?;
 
-        let c = (q1.atom()?.as_ref().len() + r1.atom()?.as_ref().len()) as u64 * MALLOC_COST_PER_BYTE;
+        let c =
+            (q1.atom()?.as_ref().len() + r1.atom()?.as_ref().len()) as u64 * MALLOC_COST_PER_BYTE;
         let r: SExp = q1.cons(r1);
         Ok((cost + c, r))
     }

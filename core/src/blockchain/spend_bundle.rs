@@ -7,7 +7,6 @@ use crate::blockchain::utils::{pkm_pairs_for_conditions, verify_agg_sig_unsafe_m
 use crate::clvm::bls_bindings;
 use crate::clvm::bls_bindings::{aggregate_verify_signature, verify_signature};
 use crate::clvm::condition_utils::{agg_sig_additional_data_for_opcode, conditions_for_solution};
-use crate::clvm::program::Program;
 use crate::clvm::utils::{
     COST_CONDITIONS, DISABLE_SIGNATURE_VALIDATION, IGNORE_ASSERT_CONCURRENT_NULL, INFINITE_COST,
     NO_UNKNOWN_OPS,
@@ -108,13 +107,12 @@ impl SpendBundle {
         }
     }
 
-    pub fn output_conditions(&self) -> Result<Vec<Program>, Error> {
+    pub fn output_conditions(&self) -> Result<Vec<ConditionWithArgs>, Error> {
         let mut conditions = vec![];
         for spend in &self.coin_spends {
-            let (_, output) = spend
-                .puzzle_reveal
-                .run_with_cost(u64::MAX, &spend.solution)?;
-            conditions.extend(output.as_list());
+            let reveal = spend.puzzle_reveal.to_program()?;
+            let solution = spend.solution.to_program()?;
+            conditions.extend(conditions_for_solution(&reveal, &solution, INFINITE_COST)?.0);
         }
         Ok(conditions)
     }
@@ -179,15 +177,15 @@ impl SpendBundle {
             .to_u64()
             .ok_or(Error::new(ErrorKind::InvalidInput, "Invalid Max Cost"))?;
         for coin_spend in self.coin_spends.iter() {
+            let reveal = coin_spend.puzzle_reveal.to_program()?;
+            let solution = coin_spend.solution.to_program()?;
             //Get AGG_SIG conditions
-            let conditions =
-                conditions_for_solution(&coin_spend.puzzle_reveal, &coin_spend.solution, max_cost)?
-                    .0;
+            let conditions = conditions_for_solution(&reveal, &solution, max_cost)?.0;
             //Create signature
             for (code, pk_bytes, msg) in pkm_pairs_for_conditions(
                 &conditions,
                 coin_spend.coin,
-                &constants.agg_sig_me_additional_data.as_ref(),
+                constants.agg_sig_me_additional_data.as_ref(),
             )? {
                 let pk = PublicKey::from_bytes(pk_bytes.as_ref()).map_err(|e| {
                     Error::other(format!(
@@ -234,17 +232,16 @@ impl SpendBundle {
         let mut state = ValidationState::default();
         let additional_data = consensus_constants.agg_sig_me_additional_data;
         for spend in &self.coin_spends {
-            if spend.coin.puzzle_hash != spend.puzzle_reveal.tree_hash() {
+            let reveal = spend.puzzle_reveal.to_program()?;
+            let solution = spend.solution.to_program()?;
+            if spend.coin.puzzle_hash != reveal.tree_hash() {
                 return Err(Error::new(
                     ErrorKind::InvalidInput,
                     "Puzzle Hash does not match Puzzle Reveal for Spend",
                 ));
             }
-            let (cost, output_conditions_program) = spend.puzzle_reveal.run(
-                max_cost,
-                NO_UNKNOWN_OPS | flags,
-                &spend.solution,
-            )?;
+            let (cost, output_conditions_program) =
+                reveal.run(max_cost, NO_UNKNOWN_OPS | flags, &solution)?;
             state.total_cost += cost;
             state.total_removed += spend.coin.amount;
             if state.total_cost > max_cost {
@@ -261,7 +258,7 @@ impl SpendBundle {
                 ));
             }
             let conditions_with_args: Vec<ConditionWithArgs> =
-                (output_conditions_program.sexp.as_ref()).try_into()?;
+                output_conditions_program.sexp().try_into()?;
             for condition_with_args in &conditions_with_args {
                 if print {
                     info!("{condition_with_args}");

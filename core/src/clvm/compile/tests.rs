@@ -93,8 +93,7 @@ fn test_multi_constant() {
     let prog = compiler.compile().unwrap();
     let chia_prog =
         assemble_text("(a (q 2 14 (c 2 (c 5 ()))) (c (q (ash . 23) 24 18 10 (* 12 (* 8 5))) 1))")
-            .unwrap()
-            .to_program();
+            .unwrap();
     let results = prog.run(INFINITE_COST, 0, &Program::to(vec![11])).unwrap();
     println!(
         "DG Results: Cost({}) Value({})",
@@ -184,7 +183,7 @@ fn test_re_assembly() {
     let prog = inline_compiler.compile().unwrap();
     let inlined_str = format!("{prog}");
     println!("Inlined Constants  CLVM: {inlined_str}");
-    let serial = assemble_text(&inlined_str).unwrap().to_program();
+    let serial = assemble_text(&inlined_str).unwrap();
     assert_eq!(prog, serial);
     let results = serial
         .run(INFINITE_COST, 0, &Program::to(vec![11]))
@@ -199,7 +198,7 @@ fn test_re_assembly() {
     let prog = compiler.compile().unwrap();
     let inlined_str = format!("{prog}");
     println!("Argument Constants CLVM: {inlined_str}");
-    let serial = assemble_text(&inlined_str).unwrap().to_program();
+    let serial = assemble_text(&inlined_str).unwrap();
     assert_eq!(prog, serial);
     let results = serial
         .run(INFINITE_COST, 0, &Program::to(vec![11]))

@@ -146,10 +146,10 @@ impl From<u8> for ConditionOpcode {
     }
 }
 
-impl From<&Program> for ConditionOpcode {
+impl<'a> From<&'a Program<'a>> for ConditionOpcode {
     fn from(value: &Program) -> Self {
         value
-            .sexp
+            .sexp()
             .atom()
             .map(|a| {
                 if let Some(v) = a.as_ref().first() {

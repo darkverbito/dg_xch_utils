@@ -1,11 +1,12 @@
 use crate::blockchain::condition_opcode::ConditionOpcode;
-use crate::blockchain::sized_bytes::{Bytes100, Bytes32, Bytes4, Bytes48, Bytes480, Bytes8, Bytes96};
+use crate::blockchain::sized_bytes::{
+    Bytes100, Bytes32, Bytes4, Bytes48, Bytes480, Bytes8, Bytes96,
+};
 use crate::clvm::assemble::is_hex;
 use crate::clvm::parser::{sexp_from_bytes, sexp_to_bytes};
 use crate::clvm::program::Program;
 use crate::constants::{
-    ADD, APPLY, CONS, DIV, DIVMOD, KEYWORD_FROM_ATOM, MUL, NULL_SEXP, ONE_SEXP, QUOTE,
-    SUB,
+    ADD, APPLY, CONS, DIV, DIVMOD, KEYWORD_FROM_ATOM, MUL, NULL_SEXP, ONE_SEXP, QUOTE, SUB,
 };
 use crate::formatting::{number_from_slice, u32_from_slice, u64_from_bigint};
 use crate::traits::SizedBytes;
@@ -13,29 +14,48 @@ use crate::utils::hash_256;
 use dg_xch_serialize::{ChiaProtocolVersion, ChiaSerialize};
 use hex::encode;
 use num_bigint::BigInt;
+use serde::de::Visitor;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashMap;
 use std::fmt;
 use std::fmt::{Debug, Display, Formatter};
+use std::hash::{Hash, Hasher};
 use std::io::{Cursor, Error, ErrorKind};
 use std::mem::replace;
 use std::sync::Arc;
-use serde::de::Visitor;
 
-#[derive(Hash, PartialEq, Eq)]
-pub enum SExpSource {
+#[derive(Eq)]
+pub enum SExpSource<'a> {
     Owned(SExp),
-    Borrowed(&'static SExp),
+    Borrowed(&'a SExp),
 }
-impl AsRef<SExp> for SExpSource {
+impl<'a> PartialEq for SExpSource<'a> {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_ref() == other.as_ref()
+    }
+}
+impl<'a> Hash for SExpSource<'a> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.as_ref().hash(state);
+    }
+}
+impl<'a> AsRef<SExp> for SExpSource<'a> {
     fn as_ref(&self) -> &SExp {
         match self {
             SExpSource::Owned(owned) => owned,
-            SExpSource::Borrowed(borrowed) => *borrowed,
+            SExpSource::Borrowed(borrowed) => borrowed,
         }
     }
 }
-impl SExpSource {
+impl SExpSource<'static> {
+    pub fn tree_hash_const(&self) -> Bytes32 {
+        match self {
+            SExpSource::Owned(owned) => owned.tree_hash(),
+            SExpSource::Borrowed(borrowed) => borrowed.tree_hash(),
+        }
+    }
+}
+impl<'a> SExpSource<'a> {
     pub fn is_owned(&self) -> bool {
         matches!(self, SExpSource::Owned(_))
     }
@@ -49,6 +69,12 @@ impl SExpSource {
         match self {
             SExpSource::Owned(owned) => owned.atom(),
             SExpSource::Borrowed(borrowed) => borrowed.atom(),
+        }
+    }
+    pub fn tree_hash(&self) -> Bytes32 {
+        match self {
+            SExpSource::Owned(owned) => owned.tree_hash(),
+            SExpSource::Borrowed(borrowed) => borrowed.tree_hash(),
         }
     }
     pub fn pair(&self) -> Result<&PairBuf, Error> {
@@ -427,8 +453,8 @@ impl<'a> Iterator for SExpIter<'a> {
     }
 }
 
-#[derive(Hash, Clone, Eq)]
-pub enum AtomBuf{
+#[derive(Clone, Eq)]
+pub enum AtomBuf {
     Owned(Vec<u8>),
     Borrowed(&'static [u8]),
 }
@@ -437,7 +463,7 @@ impl AsRef<[u8]> for AtomBuf {
     fn as_ref(&self) -> &[u8] {
         match self {
             AtomBuf::Owned(buf) => buf,
-            AtomBuf::Borrowed(buf) => *buf,
+            AtomBuf::Borrowed(buf) => buf,
         }
     }
 }
@@ -455,8 +481,7 @@ impl Visitor<'_> for AtomBufVisitor {
     type Value = AtomBuf;
 
     fn expecting(&self, formatter: &mut Formatter) -> fmt::Result {
-        formatter
-            .write_str("Expecting a hex String, or byte array")
+        formatter.write_str("Expecting a hex String, or byte array")
     }
 
     fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
@@ -599,22 +624,40 @@ impl PartialEq<[u8]> for &AtomBuf {
         self.as_ref() == other
     }
 }
-#[derive(Hash, Clone, PartialEq, Eq)]
+impl Hash for AtomBuf {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write(&[0x01]);
+        self.as_ref().hash(state)
+    }
+}
+#[derive(Clone, Eq)]
 pub enum PairBuf {
     Owned((Arc<SExp>, Arc<SExp>)),
     Borrowed((&'static SExp, &'static SExp)),
+}
+impl PartialEq for PairBuf {
+    fn eq(&self, other: &Self) -> bool {
+        self.first() == other.first() && self.rest() == other.rest()
+    }
+}
+impl Hash for PairBuf {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write(&[0x02]);
+        self.first().hash(state);
+        self.rest().hash(state);
+    }
 }
 impl PairBuf {
     pub fn first(&self) -> &SExp {
         match self {
             PairBuf::Owned((first, _)) => first.as_ref(),
-            PairBuf::Borrowed((first, _)) => *first
+            PairBuf::Borrowed((first, _)) => first,
         }
     }
     pub fn rest(&self) -> &SExp {
         match self {
             PairBuf::Owned((_, rest)) => rest.as_ref(),
-            PairBuf::Borrowed((_, rest)) => *rest
+            PairBuf::Borrowed((_, rest)) => rest,
         }
     }
 }
@@ -843,15 +886,15 @@ impl IntoSExp for String {
     }
 }
 
-impl IntoSExp for Program {
+impl<'a> IntoSExp for Program<'a> {
     fn to_sexp(self) -> SExp {
-        self.sexp.as_ref().clone()
+        self.sexp().to_owned()
     }
 }
 
-impl IntoSExp for &Program {
+impl<'a> IntoSExp for &Program<'a> {
     fn to_sexp(self) -> SExp {
-        self.sexp.as_ref().clone()
+        self.sexp().clone()
     }
 }
 

@@ -40,7 +40,7 @@ impl From<&str> for UnsizedBytes {
     }
 }
 
-impl TryFrom<Program> for UnsizedBytes {
+impl<'a> TryFrom<Program<'a>> for UnsizedBytes {
     type Error = Error;
 
     fn try_from(value: Program) -> Result<Self, Self::Error> {
@@ -51,7 +51,7 @@ impl TryFrom<Program> for UnsizedBytes {
     }
 }
 
-impl TryFrom<&Program> for UnsizedBytes {
+impl<'a> TryFrom<&Program<'a>> for UnsizedBytes {
     type Error = Error;
 
     fn try_from(value: &Program) -> Result<Self, Self::Error> {

@@ -7,7 +7,8 @@ use dg_xch_core::blockchain::pool_target::PoolTarget;
 use dg_xch_core::blockchain::proof_of_space::{generate_plot_public_key, generate_taproot_sk};
 use dg_xch_core::blockchain::sized_bytes::{Bytes32, Bytes48};
 use dg_xch_core::clvm::bls_bindings::{sign, sign_prepend};
-use dg_xch_core::consensus::constants::{CONSENSUS_CONSTANTS_MAP, MAINNET};
+use dg_xch_core::consensus::constants::ChiaNetwork::Mainnet;
+use dg_xch_core::consensus::constants::{ChiaNetwork, CONSENSUS_CONSTANTS};
 use dg_xch_core::constants::AUG_SCHEME_DST;
 #[cfg(feature = "metrics")]
 use dg_xch_core::protocols::farmer::FarmerMetrics;
@@ -23,6 +24,7 @@ use hyper_tungstenite::tungstenite::Message;
 use log::{debug, error, info, warn};
 use std::collections::HashMap;
 use std::io::{Cursor, Error, ErrorKind};
+use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -89,12 +91,11 @@ impl<T: Sync + Send + 'static> MessageHandler for RespondSignaturesHandle<T> {
                 }
                 if let Some(pospace) = pospace {
                     let include_taproot = pospace.pool_contract_puzzle_hash.is_some();
-                    let constants = CONSENSUS_CONSTANTS_MAP
-                        .get(&self.config.network)
-                        .unwrap_or(&MAINNET);
+                    let constants = CONSENSUS_CONSTANTS
+                        [ChiaNetwork::from_str(&self.config.network).unwrap_or(Mainnet) as usize];
                     if let Some(computed_quality_string) = verify_and_get_quality_string(
                         &pospace,
-                        constants,
+                        &constants,
                         response.challenge_hash,
                         response.sp_hash,
                         peak_height,

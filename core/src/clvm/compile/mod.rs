@@ -9,7 +9,7 @@ use crate::clvm::compile::tokenizer::{Token, TokenType, Tokenizer};
 use crate::clvm::compile::utils::{
     concat_args, get_arg_pointer, get_const_pointer, get_function_pointer, parse_value,
 };
-use crate::clvm::program::{Program, SerializedProgram};
+use crate::clvm::program::Program;
 use crate::clvm::sexp::{IntoSExp, SExp};
 use crate::constants::{
     APPLY_SEXP, B_KEYWORD_TO_SEXP, CONS_SEXP, INLINE_CONSTS, INLINE_DEFUNS, NULL_SEXP, QUOTE_SEXP,
@@ -80,7 +80,7 @@ impl<'a> Compiler<'a> {
             ..Default::default()
         }
     }
-    pub fn compile(&'a self) -> Result<Program, Error> {
+    pub fn compile(&'a self) -> Result<Program<'a>, Error> {
         self.pre_process()?;
         let program = self.process()?;
         self.post_process(program)
@@ -108,10 +108,10 @@ impl<'a> Compiler<'a> {
         }
         Ok(())
     }
-    fn post_process(&'a self, program: Program) -> Result<Program, Error> {
-        assemble_text(&format!("{program:?}")).map(|v: SerializedProgram| v.to_program())
+    fn post_process(&'a self, program: Program<'a>) -> Result<Program<'a>, Error> {
+        assemble_text(&format!("{program:?}"))
     }
-    fn process(&'a self) -> Result<Program, Error> {
+    fn process(&'a self) -> Result<Program<'a>, Error> {
         let mut output = None;
         let body: Vec<Token<'a>> = take(self.body.lock().as_mut());
         let mut iter = body.into_iter();
@@ -141,10 +141,10 @@ impl<'a> Compiler<'a> {
             }
         }
         let body = output.ok_or(Error::new(ErrorKind::InvalidData, "No body found"))?;
-        if self.functions.read().is_empty() {
-            Program::from_sexp(body)
+        Ok(if self.functions.read().is_empty() {
+            Program::new(body)
         } else {
-            Program::from_sexp(
+            Program::new(
                 APPLY_SEXP.clone().cons(
                     QUOTE_SEXP
                         .clone()
@@ -152,7 +152,7 @@ impl<'a> Compiler<'a> {
                         .cons(self.get_program_args_sexp()?),
                 ),
             )
-        }
+        })
     }
 
     fn create_pair_sexp(&self, mut entries: Vec<SExp>, found_end: bool) -> Result<SExp, Error> {

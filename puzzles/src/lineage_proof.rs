@@ -13,6 +13,6 @@ impl IntoSExp for LineageProof {
             self.parent_inner_puzzle_hash.to_sexp(),
             self.parent_amount.to_sexp(),
         ]
-            .to_sexp()
+        .to_sexp()
     }
 }

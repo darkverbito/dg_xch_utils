@@ -4,6 +4,7 @@ use crate::formatting::prep_hex_str;
 use crate::traits::SizedBytes;
 use blst::min_pk::{PublicKey, SecretKey, Signature};
 use bytes::Buf;
+use const_hex::const_decode_to_array;
 use dg_xch_serialize::ChiaProtocolVersion;
 use dg_xch_serialize::ChiaSerialize;
 use hex::encode;
@@ -16,7 +17,6 @@ use std::cmp::min;
 use std::io::{Cursor, Error, ErrorKind, Read};
 use std::ops::{BitAnd, BitOr, BitXor, Index, IndexMut, Range, Shl, ShlAssign, Shr, ShrAssign};
 use std::str::FromStr;
-use const_hex::const_decode_to_array;
 
 #[derive(Copy, Clone)]
 pub struct SizedBytesImpl<const SIZE: usize> {
@@ -25,6 +25,9 @@ pub struct SizedBytesImpl<const SIZE: usize> {
 impl<const SIZE: usize> SizedBytesImpl<SIZE> {
     pub const fn const_new(bytes: [u8; SIZE]) -> Self {
         Self { bytes }
+    }
+    pub const fn const_bytes(&self) -> [u8; SIZE] {
+        self.bytes
     }
 }
 macro_rules! impl_const_sized_bytes {
@@ -371,14 +374,14 @@ macro_rules! impl_sized_bytes {
         $(
             pub type $name = SizedBytesImpl<$size>;
             impl DefaultIsZeroes for SizedBytesImpl<$size> {}
-            impl TryFrom<Program> for $name {
+            impl<'a> TryFrom<Program<'a>> for $name {
                 type Error = Error;
                 fn try_from(value: Program) -> Result<Self, Self::Error> {
                     let vec = value.as_vec().ok_or_else(|| Error::new(ErrorKind::InvalidInput, format!("Program is not a valid {}",  stringify!($name))))?;
                     Self::parse(&vec)
                 }
             }
-            impl TryFrom<&Program> for $name {
+            impl<'a> TryFrom<&Program<'a>> for $name {
                 type Error = Error;
                 fn try_from(value: &Program) -> Result<Self, Self::Error> {
                     let vec = value.as_vec().ok_or_else(|| Error::new(ErrorKind::InvalidInput, format!("Program is not a valid {}",  stringify!($name))))?;

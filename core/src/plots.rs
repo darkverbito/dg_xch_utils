@@ -360,7 +360,7 @@ impl PlotNftExtraData {
     pub fn from_program(program: &Program) -> Result<Self, Error> {
         let pool_state = PoolState::from_extra_data_program(program)?;
         let extra_data_program_list = program.as_list();
-        let delay_time_programs: Vec<Program> = extra_data_program_list
+        let delay_time_programs: Vec<&Program> = extra_data_program_list
             .iter()
             .filter(|p| {
                 if let Ok(f) = p.first() {
@@ -372,14 +372,13 @@ impl PlotNftExtraData {
                 }
                 false
             })
-            .cloned()
             .collect();
         if delay_time_programs.is_empty() || delay_time_programs.len() > 1 {
             return Err(Error::new(ErrorKind::InvalidInput, "Invalid PlotNFT"));
         }
         let delay_time = delay_time_programs[0].rest()?.as_int()?;
-        let extra_data_programs: Vec<Program> = extra_data_program_list
-            .into_iter()
+        let extra_data_programs: Vec<&Program> = extra_data_program_list
+            .iter()
             .filter(|p| {
                 if let Ok(f) = p.first() {
                     if let Ok(ai) = f.as_int() {

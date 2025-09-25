@@ -12,7 +12,8 @@ use dg_xch_core::blockchain::sized_bytes::{Bytes32, Bytes48};
 use dg_xch_core::blockchain::spend_bundle::SpendBundle;
 use dg_xch_core::blockchain::transaction_record::{TransactionRecord, TransactionType};
 use dg_xch_core::blockchain::wallet_type::{AmountWithPuzzleHash, WalletType};
-use dg_xch_core::clvm::program::{Program, SerializedProgram};
+use dg_xch_core::clvm::parser::sexp_to_bytes;
+use dg_xch_core::clvm::program::Program;
 use dg_xch_core::clvm::utils::INFINITE_COST;
 use dg_xch_core::consensus::constants::ConsensusConstants;
 use dg_xch_core::traits::SizedBytes;
@@ -431,7 +432,7 @@ pub trait Wallet<T: WalletStore + Send + Sync, C> {
         }
         Ok(hashes)
     }
-    fn puzzle_for_pk(&self, public_key: Bytes48) -> Result<Program, Error> {
+    fn puzzle_for_pk(&self, public_key: Bytes48) -> Result<Program<'_>, Error> {
         puzzle_for_pk(public_key)
     }
     fn puzzle_hash_for_pk(&self, public_key: Bytes48) -> Result<Bytes32, Error> {
@@ -458,7 +459,7 @@ pub trait Wallet<T: WalletStore + Send + Sync, C> {
         puzzle_announcements: Option<HashSet<Vec<u8>>>,
         puzzle_announcements_to_assert: Option<HashSet<Bytes32>>,
         fee: u64,
-    ) -> Result<Program, Error> {
+    ) -> Result<Program<'_>, Error> {
         let mut condition_list = vec![];
         for primary in primaries {
             condition_list.push(make_create_coin_condition(
@@ -691,7 +692,10 @@ pub trait Wallet<T: WalletStore + Send + Sync, C> {
                 }
             },
             HashMap::with_capacity(0),
-            &self.wallet_info().constants.agg_sig_me_additional_data,
+            self.wallet_info()
+                .constants
+                .agg_sig_me_additional_data
+                .as_ref(),
             self.wallet_info()
                 .constants
                 .max_block_cost_clvm
@@ -963,12 +967,14 @@ pub trait Wallet<T: WalletStore + Send + Sync, C> {
                     }
                     .name(),
                 );
-                info!("Reveal: {} ", hex::encode(&puzzle.serialized));
-                info!("Solution: {} ", hex::encode(&solution.serialized));
+                let puzzle_reveal = sexp_to_bytes(puzzle.sexp())?;
+                let solution = sexp_to_bytes(solution.sexp())?;
+                info!("Reveal: {} ", hex::encode(&puzzle_reveal));
+                info!("Solution: {} ", hex::encode(&solution));
                 spends.push(CoinSpend {
                     coin: *coin,
-                    puzzle_reveal: SerializedProgram::from_bytes(&puzzle.serialized),
-                    solution: SerializedProgram::from_bytes(&solution.serialized),
+                    puzzle_reveal,
+                    solution,
                 });
                 break;
             }
@@ -988,12 +994,10 @@ pub trait Wallet<T: WalletStore + Send + Sync, C> {
                 None,
                 0,
             )?;
-            info!("Reveal: {} ", hex::encode(&puzzle.serialized));
-            info!("Solution: {} ", hex::encode(&solution.serialized));
             spends.push(CoinSpend {
                 coin,
-                puzzle_reveal: SerializedProgram::from_bytes(&puzzle.serialized),
-                solution: SerializedProgram::from_bytes(&solution.serialized),
+                puzzle_reveal: puzzle.serialized()?,
+                solution: solution.serialized()?,
             });
         }
         info!("Spends is {:?}", spends);
@@ -1004,9 +1008,8 @@ pub trait Wallet<T: WalletStore + Send + Sync, C> {
 pub fn compute_memos_for_spend(
     coin_spend: &CoinSpend,
 ) -> Result<HashMap<Bytes32, Vec<Vec<u8>>>, Error> {
-    let (_, result) = coin_spend
-        .puzzle_reveal
-        .run_with_cost(INFINITE_COST, &coin_spend.solution.to_program())?;
+    let (_, result) = Program::from_serial(&coin_spend.puzzle_reveal)?
+        .run_with_cost(INFINITE_COST, &Program::from_serial(&coin_spend.solution)?)?;
     let mut memos = HashMap::default();
     let result_list = result.as_list();
     for condition in result_list {

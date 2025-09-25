@@ -7,7 +7,8 @@ use dg_xch_clients::websocket::oneshot;
 use dg_xch_core::blockchain::proof_of_space::{generate_plot_public_key, generate_taproot_sk};
 use dg_xch_core::blockchain::sized_bytes::{Bytes32, Bytes48};
 use dg_xch_core::clvm::bls_bindings::{sign, sign_prepend};
-use dg_xch_core::consensus::constants::{ConsensusConstants, CONSENSUS_CONSTANTS_MAP};
+use dg_xch_core::consensus::constants::ChiaNetwork::Mainnet;
+use dg_xch_core::consensus::constants::{ChiaNetwork, ConsensusConstants, CONSENSUS_CONSTANTS};
 use dg_xch_core::consensus::pot_iterations::{
     calculate_iterations_quality, calculate_sp_interval_iters,
 };
@@ -34,6 +35,7 @@ use hyper_tungstenite::tungstenite::Message;
 use log::{debug, error, info, warn};
 use std::collections::HashMap;
 use std::io::{Cursor, Error, ErrorKind};
+use std::str::FromStr;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -69,10 +71,8 @@ impl<T: PoolClient + Sized + Sync + Send + 'static> MessageHandler for NewProofO
             let mut cursor = Cursor::new(&msg.data);
             let new_pos = NewProofOfSpace::from_bytes(&mut cursor, protocol_version)?;
             if let Some(sps) = self.signage_points.read().await.get(&new_pos.sp_hash) {
-                let constants = CONSENSUS_CONSTANTS_MAP
-                    .get(&self.config.network)
-                    .cloned()
-                    .unwrap_or_default();
+                let constants = CONSENSUS_CONSTANTS
+                    [ChiaNetwork::from_str(&self.config.network).unwrap_or(Mainnet) as usize];
                 for sp in sps {
                     if let Some(qs) = verify_and_get_quality_string(
                         &new_pos.proof,

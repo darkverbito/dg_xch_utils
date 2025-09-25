@@ -62,9 +62,7 @@ fn test_print_ops() {
         .unwrap();
     let test_program = r#"(a (q 2 4 (c 2 (c 5 ()))) (c (q (a 6 (c 2 (c (c (q . "Running") (c (q 16 78 1) (c (q . " With ") (c 5 ())))) (c (+ 5 (q . 1)) ())))) 3 (all (q . "$print$") 5 11) 11 11) 1))"#;
     let assembled = assemble_text(test_program).unwrap();
-    let results = assembled
-        .to_program()
-        .run(INFINITE_COST, 0, &Program::to(vec![50]))
-        .unwrap();
+    let args = Program::to(vec![50]);
+    let results = assembled.run(INFINITE_COST, 0, &args).unwrap();
     info!("Output {results:?}");
 }

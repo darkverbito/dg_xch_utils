@@ -1,8 +1,7 @@
 pub mod reader;
 
 use crate::clvm::assemble::reader::{Reader, Token};
-use crate::clvm::parser::sexp_to_bytes;
-use crate::clvm::program::SerializedProgram;
+use crate::clvm::program::Program;
 use crate::clvm::sexp::{AtomBuf, SExp};
 use crate::constants::{DOT_CONS, END_CONS, KEYWORD_TO_ATOM, NULL_SEXP, START_CONS};
 use crate::formatting::bigint_to_bytes;
@@ -12,10 +11,10 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use std::io::{Error, ErrorKind};
 
-pub fn assemble_text(s: &str) -> Result<SerializedProgram, Error> {
+pub fn assemble_text<'a>(s: &'_ str) -> Result<Program<'a>, Error> {
     let mut reader = Reader::new(s.as_bytes());
     let sexp = tokenize_exp(&mut reader)?;
-    Ok(sexp_to_bytes(&sexp)?)
+    Ok(Program::new(sexp))
 }
 
 pub fn tokenize_exp(tokens: &mut Reader) -> Result<SExp, Error> {

@@ -27,7 +27,7 @@ pub struct ChiaDialect {
 
 impl ChiaDialect {
     #[must_use]
-    pub fn new(flags: u32) -> ChiaDialect {
+    pub const fn new(flags: u32) -> ChiaDialect {
         ChiaDialect { flags }
     }
 }

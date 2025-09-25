@@ -293,7 +293,7 @@ pub const TESTNET_7: ConsensusConstants = ConsensusConstants {
 };
 pub const TESTNET_10: ConsensusConstants = ConsensusConstants {
     agg_sig_me_additional_data: Bytes32::const_hex(
-        "ae83525ba8d1dd3f09b277de18ca3e43fc0af20d20c4b3e92ef2a48bd291ccb2"
+        "ae83525ba8d1dd3f09b277de18ca3e43fc0af20d20c4b3e92ef2a48bd291ccb2",
     ),
     difficulty_constant_factor: 10_052_721_566_054,
     difficulty_starting: 30,
@@ -356,38 +356,74 @@ pub const TESTNET_11: ConsensusConstants = ConsensusConstants {
     ..MAINNET
 };
 
-pub const fn get_pool_reward_prefix(consensus_constants: &'static ConsensusConstants) -> Bytes32{
-    consensus_constants.genesis_challenge
-        .const_bitand(Bytes32::const_hex("0xffffffffffffffffffffffffffffffff00000000000000000000000000000000"))
-}
-pub const fn get_farmer_reward_prefix(consensus_constants: &'static ConsensusConstants) -> Bytes32{
-    consensus_constants.genesis_challenge.const_bitand(
-        Bytes32::const_hex("0x00000000000000000000000000000000ffffffffffffffffffffffffffffffff")
-    ).const_shl(16 * size_of::<u8>())
+#[must_use]
+pub const fn get_pool_reward_prefix(consensus_constants: &'static ConsensusConstants) -> Bytes32 {
+    let mut buf: [u8; 32] = [0; 32];
+    let challenge = consensus_constants.genesis_challenge.const_bytes();
+    let mut i = 0;
+    while i < 16 {
+        buf[i] = challenge[i];
+        i += 1;
+    }
+    Bytes32::const_new(buf)
 }
 
-pub const CONSENSUS_CONSTANTS: [ConsensusConstants; 10] =[
-    MAINNET,
-    SIMULATOR,
-    TESTNET_0,
-    TESTNET_2,
-    TESTNET_3,
-    TESTNET_4,
-    TESTNET_5,
-    TESTNET_7,
-    TESTNET_10,
-    TESTNET_11,
+#[must_use]
+pub const fn get_farmer_reward_prefix(consensus_constants: &'static ConsensusConstants) -> Bytes32 {
+    let mut buf: [u8; 32] = [0; 32];
+    let challenge = consensus_constants.genesis_challenge.const_bytes();
+    let mut i = 0;
+    while i < 16 {
+        buf[i] = challenge[i + 16];
+        i += 1;
+    }
+    Bytes32::const_new(buf)
+}
+
+pub const CONSENSUS_CONSTANTS: [ConsensusConstants; 10] = [
+    MAINNET, SIMULATOR, TESTNET_0, TESTNET_2, TESTNET_3, TESTNET_4, TESTNET_5, TESTNET_7,
+    TESTNET_10, TESTNET_11,
 ];
 
-pub const FARMER_REWARD_PREFIXES: [(Bytes32, Bytes32); 10] =[
-    (get_pool_reward_prefix(&MAINNET), get_farmer_reward_prefix(&MAINNET)),
-    (get_pool_reward_prefix(&SIMULATOR), get_farmer_reward_prefix(&SIMULATOR)),
-    (get_pool_reward_prefix(&TESTNET_0), get_farmer_reward_prefix(&TESTNET_0)),
-    (get_pool_reward_prefix(&TESTNET_2), get_farmer_reward_prefix(&TESTNET_2)),
-    (get_pool_reward_prefix(&TESTNET_3), get_farmer_reward_prefix(&TESTNET_3)),
-    (get_pool_reward_prefix(&TESTNET_4), get_farmer_reward_prefix(&TESTNET_4)),
-    (get_pool_reward_prefix(&TESTNET_5), get_farmer_reward_prefix(&TESTNET_5)),
-    (get_pool_reward_prefix(&TESTNET_7), get_farmer_reward_prefix(&TESTNET_7)),
-    (get_pool_reward_prefix(&TESTNET_10), get_farmer_reward_prefix(&TESTNET_10)),
-    (get_pool_reward_prefix(&TESTNET_11), get_farmer_reward_prefix(&TESTNET_11)),
+pub const FARMER_REWARD_PREFIXES: [(Bytes32, Bytes32); 10] = [
+    (
+        get_pool_reward_prefix(&MAINNET),
+        get_farmer_reward_prefix(&MAINNET),
+    ),
+    (
+        get_pool_reward_prefix(&SIMULATOR),
+        get_farmer_reward_prefix(&SIMULATOR),
+    ),
+    (
+        get_pool_reward_prefix(&TESTNET_0),
+        get_farmer_reward_prefix(&TESTNET_0),
+    ),
+    (
+        get_pool_reward_prefix(&TESTNET_2),
+        get_farmer_reward_prefix(&TESTNET_2),
+    ),
+    (
+        get_pool_reward_prefix(&TESTNET_3),
+        get_farmer_reward_prefix(&TESTNET_3),
+    ),
+    (
+        get_pool_reward_prefix(&TESTNET_4),
+        get_farmer_reward_prefix(&TESTNET_4),
+    ),
+    (
+        get_pool_reward_prefix(&TESTNET_5),
+        get_farmer_reward_prefix(&TESTNET_5),
+    ),
+    (
+        get_pool_reward_prefix(&TESTNET_7),
+        get_farmer_reward_prefix(&TESTNET_7),
+    ),
+    (
+        get_pool_reward_prefix(&TESTNET_10),
+        get_farmer_reward_prefix(&TESTNET_10),
+    ),
+    (
+        get_pool_reward_prefix(&TESTNET_11),
+        get_farmer_reward_prefix(&TESTNET_11),
+    ),
 ];

@@ -25,9 +25,9 @@ use dg_xch_keys::{
 use dg_xch_puzzles::clvm_puzzles::{
     create_full_puzzle, create_travel_spend, get_most_recent_singleton_coin_from_coin_spend,
     launcher_coin_spend_to_extra_data, pool_state_to_inner_puzzle, solution_to_pool_state,
-    SINGLETON_LAUNCHER_HASH,
 };
 use dg_xch_puzzles::p2_delegated_puzzle_or_hidden_puzzle::puzzle_hash_for_pk;
+use dg_xch_puzzles::singleton_launcher::SINGLETON_LAUNCHER_TREE_HASH;
 use log::info;
 use num_traits::cast::ToPrimitive;
 use std::collections::HashMap;
@@ -530,7 +530,7 @@ pub async fn scrounge_for_plotnfts(
         thread_pool.spawn(async move {
             let coin_spend = client.get_coin_spend(&spent_coin).await?;
             for child in coin_spend.additions()? {
-                if child.puzzle_hash == *SINGLETON_LAUNCHER_HASH {
+                if child.puzzle_hash == SINGLETON_LAUNCHER_TREE_HASH {
                     let launcher_id = child.name();
                     if let Some(plotnft) =
                         get_plotnft_by_launcher_id(client.clone(), launcher_id, None).await?
@@ -554,7 +554,7 @@ pub async fn scrounge_for_plotnfts(
                     thread_pool.spawn(async move {
                         let coin_spend = client.get_coin_spend(&spent_coin).await?;
                         for child in coin_spend.additions()? {
-                            if child.puzzle_hash == *SINGLETON_LAUNCHER_HASH {
+                            if child.puzzle_hash == SINGLETON_LAUNCHER_TREE_HASH {
                                 let launcher_id = child.name();
                                 if let Some(plotnft) = get_plotnft_by_launcher_id(client.clone(), launcher_id, None).await? {
                                     plotnfts.lock().await.push(plotnft);

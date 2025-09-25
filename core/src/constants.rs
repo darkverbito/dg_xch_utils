@@ -1,10 +1,9 @@
 use crate::clvm::assemble::reader::Token;
 use crate::clvm::program::Program;
-use crate::clvm::sexp::{AtomBuf, IntoSExp, SExp, SExpSource};
+use crate::clvm::sexp::{AtomBuf, IntoSExp, SExp};
 use num_bigint::BigUint;
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
-use std::sync::Arc;
 
 //Keywords
 pub const QUOTE: u8 = 0x01;
@@ -84,16 +83,12 @@ pub static B_KEYWORD_TO_SEXP: Lazy<HashMap<&[u8], SExp>> =
 pub static B_KEYWORD_TO_ATOM: Lazy<HashMap<&[u8], Vec<u8>>> =
     Lazy::new(|| HashMap::from(PAIRS.map(|(k, v)| (v.as_bytes(), vec![k]))));
 
-pub static CONS_SEXP: Lazy<SExp> = Lazy::new(|| SExp::Atom(AtomBuf::new(vec![CONS])));
-pub static APPLY_SEXP: Lazy<SExp> = Lazy::new(|| SExp::Atom(AtomBuf::new(vec![APPLY])));
-pub static QUOTE_SEXP: Lazy<SExp> = Lazy::new(|| SExp::Atom(AtomBuf::new(vec![QUOTE])));
+pub const CONS_SEXP: SExp = SExp::Atom(AtomBuf::Borrowed(&[CONS]));
+pub const APPLY_SEXP: SExp = SExp::Atom(AtomBuf::Borrowed(&[APPLY]));
+pub const QUOTE_SEXP: SExp = SExp::Atom(AtomBuf::Borrowed(&[QUOTE]));
 pub const NULL_SEXP: SExp = SExp::Atom(AtomBuf::Borrowed(&[]));
-pub static NULL_CELL: Lazy<Arc<SExp>> = Lazy::new(|| Arc::new(SExp::Atom(vec![].into())));
-pub static ONE_SEXP: Lazy<SExp> = Lazy::new(|| SExp::Atom(AtomBuf::new(vec![1])));
-pub static NULL_PROG: Lazy<Program> = Lazy::new(|| Program {
-    sexp: SExpSource::Borrowed(&NULL_SEXP),
-    serialized: vec![].into(),
-});
+pub const ONE_SEXP: SExp = SExp::Atom(AtomBuf::Borrowed(&[1]));
+pub static NULL_PROGRAM: Program<'static> = Program::new_const(NULL_SEXP);
 
 //Assembler + Compiler
 pub const EOL_CHARS: [u8; 2] = [b'\r', b'\n'];

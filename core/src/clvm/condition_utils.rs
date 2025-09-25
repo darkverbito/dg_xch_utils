@@ -2,7 +2,7 @@ use crate::blockchain::coin::Coin;
 use crate::blockchain::condition_opcode::ConditionOpcode;
 use crate::blockchain::condition_with_args::ConditionWithArgs;
 use crate::blockchain::sized_bytes::Bytes32;
-use crate::clvm::program::{Program};
+use crate::clvm::program::Program;
 use crate::clvm::sexp::IntoSExp;
 use crate::traits::SizedBytes;
 use crate::utils::hash_256;
@@ -35,7 +35,7 @@ pub fn conditions_for_solution(
     solution: &Program,
     max_cost: u64,
 ) -> Result<(Vec<ConditionWithArgs>, u64), Error> {
-    match puzzle_reveal.run_with_cost(max_cost, &solution) {
+    match puzzle_reveal.run_with_cost(max_cost, solution) {
         Ok((cost, r)) => match (&r.to_sexp()).try_into() {
             Ok(conditions) => Ok((conditions, cost)),
             Err(error) => {

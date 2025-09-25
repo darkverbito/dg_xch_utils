@@ -1,1 +1,0 @@
-pub mod p2_singleton_flashloan;

@@ -1459,79 +1459,55 @@ impl Default for ConstantsOverrides {
     fn default() -> Self {
         ConstantsOverrides {
             mainnet: Some(ConsensusOverrides {
-                genesis_challenge: Some(
-                    Bytes32::const_hex(
-                        "ccd5bb71183532bff220ba46c268991a3ff07eb358e8255a65c30a2dce0e5fbb",
-                    )
-                ),
-                genesis_pre_farm_farmer_puzzle_hash: Some(
-                    Bytes32::const_hex(
-                        "3d8765d3a597ec1d99663f6c9816d915b9f68613ac94009884c4addaefcce6af",
-                    )
-                ),
-                genesis_pre_farm_pool_puzzle_hash: Some(
-                    Bytes32::const_hex(
-                        "d23da14695a188ae5708dd152263c4db883eb27edeb936178d4d988b8f3ce5fc",
-                    )
-                ),
+                genesis_challenge: Some(Bytes32::const_hex(
+                    "ccd5bb71183532bff220ba46c268991a3ff07eb358e8255a65c30a2dce0e5fbb",
+                )),
+                genesis_pre_farm_farmer_puzzle_hash: Some(Bytes32::const_hex(
+                    "3d8765d3a597ec1d99663f6c9816d915b9f68613ac94009884c4addaefcce6af",
+                )),
+                genesis_pre_farm_pool_puzzle_hash: Some(Bytes32::const_hex(
+                    "d23da14695a188ae5708dd152263c4db883eb27edeb936178d4d988b8f3ce5fc",
+                )),
                 ..Default::default()
             }),
             testnet0: Some(ConsensusOverrides {
-                genesis_challenge: Some(
-                    Bytes32::const_hex(
-                        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-                    )
-                ),
-                genesis_pre_farm_farmer_puzzle_hash: Some(
-                    Bytes32::const_hex(
-                        "3d8765d3a597ec1d99663f6c9816d915b9f68613ac94009884c4addaefcce6af",
-                    )
-                ),
-                genesis_pre_farm_pool_puzzle_hash: Some(
-                    Bytes32::const_hex(
-                        "d23da14695a188ae5708dd152263c4db883eb27edeb936178d4d988b8f3ce5fc",
-                    )
-                ),
+                genesis_challenge: Some(Bytes32::const_hex(
+                    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                )),
+                genesis_pre_farm_farmer_puzzle_hash: Some(Bytes32::const_hex(
+                    "3d8765d3a597ec1d99663f6c9816d915b9f68613ac94009884c4addaefcce6af",
+                )),
+                genesis_pre_farm_pool_puzzle_hash: Some(Bytes32::const_hex(
+                    "d23da14695a188ae5708dd152263c4db883eb27edeb936178d4d988b8f3ce5fc",
+                )),
                 min_plot_size: Some(18),
                 ..Default::default()
             }),
             testnet2: Some(ConsensusOverrides {
                 difficulty_constant_factor: Some(10_052_721_566_054),
-                genesis_challenge: Some(
-                    Bytes32::const_hex(
-                        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
-                    )
-                ),
-                genesis_pre_farm_farmer_puzzle_hash: Some(
-                    Bytes32::const_hex(
-                        "3d8765d3a597ec1d99663f6c9816d915b9f68613ac94009884c4addaefcce6af",
-                    )
-                ),
-                genesis_pre_farm_pool_puzzle_hash: Some(
-                    Bytes32::const_hex(
-                        "d23da14695a188ae5708dd152263c4db883eb27edeb936178d4d988b8f3ce5fc",
-                    )
-                ),
+                genesis_challenge: Some(Bytes32::const_hex(
+                    "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+                )),
+                genesis_pre_farm_farmer_puzzle_hash: Some(Bytes32::const_hex(
+                    "3d8765d3a597ec1d99663f6c9816d915b9f68613ac94009884c4addaefcce6af",
+                )),
+                genesis_pre_farm_pool_puzzle_hash: Some(Bytes32::const_hex(
+                    "d23da14695a188ae5708dd152263c4db883eb27edeb936178d4d988b8f3ce5fc",
+                )),
                 min_plot_size: Some(18),
                 ..Default::default()
             }),
             testnet3: Some(ConsensusOverrides {
                 difficulty_constant_factor: Some(10_052_721_566_054),
-                genesis_challenge: Some(
-                    Bytes32::const_hex(
-                        "ca7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015af",
-                    )
-                ),
-                genesis_pre_farm_farmer_puzzle_hash: Some(
-                    Bytes32::const_hex(
-                        "3d8765d3a597ec1d99663f6c9816d915b9f68613ac94009884c4addaefcce6af",
-                    )
-                ),
-                genesis_pre_farm_pool_puzzle_hash: Some(
-                    Bytes32::const_hex(
-                        "d23da14695a188ae5708dd152263c4db883eb27edeb936178d4d988b8f3ce5fc",
-                    )
-                ),
+                genesis_challenge: Some(Bytes32::const_hex(
+                    "ca7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015af",
+                )),
+                genesis_pre_farm_farmer_puzzle_hash: Some(Bytes32::const_hex(
+                    "3d8765d3a597ec1d99663f6c9816d915b9f68613ac94009884c4addaefcce6af",
+                )),
+                genesis_pre_farm_pool_puzzle_hash: Some(Bytes32::const_hex(
+                    "d23da14695a188ae5708dd152263c4db883eb27edeb936178d4d988b8f3ce5fc",
+                )),
                 mempool_block_buffer: Some(BigInt::from(10)),
                 min_plot_size: Some(18),
                 ..Default::default()
@@ -1540,21 +1516,15 @@ impl Default for ConstantsOverrides {
                 difficulty_constant_factor: Some(10_052_721_566_054),
                 difficulty_starting: Some(30),
                 epoch_blocks: Some(768),
-                genesis_challenge: Some(
-                    Bytes32::const_hex(
-                        "dd7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015af",
-                    )
-                ),
-                genesis_pre_farm_pool_puzzle_hash: Some(
-                    Bytes32::const_hex(
-                        "d23da14695a188ae5708dd152263c4db883eb27edeb936178d4d988b8f3ce5fc",
-                    )
-                ),
-                genesis_pre_farm_farmer_puzzle_hash: Some(
-                    Bytes32::const_hex(
-                        "3d8765d3a597ec1d99663f6c9816d915b9f68613ac94009884c4addaefcce6af",
-                    )
-                ),
+                genesis_challenge: Some(Bytes32::const_hex(
+                    "dd7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015af",
+                )),
+                genesis_pre_farm_pool_puzzle_hash: Some(Bytes32::const_hex(
+                    "d23da14695a188ae5708dd152263c4db883eb27edeb936178d4d988b8f3ce5fc",
+                )),
+                genesis_pre_farm_farmer_puzzle_hash: Some(Bytes32::const_hex(
+                    "3d8765d3a597ec1d99663f6c9816d915b9f68613ac94009884c4addaefcce6af",
+                )),
                 mempool_block_buffer: Some(BigInt::from(10)),
                 min_plot_size: Some(18),
                 ..Default::default()
@@ -1563,21 +1533,15 @@ impl Default for ConstantsOverrides {
                 difficulty_constant_factor: Some(10_052_721_566_054),
                 difficulty_starting: Some(30),
                 epoch_blocks: Some(768),
-                genesis_challenge: Some(
-                    Bytes32::const_hex(
-                        "ee7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015af",
-                    )
-                ),
-                genesis_pre_farm_pool_puzzle_hash: Some(
-                    Bytes32::const_hex(
-                        "d23da14695a188ae5708dd152263c4db883eb27edeb936178d4d988b8f3ce5fc",
-                    )
-                ),
-                genesis_pre_farm_farmer_puzzle_hash: Some(
-                    Bytes32::const_hex(
-                        "3d8765d3a597ec1d99663f6c9816d915b9f68613ac94009884c4addaefcce6af",
-                    )
-                ),
+                genesis_challenge: Some(Bytes32::const_hex(
+                    "ee7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015af",
+                )),
+                genesis_pre_farm_pool_puzzle_hash: Some(Bytes32::const_hex(
+                    "d23da14695a188ae5708dd152263c4db883eb27edeb936178d4d988b8f3ce5fc",
+                )),
+                genesis_pre_farm_farmer_puzzle_hash: Some(Bytes32::const_hex(
+                    "3d8765d3a597ec1d99663f6c9816d915b9f68613ac94009884c4addaefcce6af",
+                )),
                 mempool_block_buffer: Some(BigInt::from(10)),
                 min_plot_size: Some(18),
                 ..Default::default()
@@ -1586,49 +1550,35 @@ impl Default for ConstantsOverrides {
                 difficulty_constant_factor: Some(10_052_721_566_054),
                 difficulty_starting: Some(30),
                 epoch_blocks: Some(768),
-                genesis_challenge: Some(
-                    Bytes32::const_hex(
-                        "117816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015af",
-                    )
-                ),
-                genesis_pre_farm_pool_puzzle_hash: Some(
-                    Bytes32::const_hex(
-                        "d23da14695a188ae5708dd152263c4db883eb27edeb936178d4d988b8f3ce5fc",
-                    )
-                ),
-                genesis_pre_farm_farmer_puzzle_hash: Some(
-                    Bytes32::const_hex(
-                        "3d8765d3a597ec1d99663f6c9816d915b9f68613ac94009884c4addaefcce6af",
-                    )
-                ),
+                genesis_challenge: Some(Bytes32::const_hex(
+                    "117816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015af",
+                )),
+                genesis_pre_farm_pool_puzzle_hash: Some(Bytes32::const_hex(
+                    "d23da14695a188ae5708dd152263c4db883eb27edeb936178d4d988b8f3ce5fc",
+                )),
+                genesis_pre_farm_farmer_puzzle_hash: Some(Bytes32::const_hex(
+                    "3d8765d3a597ec1d99663f6c9816d915b9f68613ac94009884c4addaefcce6af",
+                )),
                 mempool_block_buffer: Some(BigInt::from(50)),
                 min_plot_size: Some(18),
                 ..Default::default()
             }),
             testnet10: Some(ConsensusOverrides {
-                agg_sig_me_additional_data: Some(
-                    Bytes32::const_hex(
-                        "ae83525ba8d1dd3f09b277de18ca3e43fc0af20d20c4b3e92ef2a48bd291ccb2",
-                    )
-                ),
+                agg_sig_me_additional_data: Some(Bytes32::const_hex(
+                    "ae83525ba8d1dd3f09b277de18ca3e43fc0af20d20c4b3e92ef2a48bd291ccb2",
+                )),
                 difficulty_constant_factor: Some(10_052_721_566_054),
                 difficulty_starting: Some(30),
                 epoch_blocks: Some(768),
-                genesis_challenge: Some(
-                    Bytes32::const_hex(
-                        "ccd5bb71183532bff220ba46c268991a3ff07eb358e8255a65c30a2dce0e5fbb",
-                    )
-                ),
-                genesis_pre_farm_pool_puzzle_hash: Some(
-                    Bytes32::const_hex(
-                        "d23da14695a188ae5708dd152263c4db883eb27edeb936178d4d988b8f3ce5fc",
-                    )
-                ),
-                genesis_pre_farm_farmer_puzzle_hash: Some(
-                    Bytes32::const_hex(
-                        "3d8765d3a597ec1d99663f6c9816d915b9f68613ac94009884c4addaefcce6af",
-                    )
-                ),
+                genesis_challenge: Some(Bytes32::const_hex(
+                    "ccd5bb71183532bff220ba46c268991a3ff07eb358e8255a65c30a2dce0e5fbb",
+                )),
+                genesis_pre_farm_pool_puzzle_hash: Some(Bytes32::const_hex(
+                    "d23da14695a188ae5708dd152263c4db883eb27edeb936178d4d988b8f3ce5fc",
+                )),
+                genesis_pre_farm_farmer_puzzle_hash: Some(Bytes32::const_hex(
+                    "3d8765d3a597ec1d99663f6c9816d915b9f68613ac94009884c4addaefcce6af",
+                )),
                 mempool_block_buffer: Some(BigInt::from(10)),
                 min_plot_size: Some(18),
                 soft_fork2_height: Some(3_000_000),
@@ -1640,29 +1590,21 @@ impl Default for ConstantsOverrides {
                 ..Default::default()
             }),
             testnet11: Some(ConsensusOverrides {
-                agg_sig_me_additional_data: Some(
-                    Bytes32::const_hex(
-                        "37a90eb5185a9c4439a91ddc98bbadce7b4feba060d50116a067de66bf236615",
-                    )
-                ),
+                agg_sig_me_additional_data: Some(Bytes32::const_hex(
+                    "37a90eb5185a9c4439a91ddc98bbadce7b4feba060d50116a067de66bf236615",
+                )),
                 difficulty_constant_factor: Some(10_052_721_566_054),
                 difficulty_starting: Some(30),
                 epoch_blocks: Some(768),
-                genesis_challenge: Some(
-                    Bytes32::const_hex(
-                        "ccd5bb71183532bff220ba46c268991a3ff07eb358e8255a65c30a2dce0e5fbb",
-                    )
-                ),
-                genesis_pre_farm_pool_puzzle_hash: Some(
-                    Bytes32::const_hex(
-                        "d23da14695a188ae5708dd152263c4db883eb27edeb936178d4d988b8f3ce5fc",
-                    )
-                ),
-                genesis_pre_farm_farmer_puzzle_hash: Some(
-                    Bytes32::const_hex(
-                        "3d8765d3a597ec1d99663f6c9816d915b9f68613ac94009884c4addaefcce6af",
-                    )
-                ),
+                genesis_challenge: Some(Bytes32::const_hex(
+                    "ccd5bb71183532bff220ba46c268991a3ff07eb358e8255a65c30a2dce0e5fbb",
+                )),
+                genesis_pre_farm_pool_puzzle_hash: Some(Bytes32::const_hex(
+                    "d23da14695a188ae5708dd152263c4db883eb27edeb936178d4d988b8f3ce5fc",
+                )),
+                genesis_pre_farm_farmer_puzzle_hash: Some(Bytes32::const_hex(
+                    "3d8765d3a597ec1d99663f6c9816d915b9f68613ac94009884c4addaefcce6af",
+                )),
                 mempool_block_buffer: Some(BigInt::from(10)),
                 min_plot_size: Some(18),
                 hard_fork_height: Some(0),

@@ -22,7 +22,7 @@ use dg_xch_keys::{
     FARMER_PATH, POOL_PATH,
 };
 use dg_xch_puzzles::p2_delegated_puzzle_or_hidden_puzzle::{
-    calculate_synthetic_secret_key, puzzle_hash_for_pk, DEFAULT_HIDDEN_PUZZLE_HASH,
+    calculate_synthetic_secret_key, puzzle_hash_for_pk, DEFAULT_HIDDEN_PUZZLE_TREE_HASH,
 };
 use log::{debug, error, info};
 use std::collections::{HashMap, HashSet};
@@ -90,7 +90,7 @@ pub fn keys_for_coinspends(
             let pub_key = sec_key.sk_to_pk();
             let puz_hash = puzzle_hash_for_pk(pub_key.into())?;
             let synthetic_secret_key =
-                calculate_synthetic_secret_key(&sec_key, *DEFAULT_HIDDEN_PUZZLE_HASH)?;
+                calculate_synthetic_secret_key(&sec_key, DEFAULT_HIDDEN_PUZZLE_TREE_HASH)?;
             info!("MasterSK: {master_sk:?}");
             info!("WalletSK: {sec_key:?}");
             info!("SyntheticSK: {synthetic_secret_key:?}");
