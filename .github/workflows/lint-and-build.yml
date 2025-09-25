@@ -7,6 +7,8 @@ env:
 jobs:
   lint:
     name: Lint
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -19,6 +21,8 @@ jobs:
         run: cargo clippy -- -Dwarnings
   build:
     name: Build
+    permissions:
+      contents: read
     needs: lint
     strategy:
       fail-fast: false
