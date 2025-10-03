@@ -1,7 +1,7 @@
 use crate::blockchain::condition_opcode::ConditionOpcode;
 use crate::blockchain::sized_bytes::{Bytes32, Bytes48};
-use crate::clvm::parser::sexp_to_bytes;
-use crate::clvm::sexp::{AtomBuf, IntoSExp, SExp};
+use crate::clvm::parser::{sexp_from_bytes, sexp_to_bytes};
+use crate::clvm::sexp::{AtomBuf, SExp};
 use crate::constants::NULL_SEXP;
 use crate::formatting::{number_from_slice, u32_from_slice, u64_from_bigint};
 use dg_xch_serialize::{ChiaProtocolVersion, ChiaSerialize};
@@ -54,9 +54,9 @@ impl AsRef<[u8]> for Message {
     }
 }
 
-impl IntoSExp for Message {
-    fn to_sexp(self) -> SExp {
-        SExp::Atom(AtomBuf::new(self.as_ref().to_vec()))
+impl From<&Message> for SExp {
+    fn from(message: &Message) -> SExp {
+        SExp::Atom(AtomBuf::new(message.as_ref().to_vec()))
     }
 }
 
@@ -103,7 +103,7 @@ impl ChiaSerialize for Message {
     }
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum ConditionWithArgs {
     Unknown,
     Remark(Message),
@@ -115,7 +115,7 @@ pub enum ConditionWithArgs {
     AggSigParentPuzzle(Bytes48, Message),
     AggSigUnsafe(Bytes48, Message),
     AggSigMe(Bytes48, Message),
-    CreateCoin(Bytes32, u64, Option<Bytes32>),
+    CreateCoin(Bytes32, u64, Option<Vec<Vec<u8>>>),
     ReserveFee(u64),
     CreateCoinAnnouncement(Message),
     AssertCoinAnnouncement(Bytes32),
@@ -160,153 +160,150 @@ impl Display for ConditionWithArgs {
     }
 }
 
-impl IntoSExp for &ConditionWithArgs {
-    fn to_sexp(self) -> SExp {
+impl From<&ConditionWithArgs> for SExp {
+    fn from(conditions: &ConditionWithArgs) -> SExp {
         let mut as_sexp = NULL_SEXP.clone();
-        let (op_code, vars) = self.op_code_with_args();
+        let (op_code, vars) = conditions.op_code_with_args();
         for var in vars.into_iter().rev() {
             as_sexp = var.cons(as_sexp)
         }
-        op_code.to_sexp().cons(as_sexp)
-    }
-}
-impl IntoSExp for ConditionWithArgs {
-    fn to_sexp(self) -> SExp {
-        (&self).to_sexp()
+        SExp::from(op_code).cons(as_sexp)
     }
 }
 
 impl ConditionWithArgs {
     pub fn op_code_with_args(&self) -> (ConditionOpcode, Vec<SExp>) {
-        match *self {
+        match self {
             ConditionWithArgs::Unknown => (ConditionOpcode::Unknown, vec![]),
-            ConditionWithArgs::Remark(msg) => (ConditionOpcode::Remark, vec![msg.to_sexp()]),
-            ConditionWithArgs::AggSigParent(key, msg) => (
-                ConditionOpcode::AggSigParent,
-                vec![key.to_sexp(), msg.to_sexp()],
-            ),
-            ConditionWithArgs::AggSigPuzzle(key, msg) => (
-                ConditionOpcode::AggSigPuzzle,
-                vec![key.to_sexp(), msg.to_sexp()],
-            ),
-            ConditionWithArgs::AggSigAmount(key, msg) => (
-                ConditionOpcode::AggSigAmount,
-                vec![key.to_sexp(), msg.to_sexp()],
-            ),
+            ConditionWithArgs::Remark(msg) => (ConditionOpcode::Remark, vec![msg.into()]),
+            ConditionWithArgs::AggSigParent(key, msg) => {
+                (ConditionOpcode::AggSigParent, vec![key.into(), msg.into()])
+            }
+            ConditionWithArgs::AggSigPuzzle(key, msg) => {
+                (ConditionOpcode::AggSigPuzzle, vec![key.into(), msg.into()])
+            }
+            ConditionWithArgs::AggSigAmount(key, msg) => {
+                (ConditionOpcode::AggSigAmount, vec![key.into(), msg.into()])
+            }
             ConditionWithArgs::AggSigPuzzleAmount(key, msg) => (
                 ConditionOpcode::AggSigPuzzleAmount,
-                vec![key.to_sexp(), msg.to_sexp()],
+                vec![key.into(), msg.into()],
             ),
             ConditionWithArgs::AggSigParentAmount(key, msg) => (
                 ConditionOpcode::AggSigParentAmount,
-                vec![key.to_sexp(), msg.to_sexp()],
+                vec![key.into(), msg.into()],
             ),
             ConditionWithArgs::AggSigParentPuzzle(key, msg) => (
                 ConditionOpcode::AggSigParentPuzzle,
-                vec![key.to_sexp(), msg.to_sexp()],
+                vec![key.into(), msg.into()],
             ),
-            ConditionWithArgs::AggSigUnsafe(key, msg) => (
-                ConditionOpcode::AggSigUnsafe,
-                vec![key.to_sexp(), msg.to_sexp()],
-            ),
-            ConditionWithArgs::AggSigMe(key, msg) => (
-                ConditionOpcode::AggSigMe,
-                vec![key.to_sexp(), msg.to_sexp()],
-            ),
-            ConditionWithArgs::CreateCoin(puzzle_hash, amount, hint) => (
-                ConditionOpcode::CreateCoin,
-                vec![puzzle_hash.to_sexp(), amount.to_sexp(), hint.to_sexp()],
-            ),
-            ConditionWithArgs::ReserveFee(fee) => {
-                (ConditionOpcode::ReserveFee, vec![fee.to_sexp()])
+            ConditionWithArgs::AggSigUnsafe(key, msg) => {
+                (ConditionOpcode::AggSigUnsafe, vec![key.into(), msg.into()])
             }
+            ConditionWithArgs::AggSigMe(key, msg) => {
+                (ConditionOpcode::AggSigMe, vec![key.into(), msg.into()])
+            }
+            ConditionWithArgs::CreateCoin(puzzle_hash, amount, hint) => {
+                let mut hints = vec![];
+                if let Some(hint) = hint {
+                    for var in hint {
+                        let mut cursor = Cursor::new(var);
+                        let sexp = sexp_from_bytes(&mut cursor).unwrap();
+                        hints.push(sexp);
+                    }
+                    (
+                        ConditionOpcode::CreateCoin,
+                        vec![puzzle_hash.into(), amount.into(), Some(hints).into()],
+                    )
+                } else {
+                    (
+                        ConditionOpcode::CreateCoin,
+                        vec![puzzle_hash.into(), amount.into(), None::<Vec<SExp>>.into()],
+                    )
+                }
+            }
+            ConditionWithArgs::ReserveFee(fee) => (ConditionOpcode::ReserveFee, vec![fee.into()]),
             ConditionWithArgs::CreateCoinAnnouncement(puzzle_hash) => (
                 ConditionOpcode::CreateCoinAnnouncement,
-                vec![puzzle_hash.to_sexp()],
+                vec![puzzle_hash.into()],
             ),
             ConditionWithArgs::AssertCoinAnnouncement(puzzle_hash) => (
                 ConditionOpcode::AssertCoinAnnouncement,
-                vec![puzzle_hash.to_sexp()],
+                vec![puzzle_hash.into()],
             ),
             ConditionWithArgs::CreatePuzzleAnnouncement(puzzle_hash) => (
                 ConditionOpcode::CreatePuzzleAnnouncement,
-                vec![puzzle_hash.to_sexp()],
+                vec![puzzle_hash.into()],
             ),
             ConditionWithArgs::AssertPuzzleAnnouncement(puzzle_hash) => (
                 ConditionOpcode::AssertPuzzleAnnouncement,
-                vec![puzzle_hash.to_sexp()],
+                vec![puzzle_hash.into()],
             ),
             ConditionWithArgs::AssertConcurrentSpend(puzzle_hash) => (
                 ConditionOpcode::AssertConcurrentSpend,
-                vec![puzzle_hash.to_sexp()],
+                vec![puzzle_hash.into()],
             ),
             ConditionWithArgs::AssertConcurrentPuzzle(puzzle_hash) => (
                 ConditionOpcode::AssertConcurrentPuzzle,
-                vec![puzzle_hash.to_sexp()],
+                vec![puzzle_hash.into()],
             ),
             ConditionWithArgs::SendMessage(mode, puzzle_hash, msg) => (
                 ConditionOpcode::SendMessage,
-                vec![mode.to_sexp(), puzzle_hash.to_sexp(), msg.to_sexp()],
+                vec![mode.into(), puzzle_hash.into(), msg.into()],
             ),
             ConditionWithArgs::ReceiveMessage(puzzle_hash, mode, msg) => (
                 ConditionOpcode::ReceiveMessage,
-                vec![puzzle_hash.to_sexp(), mode.to_sexp(), msg.to_sexp()],
+                vec![puzzle_hash.into(), mode.into(), msg.into()],
             ),
             ConditionWithArgs::AssertMyCoinId(puzzle_hash) => {
-                (ConditionOpcode::AssertMyCoinId, vec![puzzle_hash.to_sexp()])
+                (ConditionOpcode::AssertMyCoinId, vec![puzzle_hash.into()])
             }
-            ConditionWithArgs::AssertMyParentId(puzzle_hash) => (
-                ConditionOpcode::AssertMyParentId,
-                vec![puzzle_hash.to_sexp()],
-            ),
+            ConditionWithArgs::AssertMyParentId(puzzle_hash) => {
+                (ConditionOpcode::AssertMyParentId, vec![puzzle_hash.into()])
+            }
             ConditionWithArgs::AssertMyPuzzlehash(puzzle_hash) => (
                 ConditionOpcode::AssertMyPuzzlehash,
-                vec![puzzle_hash.to_sexp()],
+                vec![puzzle_hash.into()],
             ),
             ConditionWithArgs::AssertMyAmount(amount) => {
-                (ConditionOpcode::AssertMyAmount, vec![amount.to_sexp()])
+                (ConditionOpcode::AssertMyAmount, vec![amount.into()])
             }
-            ConditionWithArgs::AssertMyBirthSeconds(seconds) => (
-                ConditionOpcode::AssertMyBirthSeconds,
-                vec![seconds.to_sexp()],
-            ),
+            ConditionWithArgs::AssertMyBirthSeconds(seconds) => {
+                (ConditionOpcode::AssertMyBirthSeconds, vec![seconds.into()])
+            }
             ConditionWithArgs::AssertMyBirthHeight(height) => {
-                (ConditionOpcode::AssertMyBirthHeight, vec![height.to_sexp()])
+                (ConditionOpcode::AssertMyBirthHeight, vec![height.into()])
             }
             ConditionWithArgs::AssertEphemeral => (ConditionOpcode::AssertEphemeral, vec![]),
-            ConditionWithArgs::AssertSecondsRelative(seconds) => (
-                ConditionOpcode::AssertSecondsRelative,
-                vec![seconds.to_sexp()],
-            ),
-            ConditionWithArgs::AssertSecondsAbsolute(seconds) => (
-                ConditionOpcode::AssertSecondsAbsolute,
-                vec![seconds.to_sexp()],
-            ),
-            ConditionWithArgs::AssertHeightRelative(height) => (
-                ConditionOpcode::AssertHeightRelative,
-                vec![height.to_sexp()],
-            ),
-            ConditionWithArgs::AssertHeightAbsolute(height) => (
-                ConditionOpcode::AssertHeightAbsolute,
-                vec![height.to_sexp()],
-            ),
+            ConditionWithArgs::AssertSecondsRelative(seconds) => {
+                (ConditionOpcode::AssertSecondsRelative, vec![seconds.into()])
+            }
+            ConditionWithArgs::AssertSecondsAbsolute(seconds) => {
+                (ConditionOpcode::AssertSecondsAbsolute, vec![seconds.into()])
+            }
+            ConditionWithArgs::AssertHeightRelative(height) => {
+                (ConditionOpcode::AssertHeightRelative, vec![height.into()])
+            }
+            ConditionWithArgs::AssertHeightAbsolute(height) => {
+                (ConditionOpcode::AssertHeightAbsolute, vec![height.into()])
+            }
             ConditionWithArgs::AssertBeforeSecondsRelative(seconds) => (
                 ConditionOpcode::AssertBeforeSecondsRelative,
-                vec![seconds.to_sexp()],
+                vec![seconds.into()],
             ),
             ConditionWithArgs::AssertBeforeSecondsAbsolute(seconds) => (
                 ConditionOpcode::AssertBeforeSecondsAbsolute,
-                vec![seconds.to_sexp()],
+                vec![seconds.into()],
             ),
             ConditionWithArgs::AssertBeforeHeightRelative(height) => (
                 ConditionOpcode::AssertBeforeHeightRelative,
-                vec![height.to_sexp()],
+                vec![height.into()],
             ),
             ConditionWithArgs::AssertBeforeHeightAbsolute(height) => (
                 ConditionOpcode::AssertBeforeHeightAbsolute,
-                vec![height.to_sexp()],
+                vec![height.into()],
             ),
-            ConditionWithArgs::SoftFork(cost) => (ConditionOpcode::SoftFork, vec![cost.to_sexp()]),
+            ConditionWithArgs::SoftFork(cost) => (ConditionOpcode::SoftFork, vec![cost.into()]),
         }
     }
 
@@ -785,15 +782,21 @@ fn from_opcode_with_args(
     Ok(match op_code {
         ConditionOpcode::Unknown => ConditionWithArgs::Unknown,
         ConditionOpcode::Remark => {
-            if args.len() != 1 {
-                return Err(Error::new(
-                    ErrorKind::InvalidData,
-                    "Invalid Vars for Remark",
-                ));
+            let message = if args.len() > 1 {
+                Message::new(args.pop().unwrap_or_default())?
             } else {
-                let message = Message::new(args.pop().unwrap_or_default())?;
-                ConditionWithArgs::Remark(message)
-            }
+                Message::new(
+                    sexp_to_bytes(
+                        &args
+                            .into_iter()
+                            .map(Into::into)
+                            .collect::<Vec<SExp>>()
+                            .into(),
+                    )?
+                    .to_bytes(),
+                )?
+            };
+            ConditionWithArgs::Remark(message)
         }
         ConditionOpcode::AggSigParent => {
             if args.len() != 2 {
@@ -898,15 +901,22 @@ fn from_opcode_with_args(
                     "Invalid Vars for CreateCoin",
                 ));
             } else {
-                let hint = if args.len() > 2 {
-                    Some(Bytes32::from(args.pop().unwrap_or_default()))
+                args.reverse();
+                let puzzle_hash = Bytes32::from(args.pop().unwrap_or_default());
+                let amount_bytes = args.pop().unwrap_or_default();
+                let amount = u64_from_bigint(&number_from_slice(&amount_bytes))?;
+                let hints = if args.len() > 2 {
+                    let mut hints = vec![];
+                    while let Some(v) = args.pop() {
+                        if !v.is_empty() {
+                            hints.push(v)
+                        }
+                    }
+                    Some(hints)
                 } else {
                     None
                 };
-                let amount_bytes = args.pop().unwrap_or_default();
-                let amount = u64_from_bigint(&number_from_slice(&amount_bytes))?;
-                let puzzle_hash = Bytes32::from(args.pop().unwrap_or_default());
-                ConditionWithArgs::CreateCoin(puzzle_hash, amount, hint)
+                ConditionWithArgs::CreateCoin(puzzle_hash, amount, hints)
             }
         }
         ConditionOpcode::ReserveFee => {
@@ -991,7 +1001,7 @@ fn from_opcode_with_args(
             if args.len() != 3 {
                 return Err(Error::new(
                     ErrorKind::InvalidData,
-                    "Invalid Vars for SendMessage",
+                    format!("Invalid Vars for SendMessage- {}", args.len()),
                 ));
             } else {
                 let message = Message::new(args.pop().unwrap_or_default())?;
@@ -1253,7 +1263,7 @@ pub fn op_code_with_args_from_sexp(sexp: &SExp) -> Result<(ConditionOpcode, Vec<
     let mut opcode = ConditionOpcode::Unknown;
     let mut vars = vec![];
     let mut first = true;
-    for (index, arg) in sexp.iter().take(4).enumerate() {
+    for (index, arg) in sexp.iter().enumerate() {
         match arg {
             SExp::Atom(arg) => {
                 if first {
@@ -1269,10 +1279,25 @@ pub fn op_code_with_args_from_sexp(sexp: &SExp) -> Result<(ConditionOpcode, Vec<
                     vars.push(arg.as_ref().to_vec());
                 }
             }
-            SExp::Pair(_) => {
+            SExp::Pair(pairbuf) => {
                 if opcode == ConditionOpcode::Remark {
                     vars.push(sexp_to_bytes(arg)?.as_ref().to_vec());
-                } else if index != 3 && opcode != ConditionOpcode::CreateCoin {
+                } else if index >= 3 && opcode == ConditionOpcode::CreateCoin {
+                    vars.push(sexp_to_bytes(pairbuf.first())?.as_ref().to_vec());
+                    let mut rest = pairbuf.rest();
+                    loop {
+                        match rest {
+                            SExp::Pair(r) => {
+                                vars.push(sexp_to_bytes(r.first())?.as_ref().to_vec());
+                                rest = r.rest();
+                            }
+                            SExp::Atom(atom) => {
+                                vars.push(atom.as_ref().to_vec());
+                                break;
+                            }
+                        }
+                    }
+                } else {
                     warn!("Got pair in opcode({opcode}) args: {arg:?}");
                     break;
                 }

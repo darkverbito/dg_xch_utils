@@ -5,6 +5,7 @@ mod lineage_proof;
 pub mod nft;
 pub mod p2_conditions;
 pub mod p2_delegated_puzzle_or_hidden_puzzle;
+pub mod p2_parent;
 pub mod settlement_payments;
 pub mod singleton_launcher;
 pub mod singleton_top_layer;

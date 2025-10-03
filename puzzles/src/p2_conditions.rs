@@ -1,6 +1,6 @@
 use dg_parser_macro::parse_program_hex;
 use dg_xch_core::clvm::program::Program;
-use dg_xch_core::clvm::sexp::IntoSExp;
+use dg_xch_core::clvm::sexp::SExp;
 use dg_xch_core::clvm::utils::INFINITE_COST;
 use std::io::Error;
 
@@ -16,15 +16,15 @@ pub fn test_hashes() {
     );
 }
 
-pub fn puzzle_for_conditions<T: IntoSExp>(conditions: T) -> Result<Program<'static>, Error> {
+pub fn puzzle_for_conditions<T: Into<SExp>>(conditions: T) -> Result<Program<'static>, Error> {
     let (_cost, result) =
-        P2_CONDITIONS_PROGRAM.run(INFINITE_COST, 0, &Program::to(vec![conditions]))?;
+        P2_CONDITIONS_PROGRAM.run(INFINITE_COST, 0, &Program::to(&[conditions.into()]))?;
     Ok(result)
 }
 
-pub fn solution_for_conditions<T: IntoSExp>(conditions: T) -> Result<Program<'static>, Error> {
-    Ok(Program::to(vec![
-        puzzle_for_conditions(conditions)?.to_sexp(),
-        0.to_sexp(),
+pub fn solution_for_conditions<T: Into<SExp>>(conditions: T) -> Result<Program<'static>, Error> {
+    Ok(Program::to([
+        puzzle_for_conditions(conditions)?.sexp(),
+        &0.into(),
     ]))
 }

@@ -1014,7 +1014,7 @@ pub fn compute_memos_for_spend(
     let result_list = result.as_list();
     for condition in result_list {
         let mut conditions: Vec<Program> = condition.as_list();
-        if ConditionOpcode::from(&conditions[0]) == ConditionOpcode::CreateCoin
+        if ConditionOpcode::from(conditions[0].sexp()) == ConditionOpcode::CreateCoin
             && conditions.len() >= 4
         {
             let memo_list = conditions.remove(3);

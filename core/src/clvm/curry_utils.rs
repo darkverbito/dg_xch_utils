@@ -1,6 +1,6 @@
 use crate::clvm::program::Program;
+use crate::clvm::sexp::AtomBuf;
 use crate::clvm::sexp::SExp;
-use crate::clvm::sexp::{AtomBuf, IntoSExp};
 use std::io::Error;
 use std::io::ErrorKind;
 
@@ -24,16 +24,16 @@ pub fn concat(sexps: &[SExp]) -> Result<SExp, Error> {
 
 pub fn curry(program: &Program, args: &[Program<'_>]) -> Program<'static> {
     let mut fixed_args = Program::to(1);
-    for arg in args.iter().map(IntoSExp::to_sexp).rev() {
-        fixed_args = Program::to(vec![
-            4.to_sexp(),
-            (1.to_sexp(), arg).to_sexp(),
-            fixed_args.to_sexp(),
+    for arg in args.iter().map(Program::sexp).rev() {
+        fixed_args = Program::to(&[
+            4.into(),
+            SExp::from(1).cons(arg.clone()),
+            fixed_args.sexp().clone(),
         ]);
     }
-    Program::to(vec![
-        Program::to(2),
-        Program::to((1.to_sexp(), program.sexp().to_owned())),
-        fixed_args,
+    Program::to([
+        Program::to(2).sexp(),
+        Program::to((1.into(), program.sexp().to_owned())).sexp(),
+        fixed_args.sexp(),
     ])
 }

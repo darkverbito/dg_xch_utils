@@ -77,6 +77,7 @@ fn test_multi_constant() {
     use crate::clvm::assemble::assemble_text;
     use crate::clvm::compile::Compiler;
     use crate::clvm::program::Program;
+    use crate::clvm::sexp::SExp;
     use crate::clvm::utils::INFINITE_COST;
     use std::borrow::Cow;
     const EXAMPLE_CLSP: &str = "
@@ -94,14 +95,16 @@ fn test_multi_constant() {
     let chia_prog =
         assemble_text("(a (q 2 14 (c 2 (c 5 ()))) (c (q (ash . 23) 24 18 10 (* 12 (* 8 5))) 1))")
             .unwrap();
-    let results = prog.run(INFINITE_COST, 0, &Program::to(vec![11])).unwrap();
+    let results = prog
+        .run(INFINITE_COST, 0, &Program::to(&[SExp::from(11)]))
+        .unwrap();
     println!(
         "DG Results: Cost({}) Value({})",
         results.0,
         results.1.as_int().unwrap()
     );
     let results = chia_prog
-        .run(INFINITE_COST, 0, &Program::to(vec![11]))
+        .run(INFINITE_COST, 0, &Program::to(&[SExp::from(11)]))
         .unwrap();
     println!(
         "Chia Results: Cost({}) Value({})",
@@ -135,6 +138,7 @@ fn test_2_constants() {
 fn test_constant_inline() {
     use crate::clvm::compile::{Compiler, INLINE_CONSTS};
     use crate::clvm::program::Program;
+    use crate::clvm::sexp::SExp;
     use crate::clvm::utils::INFINITE_COST;
     use std::borrow::Cow;
     const EXAMPLE_CLSP: &str = "
@@ -152,7 +156,9 @@ fn test_constant_inline() {
         &[],
     );
     let prog = compiler.compile().unwrap();
-    let results = prog.run(INFINITE_COST, 0, &Program::to(vec![11])).unwrap();
+    let results = prog
+        .run(INFINITE_COST, 0, &Program::to(&[SExp::from(11)]))
+        .unwrap();
     assert_eq!(Program::to(275), results.1)
 }
 
@@ -161,6 +167,7 @@ fn test_re_assembly() {
     use crate::clvm::assemble::assemble_text;
     use crate::clvm::compile::{Compiler, INLINE_CONSTS};
     use crate::clvm::program::Program;
+    use crate::clvm::sexp::SExp;
     use crate::clvm::utils::INFINITE_COST;
     use std::borrow::Cow;
     const EXAMPLE_CLSP: &str = "
@@ -186,7 +193,7 @@ fn test_re_assembly() {
     let serial = assemble_text(&inlined_str).unwrap();
     assert_eq!(prog, serial);
     let results = serial
-        .run(INFINITE_COST, 0, &Program::to(vec![11]))
+        .run(INFINITE_COST, 0, &Program::to(&[SExp::from(11)]))
         .unwrap();
     println!(
         "Inlined Constants Results: Cost({}) Value({})",
@@ -201,7 +208,7 @@ fn test_re_assembly() {
     let serial = assemble_text(&inlined_str).unwrap();
     assert_eq!(prog, serial);
     let results = serial
-        .run(INFINITE_COST, 0, &Program::to(vec![11]))
+        .run(INFINITE_COST, 0, &Program::to(&[SExp::from(11)]))
         .unwrap();
     println!(
         "Argument Constants Results: Cost({}) Value({})",

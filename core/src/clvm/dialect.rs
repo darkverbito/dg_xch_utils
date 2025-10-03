@@ -41,7 +41,7 @@ impl Dialect for ChiaDialect {
                     return if (self.flags & NO_UNKNOWN_OPS) != 0 {
                         return Err(Error::new(
                             ErrorKind::InvalidData,
-                            format!("unimplemented operator: {o:?}"),
+                            format!("unimplemented operator: {:#x}", b[0]),
                         ));
                     } else {
                         op_unknown(&o, &argument_list, max_cost, self)
@@ -108,7 +108,7 @@ impl Dialect for ChiaDialect {
                                 return if (self.flags & NO_UNKNOWN_OPS) != 0 {
                                     Err(Error::new(
                                         ErrorKind::InvalidData,
-                                        format!("unimplemented operator: {o:?}"),
+                                        format!("unimplemented operator: {:#x}", b[0]),
                                     ))
                                 } else {
                                     op_unknown(&o, &argument_list, max_cost, self)

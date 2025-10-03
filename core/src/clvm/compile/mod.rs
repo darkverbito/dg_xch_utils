@@ -10,7 +10,7 @@ use crate::clvm::compile::utils::{
     concat_args, get_arg_pointer, get_const_pointer, get_function_pointer, parse_value,
 };
 use crate::clvm::program::Program;
-use crate::clvm::sexp::{IntoSExp, SExp};
+use crate::clvm::sexp::SExp;
 use crate::constants::{
     APPLY_SEXP, B_KEYWORD_TO_SEXP, CONS_SEXP, INLINE_CONSTS, INLINE_DEFUNS, NULL_SEXP, QUOTE_SEXP,
 };
@@ -279,7 +279,7 @@ impl<'a> Compiler<'a> {
         }
         Ok(APPLY_SEXP
             .clone()
-            .cons((func_pointer as u8).to_sexp().cons({
+            .cons(SExp::from(func_pointer as u8).cons({
                 let val = CONS_SEXP
                     .clone()
                     .cons(APPLY_SEXP.clone().cons(CONS_SEXP.clone().cons(
@@ -431,7 +431,7 @@ impl<'a> Compiler<'a> {
                 .find(|v| v.1.bytes == token.bytes)
                 .ok_or(Error::new(ErrorKind::InvalidData, "Argument not found"))?;
             let arg_pointer = get_arg_pointer((index + 1) as u8)?;
-            Ok((arg_pointer as u8).to_sexp())
+            Ok((arg_pointer as u8).into())
         } else if let Some(kw) = B_KEYWORD_TO_SEXP.get(&token.bytes.as_ref()) {
             Ok(kw.clone())
         } else {
@@ -616,7 +616,7 @@ impl<'a> Compiler<'a> {
                 })?
         } else {
             let const_pointer = get_const_pointer(index as u8)?;
-            Ok((const_pointer as u8).to_sexp())
+            Ok((const_pointer as u8).into())
         }
     }
 
@@ -633,7 +633,7 @@ impl<'a> Compiler<'a> {
         } else {
             get_arg_pointer((index + !self.functions.read().is_empty() as usize) as u8)?
         };
-        Ok((arg_pointer as u8).to_sexp())
+        Ok((arg_pointer as u8).into())
     }
     fn ensure_token(&'a self, t_type: TokenType) -> Result<Token<'a>, Error> {
         if let Some(token) = self.reader.next_token() {

@@ -259,7 +259,7 @@ impl SpendBundle {
             }
             let conditions_with_args: Vec<ConditionWithArgs> =
                 output_conditions_program.sexp().try_into()?;
-            for condition_with_args in &conditions_with_args {
+            for condition_with_args in conditions_with_args {
                 if print {
                     info!("{condition_with_args}");
                 }
@@ -268,7 +268,7 @@ impl SpendBundle {
                     condition_with_args.op_code(),
                 );
                 //Check Costs
-                match condition_with_args {
+                match &condition_with_args {
                     ConditionWithArgs::Remark(_) | ConditionWithArgs::Unknown => {}
                     ConditionWithArgs::CreateCoin(puzzle_hash, amount, _) => {
                         if max_cost < CREATE_COIN_COST {
@@ -292,7 +292,7 @@ impl SpendBundle {
                                 ),
                             ));
                         }
-                        create_conditions.push(*condition_with_args);
+                        create_conditions.push(condition_with_args.clone());
                     }
                     ConditionWithArgs::AggSigMe(public_key, message) => {
                         if max_cost < AGG_SIG_COST {
@@ -668,8 +668,8 @@ impl SpendBundle {
                         state.total_cost += cost;
                     }
                 }
+                state.output_conditions.push(condition_with_args);
             }
-            state.output_conditions.extend(conditions_with_args);
         }
         if (flags & DISABLE_SIGNATURE_VALIDATION) == 0 {
             let (keys, messages) = state.pkm_pairs.iter().fold(

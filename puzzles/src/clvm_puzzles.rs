@@ -8,7 +8,7 @@ use dg_xch_core::blockchain::coin::Coin;
 use dg_xch_core::blockchain::coin_spend::CoinSpend;
 use dg_xch_core::blockchain::sized_bytes::{Bytes32, Bytes48};
 use dg_xch_core::clvm::program::Program;
-use dg_xch_core::clvm::sexp::{AtomBuf, IntoSExp, SExp};
+use dg_xch_core::clvm::sexp::{AtomBuf, SExp};
 use dg_xch_core::consensus::block_rewards::calculate_pool_reward;
 use dg_xch_core::consensus::coinbase::pool_parent_id;
 use dg_xch_core::formatting::number_from_slice;
@@ -185,9 +185,9 @@ pub fn get_delay_puzzle_info_from_launcher_spend(
     ))
 }
 
-pub fn get_template_singleton_inner_puzzle(
-    inner_puzzle: &Program,
-) -> Result<Program<'static>, Error> {
+pub fn get_template_singleton_inner_puzzle<'a>(
+    inner_puzzle: &'a Program,
+) -> Result<Program<'a>, Error> {
     Ok(inner_puzzle.uncurry()?.0)
 }
 
@@ -252,27 +252,27 @@ pub fn create_absorb_spend(
     let reward_amount = calculate_pool_reward(height);
     let inner_sol = if is_pool_member_inner_puzzle(&inner_puzzle)? {
         //inner sol is (spend_type, pool_reward_amount, pool_reward_height, extra_data)
-        Program::to(vec![reward_amount.to_sexp(), height.to_sexp()])
+        Program::to(&[SExp::from(reward_amount), SExp::from(height)])
     } else if is_pool_waitingroom_inner_puzzle(&inner_puzzle)? {
         //inner sol is (spend_type, destination_puzhash, pool_reward_amount, pool_reward_height, extra_data)
-        Program::to(vec![0.to_sexp(), reward_amount.to_sexp(), height.to_sexp()])
+        Program::to(&[SExp::from(0), SExp::from(reward_amount), SExp::from(height)])
     } else {
         return Err(Error::new(ErrorKind::InvalidInput, ""));
     };
     //full sol = (parent_info, my_amount, inner_solution)
     if let Some(coin) = get_most_recent_singleton_coin_from_coin_spend(last_coin_spend)? {
         let parent_info = if coin.parent_coin_info == launcher_coin.name() {
-            Program::to(vec![
-                launcher_coin.parent_coin_info.to_sexp(),
-                launcher_coin.amount.to_sexp(),
+            Program::to(&[
+                SExp::from(launcher_coin.parent_coin_info),
+                SExp::from(launcher_coin.amount),
             ])
         } else if let Some(last_coin_spend_inner_puzzle) =
             get_inner_puzzle_from_puzzle(&last_coin_spend.puzzle_reveal.to_program()?)?
         {
-            Program::to(vec![
-                last_coin_spend.coin.parent_coin_info.to_sexp(),
-                last_coin_spend_inner_puzzle.tree_hash().to_sexp(),
-                last_coin_spend.coin.amount.to_sexp(),
+            Program::to(&[
+                SExp::from(last_coin_spend.coin.parent_coin_info),
+                SExp::from(last_coin_spend_inner_puzzle.tree_hash()),
+                SExp::from(last_coin_spend.coin.amount),
             ])
         } else {
             return Err(Error::new(
@@ -280,10 +280,10 @@ pub fn create_absorb_spend(
                 "Invalid Inner Puzzle when calculating parent info",
             ));
         };
-        let full_solution: Program = Program::to(vec![
-            parent_info.to_sexp(),
-            last_coin_spend.coin.amount.to_sexp(),
-            inner_sol.to_sexp(),
+        let full_solution: Program = Program::to([
+            parent_info.sexp(),
+            &SExp::from(last_coin_spend.coin.amount),
+            inner_sol.sexp(),
         ]);
         let full_puzzle_program = create_full_puzzle(&inner_puzzle, launcher_coin.name())?;
         if coin.puzzle_hash != full_puzzle_program.tree_hash() {
@@ -306,7 +306,7 @@ pub fn create_absorb_spend(
             amount: reward_amount,
         };
         let p2_singleton_solution: Program =
-            Program::to(vec![inner_puzzle.tree_hash(), reward_coin.name()]);
+            Program::to(&[inner_puzzle.tree_hash(), reward_coin.name()]);
 
         if reward_coin.puzzle_hash != p2_singleton_puzzle_tree_hash {
             return Err(Error::new(
@@ -358,15 +358,12 @@ pub fn create_travel_spend(
         delay_ph,
     )?;
     let inner_solution = if is_pool_member_inner_puzzle(&inner_puzzle)? {
-        Program::to(vec![
-            vec![(
-                "p".to_sexp(),
-                SExp::Atom(AtomBuf::new(
-                    target.to_bytes(ChiaProtocolVersion::default())?,
-                )),
-            )]
-            .to_sexp(),
-            0.to_sexp(),
+        Program::to(&[
+            (&[SExp::from("p").cons(SExp::Atom(AtomBuf::new(
+                target.to_bytes(ChiaProtocolVersion::default())?,
+            )))])
+                .into(),
+            SExp::from(0),
         ])
     } else if is_pool_waitingroom_inner_puzzle(&inner_puzzle)? {
         let destination_inner = pool_state_to_inner_puzzle(
@@ -381,16 +378,13 @@ pub fn create_travel_spend(
             target,
             Program::to(target.to_bytes(ChiaProtocolVersion::default())?).tree_hash()
         );
-        Program::to(vec![
-            1.to_sexp(),
-            vec![(
-                "p".to_sexp(),
-                SExp::Atom(AtomBuf::new(
-                    target.to_bytes(ChiaProtocolVersion::default())?,
-                )),
-            )]
-            .to_sexp(),
-            destination_inner.tree_hash().to_sexp(),
+        Program::to(&[
+            SExp::from(1),
+            (&[SExp::from("p").cons(SExp::Atom(AtomBuf::new(
+                target.to_bytes(ChiaProtocolVersion::default())?,
+            )))])
+                .into(),
+            SExp::from(destination_inner.tree_hash()),
         ]) // current or target
     } else {
         return Err(Error::new(ErrorKind::InvalidInput, "Invalid Inner Puzzle"));
@@ -401,9 +395,9 @@ pub fn create_travel_spend(
             "Failed to find singleton",
         ))?;
     let parent_info_list = if current_singleton.parent_coin_info == launcher_coin.name() {
-        Program::to(vec![
-            launcher_coin.parent_coin_info.to_sexp(),
-            launcher_coin.amount.to_sexp(),
+        Program::to(&[
+            SExp::from(launcher_coin.parent_coin_info),
+            SExp::from(launcher_coin.amount),
         ])
     } else {
         let puzzle_reveal = last_coin_spend.puzzle_reveal.to_program()?;
@@ -412,16 +406,16 @@ pub fn create_travel_spend(
                 ErrorKind::InvalidInput,
                 "Failed to get inner puzzle for last_coin_spend_inner_puzzle",
             ))?;
-        Program::to(vec![
-            last_coin_spend.coin.parent_coin_info.to_sexp(),
-            last_coin_spend_inner_puzzle.tree_hash().to_sexp(),
-            last_coin_spend.coin.amount.to_sexp(),
+        Program::to(&[
+            SExp::from(last_coin_spend.coin.parent_coin_info),
+            SExp::from(last_coin_spend_inner_puzzle.tree_hash()),
+            SExp::from(last_coin_spend.coin.amount),
         ])
     };
-    let full_solution = Program::to(vec![
-        parent_info_list.to_sexp(),
-        current_singleton.amount.to_sexp(),
-        inner_solution.to_sexp(),
+    let full_solution = Program::to([
+        parent_info_list.sexp(),
+        &SExp::from(current_singleton.amount),
+        inner_solution.sexp(),
     ]);
     let full_puzzle = create_full_puzzle(&inner_puzzle, launcher_coin.name())?;
     Ok((
@@ -470,17 +464,19 @@ pub fn uncurry_pool_member_inner_puzzle(
     if is_pool_member_inner_puzzle(inner_puzzle)? {
         match inner_puzzle.uncurry() {
             Ok((inner_f, args)) => {
-                let mut as_list: Vec<Program> = args.as_list().into_iter().take(5).collect();
+                let args_sexp = args.sexp();
+                let as_list = args_sexp.owned_list(true);
+                let mut as_list: Vec<SExp> = as_list.into_iter().take(5).collect();
                 if as_list.len() < 5 {
                     return Err(Error::other("Failed to unpack inner puzzle"));
                 }
-                let escape_puzzlehash = as_list.remove(4);
-                let pool_reward_prefix = as_list.remove(3);
-                let owner_pubkey = as_list.remove(2);
-                let p2_singleton_hash = as_list.remove(1);
-                let target_puzzle_hash = as_list.remove(0);
+                let escape_puzzlehash = Program::new(as_list.remove(4));
+                let pool_reward_prefix = Program::new(as_list.remove(3).to_owned());
+                let owner_pubkey = Program::new(as_list.remove(2).to_owned());
+                let p2_singleton_hash = Program::new(as_list.remove(1).to_owned());
+                let target_puzzle_hash = Program::new(as_list.remove(0).to_owned());
                 Ok((
-                    inner_f,
+                    inner_f.to_owned(),
                     target_puzzle_hash,
                     p2_singleton_hash,
                     owner_pubkey,
@@ -515,10 +511,10 @@ pub fn uncurry_pool_waitingroom_inner_puzzle(
                 if as_list.len() < 5 {
                     return Err(Error::other("Failed to unpack inner puzzle"));
                 }
-                let target_puzzle_hash = as_list[0].clone();
-                let p2_singleton_hash = as_list[1].clone();
-                let owner_pubkey = as_list[2].clone();
-                let relative_lock_height = as_list[4].clone();
+                let target_puzzle_hash = as_list[0].to_owned();
+                let p2_singleton_hash = as_list[1].to_owned();
+                let owner_pubkey = as_list[2].to_owned();
+                let relative_lock_height = as_list[4].to_owned();
                 Ok((
                     target_puzzle_hash,
                     relative_lock_height,
@@ -549,7 +545,7 @@ pub fn get_inner_puzzle_from_puzzle(
             if !is_pool_singleton_inner_puzzle(&list[1])? {
                 return Ok(None);
             }
-            Ok(Some(list[1].clone()))
+            Ok(Some(list[1].to_owned()))
         }
         Err(error) => Err(error),
     }

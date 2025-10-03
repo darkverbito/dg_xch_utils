@@ -2,7 +2,7 @@ use crate::blockchain::coin::Coin;
 use crate::blockchain::condition_opcode::{ConditionCost, ConditionOpcode};
 use crate::blockchain::sized_bytes::Bytes32;
 use crate::blockchain::utils::{additions_for_solution, fee_for_solution};
-use crate::clvm::program::{Program, SerializedProgram};
+use crate::clvm::program::SerializedProgram;
 use crate::clvm::utils::INFINITE_COST;
 use crate::traits::SizedBytes;
 use dg_xch_macros::ChiaSerial;
@@ -36,17 +36,17 @@ impl CoinSpend {
         let reveal = self.puzzle_reveal.to_program()?;
         let solution = self.solution.to_program()?;
         let (mut cost, r) = reveal.run_with_cost(max_cost, &solution)?;
-        for cond in Program::to(r).as_list() {
+        for cond in r.sexp().ref_list() {
             if cost > max_cost {
                 return Err(Error::other(
                     "BLOCK_COST_EXCEEDS_MAX compute_additions() for CoinSpend",
                 ));
             }
-            let atoms = cond.as_list();
+            let atoms = cond.ref_list();
             if atoms.is_empty() {
                 return Err(Error::other("Atoms List is Empty"));
             }
-            let op = &atoms[0];
+            let op = atoms[0];
             if [ConditionOpcode::AggSigMe, ConditionOpcode::AggSigUnsafe].contains(&op.into()) {
                 cost += ConditionCost::AggSig as u64;
                 continue;

@@ -1,3 +1,4 @@
+pub mod farmer;
 pub mod full_node;
 pub mod pool;
 pub mod responses;

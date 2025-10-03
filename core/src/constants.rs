@@ -1,9 +1,10 @@
 use crate::clvm::assemble::reader::Token;
 use crate::clvm::program::Program;
-use crate::clvm::sexp::{AtomBuf, IntoSExp, SExp};
+use crate::clvm::sexp::{AtomBuf, SExp};
 use num_bigint::BigUint;
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
+use std::convert::Into;
 
 //Keywords
 pub const QUOTE: u8 = 0x01;
@@ -79,7 +80,7 @@ pub static KEYWORD_FROM_ATOM: Lazy<HashMap<Vec<u8>, String>> =
 pub static KEYWORD_TO_ATOM: Lazy<HashMap<String, Vec<u8>>> =
     Lazy::new(|| HashMap::from(PAIRS.map(|(k, v)| (v.to_string(), vec![k]))));
 pub static B_KEYWORD_TO_SEXP: Lazy<HashMap<&[u8], SExp>> =
-    Lazy::new(|| HashMap::from(PAIRS.map(|(k, v)| (v.as_bytes(), k.to_sexp()))));
+    Lazy::new(|| HashMap::from(PAIRS.map(|(k, v)| (v.as_bytes(), k.into()))));
 pub static B_KEYWORD_TO_ATOM: Lazy<HashMap<&[u8], Vec<u8>>> =
     Lazy::new(|| HashMap::from(PAIRS.map(|(k, v)| (v.as_bytes(), vec![k]))));
 

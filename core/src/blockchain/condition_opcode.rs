@@ -1,4 +1,4 @@
-use crate::clvm::program::Program;
+use crate::clvm::sexp::SExp;
 use dg_xch_macros::ChiaSerial;
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
@@ -146,10 +146,9 @@ impl From<u8> for ConditionOpcode {
     }
 }
 
-impl<'a> From<&'a Program<'a>> for ConditionOpcode {
-    fn from(value: &Program) -> Self {
+impl From<&SExp> for ConditionOpcode {
+    fn from(value: &SExp) -> Self {
         value
-            .sexp()
             .atom()
             .map(|a| {
                 if let Some(v) = a.as_ref().first() {

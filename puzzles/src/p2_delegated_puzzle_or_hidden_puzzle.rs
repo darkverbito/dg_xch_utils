@@ -3,7 +3,7 @@ use blst::min_pk::{AggregatePublicKey, SecretKey};
 use dg_parser_macro::parse_program_hex;
 use dg_xch_core::blockchain::sized_bytes::{Bytes32, Bytes48};
 use dg_xch_core::clvm::program::Program;
-use dg_xch_core::clvm::sexp::IntoSExp;
+use dg_xch_core::clvm::sexp::SExp;
 use dg_xch_core::constants::NULL_SEXP;
 use dg_xch_core::curry_and_treehash::{calculate_hash_of_quoted_mod_hash, curry_and_treehash};
 use dg_xch_core::formatting::hex_to_bytes;
@@ -109,8 +109,8 @@ pub fn calculate_synthetic_secret_key(
 pub fn puzzle_for_synthetic_public_key(
     synthetic_public_key: Bytes48,
 ) -> Result<Program<'static>, Error> {
-    let synthetic_public_key = vec![Program::to(synthetic_public_key)];
-    P2_DELEGATED_PUZZLE_OR_HIDDEN_PUZZLE_PROGRAM.curry(&synthetic_public_key)
+    let synthetic_public_key = &[Program::to(synthetic_public_key)];
+    P2_DELEGATED_PUZZLE_OR_HIDDEN_PUZZLE_PROGRAM.curry(synthetic_public_key)
 }
 
 pub fn puzzle_hash_for_synthetic_public_key(
@@ -164,11 +164,7 @@ pub fn solution_for_delegated_puzzle(
     delegated_puzzle: Program,
     solution: Program,
 ) -> Program<'static> {
-    Program::to(vec![
-        NULL_SEXP.clone(),
-        delegated_puzzle.to_sexp(),
-        solution.to_sexp(),
-    ])
+    Program::to([&NULL_SEXP, delegated_puzzle.sexp(), solution.sexp()])
 }
 
 #[must_use]
@@ -177,14 +173,14 @@ pub fn solution_for_hidden_puzzle(
     hidden_puzzle: Program,
     solution_to_hidden_puzzle: Program,
 ) -> Program<'static> {
-    Program::to(vec![
-        hidden_public_key.to_sexp(),
-        hidden_puzzle.to_sexp(),
-        solution_to_hidden_puzzle.to_sexp(),
+    Program::to([
+        &SExp::from(hidden_public_key),
+        hidden_puzzle.sexp(),
+        solution_to_hidden_puzzle.sexp(),
     ])
 }
 
-pub fn solution_for_conditions<T: IntoSExp>(conditions: T) -> Result<Program<'static>, Error> {
+pub fn solution_for_conditions<T: Into<SExp>>(conditions: T) -> Result<Program<'static>, Error> {
     let delegated_puzzle = puzzle_for_conditions(conditions)?;
     Ok(solution_for_delegated_puzzle(
         delegated_puzzle,

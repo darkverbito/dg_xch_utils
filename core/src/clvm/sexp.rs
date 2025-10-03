@@ -315,16 +315,36 @@ impl SExp {
     }
 
     #[must_use]
-    pub fn proper_list(&self, store: bool) -> Option<Vec<SExp>> {
+    pub fn ref_list(&self) -> Vec<&SExp> {
+        let mut args = vec![];
+        let mut args_sexp = self;
+        loop {
+            match args_sexp {
+                SExp::Atom(_) => {
+                    if args_sexp.non_nil() {
+                        args.push(args_sexp);
+                    }
+                    return args;
+                }
+                SExp::Pair(buf) => {
+                    args.push(buf.first());
+                    args_sexp = buf.rest();
+                }
+            }
+        }
+    }
+
+    #[must_use]
+    pub fn owned_list(&self, store: bool) -> Vec<SExp> {
         let mut args = vec![];
         let mut args_sexp = self;
         loop {
             match args_sexp {
                 SExp::Atom(_) => {
                     return if args_sexp.non_nil() {
-                        None
+                        return vec![];
                     } else {
-                        Some(args)
+                        args
                     };
                 }
                 SExp::Pair(buf) => {
@@ -804,26 +824,45 @@ impl From<(SExp, SExp)> for PairBuf {
     }
 }
 
-pub trait IntoSExp {
-    fn to_sexp(self) -> SExp;
-}
-
-pub trait TryIntoSExp {
-    fn try_to_sexp(self) -> Result<SExp, Error>;
-}
-
-impl IntoSExp for Vec<&SExp> {
-    fn to_sexp(self) -> SExp {
-        self.into_iter().cloned().collect::<Vec<SExp>>().to_sexp()
+impl From<Vec<SExp>> for SExp {
+    fn from(vec: Vec<SExp>) -> SExp {
+        vec.as_slice().into()
     }
 }
 
-impl IntoSExp for Vec<SExp> {
-    fn to_sexp(self) -> SExp {
-        if let Some(sexp) = self.first().cloned() {
+impl<const N: usize, T: Into<SExp> + Copy> From<&[T; N]> for SExp {
+    fn from(ary: &[T; N]) -> SExp {
+        ary.iter()
+            .copied()
+            .map(Into::into)
+            .collect::<Vec<SExp>>()
+            .into()
+    }
+}
+
+impl<const N: usize> From<[&SExp; N]> for SExp {
+    fn from(ary: [&SExp; N]) -> SExp {
+        ary.as_slice().into()
+    }
+}
+
+impl<const N: usize> From<&[&SExp; N]> for SExp {
+    fn from(ary: &[&SExp; N]) -> SExp {
+        ary.as_slice().into()
+    }
+}
+
+impl<const N: usize> From<&[SExp; N]> for SExp {
+    fn from(ary: &[SExp; N]) -> SExp {
+        ary.as_slice().into()
+    }
+}
+impl From<&[SExp]> for SExp {
+    fn from(values: &[SExp]) -> SExp {
+        if let Some(sexp) = values.first().cloned() {
             let mut end = NULL_SEXP.clone();
-            if self.len() > 1 {
-                for other in self[1..].iter().rev() {
+            if values.len() > 1 {
+                for other in values[1..].iter().rev() {
                     end = other.clone().cons(end);
                 }
             }
@@ -834,82 +873,101 @@ impl IntoSExp for Vec<SExp> {
     }
 }
 
-impl<T: IntoSExp + Clone> IntoSExp for &[T] {
-    fn to_sexp(self) -> SExp {
-        self.iter()
-            .cloned()
-            .map(IntoSExp::to_sexp)
-            .collect::<Vec<SExp>>()
-            .to_sexp()
-    }
-}
-
-impl<T: IntoSExp> IntoSExp for Vec<T> {
-    fn to_sexp(self) -> SExp {
-        self.into_iter()
-            .map(IntoSExp::to_sexp)
-            .collect::<Vec<SExp>>()
-            .to_sexp()
-    }
-}
-
-impl<T: IntoSExp> IntoSExp for Option<T> {
-    fn to_sexp(self) -> SExp {
-        match self {
-            None => NULL_SEXP.clone(),
-            Some(s) => s.to_sexp(),
+impl From<&[&SExp]> for SExp {
+    fn from(values: &[&SExp]) -> SExp {
+        if let Some(sexp) = values.first().cloned() {
+            let mut end = NULL_SEXP.clone();
+            if values.len() > 1 {
+                for other in values[1..].iter().rev() {
+                    end = (*other).clone().cons(end);
+                }
+            }
+            (*sexp).clone().cons(end)
+        } else {
+            NULL_SEXP.clone()
         }
     }
 }
 
-impl<T: IntoSExp> IntoSExp for (T, T) {
-    fn to_sexp(self) -> SExp {
-        self.0.to_sexp().cons(self.1.to_sexp())
+impl From<Vec<Vec<SExp>>> for SExp {
+    fn from(mut values: Vec<Vec<SExp>>) -> SExp {
+        values.reverse();
+        if let Some(sexp) = values.pop() {
+            let mut end = NULL_SEXP.clone();
+            if !values.is_empty() {
+                for other in values.into_iter() {
+                    end = SExp::from(other.as_slice()).cons(end);
+                }
+            }
+            SExp::from(sexp.as_slice()).cons(end)
+        } else {
+            NULL_SEXP.clone()
+        }
     }
 }
 
-impl IntoSExp for (SExp, SExp) {
-    fn to_sexp(self) -> SExp {
-        self.0.cons(self.1)
+impl<T: Into<SExp>> From<Option<T>> for SExp {
+    fn from(optional: Option<T>) -> SExp {
+        match optional {
+            None => NULL_SEXP.clone(),
+            Some(s) => s.into(),
+        }
     }
 }
 
-impl IntoSExp for &str {
-    fn to_sexp(self) -> SExp {
-        SExp::Atom(AtomBuf::new(self.as_bytes().to_vec()))
+impl<T: Into<SExp>> From<(T, T)> for SExp {
+    fn from(pair: (T, T)) -> SExp {
+        pair.0.into().cons(pair.1.into())
     }
 }
 
-impl IntoSExp for String {
-    fn to_sexp(self) -> SExp {
-        SExp::Atom(AtomBuf::new(self.as_bytes().to_vec()))
+impl From<&str> for SExp {
+    fn from(string: &str) -> SExp {
+        SExp::Atom(AtomBuf::new(string.as_bytes().to_vec()))
     }
 }
 
-impl<'a> IntoSExp for Program<'a> {
-    fn to_sexp(self) -> SExp {
-        self.sexp().to_owned()
+impl From<String> for SExp {
+    fn from(string: String) -> SExp {
+        SExp::Atom(AtomBuf::new(string.into_bytes()))
     }
 }
 
-impl<'a> IntoSExp for &Program<'a> {
-    fn to_sexp(self) -> SExp {
-        self.sexp().clone()
+impl<'a> From<&Program<'a>> for SExp {
+    fn from(program: &Program) -> SExp {
+        program.sexp().to_owned()
     }
 }
 
-impl IntoSExp for ConditionOpcode {
-    fn to_sexp(self) -> SExp {
-        SExp::Atom(AtomBuf::new(vec![self as u8]))
+impl From<ConditionOpcode> for SExp {
+    fn from(condition_opcode: ConditionOpcode) -> SExp {
+        SExp::Atom(AtomBuf::new(vec![condition_opcode as u8]))
+    }
+}
+
+impl From<Vec<u8>> for SExp {
+    fn from(vec: Vec<u8>) -> SExp {
+        SExp::Atom(AtomBuf::new(vec))
+    }
+}
+
+impl From<&[u8]> for SExp {
+    fn from(ary: &[u8]) -> SExp {
+        SExp::Atom(AtomBuf::new(ary.to_vec()))
     }
 }
 
 macro_rules! impl_to_sexp_sized_bytes {
     ($($name: ident);*) => {
         $(
-            impl IntoSExp for $name {
-                fn to_sexp(self) -> SExp {
-                    SExp::Atom(AtomBuf::new(self.bytes().to_vec()))
+            impl From<$name> for SExp {
+                fn from(bytes: $name) -> SExp {
+                    SExp::Atom(AtomBuf::new(bytes.bytes().to_vec()))
+                }
+            }
+            impl From<&$name> for SExp {
+                fn from(bytes: &$name) -> SExp {
+                    SExp::Atom(AtomBuf::new(bytes.bytes().to_vec()))
                 }
             }
         )*
@@ -930,17 +988,22 @@ impl_to_sexp_sized_bytes!(
 macro_rules! impl_ints {
     ($($name: ident);*) => {
         $(
-            impl IntoSExp for $name {
-                fn to_sexp(self) -> SExp {
-                    if self == 0 {
+            impl From<$name> for SExp {
+                fn from(num: $name) -> SExp {
+                    if num == 0 {
                         return SExp::Atom(AtomBuf::new(vec![]));
                     }
-                    let as_ary = self.to_be_bytes();
+                    let as_ary = num.to_be_bytes();
                     let mut as_bytes = as_ary.as_slice();
                     while as_bytes.len() > 1 && as_bytes[0] == ( if as_bytes[1] & 0x80 > 0{0xFF} else {0}) {
                         as_bytes = &as_bytes[1..];
                     }
                     SExp::Atom(AtomBuf::new(as_bytes.to_vec()))
+                }
+            }
+            impl From<&$name> for SExp {
+                fn from(num: &$name) -> SExp {
+                    SExp::from(*num)
                 }
             }
         )*

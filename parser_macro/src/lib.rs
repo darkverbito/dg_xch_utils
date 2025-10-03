@@ -304,21 +304,14 @@ fn codegen(base: &Ident, hex: &str, bytes: &[u8], dag: &MDag, order: &[usize]) -
     let tree_hash_bytes = tree_hash.iter().map(|b| quote! { #b });
     quote! {
         mod #mod_ident {
-            #[allow(long_running_const_eval)]
             pub static __ARR: [u8; #n] = [ #( #byte_literals ),* ];
             #(#node_statics)*
-            #[allow(long_running_const_eval)]
             pub static ROOT: &#core::clvm::sexp::SExp = &#root_ident;
         }
-        #[allow(long_running_const_eval)]
         pub static #ident_src: &'static [u8] = &#mod_ident::__ARR;
-        #[allow(long_running_const_eval)]
         pub static #ident_sexp: &'static #core::clvm::sexp::SExp = &#mod_ident::ROOT;
-        #[allow(long_running_const_eval)]
         pub static #ident_program: #core::clvm::program::Program = #core::clvm::program::Program::new_static(#mod_ident::ROOT);
-        #[allow(long_running_const_eval)]
         pub static #ident_hex: &str = #hex;
-        #[allow(long_running_const_eval)]
         pub const #ident_tree_hash: #core::blockchain::sized_bytes::Bytes32 =
             #core::blockchain::sized_bytes::Bytes32::const_new([ #( #tree_hash_bytes ),* ]);
     }

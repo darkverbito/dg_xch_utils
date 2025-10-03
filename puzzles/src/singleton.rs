@@ -43,15 +43,15 @@ pub fn launch_conditions_and_coin_spend(
         Program::to(inner_puzzle),
     ];
     let curried_singleton: Program = SINGLETON_TOP_LAYER.curry(&args)?;
-    let launcher_solution = Program::to(vec![
-        curried_singleton.tree_hash().to_sexp(),
-        amount.to_sexp(),
-        comment.to_sexp(),
+    let launcher_solution = Program::to(&[
+        curried_singleton.tree_hash().into(),
+        amount.into(),
+        comment.into(),
     ]);
-    let create_launcher = Program::to(vec![
-        ConditionOpcode::CreateCoin.to_sexp(),
-        SINGLETON_LAUNCHER_HASH.to_sexp(),
-        amount.to_sexp(),
+    let create_launcher = Program::to(&[
+        ConditionOpcode::CreateCoin.into(),
+        SINGLETON_LAUNCHER_HASH.into(),
+        amount.into(),
     ]);
     let mut buf = vec![0; 64];
     buf[0..32].copy_from_slice(&launcher_coin.name().bytes());

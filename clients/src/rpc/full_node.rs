@@ -105,6 +105,10 @@ impl FullnodeAPI for FullnodeClient {
         .await?
         .block)
     }
+    // async fn get_blocks(
+    //     &self,
+    //     request: GetBlocksRequest,
+    // ) -> Result<Vec<FullBlock>, ChiaRpcError> {
     async fn get_blocks(
         &self,
         start: u32,
@@ -449,15 +453,20 @@ impl FullnodeAPI for FullnodeClient {
         start_height: Option<u32>,
         end_height: Option<u32>,
     ) -> Result<Vec<CoinRecord>, ChiaRpcError> {
-        //todo make options
         let mut request_body = Map::new();
         request_body.insert("hint".to_string(), json!(hint));
-        request_body.insert(
-            "include_spent_coins".to_string(),
-            json!(include_spent_coins),
-        );
-        request_body.insert("start_height".to_string(), json!(start_height));
-        request_body.insert("end_height".to_string(), json!(end_height));
+        if let Some(include_spent_coins) = include_spent_coins {
+            request_body.insert(
+                "include_spent_coins".to_string(),
+                json!(include_spent_coins),
+            );
+        }
+        if let Some(start_height) = start_height {
+            request_body.insert("start_height".to_string(), json!(start_height));
+        }
+        if let Some(end_height) = end_height {
+            request_body.insert("end_height".to_string(), json!(end_height));
+        }
         Ok(post::<CoinRecordAryResp, RandomState>(
             &self.client,
             &(self.url_function)(self.host.as_str(), self.port, "get_coin_records_by_hint"),
@@ -574,10 +583,14 @@ impl FullnodeAPI for FullnodeClient {
         target_times: &[u64],
     ) -> Result<FeeEstimate, ChiaRpcError> {
         let mut request_body = Map::new();
-        request_body.insert("cost".to_string(), json!(cost));
-        request_body.insert("spend_bundle".to_string(), json!(spend_bundle));
-        request_body.insert("spend_type".to_string(), json!(spend_type));
         request_body.insert("target_times".to_string(), json!(target_times));
+        if let Some(spend_bundle) = spend_bundle {
+            request_body.insert("spend_bundle".to_string(), json!(spend_bundle));
+        } else if let Some(spend_type) = spend_type {
+            request_body.insert("spend_type".to_string(), json!(spend_type));
+        } else if let Some(cost) = cost {
+            request_body.insert("cost".to_string(), json!(cost));
+        }
         post::<FeeEstimate, RandomState>(
             &self.client,
             &(self.url_function)(self.host.as_str(), self.port, "get_fee_estimate"),

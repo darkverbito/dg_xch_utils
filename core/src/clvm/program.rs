@@ -6,7 +6,7 @@ use crate::clvm::curry_utils::curry;
 use crate::clvm::dialect::{ChiaDialect, NO_UNKNOWN_OPS};
 use crate::clvm::parser::{sexp_from_bytes, sexp_to_bytes};
 use crate::clvm::run_program::run_program;
-use crate::clvm::sexp::{AtomBuf, IntoSExp};
+use crate::clvm::sexp::AtomBuf;
 use crate::clvm::sexp::{SExp, SExpSource};
 use crate::clvm::utils::MEMPOOL_MODE;
 use crate::constants::NULL_PROGRAM;
@@ -67,8 +67,8 @@ impl Program<'static> {
             ))
         }
     }
-    pub fn to<T: IntoSExp>(vals: T) -> Self {
-        Program::new(vals.to_sexp())
+    pub fn to<T: Into<SExp>>(vals: T) -> Self {
+        Program::new(vals.into())
     }
     pub fn from_serial(serial: &SerializedProgram) -> Result<Self, Error> {
         let mut cursor = Cursor::new(serial.buffer.as_ref());
@@ -81,6 +81,9 @@ impl<'a> Program<'a> {
         Program {
             sexp: SExpSource::Borrowed(sexp),
         }
+    }
+    pub fn to_owned(&'a self) -> Program<'static> {
+        Program::new(self.sexp.to_owned())
     }
     pub fn sexp(&'a self) -> &'a SExp {
         self.sexp.as_ref()
@@ -118,7 +121,7 @@ impl<'a> Program<'a> {
         Ok(curry(self, args))
     }
 
-    pub fn uncurry(&self) -> Result<(Program<'static>, Program<'static>), Error> {
+    pub fn uncurry(&'a self) -> Result<(Program<'a>, Program<'a>), Error> {
         fn inner_match(o: &SExp, expected: &[u8]) -> Result<(), Error> {
             if o.atom()? == *expected {
                 Ok(())
@@ -130,49 +133,44 @@ impl<'a> Program<'a> {
             }
         }
         //(2 (1 . <mod>) <args>)
-        let as_list = self.as_list();
-        inner_match(&as_list[0].clone().to_sexp() /*ev*/, b"\x02")?;
-        let q_pair = as_list[1].as_pair().ok_or_else(|| {
-            //quoted_inner
-            Error::new(
-                ErrorKind::InvalidData,
-                format!("expected pair found atom: {}", as_list[1]),
-            )
-        })?;
-        inner_match(&q_pair.0.to_sexp(), b"\x01")?;
+        let as_list = self.sexp().ref_list();
+        inner_match(as_list[0] /*ev*/, b"\x02")?;
+        let q_pair = as_list[1].pair()?;
+        inner_match(q_pair.first(), b"\x01")?;
         let mut args = vec![];
-        let mut args_list = as_list[2].clone();
-        while args_list.is_pair() {
+        let mut args_list = as_list[2];
+        while let SExp::Pair(_) = args_list {
             //(4(1. < arg >) < rest >)
-            let as_list = args_list.as_list();
-            inner_match(&as_list[0].clone().to_sexp(), b"\x04")?;
-            let q_pair = as_list[1].as_pair().ok_or_else(|| {
-                //quoted_inner
-                Error::new(
-                    ErrorKind::InvalidData,
-                    format!("expected pair found atom: {}", as_list[1]),
-                )
-            })?;
-            inner_match(&q_pair.0.to_sexp(), b"\x01")?;
-            args.push(q_pair.1.to_sexp());
-            args_list = as_list[2].clone();
+            let as_list = args_list.ref_list();
+            inner_match(as_list[0], b"\x04")?;
+            let q_pair = as_list[1].pair()?;
+            inner_match(q_pair.first(), b"\x01")?;
+            args.push(q_pair.rest());
+            args_list = as_list[2];
         }
-        inner_match(&args_list.to_sexp(), b"\x01")?;
-        Ok((Program::to(q_pair.1), Program::to(args)))
+        inner_match(args_list, b"\x01")?;
+        Ok((
+            Program::new_ref(q_pair.rest()),
+            Program::to(args.as_slice()),
+        ))
     }
 
     #[must_use]
-    pub fn as_list(&self) -> Vec<Program<'static>> {
-        match self.as_pair() {
-            None => {
-                vec![]
-            }
-            Some((first, rest)) => {
-                let first = Program::new(first.sexp().to_owned());
-                let rest = Program::new(rest.sexp().to_owned());
-                let mut rtn: Vec<Program> = vec![first];
-                rtn.extend(rest.as_list());
-                rtn
+    pub fn as_list(&'a self) -> Vec<Program<'a>> {
+        let mut args = vec![];
+        let mut args_sexp = self.sexp();
+        loop {
+            match args_sexp {
+                SExp::Atom(_) => {
+                    if args_sexp.non_nil() {
+                        args.push(Program::new_ref(args_sexp));
+                    }
+                    return args;
+                }
+                SExp::Pair(buf) => {
+                    args.push(Program::new_ref(buf.first()));
+                    args_sexp = buf.rest();
+                }
             }
         }
     }
@@ -197,9 +195,9 @@ impl<'a> Program<'a> {
     }
 
     #[must_use]
-    pub fn as_atom(&self) -> Option<Program<'a>> {
+    pub fn as_atom(&'a self) -> Option<Program<'a>> {
         match self.sexp.as_ref() {
-            SExp::Atom(_) => Some(Program::new(self.sexp().clone())),
+            SExp::Atom(_) => Some(Program::new_ref(self.sexp())),
             SExp::Pair(_) => None,
         }
     }
@@ -210,14 +208,8 @@ impl<'a> Program<'a> {
     }
 
     #[must_use]
-    pub fn as_pair(&self) -> Option<(Program<'static>, Program<'static>)> {
-        match self.sexp() {
-            SExp::Pair(pair) => Some((
-                Program::new(pair.first().to_owned()),
-                Program::new(pair.rest().to_owned()),
-            )),
-            SExp::Atom(_) => None,
-        }
+    pub fn as_pair(&'a self) -> Option<(Program<'a>, Program<'a>)> {
+        Some((self.first().ok()?, self.rest().ok()?))
     }
 
     #[must_use]
