@@ -1,7 +1,7 @@
 [package]
 name = "dg_xch_keys"
 version = "2.2.0"
-edition = "2021"
+edition = "2024"
 authors = ["James Hoerr"]
 description = "Key Management Utils the Chia Blockchain"
 license = "Apache-2.0"

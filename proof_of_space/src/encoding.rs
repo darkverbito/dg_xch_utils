@@ -1,9 +1,9 @@
 use crate::finite_state_entropy::compress::CTable;
-use crate::finite_state_entropy::decompress::{build_dtable, decompress_using_dtable, DTable};
+use crate::finite_state_entropy::decompress::{DTable, build_dtable, decompress_using_dtable};
 use crate::utils::span::Span;
 use lazy_static::lazy_static;
-use num_traits::real::Real;
 use num_traits::Pow;
+use num_traits::real::Real;
 use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
 use std::io::{Error, ErrorKind};

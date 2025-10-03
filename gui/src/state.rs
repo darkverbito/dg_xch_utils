@@ -2,8 +2,8 @@ use dg_xch_clients::rpc::full_node::FullnodeClient;
 use dg_xch_core::blockchain::blockchain_state::BlockchainState;
 use eframe::egui::mutex::Mutex;
 use std::collections::HashMap;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Debug, Hash)]
 pub enum SelectedTab {

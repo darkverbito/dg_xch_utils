@@ -1,14 +1,14 @@
 use crate::websocket::farmer::FarmerServerConfig;
 use async_trait::async_trait;
-use blst::min_pk::{AggregateSignature, SecretKey};
 use blst::BLST_ERROR;
+use blst::min_pk::{AggregateSignature, SecretKey};
 use dg_xch_clients::websocket::farmer::FarmerClient;
 use dg_xch_core::blockchain::pool_target::PoolTarget;
 use dg_xch_core::blockchain::proof_of_space::{generate_plot_public_key, generate_taproot_sk};
 use dg_xch_core::blockchain::sized_bytes::{Bytes32, Bytes48};
 use dg_xch_core::clvm::bls_bindings::{sign, sign_prepend};
 use dg_xch_core::consensus::constants::ChiaNetwork::Mainnet;
-use dg_xch_core::consensus::constants::{ChiaNetwork, CONSENSUS_CONSTANTS};
+use dg_xch_core::consensus::constants::{CONSENSUS_CONSTANTS, ChiaNetwork};
 use dg_xch_core::constants::AUG_SCHEME_DST;
 #[cfg(feature = "metrics")]
 use dg_xch_core::protocols::farmer::FarmerMetrics;
@@ -230,7 +230,9 @@ impl<T: Sync + Send + 'static> MessageHandler for RespondSignaturesHandle<T> {
                                             );
                                             (Some(pool_target), Some(pool_target_signature))
                                         } else {
-                                            error!("Don't have the private key for the pool key used by harvester: {pool_public_key}");
+                                            error!(
+                                                "Don't have the private key for the pool key used by harvester: {pool_public_key}"
+                                            );
                                             return Ok(());
                                         }
                                     } else {

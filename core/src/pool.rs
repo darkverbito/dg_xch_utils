@@ -43,12 +43,11 @@ impl PoolState {
             .as_list()
             .into_iter()
             .filter(|p| {
-                if let Ok(f) = p.first() {
-                    if let Ok(ai) = f.as_int() {
-                        if let Some(au) = ai.to_u8() {
-                            return char::from(au) == POOL_STATE_IDENTIFIER;
-                        }
-                    }
+                if let Ok(f) = p.first()
+                    && let Ok(ai) = f.as_int()
+                    && let Some(au) = ai.to_u8()
+                {
+                    return char::from(au) == POOL_STATE_IDENTIFIER;
                 }
                 false
             })

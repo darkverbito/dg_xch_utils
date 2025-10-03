@@ -1,7 +1,7 @@
 use crate::websocket::farmer::request_signed_values::RequestSignedValuesHandle;
 use crate::websocket::farmer::signage_point::NewSignagePointHandle;
 use crate::websocket::{WsClient, WsClientConfig};
-use dg_xch_core::consensus::constants::{ChiaNetwork, ConsensusConstants, CONSENSUS_CONSTANTS};
+use dg_xch_core::consensus::constants::{CONSENSUS_CONSTANTS, ChiaNetwork, ConsensusConstants};
 use dg_xch_core::constants::{CHIA_CA_CRT, CHIA_CA_KEY};
 use dg_xch_core::protocols::farmer::FarmerSharedState;
 use dg_xch_core::protocols::{
@@ -10,8 +10,8 @@ use dg_xch_core::protocols::{
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind};
 use std::str::FromStr;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 

@@ -705,17 +705,15 @@ pub async fn submit_next_state_spend_bundle(
             info!("Transaction Submitted Successfully. Waiting for coin to show as spent...");
             loop {
                 if let Ok(Some(record)) = client.get_coin_record_by_name(&coin_to_find.name()).await
-                {
-                    if let Ok(Some(record)) = client
+                    && let Ok(Some(record)) = client
                         .get_coin_record_by_name(&record.coin.parent_coin_info)
                         .await
-                    {
-                        info!(
-                            "Found spent parent coin, Parent Coin was spent at {}",
-                            record.spent_block_index
-                        );
-                        break;
-                    }
+                {
+                    info!(
+                        "Found spent parent coin, Parent Coin was spent at {}",
+                        record.spent_block_index
+                    );
+                    break;
                 }
                 tokio::time::sleep(Duration::from_secs(10)).await;
                 info!("Waiting for plot_nft spend to appear...");
@@ -759,17 +757,15 @@ pub async fn submit_next_state_spend_bundle_with_key(
             info!("Transaction Submitted Successfully. Waiting for coin to show as spent...");
             loop {
                 if let Ok(Some(record)) = client.get_coin_record_by_name(&coin_to_find.name()).await
-                {
-                    if let Ok(Some(record)) = client
+                    && let Ok(Some(record)) = client
                         .get_coin_record_by_name(&record.coin.parent_coin_info)
                         .await
-                    {
-                        info!(
-                            "Found spent parent coin, Parent Coin was spent at {}",
-                            record.spent_block_index
-                        );
-                        break;
-                    }
+                {
+                    info!(
+                        "Found spent parent coin, Parent Coin was spent at {}",
+                        record.spent_block_index
+                    );
+                    break;
                 }
                 tokio::time::sleep(Duration::from_secs(10)).await;
                 info!("Waiting for plot_nft spend to appear...");

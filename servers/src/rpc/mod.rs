@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use dg_xch_core::constants::{CHIA_CA_CRT, CHIA_CA_KEY};
 use dg_xch_core::ssl::{
-    generate_ca_signed_cert_data, load_certs, load_certs_from_bytes, load_private_key,
-    load_private_key_from_bytes, AllowAny, SslInfo,
+    AllowAny, SslInfo, generate_ca_signed_cert_data, load_certs, load_certs_from_bytes,
+    load_private_key, load_private_key_from_bytes,
 };
 use http::request::Parts;
 use http::{Method, StatusCode};
@@ -23,8 +23,8 @@ use std::env;
 use std::io::{Error, ErrorKind};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 #[cfg(feature = "metrics")]
 use std::time::Instant;

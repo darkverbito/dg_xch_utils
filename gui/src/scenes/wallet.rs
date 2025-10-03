@@ -1,14 +1,14 @@
 // wallet_scene.rs
 
 use crate::app::DgXchGui;
+use crate::scenes::Scene;
 use crate::scenes::wallet_import_mnemonic::WalletImportMnemonicScene;
 use crate::scenes::wallet_overview::WalletOverviewScene;
 use crate::scenes::wallet_transactions::WalletTransactionsScene;
-use crate::scenes::Scene;
 use crate::state::{WalletState, WalletTab};
 use eframe::egui;
-use eframe::egui::mutex::Mutex;
 use eframe::egui::Context;
+use eframe::egui::mutex::Mutex;
 use std::sync::{Arc, OnceLock};
 
 static OVERVIEW: OnceLock<Mutex<WalletOverviewScene>> = OnceLock::new();

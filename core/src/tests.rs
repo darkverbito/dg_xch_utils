@@ -5,7 +5,9 @@ mod tests {
     use crate::clvm::utils::INFINITE_COST;
     use dg_parser_macro::parse_program_hex;
 
-    const TEST_PROGRAM: Program<'static> = parse_program_hex!("ff02ffff01ff02ff02ffff04ff02ffff04ff05ff80808080ffff04ffff01ff12ffff0118ffff12ffff0117ffff12ffff0116ff05808080ff018080");
+    const TEST_PROGRAM: Program<'static> = parse_program_hex!(
+        "ff02ffff01ff02ff02ffff04ff02ffff04ff05ff80808080ffff04ffff01ff12ffff0118ffff12ffff0117ffff12ffff0116ff05808080ff018080"
+    );
     #[test]
     fn test_minimal_const_program() {
         let test_program = TEST_PROGRAM;

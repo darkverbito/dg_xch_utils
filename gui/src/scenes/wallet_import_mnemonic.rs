@@ -5,7 +5,7 @@ use arboard::Clipboard;
 use blst::min_pk::SecretKey;
 use dg_xch_keys::{key_from_mnemonic_str, master_sk_to_wallet_sk};
 use eframe::egui::Context;
-use eframe::{egui, Frame};
+use eframe::{Frame, egui};
 use std::sync::Arc;
 
 pub struct WalletImportMnemonicScene {

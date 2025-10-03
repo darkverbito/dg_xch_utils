@@ -1,10 +1,10 @@
+use crate::ClientSSLConfig;
 use crate::api::responses::{
     LoginResp, SignedTransactionRecordResp, TransactionRecordResp, WalletBalanceResp,
     WalletInfoResp, WalletSyncResp,
 };
 use crate::api::wallet::WalletAPI;
-use crate::rpc::{get_client, get_url, post, ChiaRpcError};
-use crate::ClientSSLConfig;
+use crate::rpc::{ChiaRpcError, get_client, get_url, post};
 use async_trait::async_trait;
 use dg_xch_core::blockchain::announcement::Announcement;
 use dg_xch_core::blockchain::coin::Coin;
@@ -14,7 +14,7 @@ use dg_xch_core::blockchain::wallet_info::WalletInfo;
 use dg_xch_core::blockchain::wallet_sync::WalletSync;
 use dg_xch_core::blockchain::wallet_type::AmountWithPuzzleHash;
 use reqwest::Client;
-use serde_json::{json, Map};
+use serde_json::{Map, json};
 use std::collections::HashMap;
 use std::hash::RandomState;
 

@@ -2,7 +2,7 @@ use crate::version;
 use crate::websocket::harvester::HarvesterServerConfig;
 use async_trait::async_trait;
 use dg_xch_core::blockchain::sized_bytes::Bytes32;
-use dg_xch_core::protocols::shared::{Handshake, CAPABILITIES};
+use dg_xch_core::protocols::shared::{CAPABILITIES, Handshake};
 use dg_xch_core::protocols::{
     ChiaMessage, MessageHandler, NodeType, PeerMap, ProtocolMessageTypes,
 };

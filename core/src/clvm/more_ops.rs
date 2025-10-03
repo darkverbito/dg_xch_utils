@@ -694,11 +694,7 @@ fn number_to_scalar(n: &BigInt) -> Scalar {
     let mut scalar_array: [u8; 32] = [0; 32];
     scalar_array[..as_u8.len()].clone_from_slice(&as_u8[..]);
     let exp: Scalar = Scalar::from_bytes(&scalar_array).unwrap();
-    if sign == Sign::Minus {
-        exp.neg()
-    } else {
-        exp
-    }
+    if sign == Sign::Minus { exp.neg() } else { exp }
 }
 
 pub fn op_pubkey_for_exp<D: Dialect>(
@@ -740,7 +736,9 @@ pub fn op_point_add<D: Dialect>(
             }
         } else {
             let blob: String = hex::encode(sexp_to_bytes(arg)?);
-            let msg = format!("point_add expects blob, got {blob}: Length of bytes object not equal to G1Element::SIZE");
+            let msg = format!(
+                "point_add expects blob, got {blob}: Length of bytes object not equal to G1Element::SIZE"
+            );
             return Err(Error::new(
                 ErrorKind::InvalidData,
                 format!("{msg} {args:?}"),

@@ -2,7 +2,7 @@ use crate::websocket::harvester::harvester_handshake::HarvesterHandshakeHandle;
 use crate::websocket::harvester::new_signage_point_harvester::NewSignagePointHarvesterHandle;
 use crate::websocket::harvester::request_signatures::RequestSignaturesHandle;
 use crate::websocket::{WsClient, WsClientConfig};
-use dg_xch_core::consensus::constants::{ChiaNetwork, ConsensusConstants, CONSENSUS_CONSTANTS};
+use dg_xch_core::consensus::constants::{CONSENSUS_CONSTANTS, ChiaNetwork, ConsensusConstants};
 use dg_xch_core::constants::{CHIA_CA_CRT, CHIA_CA_KEY};
 use dg_xch_core::protocols::harvester::HarvesterState;
 use dg_xch_core::protocols::{
@@ -12,8 +12,8 @@ use dg_xch_pos::PlotManagerAsync;
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind};
 use std::str::FromStr;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 pub mod harvester_handshake;

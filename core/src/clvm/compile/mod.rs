@@ -684,7 +684,7 @@ impl<'a> Compiler<'a> {
                     return Err(Error::new(
                         ErrorKind::InvalidInput,
                         "Unexpected token, Expected Expression",
-                    ))
+                    ));
                 }
             }
         }
@@ -728,7 +728,7 @@ impl<'a> Compiler<'a> {
                         return Err(Error::new(
                             ErrorKind::InvalidInput,
                             "Expected At Least 1 Condition",
-                        ))
+                        ));
                     }
                 }
                 return Ok(());
@@ -788,7 +788,7 @@ impl<'a> Compiler<'a> {
                 return Err(Error::new(
                     ErrorKind::InvalidInput,
                     format!("Unexpected Expression: {operator:?}"),
-                ))
+                ));
             }
         }
         Ok(())

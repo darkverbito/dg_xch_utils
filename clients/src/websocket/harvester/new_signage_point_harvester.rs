@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use dg_xch_core::blockchain::proof_of_space::{
-    calculate_pos_challenge, passes_plot_filter, ProofBytes, ProofOfSpace,
+    ProofBytes, ProofOfSpace, calculate_pos_challenge, passes_plot_filter,
 };
 use dg_xch_core::blockchain::sized_bytes::Bytes32;
 use dg_xch_core::consensus::constants::ConsensusConstants;
@@ -9,16 +9,16 @@ use dg_xch_core::consensus::pot_iterations::{
 };
 use dg_xch_core::protocols::harvester::{NewProofOfSpace, NewSignagePointHarvester};
 use dg_xch_core::protocols::{ChiaMessage, MessageHandler, PeerMap, ProtocolMessageTypes};
-use dg_xch_pos::verifier::proof_to_bytes;
 use dg_xch_pos::PlotManagerAsync;
+use dg_xch_pos::verifier::proof_to_bytes;
 use dg_xch_serialize::{ChiaProtocolVersion, ChiaSerialize};
-use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
+use futures_util::stream::FuturesUnordered;
 use hex::encode;
 use log::{debug, error, info, trace, warn};
 use std::io::{Cursor, Error};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio::time::timeout;

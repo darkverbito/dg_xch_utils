@@ -64,7 +64,10 @@ impl MessageHandler for NewSignagePointHandle {
                         pool_contract_puzzle_hash: *p2_singleton_puzzle_hash,
                     });
                 } else {
-                    warn!("No pool specific difficulty has been set for {p2_singleton_puzzle_hash}, check communication with the pool, skipping this signage point, pool: {}", &config.pool_url);
+                    warn!(
+                        "No pool specific difficulty has been set for {p2_singleton_puzzle_hash}, check communication with the pool, skipping this signage point, pool: {}",
+                        &config.pool_url
+                    );
                     continue;
                 }
             }

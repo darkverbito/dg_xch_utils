@@ -1,5 +1,5 @@
 use crate::constants::ucdiv_t;
-use std::cmp::{max, min, Ordering};
+use std::cmp::{Ordering, max, min};
 use std::io::{Error, ErrorKind, Seek, SeekFrom};
 use std::mem::size_of;
 use std::ops;
@@ -338,7 +338,7 @@ impl BitReader {
                 } else {
                     64
                 }; //u8?
-                   // Get the suffix from the last bucket.
+                // Get the suffix from the last bucket.
                 split = split_number_by_prefix(
                     self.buffer[end_bucket],
                     bucket_size as u8,

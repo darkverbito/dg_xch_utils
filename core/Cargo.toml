@@ -1,7 +1,7 @@
 [package]
 name = "dg_xch_core"
 version = "2.2.0"
-edition = "2021"
+edition = "2024"
 authors = ["James Hoerr"]
 description = "Core library containing type/error definitions, CLVM tools, Consensus and Pool definitions"
 license = "Apache-2.0"

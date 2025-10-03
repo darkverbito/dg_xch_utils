@@ -211,13 +211,13 @@ impl<D: Dialect> RunProgramContext<D> {
             SExp::Pair(pair) => (pair.first(), pair.rest()),
         };
         if let SExp::Pair(pair) = &op_node {
-            if let SExp::Atom(_) = pair.first() {
-                if pair.rest().nullp() {
-                    self.push(pair.first().clone());
-                    self.push(op_list.clone());
-                    self.op_stack.push(Operation::Apply);
-                    return Ok(APPLY_COST);
-                }
+            if let SExp::Atom(_) = pair.first()
+                && pair.rest().nullp()
+            {
+                self.push(pair.first().clone());
+                self.push(op_list.clone());
+                self.op_stack.push(Operation::Apply);
+                return Ok(APPLY_COST);
             }
             return Err(Error::new(
                 ErrorKind::Unsupported,

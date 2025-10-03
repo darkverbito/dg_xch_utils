@@ -1,6 +1,6 @@
 use crate::app::DgXchGui;
-use crate::scenes::fullnode_overview::FullNodeOverviewScene;
 use crate::scenes::Scene;
+use crate::scenes::fullnode_overview::FullNodeOverviewScene;
 use crate::state::{FullNodeState, FullNodeTab};
 use dg_xch_clients::api::full_node::FullnodeAPI;
 use eframe::egui;

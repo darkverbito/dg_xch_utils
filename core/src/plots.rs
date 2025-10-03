@@ -61,10 +61,10 @@ pub trait PlotFile<'a, F: AsyncSeek + AsyncRead> {
             }
         };
         let address = table_pointers[plot_table as usize];
-        if let Some(next) = table_pointers.get(plot_table as usize + 1) {
-            if *next > address {
-                return next - address;
-            }
+        if let Some(next) = table_pointers.get(plot_table as usize + 1)
+            && *next > address
+        {
+            return next - address;
         }
         self.plot_size() - address
     }
@@ -363,12 +363,11 @@ impl PlotNftExtraData {
         let delay_time_programs: Vec<&Program> = extra_data_program_list
             .iter()
             .filter(|p| {
-                if let Ok(f) = p.first() {
-                    if let Ok(ai) = f.as_int() {
-                        if let Some(au) = ai.to_u8() {
-                            return char::from(au) == DELAY_TIME_IDENTIFIER;
-                        }
-                    }
+                if let Ok(f) = p.first()
+                    && let Ok(ai) = f.as_int()
+                    && let Some(au) = ai.to_u8()
+                {
+                    return char::from(au) == DELAY_TIME_IDENTIFIER;
                 }
                 false
             })
@@ -380,12 +379,11 @@ impl PlotNftExtraData {
         let extra_data_programs: Vec<&Program> = extra_data_program_list
             .iter()
             .filter(|p| {
-                if let Ok(f) = p.first() {
-                    if let Ok(ai) = f.as_int() {
-                        if let Some(au) = ai.to_u8() {
-                            return char::from(au) == DELAY_PUZZLEHASH_IDENTIFIER;
-                        }
-                    }
+                if let Ok(f) = p.first()
+                    && let Ok(ai) = f.as_int()
+                    && let Some(au) = ai.to_u8()
+                {
+                    return char::from(au) == DELAY_PUZZLEHASH_IDENTIFIER;
                 }
                 false
             })

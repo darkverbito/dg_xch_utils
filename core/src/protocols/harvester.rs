@@ -471,9 +471,9 @@ pub struct PlotSyncResponse {
 
 use dg_xch_serialize::ChiaProtocolVersion;
 #[cfg(feature = "metrics")]
-use prometheus::core::{AtomicU64, GenericGauge};
-#[cfg(feature = "metrics")]
 use prometheus::Registry;
+#[cfg(feature = "metrics")]
+use prometheus::core::{AtomicU64, GenericGauge};
 
 #[derive(Debug, Default, Clone)]
 pub struct HarvesterState {

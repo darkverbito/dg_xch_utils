@@ -1,8 +1,8 @@
-use crate::wallets::common::{sign_coin_spends, DerivationRecord};
+use crate::wallets::common::{DerivationRecord, sign_coin_spends};
 use async_trait::async_trait;
 use blst::min_pk::SecretKey;
-use dashmap::mapref::one::Ref;
 use dashmap::DashMap;
+use dashmap::mapref::one::Ref;
 use dg_xch_core::blockchain::announcement::Announcement;
 use dg_xch_core::blockchain::coin::Coin;
 use dg_xch_core::blockchain::coin_record::{CatCoinRecord, CoinRecord};
@@ -192,7 +192,12 @@ pub trait WalletStore {
         let min_coin_amount = min_coin_amount.unwrap_or(0);
         let exclude_coin_amounts = exclude_coin_amounts.unwrap_or_default();
         if amount as u128 > spendable_amount {
-            Err(Error::new(ErrorKind::InvalidInput, format!("Can't select amount higher than our spendable balance.  Amount: {amount}, spendable: {spendable_amount}")))
+            Err(Error::new(
+                ErrorKind::InvalidInput,
+                format!(
+                    "Can't select amount higher than our spendable balance.  Amount: {amount}, spendable: {spendable_amount}"
+                ),
+            ))
         } else {
             debug!("About to select coins for amount {amount}");
             let max_num_coins = 500;
@@ -220,10 +225,18 @@ pub trait WalletStore {
                 valid_spendable_coins.push(coin_record.coin);
             }
             if sum_spendable_coins < amount {
-                return Err(Error::new(ErrorKind::InvalidInput, format!("Transaction for {amount} is greater than spendable balance of {sum_spendable_coins}. There may be other transactions pending or our minimum coin amount is too high.")));
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    format!(
+                        "Transaction for {amount} is greater than spendable balance of {sum_spendable_coins}. There may be other transactions pending or our minimum coin amount is too high."
+                    ),
+                ));
             }
             if amount == 0 && sum_spendable_coins == 0 {
-                return Err(Error::new(ErrorKind::InvalidInput, "No coins available to spend, you can not create a coin with an amount of 0, without already having coins."));
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    "No coins available to spend, you can not create a coin with an amount of 0, without already having coins.",
+                ));
             }
             valid_spendable_coins.sort_by(|f, s| f.amount.cmp(&s.amount));
             if let Some(c) = check_for_exact_match(&valid_spendable_coins, amount) {
@@ -242,7 +255,9 @@ pub trait WalletStore {
                 }
                 if smaller_coin_sum == amount && smaller_coins.len() < max_num_coins && amount != 0
                 {
-                    debug!("Selected all smaller coins because they equate to an exact match of the target: {smaller_coins:?}");
+                    debug!(
+                        "Selected all smaller coins because they equate to an exact match of the target: {smaller_coins:?}"
+                    );
                     Ok(smaller_coins.iter().copied().collect())
                 } else if smaller_coin_sum < amount {
                     let smallest_coin =
@@ -251,7 +266,12 @@ pub trait WalletStore {
                         debug!("Selected closest greater coin: {}", smallest_coin.name());
                         Ok(HashSet::from([smallest_coin]))
                     } else {
-                        return Err(Error::new(ErrorKind::InvalidInput, format!("Transaction of {amount} mojo is greater than available sum {all_sum} mojos.")));
+                        return Err(Error::new(
+                            ErrorKind::InvalidInput,
+                            format!(
+                                "Transaction of {amount} mojo is greater than available sum {all_sum} mojos."
+                            ),
+                        ));
                     }
                 } else if smaller_coin_sum > amount {
                     let mut coin_set = knapsack_coin_algorithm(
@@ -273,7 +293,12 @@ pub trait WalletStore {
                             if let Some(greater_coin) = greater_coin {
                                 coin_set = Some(HashSet::from([greater_coin]));
                             } else {
-                                return Err(Error::new(ErrorKind::InvalidInput, format!("Transaction of {amount} mojo would use more than {max_num_coins} coins. Try sending a smaller amount")));
+                                return Err(Error::new(
+                                    ErrorKind::InvalidInput,
+                                    format!(
+                                        "Transaction of {amount} mojo would use more than {max_num_coins} coins. Try sending a smaller amount"
+                                    ),
+                                ));
                             }
                         }
                     }
@@ -286,7 +311,9 @@ pub trait WalletStore {
                 } else {
                     match select_smallest_coin_over_target(amount, &valid_spendable_coins) {
                         Some(coin) => {
-                            debug!("Resorted to selecting smallest coin over target due to dust.: {coin:?}");
+                            debug!(
+                                "Resorted to selecting smallest coin over target due to dust.: {coin:?}"
+                            );
                             Ok(HashSet::from([coin]))
                         }
                         None => Err(Error::new(
@@ -785,14 +812,24 @@ pub trait Wallet<T: WalletStore + Send + Sync, C> {
         if !ignore_max_send_amount {
             let max_send = self.wallet_store().lock().await.get_max_send_amount().await;
             if total_amount > max_send {
-                return Err(Error::new(ErrorKind::InvalidInput, format!("Can't send more than {max_send} mojos in a single transaction, got {total_amount}")));
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    format!(
+                        "Can't send more than {max_send} mojos in a single transaction, got {total_amount}"
+                    ),
+                ));
             }
             debug!("Max send amount: {max_send}");
         }
         let coins_set: HashSet<Coin>;
         if coins.is_none() {
             if total_amount > total_balance {
-                return Err(Error::new(ErrorKind::InvalidInput, format!("Can't spend more than wallet balance: {total_balance} mojos, tried to spend: {total_amount} mojos")));
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    format!(
+                        "Can't spend more than wallet balance: {total_balance} mojos, tried to spend: {total_amount} mojos"
+                    ),
+                ));
             }
             coins_set = self
                 .wallet_store()

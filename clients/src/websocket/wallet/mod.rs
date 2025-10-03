@@ -3,8 +3,8 @@ use dg_xch_core::constants::{CHIA_CA_CRT, CHIA_CA_KEY};
 use dg_xch_core::protocols::{ChiaMessageHandler, NodeType};
 use std::collections::HashMap;
 use std::io::Error;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 

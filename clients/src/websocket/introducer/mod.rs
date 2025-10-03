@@ -13,8 +13,8 @@ use log::{debug, error, info};
 use rustls::crypto::ring::default_provider;
 use std::collections::{HashMap, HashSet};
 use std::io::{Cursor, Error, ErrorKind};
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 

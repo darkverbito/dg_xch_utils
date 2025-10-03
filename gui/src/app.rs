@@ -1,13 +1,13 @@
 use crate::components::top_bar::TabBar;
 use crate::config::Config;
+use crate::scenes::Scene;
 use crate::scenes::config::ConfigScene;
 use crate::scenes::farmer::FarmerScene;
 use crate::scenes::fullnode::FullNodeScene;
 use crate::scenes::wallet::WalletScene;
-use crate::scenes::Scene;
 use crate::state::{SelectedTab, State, WalletState};
-use dg_xch_clients::rpc::full_node::FullnodeClient;
 use dg_xch_clients::ClientSSLConfig;
+use dg_xch_clients::rpc::full_node::FullnodeClient;
 use eframe::egui;
 use eframe::egui::mutex::Mutex;
 use std::io::Error;

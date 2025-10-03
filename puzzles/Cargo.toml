@@ -1,7 +1,7 @@
 [package]
 name = "dg_xch_puzzles"
 version = "2.2.0"
-edition = "2021"
+edition = "2024"
 authors = ["James Hoerr"]
 description = "Core library for working with CLVM puzzles"
 license = "Apache-2.0"

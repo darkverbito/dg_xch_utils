@@ -1,6 +1,6 @@
-use hex::{decode, FromHexError};
+use hex::{FromHexError, decode};
 use num_bigint::BigInt;
-use num_traits::{pow, Signed};
+use num_traits::{Signed, pow};
 use once_cell::sync::Lazy;
 use std::io::{Error, ErrorKind};
 

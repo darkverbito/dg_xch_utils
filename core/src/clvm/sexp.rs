@@ -1,6 +1,6 @@
 use crate::blockchain::condition_opcode::ConditionOpcode;
 use crate::blockchain::sized_bytes::{
-    Bytes100, Bytes32, Bytes4, Bytes48, Bytes480, Bytes8, Bytes96,
+    Bytes4, Bytes8, Bytes32, Bytes48, Bytes96, Bytes100, Bytes480,
 };
 use crate::clvm::assemble::is_hex;
 use crate::clvm::parser::{sexp_from_bytes, sexp_to_bytes};
@@ -307,11 +307,7 @@ impl SExp {
 
     #[must_use]
     pub fn from_bool(b: bool) -> &'static SExp {
-        if b {
-            &ONE_SEXP
-        } else {
-            &NULL_SEXP
-        }
+        if b { &ONE_SEXP } else { &NULL_SEXP }
     }
 
     #[must_use]

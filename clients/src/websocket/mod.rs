@@ -8,7 +8,7 @@ use crate::ClientSSLConfig;
 use async_trait::async_trait;
 use dg_xch_core::blockchain::sized_bytes::Bytes32;
 use dg_xch_core::constants::{CHIA_CA_CRT, CHIA_CA_KEY};
-use dg_xch_core::protocols::shared::{Handshake, NoCertificateVerification, CAPABILITIES};
+use dg_xch_core::protocols::shared::{CAPABILITIES, Handshake, NoCertificateVerification};
 use dg_xch_core::protocols::{
     ChiaMessage, ChiaMessageFilter, ChiaMessageHandler, MessageHandler, NodeType, SocketPeer,
     WebsocketConnection,
@@ -23,23 +23,23 @@ use dg_xch_core::utils::hash_256;
 use dg_xch_serialize::{ChiaProtocolVersion, ChiaSerialize};
 use log::debug;
 use reqwest::header::{HeaderName, HeaderValue};
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::ClientConfig;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::io::{Cursor, Error, ErrorKind};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use std::{env, fs};
 use tokio::select;
-use tokio::sync::mpsc::Sender;
 use tokio::sync::RwLock;
+use tokio::sync::mpsc::Sender;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::{connect_async_tls_with_config, Connector};
+use tokio_tungstenite::{Connector, connect_async_tls_with_config};
 use urlencoding::encode;
 use uuid::Uuid;
 

@@ -14,8 +14,8 @@ use async_trait::async_trait;
 use dg_xch_macros::ChiaSerial;
 use dg_xch_serialize::ChiaProtocolVersion;
 use dg_xch_serialize::ChiaSerialize;
-use futures_util::stream::{FusedStream, SplitSink, SplitStream};
 use futures_util::SinkExt;
+use futures_util::stream::{FusedStream, SplitSink, SplitStream};
 use futures_util::{Sink, Stream, StreamExt};
 use hyper::upgrade::Upgraded;
 use hyper_util::rt::TokioIo;
@@ -24,15 +24,15 @@ use std::collections::HashMap;
 use std::fmt;
 use std::io::{Cursor, Error};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::select;
 use tokio::sync::RwLock;
-use tokio_tungstenite::tungstenite::error::ProtocolError;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::error::ProtocolError;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use uuid::Uuid;
 
@@ -578,10 +578,10 @@ impl ChiaMessageFilter {
         if self.id.is_some() && self.id != msg.id {
             return false;
         }
-        if let Some(s) = &self.msg_type {
-            if *s != msg.msg_type {
-                return false;
-            }
+        if let Some(s) = &self.msg_type
+            && *s != msg.msg_type
+        {
+            return false;
         }
         if let Some(func) = &self.custom_fn {
             func(msg)
@@ -620,8 +620,8 @@ impl Stream for WebsocketMsgStream {
     type Item = Result<Message, tokio_tungstenite::tungstenite::error::Error>;
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match self.get_mut() {
-            WebsocketMsgStream::TokioIo(ref mut s) => Pin::new(s).poll_next(cx),
-            WebsocketMsgStream::Tls(ref mut s) => Pin::new(s).poll_next(cx),
+            WebsocketMsgStream::TokioIo(s) => Pin::new(s).poll_next(cx),
+            WebsocketMsgStream::Tls(s) => Pin::new(s).poll_next(cx),
         }
     }
 }
@@ -637,26 +637,26 @@ impl Sink<Message> for WebsocketMsgStream {
     type Error = tokio_tungstenite::tungstenite::error::Error;
     fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         match self.get_mut() {
-            WebsocketMsgStream::TokioIo(ref mut s) => Pin::new(s).poll_ready(cx),
-            WebsocketMsgStream::Tls(ref mut s) => Pin::new(s).poll_ready(cx),
+            WebsocketMsgStream::TokioIo(s) => Pin::new(s).poll_ready(cx),
+            WebsocketMsgStream::Tls(s) => Pin::new(s).poll_ready(cx),
         }
     }
     fn start_send(self: Pin<&mut Self>, item: Message) -> Result<(), Self::Error> {
         match self.get_mut() {
-            WebsocketMsgStream::TokioIo(ref mut s) => Pin::new(s).start_send(item),
-            WebsocketMsgStream::Tls(ref mut s) => Pin::new(s).start_send(item),
+            WebsocketMsgStream::TokioIo(s) => Pin::new(s).start_send(item),
+            WebsocketMsgStream::Tls(s) => Pin::new(s).start_send(item),
         }
     }
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         match self.get_mut() {
-            WebsocketMsgStream::TokioIo(ref mut s) => Pin::new(s).poll_flush(cx),
-            WebsocketMsgStream::Tls(ref mut s) => Pin::new(s).poll_flush(cx),
+            WebsocketMsgStream::TokioIo(s) => Pin::new(s).poll_flush(cx),
+            WebsocketMsgStream::Tls(s) => Pin::new(s).poll_flush(cx),
         }
     }
     fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         match self.get_mut() {
-            WebsocketMsgStream::TokioIo(ref mut s) => Pin::new(s).poll_close(cx),
-            WebsocketMsgStream::Tls(ref mut s) => Pin::new(s).poll_close(cx),
+            WebsocketMsgStream::TokioIo(s) => Pin::new(s).poll_close(cx),
+            WebsocketMsgStream::Tls(s) => Pin::new(s).poll_close(cx),
         }
     }
 }

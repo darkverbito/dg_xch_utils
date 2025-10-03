@@ -8,8 +8,8 @@ use dg_xch_pos::plots::plot_reader::PlotReader;
 use log::Level;
 use std::io::{Error, ErrorKind};
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::available_parallelism;
 use tokio::runtime::{Builder, Runtime};
 
@@ -20,7 +20,9 @@ fn proof_benchmark(c: &mut Criterion, runtime: &Runtime) {
         .current_level(Level::Info)
         .init()
         .map_err(|e| Error::other(format!("{e:?}")))?;
-    let path = Path::new("/home/luna/plot-k32-c05-2023-06-09-02-25-11d916cf9c847158f76affb30a38ca36f83da452c37f4b4d10a1a0addcfa932b.plot");
+    let path = Path::new(
+        "/home/luna/plot-k32-c05-2023-06-09-02-25-11d916cf9c847158f76affb30a38ca36f83da452c37f4b4d10a1a0addcfa932b.plot",
+    );
     let pool = Arc::new(DecompressorPool::new(
         1,
         available_parallelism()
@@ -62,7 +64,9 @@ fn quality_then_proof_benchmark(c: &mut Criterion, runtime: &Runtime) {
         .current_level(Level::Info)
         .init()
         .map_err(|e| Error::other(format!("{e:?}")))?;
-    let path = Path::new("/home/luna/plot-k32-c05-2023-06-09-02-25-11d916cf9c847158f76affb30a38ca36f83da452c37f4b4d10a1a0addcfa932b.plot");
+    let path = Path::new(
+        "/home/luna/plot-k32-c05-2023-06-09-02-25-11d916cf9c847158f76affb30a38ca36f83da452c37f4b4d10a1a0addcfa932b.plot",
+    );
     let pool = Arc::new(DecompressorPool::new(
         1,
         available_parallelism()
@@ -110,7 +114,9 @@ fn quality_benchmark(c: &mut Criterion, runtime: &Runtime) {
         .current_level(Level::Info)
         .init()
         .map_err(|e| Error::other(format!("{e:?}")))?;
-    let path = Path::new("/home/luna/plot-k32-c05-2023-06-09-02-25-11d916cf9c847158f76affb30a38ca36f83da452c37f4b4d10a1a0addcfa932b.plot");
+    let path = Path::new(
+        "/home/luna/plot-k32-c05-2023-06-09-02-25-11d916cf9c847158f76affb30a38ca36f83da452c37f4b4d10a1a0addcfa932b.plot",
+    );
     let pool = Arc::new(DecompressorPool::new(
         1,
         available_parallelism()

@@ -41,7 +41,7 @@ pub fn parse_function<'a>(
                 return Err(Error::new(
                     ErrorKind::InvalidInput,
                     format!("Unexpected Token {arg_or_end:?}"),
-                ))
+                ));
             }
         }
     }

@@ -1,8 +1,8 @@
 use bip39::Mnemonic;
 use clap::{Parser, Subcommand, ValueEnum};
 use dg_xch_core::blockchain::sized_bytes::Bytes32;
-use dialoguer::theme::ColorfulTheme;
 use dialoguer::Input;
+use dialoguer::theme::ColorfulTheme;
 use std::io::{Error, ErrorKind};
 use std::str::FromStr;
 

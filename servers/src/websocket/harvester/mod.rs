@@ -1,12 +1,12 @@
-use crate::websocket::harvester::handshake::HandshakeHandle;
 #[cfg(feature = "metrics")]
 use crate::websocket::WebSocketMetrics;
+use crate::websocket::harvester::handshake::HandshakeHandle;
 use crate::websocket::{WebsocketServer, WebsocketServerConfig};
 use dg_xch_core::protocols::{ChiaMessageFilter, ChiaMessageHandler, ProtocolMessageTypes};
 use std::collections::HashMap;
 use std::io::Error;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 

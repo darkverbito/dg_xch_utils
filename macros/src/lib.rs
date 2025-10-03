@@ -4,7 +4,7 @@ use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{quote, quote_spanned};
 use syn::spanned::Spanned;
-use syn::{parse_macro_input, Data, DeriveInput, Fields, Index};
+use syn::{Data, DeriveInput, Fields, Index, parse_macro_input};
 
 #[proc_macro_derive(ChiaSerial)]
 pub fn derive_chia_serial(input: TokenStream) -> TokenStream {
@@ -13,7 +13,7 @@ pub fn derive_chia_serial(input: TokenStream) -> TokenStream {
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
     let name = input.ident;
     let (to_bytes, from_bytes) = create_to_bytes(input.data);
-    let gen = quote! {
+    let generated = quote! {
         impl #impl_generics dg_xch_serialize::ChiaSerialize for #name #ty_generics #where_clause {
             fn to_bytes(&self, macro_chia_protocol_version: dg_xch_serialize::ChiaProtocolVersion) -> Result<Vec<u8>, std::io::Error> {
                 #to_bytes
@@ -26,7 +26,7 @@ pub fn derive_chia_serial(input: TokenStream) -> TokenStream {
             }
         }
     };
-    gen.into()
+    generated.into()
 }
 
 fn create_to_bytes(data: Data) -> (TokenStream2, TokenStream2) {

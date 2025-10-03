@@ -1,3 +1,4 @@
+use crate::ClientSSLConfig;
 use crate::api::full_node::{FullnodeAPI, FullnodeExtAPI};
 use crate::api::responses::{
     AdditionsAndRemovalsResp, BlockRecordAryResp, BlockRecordResp, BlockchainStateResp,
@@ -10,8 +11,7 @@ use crate::api::responses::{
     BlockCountMetricsResp, CoinHintsResp, CoinSpendMapResp, HintedAdditionsAndRemovalsResp,
     MempoolItemAryResp, PaginatedCoinRecordAryResp,
 };
-use crate::rpc::{get_client, get_http_client, get_insecure_url, get_url, post, ChiaRpcError};
-use crate::ClientSSLConfig;
+use crate::rpc::{ChiaRpcError, get_client, get_http_client, get_insecure_url, get_url, post};
 use async_trait::async_trait;
 use dg_xch_core::blockchain::block_record::BlockRecord;
 use dg_xch_core::blockchain::blockchain_state::BlockchainState;
@@ -29,7 +29,7 @@ use dg_xch_core::protocols::full_node::BlockCountMetrics;
 use dg_xch_core::protocols::full_node::FeeEstimate;
 use log::error;
 use reqwest::Client;
-use serde_json::{json, Map};
+use serde_json::{Map, json};
 use std::collections::HashMap;
 use std::hash::RandomState;
 use std::io::Error;

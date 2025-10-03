@@ -54,7 +54,7 @@ impl Scene for ConfigScene {
                 });
                 ui.horizontal(|ui| {
                     ui.label("SSL:");
-                    if let Some(ref mut ssl) = &mut gui.config.full_node_config.full_node_ssl {
+                    if let Some(ssl) = &mut gui.config.full_node_config.full_node_ssl {
                         ui.text_edit_singleline(ssl);
                         if ui.button("Clear SSL").clicked() {
                             gui.config.full_node_config.full_node_ssl = None;
@@ -80,7 +80,7 @@ impl Scene for ConfigScene {
                 });
                 ui.horizontal(|ui| {
                     ui.label("SSL:");
-                    if let Some(ref mut ssl) = &mut gui.config.wallet_config.full_node_ssl {
+                    if let Some(ssl) = &mut gui.config.wallet_config.full_node_ssl {
                         ui.text_edit_singleline(ssl);
                         if ui.button("Clear SSL").clicked() {
                             gui.config.wallet_config.full_node_ssl = None;
@@ -121,7 +121,7 @@ impl Scene for ConfigScene {
                 });
                 ui.horizontal(|ui| {
                     ui.label("SSL:");
-                    if let Some(ref mut ssl) = &mut gui.config.farmer_config.full_node_ssl {
+                    if let Some(ssl) = &mut gui.config.farmer_config.full_node_ssl {
                         ui.text_edit_singleline(ssl);
                         if ui.button("Clear SSL").clicked() {
                             gui.config.farmer_config.full_node_ssl = None;

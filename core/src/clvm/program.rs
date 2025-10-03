@@ -1,5 +1,5 @@
 use crate::blockchain::sized_bytes::{
-    Bytes100, Bytes32, Bytes4, Bytes48, Bytes480, Bytes8, Bytes96,
+    Bytes4, Bytes8, Bytes32, Bytes48, Bytes96, Bytes100, Bytes480,
 };
 use crate::clvm::assemble::assemble_text;
 use crate::clvm::curry_utils::curry;

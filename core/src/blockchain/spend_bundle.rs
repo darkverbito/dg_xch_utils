@@ -580,13 +580,13 @@ impl SpendBundle {
                         } else {
                             state.seconds_relative = Some(*seconds);
                         }
-                        if let Some(before_seconds_relative) = state.before_seconds_relative {
-                            if before_seconds_relative <= *seconds {
-                                return Err(Error::new(
-                                    ErrorKind::InvalidInput,
-                                    "AssertBeforeSecondsRelative is <= AssertSecondsRelative",
-                                ));
-                            }
+                        if let Some(before_seconds_relative) = state.before_seconds_relative
+                            && before_seconds_relative <= *seconds
+                        {
+                            return Err(Error::new(
+                                ErrorKind::InvalidInput,
+                                "AssertBeforeSecondsRelative is <= AssertSecondsRelative",
+                            ));
                         }
                         //Assert not Ephemeral
                     }
@@ -599,13 +599,13 @@ impl SpendBundle {
                         } else {
                             state.height_relative = Some(*height);
                         }
-                        if let Some(before_height_relative) = state.before_height_relative {
-                            if before_height_relative <= *height {
-                                return Err(Error::new(
-                                    ErrorKind::InvalidInput,
-                                    "AssertBeforeHeightRelative is <= AssertHeightRelative",
-                                ));
-                            }
+                        if let Some(before_height_relative) = state.before_height_relative
+                            && before_height_relative <= *height
+                        {
+                            return Err(Error::new(
+                                ErrorKind::InvalidInput,
+                                "AssertBeforeHeightRelative is <= AssertHeightRelative",
+                            ));
                         }
                         //Assert not Ephemeral
                     }
@@ -618,13 +618,13 @@ impl SpendBundle {
                         } else {
                             state.before_seconds_relative = Some(*seconds);
                         }
-                        if let Some(seconds_relative) = state.seconds_relative {
-                            if seconds_relative <= *seconds {
-                                return Err(Error::new(
-                                    ErrorKind::InvalidInput,
-                                    "AssertBeforeSecondsRelative is <= AssertSecondsRelative",
-                                ));
-                            }
+                        if let Some(seconds_relative) = state.seconds_relative
+                            && seconds_relative <= *seconds
+                        {
+                            return Err(Error::new(
+                                ErrorKind::InvalidInput,
+                                "AssertBeforeSecondsRelative is <= AssertSecondsRelative",
+                            ));
                         }
                         //Assert not Ephemeral
                     }
@@ -641,13 +641,13 @@ impl SpendBundle {
                         } else {
                             state.before_height_relative = Some(*height);
                         }
-                        if let Some(height_relative) = state.height_relative {
-                            if *height <= height_relative {
-                                return Err(Error::new(
-                                    ErrorKind::InvalidInput,
-                                    "AssertBeforeHeightRelative is <= AssertHeightRelative",
-                                ));
-                            }
+                        if let Some(height_relative) = state.height_relative
+                            && *height <= height_relative
+                        {
+                            return Err(Error::new(
+                                ErrorKind::InvalidInput,
+                                "AssertBeforeHeightRelative is <= AssertHeightRelative",
+                            ));
                         }
                         //Assert not Ephemeral
                     }

@@ -1,7 +1,7 @@
 use crate::blockchain::sized_bytes::Bytes48;
 use crate::constants::AUG_SCHEME_DST;
-use blst::min_pk::{PublicKey, SecretKey, Signature};
 use blst::BLST_ERROR;
+use blst::min_pk::{PublicKey, SecretKey, Signature};
 
 #[must_use]
 pub fn verify_signature(public_key: &PublicKey, msg: &[u8], signature: &Signature) -> bool {

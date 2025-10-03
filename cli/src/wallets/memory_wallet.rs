@@ -1,11 +1,11 @@
-use crate::wallets::common::{sign_coin_spends, DerivationRecord};
+use crate::wallets::common::{DerivationRecord, sign_coin_spends};
 use crate::wallets::{SecretKeyStore, Wallet, WalletInfo, WalletStore};
 use async_trait::async_trait;
 use blst::min_pk::SecretKey;
 use dashmap::DashMap;
+use dg_xch_clients::ClientSSLConfig;
 use dg_xch_clients::api::full_node::FullnodeAPI;
 use dg_xch_clients::rpc::full_node::FullnodeClient;
-use dg_xch_clients::ClientSSLConfig;
 use dg_xch_core::blockchain::coin_record::{CatCoinRecord, CoinRecord};
 use dg_xch_core::blockchain::coin_spend::CoinSpend;
 use dg_xch_core::blockchain::sized_bytes::{Bytes32, Bytes48};
@@ -14,14 +14,14 @@ use dg_xch_core::blockchain::wallet_type::{AmountWithPuzzleHash, WalletType};
 use dg_xch_core::clvm::program::Program;
 use dg_xch_core::consensus::constants::ConsensusConstants;
 use dg_xch_puzzles::p2_delegated_puzzle_or_hidden_puzzle::{
-    calculate_synthetic_secret_key, DEFAULT_HIDDEN_PUZZLE_TREE_HASH,
+    DEFAULT_HIDDEN_PUZZLE_TREE_HASH, calculate_synthetic_secret_key,
 };
 use log::{error, info};
 use num_traits::ToPrimitive;
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind};
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use tokio::sync::Mutex;
 
 pub struct MemoryWalletConfig {
@@ -330,14 +330,14 @@ impl Wallet<MemoryWalletStore, MemoryWalletConfig> for MemoryWallet {
                 "Found change but not Change Puzzle Hash was provided.",
             ));
         }
-        if let Some(change_puzzle_hash) = change_puzzle_hash {
-            if change > 0 {
-                payments.push(AmountWithPuzzleHash {
-                    puzzle_hash: change_puzzle_hash,
-                    amount: change as u64,
-                    memos: vec![],
-                })
-            }
+        if let Some(change_puzzle_hash) = change_puzzle_hash
+            && change > 0
+        {
+            payments.push(AmountWithPuzzleHash {
+                puzzle_hash: change_puzzle_hash,
+                amount: change as u64,
+                memos: vec![],
+            })
         }
         let mut spends = vec![];
         let origin_index = match origin_id {

@@ -4,8 +4,8 @@ use dg_logger::DruidGardenLogger;
 use log::Level;
 use std::env;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 mod app;
 mod components;
