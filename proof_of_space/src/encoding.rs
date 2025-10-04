@@ -54,7 +54,7 @@ lazy_static! {
 
 #[must_use]
 pub fn get_x_enc(x: &u64) -> u64 {
-    if x % 2 == 0 {
+    if x.is_multiple_of(2) {
         (x >> 1).wrapping_mul(x.wrapping_sub(1))
     } else {
         x.wrapping_mul(x.wrapping_sub(1) >> 1)

@@ -413,7 +413,7 @@ impl Decompressor {
             let x2 = u64::from(x_groups[j + 1]);
             let group_index = i / 2;
             let table: &mut ProofTable = &mut tables[1usize];
-            if i % 2 == 0 {
+            if i.is_multiple_of(2) {
                 table.begin_group(group_index);
             }
             if let Err(e) =
@@ -1853,11 +1853,11 @@ impl Decompressor {
                 out_pairs,
             };
             let table: &mut ProofTable = &mut tables[1isize];
-            for (i, j) in (0..num_xgroups).zip((0..x_groups.len()).step_by(2)) {
+            for (i, j) in (0usize..num_xgroups).zip((0..x_groups.len()).step_by(2)) {
                 let x1 = u64::from(x_groups[j]);
                 let x2 = u64::from(x_groups[j + 1]);
                 let group_index = i / 2;
-                if i % 2 == 0 {
+                if i.is_multiple_of(2) {
                     table.begin_group(group_index);
                 }
                 if let Err(e) = Self::process_table1bucket(

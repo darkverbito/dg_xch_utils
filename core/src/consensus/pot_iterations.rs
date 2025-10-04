@@ -24,7 +24,7 @@ pub fn calculate_sp_interval_iters(
     constants: &ConsensusConstants,
     sub_slot_iters: u64,
 ) -> Result<u64, Error> {
-    if sub_slot_iters % u64::from(constants.num_sps_sub_slot) != 0 {
+    if !sub_slot_iters.is_multiple_of(u64::from(constants.num_sps_sub_slot)) {
         Err(Error::new(
             ErrorKind::InvalidData,
             format!("Invalid SubSlot Iterations: {sub_slot_iters}"),

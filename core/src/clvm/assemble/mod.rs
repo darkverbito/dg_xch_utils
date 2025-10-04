@@ -127,7 +127,7 @@ pub fn handle_quote(token: &[u8]) -> Option<SExp> {
 
 pub fn handle_hex(token: &[u8]) -> Result<Option<SExp>, Error> {
     if is_hex(token) {
-        let mut bytes = if token.len() % 2 > 0 {
+        let mut bytes = if !token.len().is_multiple_of(2) {
             vec![b'0']
         } else {
             vec![]

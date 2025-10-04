@@ -177,7 +177,7 @@ impl RadixSorter {
             swap(input, output);
             shift += SHIFT_BASE;
         }
-        if max_iter % 2 == 0 {
+        if max_iter.is_multiple_of(2) {
             output.copy_from_slice(input);
         }
     }
@@ -204,7 +204,7 @@ impl RadixSorter {
             swap(&mut key_input, &mut key_output);
             shift += SHIFT_BASE;
         }
-        if max_iter % 2 == 0 {
+        if max_iter.is_multiple_of(2) {
             output.copy_from_slice(input);
         }
     }

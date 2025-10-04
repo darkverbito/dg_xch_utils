@@ -324,7 +324,7 @@ fn decode_hex(s: &str) -> Result<Vec<u8>, String> {
         .or_else(|| s.strip_prefix("0X"))
         .unwrap_or(s);
 
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return Err("Odd Length".into());
     }
 
