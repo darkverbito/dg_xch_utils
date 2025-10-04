@@ -31,7 +31,7 @@ use std::ops::Add;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-pub fn create_cold_wallet() -> Result<(), Error> {
+pub fn create_cold_wallet(network: &ConsensusConstants) -> Result<(), Error> {
     let mnemonic = Mnemonic::generate(24)
         .map_err(|e| Error::new(ErrorKind::InvalidInput, format!("{e:?}")))?;
     let master_secret_key = key_from_mnemonic_str(&mnemonic.to_string())?;
@@ -66,7 +66,7 @@ pub fn create_cold_wallet() -> Result<(), Error> {
             .map_err(|e| Error::new(ErrorKind::InvalidInput, format!("MasterKey: {e:?}")))?;
         let address = encode_puzzle_hash(
             &puzzle_hash_for_pk(Bytes48::from(wallet_sk.sk_to_pk().to_bytes()))?,
-            "xch",
+            &network.bech32_prefix,
         )?;
         info!("Index: {i}, Address: {address}");
     }

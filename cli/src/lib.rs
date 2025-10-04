@@ -751,7 +751,7 @@ pub async fn run_cli() -> Result<(), Error> {
         }
         RootCommands::CreateWallet { action } => match action {
             WalletAction::WithNFT { .. } => {}
-            WalletAction::Cold => create_cold_wallet()?,
+            WalletAction::Cold => create_cold_wallet(constants.as_ref())?,
         },
         RootCommands::Curry {
             program,
