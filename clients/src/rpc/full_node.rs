@@ -39,13 +39,13 @@ pub type UrlFunction = Arc<dyn Fn(&str, u16, &str) -> String + Send + Sync + 'st
 
 #[derive(Clone)]
 pub struct FullnodeClient {
-    client: Client,
+    pub client: Client,
     pub secure: bool,
     pub host: String,
     pub port: u16,
     pub ssl_path: Option<ClientSSLConfig>,
     pub additional_headers: Option<HashMap<String, String>>,
-    url_function: UrlFunction,
+    pub url_function: UrlFunction,
 }
 
 impl FullnodeClient {
@@ -91,7 +91,7 @@ impl FullnodeAPI for FullnodeClient {
             &self.additional_headers,
         )
         .await?
-        .blockchain_state)
+        .result)
     }
     async fn get_block(&self, header_hash: &Bytes32) -> Result<FullBlock, ChiaRpcError> {
         let mut request_body = Map::new();
@@ -103,7 +103,7 @@ impl FullnodeAPI for FullnodeClient {
             &self.additional_headers,
         )
         .await?
-        .block)
+        .result)
     }
     // async fn get_blocks(
     //     &self,
@@ -131,7 +131,7 @@ impl FullnodeAPI for FullnodeClient {
             &self.additional_headers,
         )
         .await?
-        .blocks)
+        .result)
     }
     async fn get_all_blocks(&self, start: u32, end: u32) -> Result<Vec<FullBlock>, ChiaRpcError> {
         self.get_blocks(start, end, true, false).await
@@ -144,7 +144,7 @@ impl FullnodeAPI for FullnodeClient {
             &self.additional_headers,
         )
         .await?
-        .metrics)
+        .result)
     }
     async fn get_block_record_by_height(&self, height: u32) -> Result<BlockRecord, ChiaRpcError> {
         let mut request_body = Map::new();
@@ -156,7 +156,7 @@ impl FullnodeAPI for FullnodeClient {
             &self.additional_headers,
         )
         .await?
-        .block_record)
+        .result)
     }
     async fn get_block_record(&self, header_hash: &Bytes32) -> Result<BlockRecord, ChiaRpcError> {
         let mut request_body = Map::new();
@@ -168,7 +168,7 @@ impl FullnodeAPI for FullnodeClient {
             &self.additional_headers,
         )
         .await?
-        .block_record)
+        .result)
     }
     async fn get_block_records(
         &self,
@@ -185,7 +185,7 @@ impl FullnodeAPI for FullnodeClient {
             &self.additional_headers,
         )
         .await?
-        .block_records)
+        .result)
     }
     async fn get_unfinished_block_headers(
         &self,
@@ -201,7 +201,7 @@ impl FullnodeAPI for FullnodeClient {
             &self.additional_headers,
         )
         .await?
-        .headers)
+        .result)
     }
     async fn get_network_space(
         &self,
@@ -224,7 +224,7 @@ impl FullnodeAPI for FullnodeClient {
             &self.additional_headers,
         )
         .await?
-        .space)
+        .result)
     }
     async fn get_network_space_by_height(
         &self,
@@ -249,7 +249,7 @@ impl FullnodeAPI for FullnodeClient {
             &self.additional_headers,
         )
         .await?;
-        Ok((resp.additions, resp.removals))
+        Ok((resp.result.additions, resp.result.removals))
     }
     async fn get_initial_freeze_period(&self) -> Result<u64, ChiaRpcError> {
         Ok(post::<InitialFreezePeriodResp, RandomState>(
@@ -259,7 +259,7 @@ impl FullnodeAPI for FullnodeClient {
             &self.additional_headers,
         )
         .await?
-        .initial_freeze_end_timestamp)
+        .result)
     }
     async fn get_network_info(&self) -> Result<NetworkInfo, ChiaRpcError> {
         let resp = post::<NetworkInfoResp, RandomState>(
@@ -270,8 +270,8 @@ impl FullnodeAPI for FullnodeClient {
         )
         .await?;
         Ok(NetworkInfo {
-            network_name: resp.network_name,
-            network_prefix: resp.network_prefix,
+            network_name: resp.result.network_name,
+            network_prefix: resp.result.network_prefix,
         })
     }
     async fn get_recent_signage_point_or_eos(
@@ -303,10 +303,10 @@ impl FullnodeAPI for FullnodeClient {
         )
         .await?;
         Ok(SignagePointOrEOS {
-            signage_point: resp.signage_point,
-            eos: resp.eos,
-            time_received: resp.time_received,
-            reverted: resp.reverted,
+            signage_point: resp.result.signage_point,
+            eos: resp.result.eos,
+            time_received: resp.result.time_received,
+            reverted: resp.result.reverted,
         })
     }
     async fn get_coin_records_by_puzzle_hash(
@@ -341,7 +341,7 @@ impl FullnodeAPI for FullnodeClient {
             &self.additional_headers,
         )
         .await?
-        .coin_records)
+        .result)
     }
     async fn get_coin_records_by_puzzle_hashes(
         &self,
@@ -373,7 +373,7 @@ impl FullnodeAPI for FullnodeClient {
             &self.additional_headers,
         )
         .await?
-        .coin_records)
+        .result)
     }
     async fn get_coin_record_by_name(
         &self,
@@ -388,7 +388,7 @@ impl FullnodeAPI for FullnodeClient {
             &self.additional_headers,
         )
         .await?
-        .coin_record)
+        .result)
     }
     async fn get_coin_records_by_names(
         &self,
@@ -415,7 +415,7 @@ impl FullnodeAPI for FullnodeClient {
             &self.additional_headers,
         )
         .await?
-        .coin_records)
+        .result)
     }
     async fn get_coin_records_by_parent_ids(
         &self,
@@ -444,7 +444,7 @@ impl FullnodeAPI for FullnodeClient {
             &self.additional_headers,
         )
         .await?
-        .coin_records)
+        .result)
     }
     async fn get_coin_records_by_hint(
         &self,
@@ -474,7 +474,7 @@ impl FullnodeAPI for FullnodeClient {
             &self.additional_headers,
         )
         .await?
-        .coin_records)
+        .result)
     }
     async fn push_tx(&self, spend_bundle: &SpendBundle) -> Result<TXStatus, ChiaRpcError> {
         let mut retries = 0;
@@ -490,7 +490,7 @@ impl FullnodeAPI for FullnodeClient {
             .await
             {
                 Ok(v) => {
-                    return Ok(v.status);
+                    return Ok(v.result);
                 }
                 Err(e) => {
                     error!("Failed to Push TX({retries}): {e:?}");
@@ -518,7 +518,7 @@ impl FullnodeAPI for FullnodeClient {
             &self.additional_headers,
         )
         .await?
-        .coin_solution)
+        .result)
     }
     async fn get_coin_spend(&self, coin_record: &CoinRecord) -> Result<CoinSpend, ChiaRpcError> {
         self.get_puzzle_and_solution(&coin_record.coin.name(), coin_record.spent_block_index)
@@ -532,7 +532,7 @@ impl FullnodeAPI for FullnodeClient {
             &self.additional_headers,
         )
         .await?
-        .tx_ids)
+        .result)
     }
     async fn get_all_mempool_items(&self) -> Result<HashMap<Bytes32, MempoolItem>, ChiaRpcError> {
         Ok(post::<MempoolItemsResp, RandomState>(
@@ -542,7 +542,7 @@ impl FullnodeAPI for FullnodeClient {
             &self.additional_headers,
         )
         .await?
-        .mempool_items)
+        .result)
     }
     async fn get_mempool_item_by_tx_id(&self, tx_id: &str) -> Result<MempoolItem, ChiaRpcError> {
         let mut request_body = Map::new();
@@ -554,7 +554,7 @@ impl FullnodeAPI for FullnodeClient {
             &self.additional_headers,
         )
         .await?
-        .mempool_item)
+        .result)
     }
     async fn get_mempool_items_by_coin_name(
         &self,
@@ -573,7 +573,7 @@ impl FullnodeAPI for FullnodeClient {
             &self.additional_headers,
         )
         .await?
-        .mempool_items)
+        .result)
     }
     async fn get_fee_estimate(
         &self,
@@ -620,7 +620,7 @@ impl FullnodeExtAPI for FullnodeClient {
             &self.additional_headers,
         )
         .await?;
-        Ok((resp.additions, resp.removals))
+        Ok((resp.result.additions, resp.result.removals))
     }
     async fn get_singleton_by_launcher_id(
         &self,
@@ -639,7 +639,7 @@ impl FullnodeExtAPI for FullnodeClient {
             &self.additional_headers,
         )
         .await?;
-        Ok((resp.coin_record, resp.parent_spend))
+        Ok((resp.result.coin_record, resp.result.parent_spend))
     }
 
     async fn get_coin_records_by_hints(
@@ -670,7 +670,7 @@ impl FullnodeExtAPI for FullnodeClient {
             &self.additional_headers,
         )
         .await?
-        .coin_records)
+        .result)
     }
 
     async fn get_coin_records_by_hints_paginated(
@@ -710,7 +710,7 @@ impl FullnodeExtAPI for FullnodeClient {
         )
         .await?;
 
-        Ok((resp.coin_records, resp.last_id, resp.total_coin_count))
+        Ok((resp.result.coin_records, resp.result.last_id, resp.result.total_coin_count))
     }
 
     async fn get_coin_records_by_puzzle_hashes_paginated(
@@ -749,7 +749,7 @@ impl FullnodeExtAPI for FullnodeClient {
         )
         .await?;
 
-        Ok((resp.coin_records, resp.last_id, resp.total_coin_count))
+        Ok((resp.result.coin_records, resp.result.last_id, resp.result.total_coin_count))
     }
 
     async fn get_hints_by_coin_ids(
@@ -765,7 +765,7 @@ impl FullnodeExtAPI for FullnodeClient {
             &self.additional_headers,
         )
         .await?
-        .coin_id_hints)
+        .result)
     }
 
     async fn get_puzzles_and_solutions_by_names(
@@ -798,6 +798,6 @@ impl FullnodeExtAPI for FullnodeClient {
             &self.additional_headers,
         )
         .await?
-        .coin_solutions)
+        .result)
     }
 }

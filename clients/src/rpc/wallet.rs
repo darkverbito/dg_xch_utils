@@ -53,7 +53,7 @@ impl WalletAPI for WalletClient {
             &self.additional_headers,
         )
         .await?
-        .fingerprint)
+        .result)
     }
     async fn log_in_and_skip(&self, wallet_fingerprint: u32) -> Result<u32, ChiaRpcError> {
         let mut request_body = Map::new();
@@ -65,7 +65,7 @@ impl WalletAPI for WalletClient {
             &self.additional_headers,
         )
         .await?
-        .fingerprint)
+        .result)
     }
     async fn get_wallets(&self) -> Result<Vec<WalletInfo>, ChiaRpcError> {
         Ok(post::<WalletInfoResp, RandomState>(
@@ -75,7 +75,7 @@ impl WalletAPI for WalletClient {
             &self.additional_headers,
         )
         .await?
-        .wallets)
+        .result)
     }
     async fn get_wallet_balance(&self, wallet_id: u32) -> Result<Vec<WalletBalance>, ChiaRpcError> {
         let mut request_body = Map::new();
@@ -87,7 +87,7 @@ impl WalletAPI for WalletClient {
             &self.additional_headers,
         )
         .await?
-        .wallets)
+        .result)
     }
     async fn get_sync_status(&self) -> Result<WalletSync, ChiaRpcError> {
         let resp = post::<WalletSyncResp, RandomState>(
@@ -98,9 +98,9 @@ impl WalletAPI for WalletClient {
         )
         .await?;
         Ok(WalletSync {
-            genesis_initialized: resp.genesis_initialized,
-            synced: resp.synced,
-            syncing: resp.syncing,
+            genesis_initialized: resp.result.genesis_initialized,
+            synced: resp.result.synced,
+            syncing: resp.result.syncing,
         })
     }
     async fn send_transaction(
@@ -122,7 +122,7 @@ impl WalletAPI for WalletClient {
             &self.additional_headers,
         )
         .await?
-        .transaction)
+        .result)
     }
     async fn send_transaction_multi(
         &self,
@@ -141,7 +141,7 @@ impl WalletAPI for WalletClient {
             &self.additional_headers,
         )
         .await?
-        .transaction)
+        .result)
     }
     async fn get_transaction(
         &self,
@@ -158,7 +158,7 @@ impl WalletAPI for WalletClient {
             &self.additional_headers,
         )
         .await?
-        .transaction)
+        .result)
     }
     async fn create_signed_transaction(
         &self,
@@ -186,6 +186,6 @@ impl WalletAPI for WalletClient {
             &self.additional_headers,
         )
         .await?
-        .signed_tx)
+        .result)
     }
 }

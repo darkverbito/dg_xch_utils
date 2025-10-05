@@ -4,3 +4,4 @@ target/
 *.iml
 publish.sh
 config.yaml
+*.sqlite
