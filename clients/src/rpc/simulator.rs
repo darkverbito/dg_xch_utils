@@ -1,7 +1,6 @@
-use crate::api::full_node::FullnodeAPI;
-use crate::api::responses::{AutoFarmResp, EmptyResponse};
+use crate::api::responses::simulator_responses::{AutoFarmResp};
 use crate::api::simulator::SimulatorAPI;
-use crate::rpc::full_node::{FullnodeClient, UrlFunction};
+use crate::rpc::full_node::{FullnodeAPI, FullnodeClient, FullnodeHelpers};
 use crate::rpc::{ChiaRpcError, get_http_client, get_insecure_url, post};
 use async_trait::async_trait;
 use dg_xch_core::blockchain::block_record::BlockRecord;
@@ -24,6 +23,7 @@ use std::collections::HashMap;
 use std::hash::RandomState;
 use std::io::Error;
 use std::sync::Arc;
+use crate::api::responses::{EmptyResponse, UrlFunction};
 
 pub struct SimulatorClient {
     client: Client,
@@ -102,6 +102,7 @@ impl SimulatorAPI for SimulatorClient {
         .await?)
     }
 }
+
 #[async_trait]
 impl FullnodeAPI for SimulatorClient {
     async fn get_blockchain_state(&self) -> Result<BlockchainState, ChiaRpcError> {
@@ -120,9 +121,6 @@ impl FullnodeAPI for SimulatorClient {
         self.full_node_client
             .get_blocks(start, end, exclude_header_hash, exclude_reorged)
             .await
-    }
-    async fn get_all_blocks(&self, start: u32, end: u32) -> Result<Vec<FullBlock>, ChiaRpcError> {
-        self.full_node_client.get_all_blocks(start, end).await
     }
     async fn get_block_count_metrics(&self) -> Result<BlockCountMetrics, ChiaRpcError> {
         self.full_node_client.get_block_count_metrics().await
@@ -156,15 +154,7 @@ impl FullnodeAPI for SimulatorClient {
             .get_network_space(older_block_header_hash, newer_block_header_hash)
             .await
     }
-    async fn get_network_space_by_height(
-        &self,
-        older_block_height: u32,
-        newer_block_height: u32,
-    ) -> Result<u64, ChiaRpcError> {
-        self.full_node_client
-            .get_network_space_by_height(older_block_height, newer_block_height)
-            .await
-    }
+
     async fn get_additions_and_removals(
         &self,
         header_hash: &Bytes32,
@@ -173,9 +163,7 @@ impl FullnodeAPI for SimulatorClient {
             .get_additions_and_removals(header_hash)
             .await
     }
-    async fn get_initial_freeze_period(&self) -> Result<u64, ChiaRpcError> {
-        self.full_node_client.get_initial_freeze_period().await
-    }
+
     async fn get_network_info(&self) -> Result<NetworkInfo, ChiaRpcError> {
         self.full_node_client.get_network_info().await
     }
@@ -276,9 +264,6 @@ impl FullnodeAPI for SimulatorClient {
             .get_puzzle_and_solution(coin_id, height)
             .await
     }
-    async fn get_coin_spend(&self, coin_record: &CoinRecord) -> Result<CoinSpend, ChiaRpcError> {
-        self.full_node_client.get_coin_spend(coin_record).await
-    }
     async fn get_all_mempool_tx_ids(&self) -> Result<Vec<Bytes32>, ChiaRpcError> {
         self.full_node_client.get_all_mempool_tx_ids().await
     }
@@ -307,5 +292,22 @@ impl FullnodeAPI for SimulatorClient {
         self.full_node_client
             .get_fee_estimate(cost, spend_bundle, spend_type, target_times)
             .await
+    }
+}
+
+impl SimulatorClient {
+    pub async fn get_all_blocks(&self, start: u32, end: u32) -> Result<Vec<FullBlock>, ChiaRpcError>
+    {
+        self.full_node_client.get_all_blocks(start, end).await
+    }
+
+    pub async fn get_network_space_by_height(&self, a: u32, b: u32) -> Result<u64, ChiaRpcError>
+    {
+        self.full_node_client.get_network_space_by_height(a, b).await
+    }
+
+    pub async fn get_coin_spend(&self, cr: &CoinRecord) -> Result<CoinSpend, ChiaRpcError>
+    {
+        self.full_node_client.get_coin_spend(cr).await
     }
 }

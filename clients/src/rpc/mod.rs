@@ -1,7 +1,7 @@
 pub mod full_node;
 pub mod simulator;
 pub mod wallet;
-pub mod full_node_rpc_generator;
+pub mod rpc_generator;
 
 use crate::ClientSSLConfig;
 use dg_xch_core::constants::{CHIA_CA_CRT, CHIA_CA_KEY};
