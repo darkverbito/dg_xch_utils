@@ -5,7 +5,7 @@ members = [
     "cli",
     "clients",
     "core",
-    "gui",
+    "gui/src-tauri",
     "keys",
     "logging",
     "macros",

@@ -210,6 +210,14 @@ pub fn key_from_mnemonic(mnemonic: &Mnemonic) -> Result<SecretKey, Error> {
         .map_err(|e| Error::new(ErrorKind::InvalidInput, format!("{e:?}")))
 }
 
+pub fn random_key() -> Result<SecretKey, Error> {
+    let seed = Mnemonic::generate(24)
+        .map_err(|e| Error::new(ErrorKind::InvalidInput, format!("{e:?}")))?
+        .to_seed("");
+    SecretKey::key_gen_v3(&seed, &[])
+        .map_err(|e| Error::new(ErrorKind::InvalidInput, format!("{e:?}")))
+}
+
 #[must_use]
 pub fn fingerprint(key: &PublicKey) -> u32 {
     let mut int_buf = [0; size_of::<u32>()];
