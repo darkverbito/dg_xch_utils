@@ -188,7 +188,7 @@ pub struct RespondPeers {
 
 #[derive(ChiaSerial, Clone, PartialEq, Serialize, Deserialize, Debug)]
 pub struct FeeEstimate {
-    estimates: Vec<u64>,
+    pub estimates: Vec<u64>,
     target_times: Vec<u64>,
     current_fee_rate: f64,
     mempool_size: u64,
