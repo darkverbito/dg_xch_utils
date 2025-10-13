@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use std::io::Error;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
+use tauri::async_runtime::JoinHandle;
 use tauri::{Manager, State};
-use tokio::task::JoinHandle;
 
 pub mod commands;
 pub mod secrets;
@@ -46,7 +46,7 @@ pub fn run() {
                 Ok(mut threads) => {
                     let wallets = state.wallets.clone();
                     let loaded_profiles = state.loaded_profiles.clone();
-                    threads.push(tokio::spawn(async move {
+                    threads.push(tauri::async_runtime::spawn(async move {
                         sync_wallets(loaded_profiles, wallets, background_run_handle).await
                     }));
                 }
