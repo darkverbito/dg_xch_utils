@@ -1,9 +1,10 @@
-use crate::{generate_rpc, ClientSSLConfig};
+use crate::api::responses::UrlFunction;
 use crate::api::responses::wallet_responses::{
     LoginResp, SignedTransactionRecordResp, TransactionRecordResp, WalletBalanceResp,
     WalletInfoResp, WalletSyncResp,
 };
 use crate::rpc::{get_client, get_url};
+use crate::{ClientSSLConfig, generate_rpc};
 use dg_xch_core::blockchain::announcement::Announcement;
 use dg_xch_core::blockchain::coin::Coin;
 use dg_xch_core::blockchain::transaction_record::TransactionRecord;
@@ -14,8 +15,6 @@ use dg_xch_core::blockchain::wallet_type::AmountWithPuzzleHash;
 use reqwest::Client;
 use std::collections::HashMap;
 use std::sync::Arc;
-use crate::api::responses::UrlFunction;
-
 
 pub struct WalletClient {
     client: Client,

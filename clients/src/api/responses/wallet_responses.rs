@@ -1,8 +1,8 @@
-use serde::{Deserialize, Serialize};
 use dg_xch_core::blockchain::transaction_record::TransactionRecord;
 use dg_xch_core::blockchain::wallet_balance::WalletBalance;
 use dg_xch_core::blockchain::wallet_info::WalletInfo;
 use dg_xch_core::blockchain::wallet_sync::WalletSync;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LoginResp {

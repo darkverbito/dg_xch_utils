@@ -1,4 +1,5 @@
-use crate::api::responses::simulator_responses::{AutoFarmResp};
+use crate::api::responses::simulator_responses::AutoFarmResp;
+use crate::api::responses::{EmptyResponse, UrlFunction};
 use crate::api::simulator::SimulatorAPI;
 use crate::rpc::full_node::{FullnodeAPI, FullnodeClient, FullnodeHelpers};
 use crate::rpc::{ChiaRpcError, get_http_client, get_insecure_url, post};
@@ -23,7 +24,6 @@ use std::collections::HashMap;
 use std::hash::RandomState;
 use std::io::Error;
 use std::sync::Arc;
-use crate::api::responses::{EmptyResponse, UrlFunction};
 
 pub struct SimulatorClient {
     client: Client,
@@ -296,18 +296,21 @@ impl FullnodeAPI for SimulatorClient {
 }
 
 impl SimulatorClient {
-    pub async fn get_all_blocks(&self, start: u32, end: u32) -> Result<Vec<FullBlock>, ChiaRpcError>
-    {
+    pub async fn get_all_blocks(
+        &self,
+        start: u32,
+        end: u32,
+    ) -> Result<Vec<FullBlock>, ChiaRpcError> {
         self.full_node_client.get_all_blocks(start, end).await
     }
 
-    pub async fn get_network_space_by_height(&self, a: u32, b: u32) -> Result<u64, ChiaRpcError>
-    {
-        self.full_node_client.get_network_space_by_height(a, b).await
+    pub async fn get_network_space_by_height(&self, a: u32, b: u32) -> Result<u64, ChiaRpcError> {
+        self.full_node_client
+            .get_network_space_by_height(a, b)
+            .await
     }
 
-    pub async fn get_coin_spend(&self, cr: &CoinRecord) -> Result<CoinSpend, ChiaRpcError>
-    {
+    pub async fn get_coin_spend(&self, cr: &CoinRecord) -> Result<CoinSpend, ChiaRpcError> {
         self.full_node_client.get_coin_spend(cr).await
     }
 }

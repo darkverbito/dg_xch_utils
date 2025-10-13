@@ -3,8 +3,16 @@ use ts_rs::TS;
 
 #[derive(TS, Clone, Deserialize, Serialize)]
 #[ts(export)]
+pub enum ProfileState {
+    Encrypted,
+    Decrypted,
+}
+
+#[derive(TS, Clone, Deserialize, Serialize)]
+#[ts(export)]
 pub struct Profile {
     pub id: u64,
+    pub state: ProfileState,
     pub name: String,
     pub image_hash: [u8; 32],
     pub description: String,

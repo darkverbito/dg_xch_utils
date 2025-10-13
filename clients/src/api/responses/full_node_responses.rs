@@ -10,11 +10,11 @@ use dg_xch_core::blockchain::tx_status::TXStatus;
 use dg_xch_core::blockchain::unfinished_header_block::UnfinishedHeaderBlock;
 use dg_xch_core::protocols::full_node::{BlockCountMetrics, FeeEstimate};
 
+use dg_xch_core::blockchain::network_info::NetworkInfo;
+use dg_xch_core::blockchain::signage_point_or_eos::SignagePointOrEOS;
 use dg_xch_core::blockchain::sized_bytes::Bytes32;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use dg_xch_core::blockchain::network_info::NetworkInfo;
-use dg_xch_core::blockchain::signage_point_or_eos::SignagePointOrEOS;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AdditionsAndRemovalsResp {
@@ -123,7 +123,7 @@ pub struct PaginatedCoinRecordAryResp {
     pub success: bool,
 }
 
-impl From<PaginatedCoinRecordAryResp> for  (Vec<PaginatedCoinRecord>, Option<Bytes32>, Option<i32>) {
+impl From<PaginatedCoinRecordAryResp> for (Vec<PaginatedCoinRecord>, Option<Bytes32>, Option<i32>) {
     fn from(a: PaginatedCoinRecordAryResp) -> Self {
         (a.coin_records, a.last_id, a.total_coin_count)
     }

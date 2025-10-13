@@ -1,16 +1,89 @@
+use chacha20poly1305::aead::Aead;
+use chacha20poly1305::aead::generic_array::GenericArray;
+use chacha20poly1305::consts::U32;
+use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use lifehash_lib::Version::Version2;
 use lifehash_lib::lifehash;
+use log::info;
 use petname::{Generator, Petnames};
 use rand_chacha::ChaCha20Rng;
 use rand_chacha::rand_core::SeedableRng;
-use sha2::{Digest, Sha256};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 use shared_types::RgbaImage;
+use std::fs;
+use std::fs::File;
+use std::io::Write;
+use tauri::Manager;
 
 pub fn petname(data: &[u8]) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
     let sha256: [u8; 32] = Sha256::digest(data).into();
     Petnames::medium()
         .generate(&mut ChaCha20Rng::from_seed(sha256), 2, "-")
         .ok_or("Failed to generate petname".to_string())
+}
+
+fn hash_256(data: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(data).into()
+}
+
+pub fn encrypt(data: &[u8], password: &[u8], nonce: [u8; 24]) -> Result<Vec<u8>, String> {
+    use chacha20poly1305::KeyInit;
+    let encryption_key: [u8; 32] = hash_256(password);
+    let key: GenericArray<u8, U32> = GenericArray::<u8, U32>::from(encryption_key);
+    let chacha_key = XChaCha20Poly1305::new(&key);
+    let chacha_nonce = XNonce::from(nonce);
+    chacha_key
+        .encrypt(&chacha_nonce, data)
+        .map_err(|e| e.to_string())
+}
+
+pub fn decrypt(data: &[u8], password: &[u8], nonce: [u8; 24]) -> Result<Vec<u8>, String> {
+    use chacha20poly1305::KeyInit;
+    let encryption_key: [u8; 32] = hash_256(password);
+    let key: GenericArray<u8, U32> = GenericArray::<u8, U32>::from(encryption_key);
+    let chacha_key = XChaCha20Poly1305::new(&key);
+    let chacha_nonce = XNonce::from(nonce);
+    chacha_key
+        .decrypt(&chacha_nonce, data)
+        .map_err(|e| e.to_string())
+}
+
+pub fn load_config_file<T: DeserializeOwned>(
+    app: tauri::AppHandle,
+    file_name: &str,
+) -> Result<Option<T>, String> {
+    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let file_path = dir.join(file_name);
+    info!("Loading {file_name} from {:?}", file_path);
+    if !file_path.exists() {
+        Ok(None)
+    } else {
+        serde_json::from_reader(File::open(file_path).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())
+            .map(Some)
+    }
+}
+
+pub fn save_config_file<T: Serialize>(
+    app: tauri::AppHandle,
+    file_name: &str,
+    data: &T,
+) -> Result<(), String> {
+    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let file_path = dir.join(file_name);
+    info!("Saving {file_name} to {:?}", file_path);
+    let mut file = File::create(file_name).map_err(|e| e.to_string())?;
+    file.write_all(
+        serde_json::to_string_pretty(data)
+            .map_err(|e| e.to_string())?
+            .as_bytes(),
+    )
+    .map_err(|e| e.to_string())
 }
 
 pub fn lifehash(data: &'_ [u8]) -> Result<RgbaImage, String> {

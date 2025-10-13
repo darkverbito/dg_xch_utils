@@ -1,7 +1,7 @@
 pub mod full_node;
+pub mod rpc_generator;
 pub mod simulator;
 pub mod wallet;
-pub mod rpc_generator;
 
 use crate::ClientSSLConfig;
 use dg_xch_core::constants::{CHIA_CA_CRT, CHIA_CA_KEY};
@@ -156,19 +156,19 @@ where
     })?;
 
     // Respect RPC envelope: success must be true for Ok(...)
-    if let Some(success) = val.get("success").and_then(|b| b.as_bool()) {
-        if !success {
-            // Extract server error if present
-            let err_msg = val
-                .get("error")
-                .and_then(|e| e.as_str())
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| format!("server returned success=false: {body}"));
-            return Err(ChiaRpcError {
-                error: Some(err_msg),
-                success: false,
-            });
-        }
+    if let Some(success) = val.get("success").and_then(|b| b.as_bool())
+        && !success
+    {
+        // Extract server error if present
+        let err_msg = val
+            .get("error")
+            .and_then(|e| e.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("server returned success=false: {body}"));
+        return Err(ChiaRpcError {
+            error: Some(err_msg),
+            success: false,
+        });
     }
 
     // Now decode into T. If this fails while success==true, it's a decode error (still an error).

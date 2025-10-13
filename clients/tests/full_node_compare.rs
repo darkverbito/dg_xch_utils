@@ -1,16 +1,13 @@
-use std::fs;
-use std::path::PathBuf;
-use serde::{Deserialize, Serialize};
-use serde_json::{to_value, Value};
-use dg_xch_core::blockchain::{
-    block_record::BlockRecord,
-    coin_record::CoinRecord,
-    full_block::FullBlock,
-    sized_bytes::Bytes32,
-};
-use dg_xch_core::blockchain::network_info::NetworkInfo;
 use dg_xch_clients::rpc::full_node::FullnodeAPI;
 use dg_xch_clients::rpc::full_node::FullnodeClient;
+use dg_xch_core::blockchain::network_info::NetworkInfo;
+use dg_xch_core::blockchain::{
+    block_record::BlockRecord, coin_record::CoinRecord, full_block::FullBlock, sized_bytes::Bytes32,
+};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, to_value};
+use std::fs;
+use std::path::PathBuf;
 
 // -------- stable compare helpers (no mempool, no fee) --------
 
@@ -22,10 +19,11 @@ where
     let l: Value = to_value(left).expect("left to JSON");
     let r: Value = to_value(right).expect("right to JSON");
     if l != r {
-        panic!("{} mismatch\nleft:\n{}\nright:\n{}",
-               label,
-               serde_json::to_string_pretty(&l).unwrap(),
-               serde_json::to_string_pretty(&r).unwrap()
+        panic!(
+            "{} mismatch\nleft:\n{}\nright:\n{}",
+            label,
+            serde_json::to_string_pretty(&l).unwrap(),
+            serde_json::to_string_pretty(&r).unwrap()
         );
     }
 }
@@ -57,9 +55,7 @@ struct FullnodeFixture {
 }
 
 async fn choose_height(c: &impl FullnodeAPI) -> u32 {
-    const CANDIDATES: &[u32] = &[
-        7_500_000, 1_000_000, 500_000, 100_000, 10_000, 1_000, 1,
-    ];
+    const CANDIDATES: &[u32] = &[7_500_000, 1_000_000, 500_000, 100_000, 10_000, 1_000, 1];
     for &h in CANDIDATES {
         if c.get_block_record_by_height(h).await.is_ok() {
             return h;
@@ -109,8 +105,11 @@ fn write_fixture(fx: &FullnodeFixture) {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir).expect("create fixtures dir");
     }
-    fs::write(&path, serde_json::to_string_pretty(fx).expect("serialize fixture"))
-        .unwrap_or_else(|e| panic!("write fixture {}: {e}", path.display()));
+    fs::write(
+        &path,
+        serde_json::to_string_pretty(fx).expect("serialize fixture"),
+    )
+    .unwrap_or_else(|e| panic!("write fixture {}: {e}", path.display()));
 }
 
 fn read_fixture() -> FullnodeFixture {
@@ -155,7 +154,10 @@ mod tests {
             .expect("block_record_by_height");
         assert_json_eq(&br_now, &fx_old.block_record, "block_record_by_height");
 
-        let blk_now = client.get_block(&fx_old.header_hash).await.expect("get_block");
+        let blk_now = client
+            .get_block(&fx_old.header_hash)
+            .await
+            .expect("get_block");
         assert_json_eq(&blk_now, &fx_old.block, "get_block");
 
         // additions/removals can be tuple or object depending on server; normalize to object
@@ -178,8 +180,8 @@ mod tests {
 
     #[tokio::test]
     async fn fullnode_smoke_other_endpoints() {
-        use dg_xch_clients::rpc::full_node::FullnodeClient;
         use dg_xch_clients::rpc::full_node::FullnodeAPI;
+        use dg_xch_clients::rpc::full_node::FullnodeClient;
 
         let c = FullnodeClient::new("druid.garden", 443, 30, None, &None).unwrap();
 
@@ -189,27 +191,48 @@ mod tests {
         // --- Mostly-stable calls that can be anchored by height/hash ---
 
         // get_blockchain_state: decode-only (live info)
-        let _ = c.get_blockchain_state().await.expect("get_blockchain_state");
+        let _ = c
+            .get_blockchain_state()
+            .await
+            .expect("get_blockchain_state");
 
         // small window around height
         let start = fx_old.height.saturating_sub(3);
         let end = fx_old.height;
-        let _ = c.get_block_records(start, end).await.expect("get_block_records");
-        let _ = c.get_blocks(start, end, false, true).await.expect("get_blocks");
+        let _ = c
+            .get_block_records(start, end)
+            .await
+            .expect("get_block_records");
+        let _ = c
+            .get_blocks(start, end, false, true)
+            .await
+            .expect("get_blocks");
 
         // By header hash directly
-        let _ = c.get_block_record(&fx_old.header_hash).await.expect("get_block_record");
+        let _ = c
+            .get_block_record(&fx_old.header_hash)
+            .await
+            .expect("get_block_record");
 
         // Prefer the exact prev hash recorded in the baseline (guaranteed adjacent)
         let prev_hash_from_fixture = fx_old.block_record.prev_hash;
 
         // First try with the baseline's prev hash -> current hash
-        if let Err(e) = c.get_network_space(&prev_hash_from_fixture, &fx_old.header_hash).await {
+        if let Err(e) = c
+            .get_network_space(&prev_hash_from_fixture, &fx_old.header_hash)
+            .await
+        {
             eprintln!("get_network_space(prev..current) via baseline prev_hash skipped: {e:?}");
 
             // Fallback: fetch height-1 record and try again (may still fail if node prunes/caches)
-            if let Ok(br_prev) = c.get_block_record_by_height(fx_old.height.saturating_sub(1)).await {
-                if let Err(e2) = c.get_network_space(&br_prev.header_hash, &fx_old.header_hash).await {
+            if let Ok(br_prev) = c
+                .get_block_record_by_height(fx_old.height.saturating_sub(1))
+                .await
+            {
+                if let Err(e2) = c
+                    .get_network_space(&br_prev.header_hash, &fx_old.header_hash)
+                    .await
+                {
                     eprintln!("get_network_space(prev..current) via height-1 skipped: {e2:?}");
                 }
             } else {
@@ -221,7 +244,11 @@ mod tests {
         // let _ = c.get_initial_freeze_period().await.expect("get_initial_freeze_period");
 
         // --- Try to find a nearby tx block to exercise coin endpoints (best effort) ---
-        async fn find_tx_block<C: FullnodeAPI>(cli: &C, h0: u32, back: u32) -> Option<(u32, FullBlock)> {
+        async fn find_tx_block<C: FullnodeAPI>(
+            cli: &C,
+            h0: u32,
+            back: u32,
+        ) -> Option<(u32, FullBlock)> {
             let start = h0.saturating_sub(back);
             let end = h0;
             if let Ok(recs) = cli.get_block_records(start, end).await {
@@ -238,17 +265,24 @@ mod tests {
 
         if let Some((_h_tx, blk_tx)) = find_tx_block(&c, fx_old.height, 512).await {
             // Use a reward claim coin (if present) to drive name/puzzle queries
-            if let Some(reward_coin) = blk_tx.transactions_info.as_ref()
+            if let Some(reward_coin) = blk_tx
+                .transactions_info
+                .as_ref()
                 .and_then(|ti| ti.reward_claims_incorporated.first())
             {
                 let coin_id = reward_coin.name();
                 let puzzle_hash = reward_coin.puzzle_hash;
                 // Point queries
-                let _ = c.get_coin_record_by_name(&coin_id).await.expect("get_coin_record_by_name");
-                let _ = c.get_coin_records_by_puzzle_hash(&puzzle_hash, Some(true), Some(0), Some(_h_tx))
+                let _ = c
+                    .get_coin_record_by_name(&coin_id)
+                    .await
+                    .expect("get_coin_record_by_name");
+                let _ = c
+                    .get_coin_records_by_puzzle_hash(&puzzle_hash, Some(true), Some(0), Some(_h_tx))
                     .await
                     .expect("get_coin_records_by_puzzle_hash");
-                let _ = c.get_coin_records_by_names(&[coin_id], Some(true), Some(0), Some(_h_tx))
+                let _ = c
+                    .get_coin_records_by_names(&[coin_id], Some(true), Some(0), Some(_h_tx))
                     .await
                     .expect("get_coin_records_by_names");
                 // Parents & hints may not exist; call decode-only if you want:
@@ -267,7 +301,6 @@ mod tests {
         // let _ = c.get_fee_estimate(...).await;               // node-dependent
     }
 
-
     #[test]
     fn simulator_and_headers_construction() {
         use dg_xch_clients::rpc::full_node::FullnodeClient;
@@ -279,6 +312,11 @@ mod tests {
         let mut h = HashMap::new();
         h.insert("X-Test".to_string(), "1".to_string());
         let cli = FullnodeClient::new("druid.garden", 443, 5, None, &Some(h)).unwrap();
-        assert!(cli.additional_headers.as_ref().unwrap().contains_key("X-Test"));
+        assert!(
+            cli.additional_headers
+                .as_ref()
+                .unwrap()
+                .contains_key("X-Test")
+        );
     }
 }

@@ -105,9 +105,7 @@ pub enum RootCommands {
         #[arg(long)]
         header_hash: Bytes32,
     },
-    #[command(about = "Loads InitialFreezePeriod", long_about = None)]
-    GetInitialFreezePeriod,
-    #[command(about = "Loads InitialFreezePeriod", long_about = None)]
+    #[command(about = "Loads GetNetworkInfo", long_about = None)]
     GetNetworkInfo,
     #[command(about = "Get SignagePoint or End Of Subslot, Only Provide one of sp_hash or challenge_hash", long_about = None)]
     GetSignagePointOrEOS {

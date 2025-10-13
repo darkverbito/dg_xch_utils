@@ -1,10 +1,10 @@
-pub mod wallet_responses;
 pub mod full_node_responses;
 pub mod generic;
 pub mod simulator_responses;
+pub mod wallet_responses;
 
-use std::sync::Arc;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 pub type UrlFunction = Arc<dyn Fn(&str, u16, &str) -> String + Send + Sync + 'static>;
 

@@ -5,9 +5,8 @@ use crate::wallets::plotnft_utils::{
 };
 use bip39::Mnemonic;
 use blst::min_pk::SecretKey;
-use dg_xch_clients::api::full_node::FullnodeAPI;
 use dg_xch_clients::api::pool::{DefaultPoolClient, PoolClient};
-use dg_xch_clients::rpc::full_node::FullnodeClient;
+use dg_xch_clients::rpc::full_node::{FullnodeAPI, FullnodeClient};
 use dg_xch_core::blockchain::coin_spend::CoinSpend;
 use dg_xch_core::blockchain::sized_bytes::{Bytes32, Bytes48};
 use dg_xch_core::consensus::constants::ConsensusConstants;

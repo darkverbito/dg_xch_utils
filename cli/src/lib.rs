@@ -8,9 +8,10 @@ use clap::Parser;
 use cli::{Cli, RootCommands, WalletAction, prompt_for_mnemonic};
 use dg_logger::DruidGardenLogger;
 use dg_xch_clients::ClientSSLConfig;
-use dg_xch_clients::api::full_node::{FullnodeAPI, FullnodeExtAPI};
 use dg_xch_clients::api::pool::create_pool_login_url;
-use dg_xch_clients::rpc::full_node::FullnodeClient;
+use dg_xch_clients::rpc::full_node::{
+    FullnodeAPI, FullnodeClient, FullnodeExtAPI, FullnodeHelpers,
+};
 use dg_xch_core::blockchain::sized_bytes::{Bytes32, Bytes48};
 use dg_xch_core::blockchain::spend_bundle::SpendBundle;
 use dg_xch_core::clvm::assemble::{assemble_text, is_hex};
@@ -288,18 +289,6 @@ pub async fn run_cli() -> Result<(), Error> {
         RootCommands::GetAdditionsAndRemovals { header_hash } => {
             let client = FullnodeClient::new(&host, port, timeout, ssl, &None)?;
             let results = client.get_additions_and_removals(&header_hash).await?;
-            match serde_json::to_string_pretty(&results) {
-                Ok(json) => {
-                    info!("{json}");
-                }
-                Err(e) => {
-                    error!("Failed to convert value to JSON: {e:?}");
-                }
-            }
-        }
-        RootCommands::GetInitialFreezePeriod => {
-            let client = FullnodeClient::new(&host, port, timeout, ssl, &None)?;
-            let results = client.get_initial_freeze_period().await?;
             match serde_json::to_string_pretty(&results) {
                 Ok(json) => {
                     info!("{json}");

@@ -1,6 +1,9 @@
 use crate::SERVICE;
 use keyring::Entry;
 
+#[derive(Copy, Clone)]
+pub struct NonceArray(pub [u8; 24]);
+
 pub fn set_secret(key: &str, value: &str) -> Result<(), String> {
     Entry::new(SERVICE, key)
         .and_then(|e| e.set_password(value))

@@ -1,8 +1,15 @@
-use std::collections::HashMap;
-use std::io::Error;
-use std::sync::Arc;
+use crate::api::responses::UrlFunction;
+use crate::api::responses::full_node_responses::{
+    AdditionsAndRemovalsResp, BlockCountMetricsResp, BlockRecordAryResp, BlockRecordResp,
+    BlockchainStateResp, CoinHintsResp, CoinRecordAryResp, CoinRecordResp, CoinSpendMapResp,
+    CoinSpendResp, FeeEstimateResp, FullBlockAryResp, FullBlockResp,
+    HintedAdditionsAndRemovalsResp, MempoolItemAryResp, MempoolItemResp, MempoolItemsResp,
+    MempoolTXResp, NetSpaceResp, NetworkInfoResp, PaginatedCoinRecordAryResp,
+    SignagePointOrEOSResp, SingletonByLauncherIdResp, TXResp, UnfinishedBlockAryResp,
+};
+use crate::rpc::{ChiaRpcError, get_client, get_http_client, get_insecure_url, get_url};
+use crate::{ClientSSLConfig, generate_rpc};
 use async_trait::async_trait;
-use reqwest::Client;
 use dg_xch_core::blockchain::block_record::BlockRecord;
 use dg_xch_core::blockchain::blockchain_state::BlockchainState;
 use dg_xch_core::blockchain::coin_record::{CoinRecord, HintedCoinRecord, PaginatedCoinRecord};
@@ -16,10 +23,10 @@ use dg_xch_core::blockchain::spend_bundle::SpendBundle;
 use dg_xch_core::blockchain::tx_status::TXStatus;
 use dg_xch_core::blockchain::unfinished_header_block::UnfinishedHeaderBlock;
 use dg_xch_core::protocols::full_node::{BlockCountMetrics, FeeEstimate};
-use crate::api::responses::UrlFunction;
-use crate::api::responses::full_node_responses::{AdditionsAndRemovalsResp, BlockCountMetricsResp, BlockRecordAryResp, BlockRecordResp, BlockchainStateResp, CoinHintsResp, CoinRecordAryResp, CoinRecordResp, CoinSpendMapResp, CoinSpendResp, FeeEstimateResp, FullBlockAryResp, FullBlockResp, HintedAdditionsAndRemovalsResp, MempoolItemAryResp, MempoolItemResp, MempoolItemsResp, MempoolTXResp, NetSpaceResp, NetworkInfoResp, PaginatedCoinRecordAryResp, SignagePointOrEOSResp, SingletonByLauncherIdResp, UnfinishedBlockAryResp, TXResp};
-use crate::{generate_rpc, ClientSSLConfig};
-use crate::rpc::{get_client, get_http_client, get_insecure_url, get_url, ChiaRpcError};
+use reqwest::Client;
+use std::collections::HashMap;
+use std::io::Error;
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct FullnodeClient {
@@ -148,13 +155,19 @@ pub trait FullnodeHelpers: FullnodeAPI + Send + Sync {
     async fn get_all_blocks(&self, start: u32, end: u32) -> Result<Vec<FullBlock>, ChiaRpcError> {
         self.get_blocks(start, end, true, false).await
     }
-    async fn get_network_space_by_height(&self, old_h: u32, new_h: u32) -> Result<u64, ChiaRpcError> {
+    async fn get_network_space_by_height(
+        &self,
+        old_h: u32,
+        new_h: u32,
+    ) -> Result<u64, ChiaRpcError> {
         let older = self.get_block_record_by_height(old_h).await?;
         let newer = self.get_block_record_by_height(new_h).await?;
-        self.get_network_space(&older.header_hash, &newer.header_hash).await
+        self.get_network_space(&older.header_hash, &newer.header_hash)
+            .await
     }
     async fn get_coin_spend(&self, cr: &CoinRecord) -> Result<CoinSpend, ChiaRpcError> {
-        self.get_puzzle_and_solution(&cr.coin.name(), cr.spent_block_index).await
+        self.get_puzzle_and_solution(&cr.coin.name(), cr.spent_block_index)
+            .await
     }
 }
 impl<T> FullnodeHelpers for T where T: FullnodeAPI + Send + Sync {}
