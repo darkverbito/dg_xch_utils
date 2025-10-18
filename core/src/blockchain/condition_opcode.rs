@@ -146,7 +146,7 @@ impl From<u8> for ConditionOpcode {
     }
 }
 
-impl From<&SExp> for ConditionOpcode {
+impl From<&SExp<'_>> for ConditionOpcode {
     fn from(value: &SExp) -> Self {
         value
             .atom()

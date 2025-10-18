@@ -1,4 +1,5 @@
 use crate::clvm::sexp::SExp;
+use crate::errors::ClvmError;
 use crate::formatting::{i32_from_slice, number_from_slice};
 use num_bigint::BigInt;
 use std::io::{Error, ErrorKind};
@@ -28,17 +29,11 @@ pub fn check_cost(cost: u64, max_cost: u64) -> Result<(), Error> {
     }
 }
 
-pub fn check_arg_count(args: &SExp, expected: usize, name: &str) -> Result<(), Error> {
+pub fn check_arg_count(args: &SExp, expected: usize, name: &'static str) -> Result<(), ClvmError> {
     if args.arg_count(expected) == expected {
         Ok(())
     } else {
-        Err(Error::new(
-            ErrorKind::InvalidData,
-            format!(
-                "{name} takes exactly {expected} argument{}",
-                if expected == 1 { "" } else { "s" }
-            ),
-        ))
+        Err(ClvmError::InvalidOperandArgs(name, expected))
     }
 }
 
@@ -57,7 +52,10 @@ pub fn atom<'a>(args: &'a SExp, op_name: &str) -> Result<&'a [u8], Error> {
         .map_err(|_| Error::new(ErrorKind::InvalidInput, format!("{op_name} on list")))
 }
 
-pub fn two_ints(args: &SExp, op_name: &str) -> Result<(BigInt, usize, BigInt, usize), Error> {
+pub fn two_ints(
+    args: &SExp,
+    op_name: &'static str,
+) -> Result<(BigInt, usize, BigInt, usize), Error> {
     check_arg_count(args, 2, op_name)?;
     let a0 = args.first()?;
     let a1 = args.rest()?.first()?;

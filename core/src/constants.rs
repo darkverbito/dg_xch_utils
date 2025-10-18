@@ -89,7 +89,7 @@ pub const APPLY_SEXP: SExp = SExp::Atom(AtomBuf::Borrowed(&[APPLY]));
 pub const QUOTE_SEXP: SExp = SExp::Atom(AtomBuf::Borrowed(&[QUOTE]));
 pub const NULL_SEXP: SExp = SExp::Atom(AtomBuf::Borrowed(&[]));
 pub const ONE_SEXP: SExp = SExp::Atom(AtomBuf::Borrowed(&[1]));
-pub static NULL_PROGRAM: Program<'static> = Program::new_const(NULL_SEXP);
+pub const NULL_PROGRAM: Program<'static> = Program::new_const(NULL_SEXP);
 
 //Assembler + Compiler
 pub const EOL_CHARS: [u8; 2] = [b'\r', b'\n'];

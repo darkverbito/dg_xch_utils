@@ -7,3 +7,6 @@ config.yaml
 node_modules
 gui/src-tauri/gen/schemas
 *.sqlite
+flamegraph.svg
+perf.data
+perf.data.old

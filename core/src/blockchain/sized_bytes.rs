@@ -1,5 +1,6 @@
 use crate::clvm::program::Program;
 use crate::clvm::sexp::SExp;
+use crate::errors::ClvmError;
 use crate::formatting::prep_hex_str;
 use crate::traits::SizedBytes;
 use blst::min_pk::{PublicKey, SecretKey, Signature};
@@ -146,17 +147,14 @@ impl<const SIZE: usize> SizedBytes<'_, SIZE> for SizedBytesImpl<SIZE> {
     fn new(bytes: [u8; SIZE]) -> Self {
         Self { bytes }
     }
-    fn parse(bytes: &[u8]) -> Result<Self, Error> {
+    fn parse(bytes: &[u8]) -> Result<Self, ClvmError> {
         let mut buf = [0u8; SIZE];
         if bytes.len() > SIZE {
-            Err(Error::new(
-                ErrorKind::InvalidInput,
-                format!(
-                    "Too Many Bytes Sent to parse, expected {} got {}",
-                    SIZE,
-                    bytes.len()
-                ),
-            ))
+            Err(ClvmError::InvalidInput(format!(
+                "Too Many Bytes Sent to parse, expected {} got {}",
+                SIZE,
+                bytes.len()
+            )))
         } else {
             let offset = SIZE - bytes.len();
             for (i, v) in bytes.iter().enumerate() {
@@ -231,7 +229,7 @@ impl<const SIZE: usize> Fill for SizedBytesImpl<SIZE> {
     }
 }
 impl<const SIZE: usize> FromStr for SizedBytesImpl<SIZE> {
-    type Err = Error;
+    type Err = ClvmError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         s.try_into()
@@ -309,13 +307,12 @@ impl<const SIZE: usize> IntoIterator for SizedBytesImpl<SIZE> {
     }
 }
 impl<const SIZE: usize> TryFrom<&str> for SizedBytesImpl<SIZE> {
-    type Error = Error;
+    type Error = ClvmError;
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         Self::parse(&hex::decode(prep_hex_str(value)).map_err(|e| {
-            Error::new(
-                ErrorKind::InvalidInput,
-                format!("Hex string {value} is not a Valid Bytes{SIZE}: {e:?}"),
-            )
+            ClvmError::InvalidInput(format!(
+                "Hex string {value} is not a Valid Bytes{SIZE}: {e:?}"
+            ))
         })?)
     }
 }
@@ -375,30 +372,30 @@ macro_rules! impl_sized_bytes {
             pub type $name = SizedBytesImpl<$size>;
             impl DefaultIsZeroes for SizedBytesImpl<$size> {}
             impl<'a> TryFrom<Program<'a>> for $name {
-                type Error = Error;
+                type Error = ClvmError;
                 fn try_from(value: Program) -> Result<Self, Self::Error> {
-                    let vec = value.as_vec().ok_or_else(|| Error::new(ErrorKind::InvalidInput, format!("Program is not a valid {}",  stringify!($name))))?;
+                    let vec = value.as_vec().ok_or_else(|| ClvmError::InvalidInput(format!("Program is not a valid {}",  stringify!($name))))?;
                     Self::parse(&vec)
                 }
             }
             impl<'a> TryFrom<&Program<'a>> for $name {
-                type Error = Error;
+                type Error = ClvmError;
                 fn try_from(value: &Program) -> Result<Self, Self::Error> {
-                    let vec = value.as_vec().ok_or_else(|| Error::new(ErrorKind::InvalidInput, format!("Program is not a valid {}",  stringify!($name))))?;
+                    let vec = value.as_vec().ok_or_else(|| ClvmError::InvalidInput(format!("Program is not a valid {}",  stringify!($name))))?;
                     Self::parse(&vec)
                 }
             }
-            impl TryFrom<SExp> for $name {
-                type Error = Error;
+            impl TryFrom<SExp<'_>> for $name {
+                type Error = ClvmError;
                 fn try_from(value: SExp) -> Result<Self, Self::Error> {
-                    let vec = value.as_vec().ok_or_else(|| Error::new(ErrorKind::InvalidInput, format!("SExp is not a valid {}",  stringify!($name))))?;
+                    let vec = value.as_vec().ok_or_else(|| ClvmError::InvalidInput(format!("SExp is not a valid {}",  stringify!($name))))?;
                     Self::parse(&vec)
                 }
             }
-            impl TryFrom<&SExp> for $name {
-                type Error = Error;
+            impl TryFrom<&SExp<'_>> for $name {
+                type Error = ClvmError;
                 fn try_from(value: &SExp) -> Result<Self, Self::Error> {
-                    let vec = value.as_vec().ok_or_else(|| Error::new(ErrorKind::InvalidInput, format!("SExp is not a valid {}",  stringify!($name))))?;
+                    let vec = value.as_vec().ok_or_else(|| ClvmError::InvalidInput(format!("SExp is not a valid {}",  stringify!($name))))?;
                     Self::parse(&vec)
                 }
             }
@@ -412,7 +409,7 @@ macro_rules! impl_sized_bytes {
                 fn to_bytes(&self, _version: ChiaProtocolVersion) -> Result<Vec<u8>, std::io::Error> {
                     Ok(self.bytes().to_vec())
                 }
-                fn from_bytes<T: AsRef<[u8]>>(bytes: &mut Cursor<T>, _version: ChiaProtocolVersion) -> Result<Self, Error> where Self: Sized,
+                fn from_bytes(bytes: &mut Cursor<&[u8]>, _version: ChiaProtocolVersion) -> Result<Self, Error> where Self: Sized,
                 {
                     if bytes.remaining() < $size {
                         Err(Error::new(ErrorKind::InvalidInput, format!("Failed to Parse {}, expected length {}, found {}", stringify!($name),  $size, bytes.remaining())))

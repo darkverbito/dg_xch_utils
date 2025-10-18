@@ -4,12 +4,12 @@ use crate::clvm::sexp::SExp;
 use std::io::Error;
 use std::io::ErrorKind;
 
-pub fn concat(sexps: &[SExp]) -> Result<SExp, Error> {
-    let mut buf = AtomBuf::new(vec![]);
+pub fn concat<'a>(sexps: &'_ [SExp<'a>]) -> Result<SExp<'a>, Error> {
+    let mut buf = vec![];
     for sexp in sexps {
         match sexp {
             SExp::Atom(a) => {
-                buf.extend(a);
+                buf.extend(a.as_ref());
             }
             SExp::Pair(_) => {
                 return Err(Error::new(
@@ -19,21 +19,24 @@ pub fn concat(sexps: &[SExp]) -> Result<SExp, Error> {
             }
         }
     }
-    Ok(SExp::Atom(buf))
+    Ok(SExp::Atom(AtomBuf::new(buf)))
 }
 
-pub fn curry(program: &Program, args: &[Program<'_>]) -> Program<'static> {
+pub fn curry(program: &'_ Program, args: &[Program<'_>]) -> Program<'static> {
     let mut fixed_args = Program::to(1);
     for arg in args.iter().map(Program::sexp).rev() {
         fixed_args = Program::to(&[
-            4.into(),
+            SExp::from(4),
             SExp::from(1).cons(arg.clone()),
-            fixed_args.sexp().clone(),
+            fixed_args.sexp().to_owned(),
         ]);
     }
-    Program::to([
-        Program::to(2).sexp(),
-        Program::to((1.into(), program.sexp().to_owned())).sexp(),
-        fixed_args.sexp(),
+    Program::to(&[
+        SExp::from(2),
+        Program::to((SExp::from(1), program.sexp().to_owned()))
+            .sexp()
+            .to_owned(),
+        fixed_args.sexp().to_owned(),
     ])
+    .to_owned()
 }

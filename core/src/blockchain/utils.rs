@@ -7,27 +7,27 @@ use crate::clvm::condition_utils::{
 };
 use crate::clvm::program::Program;
 use crate::consensus::constants::ConsensusConstants;
+use crate::errors::ClvmError;
 use crate::formatting::u64_to_bytes;
 use crate::traits::SizedBytes;
 use crate::utils::hash_256;
 use num_bigint::BigInt;
-use std::io::Error;
 
 pub fn additions_for_solution(
     coin_name: Bytes32,
     puzzle_reveal: &Program,
     solution: &Program,
     max_cost: u64,
-) -> Result<Vec<Coin>, Error> {
+) -> Result<Vec<Coin>, ClvmError> {
     let (map, _cost) = conditions_for_solution(puzzle_reveal, solution, max_cost)?;
-    created_outputs_for_conditions(&map, coin_name)
+    Ok(created_outputs_for_conditions(&map, coin_name))
 }
 
 pub fn fee_for_solution(
     puzzle_reveal: &Program,
     solution: &Program,
     max_cost: u64,
-) -> Result<BigInt, Error> {
+) -> Result<BigInt, ClvmError> {
     let (conditions, _cost) = conditions_for_solution(puzzle_reveal, solution, max_cost)?;
     let mut total: BigInt = 0.into();
     for condition in conditions {
@@ -45,7 +45,7 @@ pub fn pkm_pairs_for_conditions(
     conditions: &[ConditionWithArgs],
     coin: Coin,
     additional_data: &[u8],
-) -> Result<Vec<(ConditionOpcode, Bytes48, Message)>, Error> {
+) -> Result<Vec<(ConditionOpcode, Bytes48, Message)>, ClvmError> {
     let mut ret = vec![];
     let additional_data = Bytes32::parse(additional_data)?;
     for condition in conditions {
@@ -109,7 +109,7 @@ pub fn pkm_pairs_for_conditions(
 pub fn verify_agg_sig_unsafe_message(
     message: &Message,
     consensus_constants: &ConsensusConstants,
-) -> Result<(), Error> {
+) -> Result<(), ClvmError> {
     let mut buffer = consensus_constants
         .agg_sig_me_additional_data
         .bytes()
@@ -126,7 +126,7 @@ pub fn verify_agg_sig_unsafe_message(
         buffer.push(code as u8);
         forbidden_message_suffix = Bytes32::from(hash_256(&buffer));
         if message.data().ends_with(forbidden_message_suffix.as_ref()) {
-            return Err(Error::other("Invalid Condition"));
+            return Err(ClvmError::InvalidSyntax("Invalid Condition".to_string()));
         }
         buffer.pop();
     }

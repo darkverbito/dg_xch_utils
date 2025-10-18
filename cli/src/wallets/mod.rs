@@ -1045,8 +1045,9 @@ pub trait Wallet<T: WalletStore + Send + Sync, C> {
 pub fn compute_memos_for_spend(
     coin_spend: &CoinSpend,
 ) -> Result<HashMap<Bytes32, Vec<Vec<u8>>>, Error> {
-    let (_, result) = Program::from_serial(&coin_spend.puzzle_reveal)?
-        .run_with_cost(INFINITE_COST, &Program::from_serial(&coin_spend.solution)?)?;
+    let program = Program::from_serial(&coin_spend.puzzle_reveal)?;
+    let args = Program::from_serial(&coin_spend.solution)?;
+    let (_, result) = program.run_with_cost(INFINITE_COST, &args)?;
     let mut memos = HashMap::default();
     let result_list = result.as_list();
     for condition in result_list {

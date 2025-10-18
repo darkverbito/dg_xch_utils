@@ -114,10 +114,10 @@ impl dg_xch_serialize::ChiaSerialize for NewSignagePoint {
         }
         Ok(bytes)
     }
-    fn from_bytes<T: AsRef<[u8]>>(
-        bytes: &mut std::io::Cursor<T>,
+    fn from_bytes(
+        bytes: &mut std::io::Cursor<&[u8]>,
         version: ChiaProtocolVersion,
-    ) -> Result<Self, std::io::Error>
+    ) -> Result<Self, Error>
     where
         Self: Sized,
     {
@@ -222,8 +222,8 @@ impl dg_xch_serialize::ChiaSerialize for DeclareProofOfSpace {
         }
         Ok(bytes)
     }
-    fn from_bytes<T: AsRef<[u8]>>(
-        bytes: &mut std::io::Cursor<T>,
+    fn from_bytes(
+        bytes: &mut std::io::Cursor<&[u8]>,
         version: ChiaProtocolVersion,
     ) -> Result<Self, std::io::Error>
     where
@@ -302,8 +302,8 @@ impl dg_xch_serialize::ChiaSerialize for RequestSignedValues {
         }
         Ok(bytes)
     }
-    fn from_bytes<T: AsRef<[u8]>>(
-        bytes: &mut std::io::Cursor<T>,
+    fn from_bytes(
+        bytes: &mut std::io::Cursor<&[u8]>,
         version: ChiaProtocolVersion,
     ) -> Result<Self, std::io::Error>
     where

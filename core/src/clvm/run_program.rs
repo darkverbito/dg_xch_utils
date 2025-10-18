@@ -35,26 +35,26 @@ enum Operation {
 
 // `run_program` has two stacks: the operand stack (of `Node` objects) and the
 // operator stack (of Operation)
-struct RunProgramContext<D> {
+struct RunProgramContext<'a, D> {
     dialect: D,
     pre_eval: Option<PreEval>,
     posteval_stack: Vec<Box<PostEval>>,
-    val_stack: Vec<SExp>,
+    val_stack: Vec<SExp<'a>>,
     op_stack: Vec<Operation>,
 }
 
-impl<D: Dialect> RunProgramContext<D> {
-    pub fn pop(&mut self) -> Result<SExp, Error> {
+impl<D: Dialect> RunProgramContext<'_, D> {
+    pub fn pop(&mut self) -> Result<SExp<'static>, Error> {
         match self.val_stack.pop() {
             None => Err(Error::new(
                 ErrorKind::InvalidData,
                 "runtime error: value stack empty",
             )),
-            Some(k) => Ok(k),
+            Some(k) => Ok(k.to_owned()),
         }
     }
-    pub fn push(&mut self, node: SExp) {
-        self.val_stack.push(node);
+    pub fn push(&mut self, node: SExp<'static>) {
+        self.val_stack.push(node.to_owned());
     }
 }
 
@@ -79,7 +79,7 @@ const fn first_non_zero(buf: &[u8]) -> usize {
     c
 }
 
-fn traverse_path(node_index: &[u8], args: &SExp) -> Result<(u64, SExp), Error> {
+fn traverse_path<'a>(node_index: &[u8], args: &'a SExp<'a>) -> Result<(u64, SExp<'static>), Error> {
     let mut arg_list: &SExp = args;
 
     // find first non-zero byte
@@ -124,7 +124,7 @@ fn traverse_path(node_index: &[u8], args: &SExp) -> Result<(u64, SExp), Error> {
         }
         cost += TRAVERSE_COST_PER_BIT;
     }
-    Ok((cost, arg_list.clone()))
+    Ok((cost, arg_list.to_owned()))
 }
 
 fn augment_cost_errors(r: Result<u64, Error>, max_cost: u64) -> Result<u64, Error> {
@@ -142,7 +142,7 @@ fn augment_cost_errors(r: Result<u64, Error>, max_cost: u64) -> Result<u64, Erro
     }
 }
 
-impl<D: Dialect> RunProgramContext<D> {
+impl<D: Dialect> RunProgramContext<'_, D> {
     fn new(dialect: D, pre_eval: Option<PreEval>) -> Self {
         RunProgramContext {
             dialect,
@@ -162,7 +162,7 @@ impl<D: Dialect> RunProgramContext<D> {
     }
 }
 
-impl<D: Dialect> RunProgramContext<D> {
+impl<D: Dialect> RunProgramContext<'_, D> {
     fn eval_op_atom(
         &mut self,
         operator_node: &SExp,
@@ -171,11 +171,11 @@ impl<D: Dialect> RunProgramContext<D> {
     ) -> Result<u64, Error> {
         let op_atom = operator_node.atom()?;
         if op_atom.as_ref() == self.dialect.quote_kw() {
-            self.push(operand_list.clone());
+            self.push(operand_list.to_owned());
             Ok(QUOTE_COST)
         } else {
             self.op_stack.push(Operation::Apply);
-            self.push(operator_node.clone());
+            self.push(operator_node.to_owned());
             let mut operands: &SExp = operand_list;
             loop {
                 match operands {
@@ -190,13 +190,13 @@ impl<D: Dialect> RunProgramContext<D> {
                     }
                     SExp::Pair(pair) => {
                         self.op_stack.push(Operation::SwapEval);
-                        self.push(args.clone());
-                        self.push(pair.first().clone());
+                        self.push(args.to_owned());
+                        self.push(pair.first().to_owned());
                         operands = pair.rest();
                     }
                 }
             }
-            self.push(NULL_SEXP.clone());
+            self.push(NULL_SEXP.to_owned());
             Ok(OP_COST)
         }
     }
@@ -214,8 +214,8 @@ impl<D: Dialect> RunProgramContext<D> {
             if let SExp::Atom(_) = pair.first()
                 && pair.rest().nullp()
             {
-                self.push(pair.first().clone());
-                self.push(op_list.clone());
+                self.push(pair.first().to_owned());
+                self.push(op_list.to_owned());
                 self.op_stack.push(Operation::Apply);
                 return Ok(APPLY_COST);
             }
@@ -299,19 +299,19 @@ impl<D: Dialect> RunProgramContext<D> {
                 ))
             }
         } else {
-            let (cost, result) = self.dialect.op(operator, operand_list, max_cost)?;
-            self.push(result);
+            let (cost, result) = self.dialect.op(&operator, &operand_list, max_cost)?;
+            self.push(result.to_owned());
             Ok(cost)
         }
     }
 
-    pub fn run_program(
+    pub fn run_program<'a>(
         &mut self,
-        program: &SExp,
-        args: &SExp,
+        program: &'a SExp<'a>,
+        args: &'a SExp<'a>,
         max_cost: u64,
-    ) -> Result<(u64, SExp), Error> {
-        self.val_stack = vec![SExp::Pair((program, args).into())];
+    ) -> Result<(u64, SExp<'static>), Error> {
+        self.val_stack = vec![SExp::Pair((program.to_owned(), args.to_owned()).into())];
         self.op_stack = vec![Operation::Eval];
         let max_cost = if max_cost == 0 { u64::MAX } else { max_cost };
         let mut cost: u64 = 0;
@@ -342,17 +342,18 @@ impl<D: Dialect> RunProgramContext<D> {
         }
         let duration = start.elapsed();
         debug!("Program duration: {duration:?}");
-        Ok((cost, self.pop()?))
+        Ok((cost, self.pop()?.to_owned()))
     }
 }
 
-pub fn run_program<'a, D: Dialect>(
+pub fn run_program<'a, D: Dialect + 'static>(
     dialect: D,
-    program: &'a SExp,
-    args: &'a SExp,
+    program: &'a SExp<'a>,
+    args: &'a SExp<'a>,
     max_cost: u64,
     pre_eval: Option<PreEval>,
-) -> Result<(u64, SExp), Error> {
+) -> Result<(u64, SExp<'static>), Error> {
     let mut rpc = RunProgramContext::new(dialect, pre_eval);
-    rpc.run_program(program, args, max_cost)
+    let prog = rpc.run_program(program, args, max_cost)?;
+    Ok((prog.0, prog.1.to_owned()))
 }

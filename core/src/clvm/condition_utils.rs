@@ -3,50 +3,36 @@ use crate::blockchain::condition_opcode::ConditionOpcode;
 use crate::blockchain::condition_with_args::ConditionWithArgs;
 use crate::blockchain::sized_bytes::Bytes32;
 use crate::clvm::program::Program;
+use crate::errors::ClvmError;
 use crate::traits::SizedBytes;
 use crate::utils::hash_256;
-use log::info;
-use std::io::Error;
 
 pub fn created_outputs_for_conditions(
     conditions: &[ConditionWithArgs],
     input_coin_name: Bytes32,
-) -> Result<Vec<Coin>, Error> {
+) -> Vec<Coin> {
     let mut output_coins = Vec::new();
     for condition in conditions {
-        match condition {
-            ConditionWithArgs::CreateCoin(puzzle_hash, amount, _) => {
-                let coin = Coin {
-                    parent_coin_info: input_coin_name,
-                    puzzle_hash: *puzzle_hash,
-                    amount: *amount,
-                };
-                output_coins.push(coin);
-            }
-            _ => continue,
-        }
+        let ConditionWithArgs::CreateCoin(puzzle_hash, amount, _) = condition else {
+            continue;
+        };
+        output_coins.push(Coin {
+            parent_coin_info: input_coin_name,
+            puzzle_hash: *puzzle_hash,
+            amount: *amount,
+        });
     }
-    Ok(output_coins)
+    output_coins
 }
 
 pub fn conditions_for_solution(
     puzzle_reveal: &Program,
     solution: &Program,
     max_cost: u64,
-) -> Result<(Vec<ConditionWithArgs>, u64), Error> {
-    match puzzle_reveal.run_with_cost(max_cost, solution) {
-        Ok((cost, r)) => match r.sexp().try_into() {
-            Ok(conditions) => Ok((conditions, cost)),
-            Err(error) => {
-                info!("{error:?}");
-                Err(error)
-            }
-        },
-        Err(error) => {
-            info!("{error:?}");
-            Err(error)
-        }
-    }
+) -> Result<(Vec<ConditionWithArgs>, u64), ClvmError> {
+    let (cost, r) = puzzle_reveal.run_with_cost(max_cost, solution)?;
+    let conditions = r.sexp().try_into()?;
+    Ok((conditions, cost))
 }
 
 pub fn agg_sig_additional_data_for_opcode(

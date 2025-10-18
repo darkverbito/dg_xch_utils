@@ -8,6 +8,7 @@ use dg_xch_core::clvm::program::Program;
 use dg_xch_core::clvm::sexp::{AtomBuf, SExp};
 use lazy_static::lazy_static;
 use log::error;
+use std::sync::Arc;
 
 pub fn is_singleton_top_layer(program: &Program) -> bool {
     if let Ok((module, _)) = program.uncurry() {
@@ -27,7 +28,7 @@ pub fn is_singleton_top_layer_v1_1(program: &Program) -> bool {
 
 lazy_static! {
     pub static ref ACS_MU_PH: Bytes32 = Program::to(11u8).tree_hash(); //returns the third argument a.k.a the full solution
-    pub static ref MIRROR_PUZZLE_HASH: Bytes32 = P2_PARENT_PROGRAM.curry(&[Program::to(1u8)]).expect("Failed to Calculate Mirror Hash").tree_hash();
+    pub static ref MIRROR_PUZZLE_HASH: Bytes32 = P2_PARENT_PROGRAM.curry(&[Program::to(1u8)]).tree_hash();
 }
 
 #[derive(Debug)]
@@ -81,7 +82,7 @@ pub fn make_create_coin_condition(
     puzzle_hash: Bytes32,
     amount: u64,
     memos: &[Vec<u8>],
-) -> Vec<SExp> {
+) -> Vec<SExp<'static>> {
     if memos.is_empty() {
         vec![
             ConditionOpcode::CreateCoin.into(),
@@ -95,8 +96,7 @@ pub fn make_create_coin_condition(
             amount.into(),
             memos
                 .iter()
-                .map(Vec::as_slice)
-                .map(Into::into)
+                .map(|v| SExp::Atom(AtomBuf::Owned(Arc::new(v.clone()))))
                 .collect::<Vec<SExp>>()
                 .into(),
         ]
@@ -104,17 +104,17 @@ pub fn make_create_coin_condition(
 }
 
 #[must_use]
-pub fn make_assert_aggsig_condition(public_key: &Bytes48) -> Vec<SExp> {
+pub fn make_assert_aggsig_condition(public_key: &Bytes48) -> Vec<SExp<'static>> {
     vec![ConditionOpcode::AggSigUnsafe.into(), public_key.into()]
 }
 
 #[must_use]
-pub fn make_assert_my_coin_id_condition(coin_name: &Bytes32) -> Vec<SExp> {
+pub fn make_assert_my_coin_id_condition(coin_name: &Bytes32) -> Vec<SExp<'static>> {
     vec![ConditionOpcode::AssertMyCoinId.into(), coin_name.into()]
 }
 
 #[must_use]
-pub fn make_assert_absolute_height_exceeds_condition(block_index: u32) -> Vec<SExp> {
+pub fn make_assert_absolute_height_exceeds_condition(block_index: u32) -> Vec<SExp<'static>> {
     vec![
         ConditionOpcode::AssertHeightAbsolute.into(),
         block_index.into(),
@@ -122,7 +122,7 @@ pub fn make_assert_absolute_height_exceeds_condition(block_index: u32) -> Vec<SE
 }
 
 #[must_use]
-pub fn make_assert_relative_height_exceeds_condition(block_index: u32) -> Vec<SExp> {
+pub fn make_assert_relative_height_exceeds_condition(block_index: u32) -> Vec<SExp<'static>> {
     vec![
         ConditionOpcode::AssertHeightRelative.into(),
         block_index.into(),
@@ -130,22 +130,22 @@ pub fn make_assert_relative_height_exceeds_condition(block_index: u32) -> Vec<SE
 }
 
 #[must_use]
-pub fn make_assert_absolute_seconds_exceeds_condition(time: u64) -> Vec<SExp> {
+pub fn make_assert_absolute_seconds_exceeds_condition(time: u64) -> Vec<SExp<'static>> {
     vec![ConditionOpcode::AssertSecondsAbsolute.into(), time.into()]
 }
 
 #[must_use]
-pub fn make_assert_relative_seconds_exceeds_condition(time: u64) -> Vec<SExp> {
+pub fn make_assert_relative_seconds_exceeds_condition(time: u64) -> Vec<SExp<'static>> {
     vec![ConditionOpcode::AssertSecondsRelative.into(), time.into()]
 }
 
 #[must_use]
-pub fn make_reserve_fee_condition(fee: u64) -> Vec<SExp> {
+pub fn make_reserve_fee_condition(fee: u64) -> Vec<SExp<'static>> {
     vec![ConditionOpcode::ReserveFee.into(), fee.into()]
 }
 
 #[must_use]
-pub fn make_assert_coin_announcement(announcement_hash: &Bytes32) -> Vec<SExp> {
+pub fn make_assert_coin_announcement(announcement_hash: &Bytes32) -> Vec<SExp<'static>> {
     vec![
         ConditionOpcode::AssertCoinAnnouncement.into(),
         announcement_hash.into(),
@@ -153,7 +153,7 @@ pub fn make_assert_coin_announcement(announcement_hash: &Bytes32) -> Vec<SExp> {
 }
 
 #[must_use]
-pub fn make_assert_puzzle_announcement(announcement_hash: &Bytes32) -> Vec<SExp> {
+pub fn make_assert_puzzle_announcement(announcement_hash: &Bytes32) -> Vec<SExp<'static>> {
     vec![
         ConditionOpcode::AssertPuzzleAnnouncement.into(),
         announcement_hash.into(),
@@ -161,7 +161,7 @@ pub fn make_assert_puzzle_announcement(announcement_hash: &Bytes32) -> Vec<SExp>
 }
 
 #[must_use]
-pub fn make_create_coin_announcement(message: &[u8]) -> Vec<SExp> {
+pub fn make_create_coin_announcement(message: &[u8]) -> Vec<SExp<'static>> {
     vec![
         ConditionOpcode::CreateCoinAnnouncement.into(),
         SExp::Atom(AtomBuf::new(message.to_vec())),
@@ -169,7 +169,7 @@ pub fn make_create_coin_announcement(message: &[u8]) -> Vec<SExp> {
 }
 
 #[must_use]
-pub fn make_create_puzzle_announcement(message: &[u8]) -> Vec<SExp> {
+pub fn make_create_puzzle_announcement(message: &[u8]) -> Vec<SExp<'static>> {
     vec![
         ConditionOpcode::CreatePuzzleAnnouncement.into(),
         SExp::Atom(AtomBuf::new(message.to_vec())),
@@ -177,12 +177,12 @@ pub fn make_create_puzzle_announcement(message: &[u8]) -> Vec<SExp> {
 }
 
 #[must_use]
-pub fn make_assert_my_parent_id(parent_id: Bytes32) -> Vec<SExp> {
+pub fn make_assert_my_parent_id(parent_id: Bytes32) -> Vec<SExp<'static>> {
     vec![ConditionOpcode::AssertMyParentId.into(), parent_id.into()]
 }
 
 #[must_use]
-pub fn make_assert_my_puzzlehash(puzzlehash: Bytes32) -> Vec<SExp> {
+pub fn make_assert_my_puzzlehash(puzzlehash: Bytes32) -> Vec<SExp<'static>> {
     vec![
         ConditionOpcode::AssertMyPuzzlehash.into(),
         puzzlehash.into(),
@@ -190,6 +190,6 @@ pub fn make_assert_my_puzzlehash(puzzlehash: Bytes32) -> Vec<SExp> {
 }
 
 #[must_use]
-pub fn make_assert_my_amount(amount: u64) -> Vec<SExp> {
+pub fn make_assert_my_amount(amount: u64) -> Vec<SExp<'static>> {
     vec![ConditionOpcode::AssertMyAmount.into(), amount.into()]
 }

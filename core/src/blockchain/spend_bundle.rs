@@ -13,13 +13,14 @@ use crate::clvm::utils::{
 };
 use crate::consensus::constants::{ConsensusConstants, MAINNET};
 use crate::consensus::{AGG_SIG_COST, CREATE_COIN_COST};
+use crate::errors::ClvmError;
 use crate::formatting::u64_to_bytes;
 use crate::traits::SizedBytes;
 use crate::utils::hash_256;
 use blst::min_pk::{AggregateSignature, PublicKey, SecretKey, Signature};
 use dg_xch_macros::ChiaSerial;
 use dg_xch_serialize::{ChiaProtocolVersion, ChiaSerialize};
-use log::info;
+use log::{error, info};
 use num_traits::ToPrimitive;
 use serde::{Deserialize, Serialize};
 use std::cmp::{max, min};
@@ -163,10 +164,10 @@ impl SpendBundle {
         mut self,
         key_function: F,
         constants: Option<&ConsensusConstants>,
-    ) -> Result<Self, Error>
+    ) -> Result<Self, ClvmError>
     where
         F: Fn(&Bytes48) -> Fut,
-        Fut: Future<Output = Result<SecretKey, Error>>,
+        Fut: Future<Output = Result<SecretKey, ClvmError>>,
     {
         let constants = constants.unwrap_or(&MAINNET);
         let mut signatures: Vec<Signature> = vec![];
@@ -175,7 +176,10 @@ impl SpendBundle {
         let max_cost = constants
             .max_block_cost_clvm
             .to_u64()
-            .ok_or(Error::new(ErrorKind::InvalidInput, "Invalid Max Cost"))?;
+            .ok_or(ClvmError::AtomNotValidU64(format!(
+                "Invalid Max Cost: {}",
+                constants.max_block_cost_clvm
+            )))?;
         for coin_spend in self.coin_spends.iter() {
             let reveal = coin_spend.puzzle_reveal.to_program()?;
             let solution = coin_spend.solution.to_program()?;
@@ -188,22 +192,19 @@ impl SpendBundle {
                 constants.agg_sig_me_additional_data.as_ref(),
             )? {
                 let pk = PublicKey::from_bytes(pk_bytes.as_ref()).map_err(|e| {
-                    Error::other(format!(
-                        "Failed to parse Public key: {}, {:?}",
-                        hex::encode(pk_bytes),
-                        e
-                    ))
+                    error!("Failed to Parse PublicKey: {:?}", e);
+                    ClvmError::InvalidPublicKey(pk_bytes)
                 })?;
                 let secret_key = (key_function)(&pk_bytes).await?;
                 assert_eq!(&secret_key.sk_to_pk(), &pk);
                 let signature = bls_bindings::sign(&secret_key, msg.as_ref());
                 if !verify_signature(&pk, msg.as_ref(), &signature) {
-                    return Err(Error::other(format!(
+                    Err(ClvmError::InvalidSignature(format!(
                         "PH({}) Failed to Validate Signature for Message: {} - {}",
                         pk_bytes,
                         code,
                         UnsizedBytes::new(msg.as_ref())
-                    )));
+                    )))?;
                 }
                 pk_list.push(pk_bytes);
                 msg_list.push(msg.as_ref().to_vec());
@@ -214,7 +215,9 @@ impl SpendBundle {
         let sig_refs: Vec<&Signature> = signatures.iter().collect();
         let msg_list: Vec<&[u8]> = msg_list.iter().map(Vec::as_slice).collect();
         let aggsig = AggregateSignature::aggregate(&sig_refs, true)
-            .map_err(|e| Error::other(format!("Failed to aggregate signatures: {e:?}")))?
+            .map_err(|e| {
+                ClvmError::InvalidSignature(format!("Failed to aggregate signatures: {e:?}"))
+            })?
             .to_signature();
         assert!(aggregate_verify_signature(&pk_list, &msg_list, &aggsig));
         self.aggregated_signature = aggsig.to_bytes().into();
@@ -226,7 +229,7 @@ impl SpendBundle {
         flags: u32,
         consensus_constants: &ConsensusConstants,
         print: bool,
-    ) -> Result<Vec<ConditionWithArgs>, Error> {
+    ) -> Result<Vec<ConditionWithArgs>, ClvmError> {
         let mut max_cost = max_cost.unwrap_or(INFINITE_COST);
         let mut create_conditions = vec![];
         let mut state = ValidationState::default();
@@ -235,27 +238,19 @@ impl SpendBundle {
             let reveal = spend.puzzle_reveal.to_program()?;
             let solution = spend.solution.to_program()?;
             if spend.coin.puzzle_hash != reveal.tree_hash() {
-                return Err(Error::new(
-                    ErrorKind::InvalidInput,
-                    "Puzzle Hash does not match Puzzle Reveal for Spend",
-                ));
+                Err(ClvmError::InvalidSpendbundle(
+                    "Puzzle Hash does not match Puzzle Reveal for Spend".to_string(),
+                ))?;
             }
             let (cost, output_conditions_program) =
                 reveal.run(max_cost, NO_UNKNOWN_OPS | flags, &solution)?;
             state.total_cost += cost;
             state.total_removed += spend.coin.amount;
             if state.total_cost > max_cost {
-                return Err(Error::new(
-                    ErrorKind::InvalidInput,
-                    format!("Max Cost Exceded {} > {max_cost}", state.total_cost),
-                ));
+                Err(ClvmError::CostExceeded(max_cost, state.total_cost))?;
             }
             if !state.coins_spent.insert(spend.coin) {
-                //Double Spend
-                return Err(Error::new(
-                    ErrorKind::InvalidInput,
-                    format!("Duplicate Spend: {}", spend.coin.coin_id()),
-                ));
+                Err(ClvmError::DoubleSpend(format!("{}", spend.coin.coin_id())))?;
             }
             let conditions_with_args: Vec<ConditionWithArgs> =
                 output_conditions_program.sexp().try_into()?;
@@ -271,12 +266,9 @@ impl SpendBundle {
                 match &condition_with_args {
                     ConditionWithArgs::Remark(_) | ConditionWithArgs::Unknown => {}
                     ConditionWithArgs::CreateCoin(puzzle_hash, amount, _) => {
-                        if max_cost < CREATE_COIN_COST {
-                            return Err(Error::new(ErrorKind::InvalidInput, "Max Cost Exceeded"));
-                        }
                         max_cost = max_cost
                             .checked_sub(CREATE_COIN_COST)
-                            .ok_or(Error::new(ErrorKind::InvalidInput, "Max Cost Exceeded"))?;
+                            .ok_or(ClvmError::CostExceeded(max_cost, state.total_cost))?;
                         let created_coin = Coin {
                             parent_coin_info: spend.coin.coin_id(),
                             puzzle_hash: *puzzle_hash,
@@ -284,23 +276,17 @@ impl SpendBundle {
                         };
                         state.total_created += created_coin.amount;
                         if !state.coins_created.insert(created_coin) {
-                            return Err(Error::new(
-                                ErrorKind::InvalidInput,
-                                format!(
-                                    "Duplicate CreateCoin Condition: {}",
-                                    created_coin.coin_id()
-                                ),
-                            ));
+                            Err(ClvmError::DuplicateCreate(format!(
+                                "Duplicate CreateCoin Condition: {}",
+                                created_coin.coin_id()
+                            )))?;
                         }
                         create_conditions.push(condition_with_args.clone());
                     }
                     ConditionWithArgs::AggSigMe(public_key, message) => {
-                        if max_cost < AGG_SIG_COST {
-                            return Err(Error::new(ErrorKind::InvalidInput, "Max Cost Exceeded"));
-                        }
                         max_cost = max_cost
                             .checked_sub(AGG_SIG_COST)
-                            .ok_or(Error::new(ErrorKind::InvalidInput, "Max Cost Exceeded"))?;
+                            .ok_or(ClvmError::CostExceeded(max_cost, state.total_cost))?;
                         state.agg_sig_me.push((*public_key, *message));
                         if (flags & DISABLE_SIGNATURE_VALIDATION) == 0 {
                             let mut msg = message.data().to_vec();
@@ -310,12 +296,9 @@ impl SpendBundle {
                         }
                     }
                     ConditionWithArgs::AggSigParent(public_key, message) => {
-                        if max_cost < AGG_SIG_COST {
-                            return Err(Error::new(ErrorKind::InvalidInput, "Max Cost Exceeded"));
-                        }
                         max_cost = max_cost
                             .checked_sub(AGG_SIG_COST)
-                            .ok_or(Error::new(ErrorKind::InvalidInput, "Max Cost Exceeded"))?;
+                            .ok_or(ClvmError::CostExceeded(max_cost, state.total_cost))?;
                         state.agg_sig_parents.push((*public_key, *message));
                         if (flags & DISABLE_SIGNATURE_VALIDATION) == 0 {
                             let mut msg = message.data().to_vec();
@@ -325,12 +308,9 @@ impl SpendBundle {
                         }
                     }
                     ConditionWithArgs::AggSigPuzzle(public_key, message) => {
-                        if max_cost < AGG_SIG_COST {
-                            return Err(Error::new(ErrorKind::InvalidInput, "Max Cost Exceeded"));
-                        }
                         max_cost = max_cost
                             .checked_sub(AGG_SIG_COST)
-                            .ok_or(Error::new(ErrorKind::InvalidInput, "Max Cost Exceeded"))?;
+                            .ok_or(ClvmError::CostExceeded(max_cost, state.total_cost))?;
                         state.agg_sig_puzzles.push((*public_key, *message));
                         if (flags & DISABLE_SIGNATURE_VALIDATION) == 0 {
                             let mut msg = message.data().to_vec();
@@ -340,12 +320,9 @@ impl SpendBundle {
                         }
                     }
                     ConditionWithArgs::AggSigAmount(public_key, message) => {
-                        if max_cost < AGG_SIG_COST {
-                            return Err(Error::new(ErrorKind::InvalidInput, "Max Cost Exceeded"));
-                        }
                         max_cost = max_cost
                             .checked_sub(AGG_SIG_COST)
-                            .ok_or(Error::new(ErrorKind::InvalidInput, "Max Cost Exceeded"))?;
+                            .ok_or(ClvmError::CostExceeded(max_cost, state.total_cost))?;
                         state.agg_sig_amounts.push((*public_key, *message));
                         if (flags & DISABLE_SIGNATURE_VALIDATION) == 0 {
                             let mut msg = message.data().to_vec();
@@ -355,12 +332,9 @@ impl SpendBundle {
                         }
                     }
                     ConditionWithArgs::AggSigPuzzleAmount(public_key, message) => {
-                        if max_cost < AGG_SIG_COST {
-                            return Err(Error::new(ErrorKind::InvalidInput, "Max Cost Exceeded"));
-                        }
                         max_cost = max_cost
                             .checked_sub(AGG_SIG_COST)
-                            .ok_or(Error::new(ErrorKind::InvalidInput, "Max Cost Exceeded"))?;
+                            .ok_or(ClvmError::CostExceeded(max_cost, state.total_cost))?;
                         state.agg_sig_puzzle_amounts.push((*public_key, *message));
                         if (flags & DISABLE_SIGNATURE_VALIDATION) == 0 {
                             let mut msg = message.data().to_vec();
@@ -371,12 +345,9 @@ impl SpendBundle {
                         }
                     }
                     ConditionWithArgs::AggSigParentAmount(public_key, message) => {
-                        if max_cost < AGG_SIG_COST {
-                            return Err(Error::new(ErrorKind::InvalidInput, "Max Cost Exceeded"));
-                        }
                         max_cost = max_cost
                             .checked_sub(AGG_SIG_COST)
-                            .ok_or(Error::new(ErrorKind::InvalidInput, "Max Cost Exceeded"))?;
+                            .ok_or(ClvmError::CostExceeded(max_cost, state.total_cost))?;
                         state.agg_sig_parent_amounts.push((*public_key, *message));
                         if (flags & DISABLE_SIGNATURE_VALIDATION) == 0 {
                             let mut msg = message.data().to_vec();
@@ -387,12 +358,9 @@ impl SpendBundle {
                         }
                     }
                     ConditionWithArgs::AggSigParentPuzzle(public_key, message) => {
-                        if max_cost < AGG_SIG_COST {
-                            return Err(Error::new(ErrorKind::InvalidInput, "Max Cost Exceeded"));
-                        }
                         max_cost = max_cost
                             .checked_sub(AGG_SIG_COST)
-                            .ok_or(Error::new(ErrorKind::InvalidInput, "Max Cost Exceeded"))?;
+                            .ok_or(ClvmError::CostExceeded(max_cost, state.total_cost))?;
                         state.agg_sig_parent_puzzles.push((*public_key, *message));
                         if (flags & DISABLE_SIGNATURE_VALIDATION) == 0 {
                             let mut msg = message.data().to_vec();
@@ -403,12 +371,9 @@ impl SpendBundle {
                         }
                     }
                     ConditionWithArgs::AggSigUnsafe(public_key, message) => {
-                        if max_cost < AGG_SIG_COST {
-                            return Err(Error::new(ErrorKind::InvalidInput, "Max Cost Exceeded"));
-                        }
                         max_cost = max_cost
                             .checked_sub(AGG_SIG_COST)
-                            .ok_or(Error::new(ErrorKind::InvalidInput, "Max Cost Exceeded"))?;
+                            .ok_or(ClvmError::CostExceeded(max_cost, state.total_cost))?;
                         verify_agg_sig_unsafe_message(message, consensus_constants)?;
                         state.agg_sig_unsafe.push((*public_key, *message));
                         if (flags & DISABLE_SIGNATURE_VALIDATION) == 0 {
@@ -417,28 +382,28 @@ impl SpendBundle {
                     }
                     ConditionWithArgs::AssertMyCoinId(my_coin_id) => {
                         if *my_coin_id != spend.coin.coin_id() {
-                            return Err(Error::new(ErrorKind::InvalidInput, "Invalid Coin ID"));
+                            Err(ClvmError::InvalidSpendbundle("Invalid Coin ID".to_string()))?;
                         }
                     }
                     ConditionWithArgs::AssertMyParentId(my_parent_id) => {
                         if *my_parent_id != spend.coin.parent_coin_info {
-                            return Err(Error::new(
-                                ErrorKind::InvalidInput,
-                                "Invalid Parent Coin ID",
-                            ));
+                            Err(ClvmError::InvalidSpendbundle(
+                                "Invalid Parent Coin ID".to_string(),
+                            ))?;
                         }
                     }
                     ConditionWithArgs::AssertMyPuzzlehash(my_puzzle_hash) => {
                         if *my_puzzle_hash != spend.coin.puzzle_hash {
-                            return Err(Error::new(ErrorKind::InvalidInput, "Invalid Puzzle Hash"));
+                            Err(ClvmError::InvalidSpendbundle(
+                                "Invalid Puzzle Hash".to_string(),
+                            ))?;
                         }
                     }
                     ConditionWithArgs::AssertMyAmount(my_amount) => {
                         if *my_amount != spend.coin.amount {
-                            return Err(Error::new(
-                                ErrorKind::InvalidInput,
-                                "Coin Amount Incorrect",
-                            ));
+                            Err(ClvmError::InvalidSpendbundle(
+                                "Coin Amount Incorrect".to_string(),
+                            ))?;
                         }
                     }
                     ConditionWithArgs::SendMessage(m_type, message_address, message) => {
@@ -472,10 +437,7 @@ impl SpendBundle {
                         if flags & COST_CONDITIONS == 0 {
                             state.total_announcements += 1;
                             if state.total_announcements > ANNOUNCEMENT_LIMIT {
-                                return Err(Error::new(
-                                    ErrorKind::InvalidInput,
-                                    "Total Announcements exceeded",
-                                ));
+                                Err(ClvmError::TooManyAnnouncements)?;
                             }
                         }
                         state
@@ -486,10 +448,7 @@ impl SpendBundle {
                         if flags & COST_CONDITIONS == 0 {
                             state.total_announcements += 1;
                             if state.total_announcements > ANNOUNCEMENT_LIMIT {
-                                return Err(Error::new(
-                                    ErrorKind::InvalidInput,
-                                    "Total Announcements exceeded",
-                                ));
+                                Err(ClvmError::TooManyAnnouncements)?;
                             }
                         }
                         state
@@ -500,19 +459,13 @@ impl SpendBundle {
                         state.total_reserved_fee = state
                             .total_reserved_fee
                             .checked_add(*reserve_fee)
-                            .ok_or(Error::new(
-                                ErrorKind::InvalidInput,
-                                "Overflow in Reserve Fee",
-                            ))?
+                            .ok_or(ClvmError::Overflow("Overflow in Reserve Fee".to_string()))?
                     }
                     ConditionWithArgs::AssertCoinAnnouncement(puzzle_hash) => {
                         if flags & COST_CONDITIONS == 0 {
                             state.total_announcements += 1;
                             if state.total_announcements > ANNOUNCEMENT_LIMIT {
-                                return Err(Error::new(
-                                    ErrorKind::InvalidInput,
-                                    "Total Announcements exceeded",
-                                ));
+                                Err(ClvmError::TooManyAnnouncements)?;
                             }
                         }
                         state.asserted_coin_announcements.push(*puzzle_hash);
@@ -521,10 +474,7 @@ impl SpendBundle {
                         if flags & COST_CONDITIONS == 0 {
                             state.total_announcements += 1;
                             if state.total_announcements > ANNOUNCEMENT_LIMIT {
-                                return Err(Error::new(
-                                    ErrorKind::InvalidInput,
-                                    "Total Announcements exceeded",
-                                ));
+                                Err(ClvmError::TooManyAnnouncements)?;
                             }
                         }
                         state.asserted_puzzle_announcements.push(*puzzle_hash);
@@ -533,10 +483,7 @@ impl SpendBundle {
                         if flags & COST_CONDITIONS == 0 {
                             state.total_announcements += 1;
                             if state.total_announcements > ANNOUNCEMENT_LIMIT {
-                                return Err(Error::new(
-                                    ErrorKind::InvalidInput,
-                                    "Total Announcements exceeded",
-                                ));
+                                Err(ClvmError::TooManyAnnouncements)?;
                             }
                         }
                         state.asserted_concurrent_spend.push(*puzzle_hash);
@@ -545,30 +492,25 @@ impl SpendBundle {
                         if flags & COST_CONDITIONS == 0 {
                             state.total_announcements += 1;
                             if state.total_announcements > ANNOUNCEMENT_LIMIT {
-                                return Err(Error::new(
-                                    ErrorKind::InvalidInput,
-                                    "Total Announcements exceeded",
-                                ));
+                                Err(ClvmError::TooManyAnnouncements)?;
                             }
                         }
                         state.asserted_concurrent_puzzle.push(*puzzle_hash);
                     }
                     ConditionWithArgs::AssertMyBirthSeconds(seconds) => {
                         if state.birth_seconds.map(|v| v == *seconds) == Some(false) {
-                            return Err(Error::new(
-                                ErrorKind::InvalidInput,
-                                "Cannot have 2 Different Birth Seconds",
-                            ));
+                            Err(ClvmError::InvalidSpendbundle(
+                                "Cannot have 2 Different Birth Seconds".to_string(),
+                            ))?;
                         }
                         state.birth_seconds = Some(*seconds);
                         //Assert not Ephemeral
                     }
                     ConditionWithArgs::AssertMyBirthHeight(height) => {
                         if state.birth_height.map(|v| v == *height) == Some(false) {
-                            return Err(Error::new(
-                                ErrorKind::InvalidInput,
-                                "Cannot have 2 Different Birth Heights",
-                            ));
+                            Err(ClvmError::InvalidSpendbundle(
+                                "Cannot have 2 Different Birth Heights".to_string(),
+                            ))?;
                         }
                         state.birth_height = Some(*height);
                         //Assert not Ephemeral
@@ -583,10 +525,10 @@ impl SpendBundle {
                         if let Some(before_seconds_relative) = state.before_seconds_relative
                             && before_seconds_relative <= *seconds
                         {
-                            return Err(Error::new(
-                                ErrorKind::InvalidInput,
-                                "AssertBeforeSecondsRelative is <= AssertSecondsRelative",
-                            ));
+                            Err(ClvmError::InvalidSpendbundle(
+                                "AssertBeforeSecondsRelative is <= AssertSecondsRelative"
+                                    .to_string(),
+                            ))?;
                         }
                         //Assert not Ephemeral
                     }
@@ -602,10 +544,9 @@ impl SpendBundle {
                         if let Some(before_height_relative) = state.before_height_relative
                             && before_height_relative <= *height
                         {
-                            return Err(Error::new(
-                                ErrorKind::InvalidInput,
-                                "AssertBeforeHeightRelative is <= AssertHeightRelative",
-                            ));
+                            Err(ClvmError::InvalidSpendbundle(
+                                "AssertBeforeHeightRelative is <= AssertHeightRelative".to_string(),
+                            ))?;
                         }
                         //Assert not Ephemeral
                     }
@@ -621,10 +562,10 @@ impl SpendBundle {
                         if let Some(seconds_relative) = state.seconds_relative
                             && seconds_relative <= *seconds
                         {
-                            return Err(Error::new(
-                                ErrorKind::InvalidInput,
-                                "AssertBeforeSecondsRelative is <= AssertSecondsRelative",
-                            ));
+                            Err(ClvmError::InvalidSpendbundle(
+                                "AssertBeforeSecondsRelative is <= AssertSecondsRelative"
+                                    .to_string(),
+                            ))?;
                         }
                         //Assert not Ephemeral
                     }
@@ -644,10 +585,9 @@ impl SpendBundle {
                         if let Some(height_relative) = state.height_relative
                             && *height <= height_relative
                         {
-                            return Err(Error::new(
-                                ErrorKind::InvalidInput,
-                                "AssertBeforeHeightRelative is <= AssertHeightRelative",
-                            ));
+                            Err(ClvmError::InvalidSpendbundle(
+                                "AssertBeforeHeightRelative is <= AssertHeightRelative".to_string(),
+                            ))?;
                         }
                         //Assert not Ephemeral
                     }
@@ -659,12 +599,9 @@ impl SpendBundle {
                         }
                     }
                     ConditionWithArgs::SoftFork(cost) => {
-                        if max_cost < *cost {
-                            return Err(Error::new(ErrorKind::InvalidInput, "Max Cost Exceeded"));
-                        }
                         max_cost = max_cost
                             .checked_sub(*cost)
-                            .ok_or(Error::new(ErrorKind::InvalidInput, "Max Cost Exceeded"))?;
+                            .ok_or(ClvmError::CostExceeded(max_cost, state.total_cost))?;
                         state.total_cost += cost;
                     }
                 }
@@ -682,13 +619,10 @@ impl SpendBundle {
             );
             let signature = self.aggregated_signature.try_into()?;
             if !aggregate_verify_signature(&keys, &messages, &signature) {
-                return Err(Error::new(
-                    ErrorKind::InvalidInput,
-                    format!(
-                        "Invalid signature on Spendbundle: {}",
-                        self.aggregated_signature
-                    ),
-                ));
+                Err(ClvmError::InvalidSpendbundle(format!(
+                    "Invalid signature on Spendbundle: {}",
+                    self.aggregated_signature
+                )))?;
             };
         }
         for coin_id in state.asserted_concurrent_spend {
@@ -698,10 +632,9 @@ impl SpendBundle {
                 continue;
             }
             if !state.coins_spent.iter().any(|c| c.coin_id() == coin_id) {
-                return Err(Error::new(
-                    ErrorKind::InvalidInput,
-                    format!("Invalid Concurrent Spend: Missing Coin {coin_id}"),
-                ));
+                Err(ClvmError::InvalidSpendbundle(format!(
+                    "Invalid Concurrent Spend: Missing Coin {coin_id}"
+                )))?;
             }
         }
         for puzzle_hash in state.asserted_concurrent_puzzle {
@@ -710,10 +643,9 @@ impl SpendBundle {
                 .iter()
                 .any(|c| c.puzzle_hash == puzzle_hash)
             {
-                return Err(Error::new(
-                    ErrorKind::InvalidInput,
-                    "Invalid Concurrent Puzzle",
-                ));
+                Err(ClvmError::InvalidSpendbundle(
+                    "Invalid Concurrent Puzzle".to_string(),
+                ))?;
             }
         }
         if !state.asserted_coin_announcements.is_empty() {
@@ -726,23 +658,19 @@ impl SpendBundle {
             }
             for announcement in state.asserted_coin_announcements {
                 if !announcements.contains(&announcement) {
-                    return Err(Error::new(
-                        ErrorKind::InvalidInput,
-                        "Failed to Assert Coin Announcement",
-                    ));
+                    Err(ClvmError::InvalidSpendbundle(
+                        "Failed to Assert Coin Announcement".to_string(),
+                    ))?;
                 }
             }
         }
 
         if state.messages_received.len() != state.messages_sent.len() {
-            return Err(Error::new(
-                ErrorKind::InvalidInput,
-                format!(
-                    "Sent Messages {} != Received Messages {}",
-                    state.messages_received.len(),
-                    state.messages_sent.len()
-                ),
-            ));
+            Err(ClvmError::InvalidSpendbundle(format!(
+                "Sent Messages {} != Received Messages {}",
+                state.messages_received.len(),
+                state.messages_sent.len()
+            )))?;
         }
         for (send_type, send_target, send_message, send_source) in &state.messages_sent {
             if !state
@@ -759,10 +687,9 @@ impl SpendBundle {
                 .count()
                 == 1
             {
-                return Err(Error::new(
-                    ErrorKind::NotFound,
-                    "Mismatch on Send and Receive messages",
-                ));
+                Err(ClvmError::InvalidSpendbundle(
+                    "Mismatch on Send and Receive messages".to_string(),
+                ))?;
             }
         }
         Ok(state.output_conditions)

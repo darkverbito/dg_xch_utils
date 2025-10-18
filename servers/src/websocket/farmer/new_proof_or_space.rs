@@ -68,7 +68,7 @@ impl<T: PoolClient + Sized + Sync + Send + 'static> MessageHandler for NewProofO
         let peer = peers.read().await.get(&peer_id).cloned();
         if let Some(peer) = peer {
             let protocol_version = *peer.protocol_version.read().await;
-            let mut cursor = Cursor::new(&msg.data);
+            let mut cursor = Cursor::new(msg.data.as_slice());
             let new_pos = NewProofOfSpace::from_bytes(&mut cursor, protocol_version)?;
             if let Some(sps) = self.signage_points.read().await.get(&new_pos.sp_hash) {
                 let constants = CONSENSUS_CONSTANTS

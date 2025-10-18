@@ -17,3 +17,6 @@ members = [
     "simulator",
     "tests"
 ]
+
+[profile.bench]
+debug = true

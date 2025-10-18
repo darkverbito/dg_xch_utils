@@ -19,15 +19,16 @@ pub fn test_hashes() {
     );
 }
 
-pub fn puzzle_for_conditions<T: Into<SExp>>(conditions: T) -> Result<Program<'static>, Error> {
+pub fn puzzle_for_conditions<T: Into<SExp<'static>>>(
+    conditions: T,
+) -> Result<Program<'static>, Error> {
     let (_cost, result) =
         P2_PARENT_PROGRAM.run(INFINITE_COST, 0, &Program::to(&[conditions.into()]))?;
     Ok(result)
 }
 
-pub fn solution_for_conditions<T: Into<SExp>>(conditions: T) -> Result<Program<'static>, Error> {
-    Ok(Program::to([
-        puzzle_for_conditions(conditions)?.sexp(),
-        &0.into(),
-    ]))
+pub fn solution_for_conditions<T: Into<SExp<'static>>>(
+    conditions: T,
+) -> Result<Program<'static>, Error> {
+    Ok(Program::to([puzzle_for_conditions(conditions)?.sexp(), &0.into()]).to_owned())
 }

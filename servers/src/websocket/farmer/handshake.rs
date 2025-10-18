@@ -29,7 +29,7 @@ impl MessageHandler for HandshakeHandle {
         peer_id: Arc<Bytes32>,
         peers: PeerMap,
     ) -> Result<(), Error> {
-        let mut cursor = Cursor::new(&msg.data);
+        let mut cursor = Cursor::new(msg.data.as_slice());
         let peer = peers.read().await.get(&peer_id).cloned();
         let protocol_version = if let Some(peer) = peer.as_ref() {
             *peer.protocol_version.read().await

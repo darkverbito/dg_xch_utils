@@ -5,11 +5,11 @@ use crate::constants::NULL_SEXP;
 use log::info;
 use std::io::Error;
 
-pub fn op_print<D: Dialect>(
-    args: &SExp,
+pub fn op_print<'a, D: Dialect>(
+    args: &'a SExp<'a>,
     _max_cost: u64,
-    _dialect: &D,
-) -> Result<(u64, SExp), Error> {
+    _dialect: &'a D,
+) -> Result<(u64, SExp<'a>), Error> {
     let mut args = args.ref_list();
     args.reverse();
     if args.is_empty() {

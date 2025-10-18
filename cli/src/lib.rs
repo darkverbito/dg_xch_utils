@@ -519,9 +519,8 @@ pub async fn run_cli() -> Result<(), Error> {
                     cost,
                     spend_bundle.map(|s| {
                         if s.starts_with("0x") {
-                            let mut cur = Cursor::new(
-                                decode(s).expect("String is not valid SpendBundle Hex"),
-                            );
+                            let decoded = decode(s).expect("String is not valid SpendBundle Hex");
+                            let mut cur = Cursor::new(decoded.as_slice());
                             SpendBundle::from_bytes(&mut cur, ChiaProtocolVersion::default())
                                 .expect("String is not valid SpendBundle Hex")
                         } else {
@@ -748,21 +747,26 @@ pub async fn run_cli() -> Result<(), Error> {
         } => {
             let prog_as_path = Path::new(&program);
             let args_as_path = Path::new(&args);
+            let serial_program;
+            let serial_args;
             let program = if prog_as_path.exists() {
                 Program::from_file(prog_as_path).await?
             } else if is_hex(program.as_bytes()) {
-                Program::from_serial(&SerializedProgram::from_bytes(program.as_bytes()))?
+                serial_program = SerializedProgram::from_bytes(program.as_bytes());
+                Program::from_serial(&serial_program)?
             } else {
                 assemble_text(&program)?
             };
             let args = if args_as_path.exists() {
                 Program::from_file(args_as_path).await?
             } else if is_hex(args.as_bytes()) {
-                Program::from_serial(&SerializedProgram::from_bytes(args.as_bytes()))?
+                serial_args = SerializedProgram::from_bytes(args.as_bytes());
+                Program::from_serial(&serial_args)?
             } else {
                 assemble_text(&args)?
             };
-            let curried_program = program.curry(&args.as_list())?;
+            let arg_list = args.as_list();
+            let curried_program = program.curry(&arg_list);
             match output.unwrap_or_default() {
                 ProgramOutput::Hex => {
                     println!("{}", encode(&sexp_to_bytes(curried_program.sexp())?))
@@ -779,17 +783,21 @@ pub async fn run_cli() -> Result<(), Error> {
         } => {
             let prog_as_path = Path::new(&program);
             let asrg_as_path = Path::new(&args);
+            let serial_program;
+            let serial_args;
             let program = if prog_as_path.exists() {
                 Program::from_file(prog_as_path).await?
             } else if is_hex(program.as_bytes()) {
-                Program::from_serial(&SerializedProgram::from_bytes(program.as_bytes()))?
+                serial_program = SerializedProgram::from_bytes(program.as_bytes());
+                Program::from_serial(&serial_program)?
             } else {
                 assemble_text(&program)?
             };
             let args = if asrg_as_path.exists() {
                 Program::from_file(asrg_as_path).await?
             } else if is_hex(args.as_bytes()) {
-                Program::from_serial(&SerializedProgram::from_bytes(args.as_bytes()))?
+                serial_args = SerializedProgram::from_bytes(args.as_bytes());
+                Program::from_serial(&serial_args)?
             } else {
                 assemble_text(&args)?
             };

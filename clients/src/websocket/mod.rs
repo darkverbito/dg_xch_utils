@@ -379,21 +379,25 @@ pub async fn oneshot<R: ChiaSerialize>(
         }
         res = res_handle => {
             let res = res?;
-            if let Some(v) = res {
-                let mut cursor = Cursor::new(v);
-                connection.read().await.unsubscribe(handle.id).await;
-                R::from_bytes(&mut cursor, protocol_version).map_err(|e| {
-                    Error::new(
-                        ErrorKind::InvalidData,
-                        format!("Failed to parse msg: {e:?}"),
-                    )
-                })
+            let resp = if let Some(v) = res {
+                let retn = {
+                    let values = v;
+                    let mut cursor = Cursor::new(values.as_slice());
+                    R::from_bytes(&mut cursor, protocol_version).map_err(|e| {
+                        Error::new(
+                            ErrorKind::InvalidData,
+                            format!("Failed to parse msg: {e:?}"),
+                        )
+                    })?
+                };
+                Ok(retn)
             } else {
-                connection.write().await.unsubscribe(handle.id).await;
                 Err(Error::other(
                     "Channel Closed before response received",
                 ))
-            }
+            };
+            connection.read().await.unsubscribe(handle.id).await;
+            resp
         }
     )
 }

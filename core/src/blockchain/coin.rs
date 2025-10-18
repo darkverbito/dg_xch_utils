@@ -1,12 +1,12 @@
 use crate::blockchain::sized_bytes::Bytes32;
 use crate::clvm::sexp::SExp;
+use crate::errors::ClvmError;
 use dg_xch_macros::ChiaSerial;
 use num_traits::ToPrimitive;
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use sha2::Sha256;
 use std::hash::{Hash, Hasher};
-use std::io::{Error, ErrorKind};
 
 #[derive(ChiaSerial, Copy, Clone, PartialEq, Eq, Serialize, Deserialize, Debug)]
 pub struct Coin {
@@ -14,13 +14,13 @@ pub struct Coin {
     pub puzzle_hash: Bytes32,
     pub amount: u64,
 }
-impl From<Coin> for SExp {
-    fn from(coin: Coin) -> SExp {
+impl<'a> From<Coin> for SExp<'a> {
+    fn from(coin: Coin) -> SExp<'a> {
         (&coin).into()
     }
 }
-impl From<&Coin> for SExp {
-    fn from(coin: &Coin) -> SExp {
+impl<'a> From<&Coin> for SExp<'a> {
+    fn from(coin: &Coin) -> SExp<'a> {
         (&[
             SExp::from(coin.parent_coin_info),
             SExp::from(coin.puzzle_hash),
@@ -29,8 +29,8 @@ impl From<&Coin> for SExp {
             .into()
     }
 }
-impl TryFrom<&SExp> for Coin {
-    type Error = Error;
+impl<'a> TryFrom<&'a SExp<'a>> for Coin {
+    type Error = ClvmError;
     fn try_from(sexp: &SExp) -> Result<Self, Self::Error> {
         let (parent_coin_info, rest) = sexp.split()?;
         let (puzzle_hash, rest) = rest.split()?;
@@ -41,7 +41,7 @@ impl TryFrom<&SExp> for Coin {
             amount: amount
                 .as_int()?
                 .to_u64()
-                .ok_or(Error::new(ErrorKind::InvalidData, "Invalid prev_subtotal"))?,
+                .ok_or(ClvmError::AtomNotValidU64(amount.to_string()))?,
         })
     }
 }

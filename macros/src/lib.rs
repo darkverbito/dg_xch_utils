@@ -18,7 +18,7 @@ pub fn derive_chia_serial(input: TokenStream) -> TokenStream {
             fn to_bytes(&self, macro_chia_protocol_version: dg_xch_serialize::ChiaProtocolVersion) -> Result<Vec<u8>, std::io::Error> {
                 #to_bytes
             }
-            fn from_bytes<T: AsRef<[u8]>>(bytes: &mut std::io::Cursor<T>, macro_chia_protocol_version: dg_xch_serialize::ChiaProtocolVersion) -> Result<Self, std::io::Error>
+            fn from_bytes(bytes: &mut std::io::Cursor<&[u8]>, macro_chia_protocol_version: dg_xch_serialize::ChiaProtocolVersion) -> Result<Self, std::io::Error>
             where
                 Self: Sized,
             {

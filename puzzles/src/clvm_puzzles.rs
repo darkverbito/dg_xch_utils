@@ -11,6 +11,7 @@ use dg_xch_core::clvm::program::Program;
 use dg_xch_core::clvm::sexp::{AtomBuf, SExp};
 use dg_xch_core::consensus::block_rewards::calculate_pool_reward;
 use dg_xch_core::consensus::coinbase::pool_parent_id;
+use dg_xch_core::errors::ClvmError;
 use dg_xch_core::formatting::number_from_slice;
 use dg_xch_core::plots::PlotNftExtraData;
 use dg_xch_core::pool::PoolState;
@@ -49,11 +50,10 @@ pub fn test_hashes() {
 }
 pub fn launcher_coin_spend_to_extra_data(
     coin_spend: &CoinSpend,
-) -> Result<PlotNftExtraData, Error> {
+) -> Result<PlotNftExtraData, ClvmError> {
     if coin_spend.coin.puzzle_hash != SINGLETON_LAUNCHER_TREE_HASH {
-        return Err(Error::new(
-            ErrorKind::InvalidInput,
-            "Provided coin spend is not launcher coin spend",
+        return Err(ClvmError::InvalidSyntax(
+            "Provided coin spend is not launcher coin spend".to_string(),
         ));
     }
     let solution = coin_spend.solution.to_program()?;
@@ -63,31 +63,27 @@ pub fn launcher_coin_spend_to_extra_data(
 pub fn puzzle_for_singleton(
     launcher_id: Bytes32,
     inner_puz: &'_ Program,
-) -> Result<Program<'static>, Error> {
-    let args = vec![
-        (
-            SINGLETON_TOP_LAYER_TREE_HASH.into(),
-            (launcher_id.into(), SINGLETON_LAUNCHER_TREE_HASH.into()).try_into()?,
-        )
-            .try_into()?,
-        inner_puz.clone(),
-    ];
-    SINGLETON_TOP_LAYER_PROGRAM.curry(&args)
+) -> Result<Program<'static>, ClvmError> {
+    let top_layer: SExp<'_> = SINGLETON_TOP_LAYER_TREE_HASH.into();
+    let launcher: SExp<'_> = launcher_id.into();
+    let singleton_hash: SExp<'_> = SINGLETON_LAUNCHER_TREE_HASH.into();
+    let rest_prog: SExp<'_> = (launcher, singleton_hash).into();
+    let pair_prog: SExp<'_> = (top_layer, rest_prog).into();
+    let args = vec![Program::new(pair_prog), inner_puz.to_owned()];
+    Ok(SINGLETON_TOP_LAYER_PROGRAM.curry(&args).to_owned())
 }
 
 pub fn puzzle_for_singleton_v1_1(
     launcher_id: Bytes32,
     inner_puz: &Program,
-) -> Result<Program<'static>, Error> {
-    let args = vec![
-        (
-            SINGLETON_TOP_LAYER_V1_1_TREE_HASH.into(),
-            (launcher_id.into(), SINGLETON_LAUNCHER_TREE_HASH.into()).try_into()?,
-        )
-            .try_into()?,
-        inner_puz.clone(),
-    ];
-    SINGLETON_TOP_LAYER_V1_1_PROGRAM.curry(&args)
+) -> Result<Program<'static>, ClvmError> {
+    let top_layer: SExp<'_> = SINGLETON_TOP_LAYER_V1_1_TREE_HASH.into();
+    let launcher: SExp<'_> = launcher_id.into();
+    let singleton_hash: SExp<'_> = SINGLETON_LAUNCHER_TREE_HASH.into();
+    let rest_prog: SExp<'_> = (launcher, singleton_hash).into();
+    let pair_prog: SExp<'_> = (top_layer, rest_prog).into();
+    let args = vec![Program::new(pair_prog), inner_puz.to_owned()];
+    Ok(SINGLETON_TOP_LAYER_V1_1_PROGRAM.curry(&args).to_owned())
 }
 
 pub fn create_waiting_room_inner_puzzle(
@@ -98,7 +94,7 @@ pub fn create_waiting_room_inner_puzzle(
     genesis_challenge: Bytes32,
     delay_time: u64,
     delay_ph: Bytes32,
-) -> Result<Program<'static>, Error> {
+) -> Result<Program<'static>, ClvmError> {
     let mut genesis_bytes = genesis_challenge.bytes()[0..16].to_vec();
     genesis_bytes.append(&mut b"\x00".repeat(16));
     let pool_reward_prefix: Bytes32 = Bytes32::parse(&genesis_bytes)?;
@@ -111,7 +107,7 @@ pub fn create_waiting_room_inner_puzzle(
         pool_reward_prefix.into(),
         relative_lock_height.try_into()?,
     ];
-    POOL_WAITING_ROOM_PROGRAM.curry(&args)
+    Ok(POOL_WAITING_ROOM_PROGRAM.curry(&args).to_owned())
 }
 
 pub fn create_pooling_inner_puzzle(
@@ -122,7 +118,7 @@ pub fn create_pooling_inner_puzzle(
     genesis_challenge: Bytes32,
     delay_time: u64,
     delay_ph: Bytes32,
-) -> Result<Program<'static>, Error> {
+) -> Result<Program<'static>, ClvmError> {
     let mut genesis_bytes = genesis_challenge.bytes()[..16].to_vec();
     genesis_bytes.append(&mut b"\x00".repeat(16));
     let pool_reward_prefix: Bytes32 = Bytes32::parse(&genesis_bytes)?;
@@ -135,13 +131,13 @@ pub fn create_pooling_inner_puzzle(
         pool_reward_prefix.into(),
         pool_waiting_room_inner_hash.into(),
     ];
-    POOL_MEMBER_PROGRAM.curry(&args)
+    Ok(POOL_MEMBER_PROGRAM.curry(&args).to_owned())
 }
 
 pub fn create_full_puzzle(
     inner_puzzle: &Program,
     launcher_id: Bytes32,
-) -> Result<Program<'static>, Error> {
+) -> Result<Program<'static>, ClvmError> {
     puzzle_for_singleton(launcher_id, inner_puzzle)
 }
 
@@ -150,7 +146,7 @@ pub fn create_p2_singleton_puzzle(
     launcher_id: Bytes32,
     seconds_delay: u64,
     delayed_puzzle_hash: Bytes32,
-) -> Result<Program<'static>, Error> {
+) -> Result<Program<'static>, ClvmError> {
     let args: Vec<Program> = vec![
         singleton_mod_hash.into(),
         launcher_id.into(),
@@ -158,8 +154,7 @@ pub fn create_p2_singleton_puzzle(
         seconds_delay.try_into()?,
         delayed_puzzle_hash.into(),
     ];
-    let curried = P2_SINGLETON_OR_DELAYED_PROGRAM.curry(&args)?;
-    Ok(curried)
+    Ok(P2_SINGLETON_OR_DELAYED_PROGRAM.curry(&args).to_owned())
 }
 
 pub fn launcher_id_to_p2_puzzle_hash(
@@ -202,29 +197,27 @@ pub fn get_template_singleton_inner_puzzle<'a>(
 
 pub fn get_seconds_and_delayed_puzhash_from_p2_singleton_puzzle(
     puzzle: &Program,
-) -> Result<(u64, Bytes32), Error> {
-    match puzzle.uncurry() {
-        Ok((_, args)) => {
-            let as_list = args.as_list();
-            if as_list.len() < 5 {
-                return Err(Error::other("Failed to unpack inner puzzle"));
-            }
-            let seconds_delay = as_list[3].clone();
-            let delayed_puzzle_hash = as_list[4].clone();
-            let seconds_delay_int: u64 = seconds_delay.try_into()?;
-            Ok((
-                seconds_delay_int,
-                Bytes32::parse(
-                    delayed_puzzle_hash
-                        .as_atom()
-                        .unwrap_or_default()
-                        .serialized()?
-                        .as_ref(),
-                )?,
-            ))
-        }
-        Err(error) => Err(error),
+) -> Result<(u64, Bytes32), ClvmError> {
+    let (_, args) = puzzle.uncurry()?;
+    let as_list = args.as_list();
+    if as_list.len() < 5 {
+        return Err(ClvmError::InvalidInput(
+            "Failed to unpack inner puzzle".to_string(),
+        ));
     }
+    let seconds_delay = as_list[3].to_owned();
+    let delayed_puzzle_hash = as_list[4].to_owned();
+    let seconds_delay_int: u64 = seconds_delay.try_into()?;
+    Ok((
+        seconds_delay_int,
+        Bytes32::parse(
+            delayed_puzzle_hash
+                .as_atom()
+                .unwrap_or_default()
+                .serialized()?
+                .as_ref(),
+        )?,
+    ))
 }
 
 pub fn is_pool_singleton_inner_puzzle(inner_puzzle: &Program) -> Result<bool, Error> {
@@ -479,7 +472,7 @@ pub fn uncurry_pool_member_inner_puzzle(
                 if as_list.len() < 5 {
                     return Err(Error::other("Failed to unpack inner puzzle"));
                 }
-                let escape_puzzlehash = Program::new(as_list.remove(4));
+                let escape_puzzlehash = Program::new(as_list.remove(4)).to_owned();
                 let pool_reward_prefix = Program::new(as_list.remove(3).to_owned());
                 let owner_pubkey = Program::new(as_list.remove(2).to_owned());
                 let p2_singleton_hash = Program::new(as_list.remove(1).to_owned());
@@ -545,48 +538,40 @@ pub fn uncurry_pool_waitingroom_inner_puzzle(
 pub fn get_inner_puzzle_from_puzzle(
     full_puzzle: &Program,
 ) -> Result<Option<Program<'static>>, Error> {
-    match full_puzzle.uncurry() {
-        Ok((_, args)) => {
-            let list: Vec<Program> = args.as_list();
-            if list.len() < 2 {
-                return Ok(None);
-            }
-            if !is_pool_singleton_inner_puzzle(&list[1])? {
-                return Ok(None);
-            }
-            Ok(Some(list[1].to_owned()))
-        }
-        Err(error) => Err(error),
+    let (_, args) = full_puzzle.uncurry()?;
+    let list: Vec<Program> = args.as_list();
+    if list.len() < 2 {
+        return Ok(None);
     }
+    if !is_pool_singleton_inner_puzzle(&list[1])? {
+        return Ok(None);
+    }
+    Ok(Some(list[1].to_owned()))
 }
 
-pub fn pool_state_from_extra_data(extra_data: Program) -> Result<Option<PoolState>, Error> {
+pub fn pool_state_from_extra_data(extra_data: Program) -> Result<Option<PoolState>, ClvmError> {
     let mut state_bytes: Option<Vec<u8>> = None;
-    match extra_data.to_map() {
-        Ok(extra_data) => {
-            for (key, value) in extra_data {
-                let key_vec = key.as_vec().unwrap_or_default();
-                if key_vec.len() == 1 && key_vec == b"p".to_vec() {
-                    state_bytes = Some(value.as_vec().unwrap_or_default());
-                    break;
-                }
-            }
-            match state_bytes {
-                Some(byte_data) => {
-                    let mut cursor = Cursor::new(byte_data);
-                    Ok(Some(PoolState::from_bytes(
-                        &mut cursor,
-                        ChiaProtocolVersion::default(),
-                    )?))
-                }
-                None => Ok(None),
-            }
+    let extra_data = extra_data.to_map()?;
+    for (key, value) in extra_data {
+        let key_vec = key.as_vec().unwrap_or_default();
+        if key_vec.len() == 1 && key_vec == b"p".to_vec() {
+            state_bytes = Some(value.as_vec().unwrap_or_default());
+            break;
         }
-        Err(error) => Err(error),
+    }
+    match state_bytes {
+        Some(byte_data) => {
+            let mut cursor = Cursor::new(byte_data.as_slice());
+            Ok(Some(PoolState::from_bytes(
+                &mut cursor,
+                ChiaProtocolVersion::default(),
+            )?))
+        }
+        None => Ok(None),
     }
 }
 
-pub fn solution_to_pool_state(coin_solution: &CoinSpend) -> Result<Option<PoolState>, Error> {
+pub fn solution_to_pool_state(coin_solution: &CoinSpend) -> Result<Option<PoolState>, ClvmError> {
     let extra_data: Program;
     if coin_solution.coin.puzzle_hash == SINGLETON_LAUNCHER_TREE_HASH {
         //Launcher spend
@@ -600,9 +585,9 @@ pub fn solution_to_pool_state(coin_solution: &CoinSpend) -> Result<Option<PoolSt
     let as_program = coin_solution.solution.to_program()?;
     let rest = as_program.rest()?;
     let rest = rest.rest()?;
-    let inner_solution = rest.first()?;
+    let inner_solution = rest.first()?.to_owned();
     // Spend which is not absorb, and is not the launcher
-    let inner_map = inner_solution.clone().to_map()?;
+    let inner_map = inner_solution.to_map()?;
     let num_args = inner_map.len();
     if num_args == 2 {
         if inner_solution.rest()?.first()?.as_int()? != Zero::zero() {
@@ -625,10 +610,9 @@ pub fn solution_to_pool_state(coin_solution: &CoinSpend) -> Result<Option<PoolSt
         extra_data = rest.first()?;
         pool_state_from_extra_data(extra_data)
     } else {
-        Err(Error::new(
-            ErrorKind::InvalidInput,
-            format!("Invalid Arg Length {num_args}, expected 2 or 3"),
-        ))
+        Err(ClvmError::InvalidArgCount(format!(
+            "Invalid Arg Length {num_args}, expected 2 or 3"
+        )))
     }
 }
 
@@ -638,7 +622,7 @@ pub fn pool_state_to_inner_puzzle(
     genesis_challenge: Bytes32,
     delay_time: u64,
     delay_ph: Bytes32,
-) -> Result<Program<'static>, Error> {
+) -> Result<Program<'static>, ClvmError> {
     let escaping_inner_puzzle: Program = create_waiting_room_inner_puzzle(
         pool_state.target_puzzle_hash,
         pool_state.relative_lock_height,

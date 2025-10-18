@@ -8,8 +8,8 @@ pub struct LineageProof {
     pub parent_inner_puzzle_hash: Bytes32,
     pub parent_amount: u64,
 }
-impl From<LineageProof> for SExp {
-    fn from(value: LineageProof) -> SExp {
+impl From<LineageProof> for SExp<'static> {
+    fn from(value: LineageProof) -> SExp<'static> {
         (&[
             SExp::from(value.parent_parent_id),
             SExp::from(value.parent_inner_puzzle_hash),
@@ -18,7 +18,7 @@ impl From<LineageProof> for SExp {
             .into()
     }
 }
-impl TryFrom<&SExp> for LineageProof {
+impl TryFrom<&SExp<'_>> for LineageProof {
     type Error = Error;
     fn try_from(sexp: &SExp) -> Result<Self, Self::Error> {
         let (parent_parent_id, rest) = sexp.split()?;

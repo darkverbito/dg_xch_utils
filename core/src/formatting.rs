@@ -1,6 +1,7 @@
+use crate::errors::ClvmError;
 use hex::{FromHexError, decode};
 use num_bigint::BigInt;
-use num_traits::{Signed, pow};
+use num_traits::{Signed, ToPrimitive, Zero, pow};
 use once_cell::sync::Lazy;
 use std::io::{Error, ErrorKind};
 
@@ -25,7 +26,7 @@ pub fn hex_to_bytes<S: AsRef<str>>(hex: S) -> Result<Vec<u8>, FromHexError> {
 #[must_use]
 pub fn number_from_slice(v: &[u8]) -> BigInt {
     if v.is_empty() {
-        0.into()
+        BigInt::zero()
     } else {
         BigInt::from_signed_bytes_be(v)
     }
@@ -57,14 +58,13 @@ pub fn u64_to_bytes(v: u64) -> Vec<u8> {
 }
 
 #[allow(clippy::cast_possible_truncation)]
-pub fn bigint_to_bytes(v_: &BigInt, signed: bool) -> Result<Vec<u8>, Error> {
+pub fn bigint_to_bytes(v_: &BigInt, signed: bool) -> Result<Vec<u8>, ClvmError> {
     let v = v_.clone();
     if v == *BIG_ZERO {
         return Ok(vec![]);
     }
     if !signed && v.is_negative() {
-        return Err(Error::new(
-            ErrorKind::InvalidInput,
+        return Err(ClvmError::Overflow(
             "OverflowError: can't convert negative int to unsigned".to_string(),
         ));
     }
@@ -145,22 +145,8 @@ pub fn u64_from_bigint(item: &BigInt) -> Result<u64, Error> {
             "cannot convert negative integer to u64",
         ));
     }
-    if *item > u64::MAX.into() {
-        return Err(Error::new(ErrorKind::InvalidData, "u64::MAX exceeded"));
-    }
-    let bytes: Vec<u8> = item.to_signed_bytes_be();
-    let mut slice = bytes.as_slice();
-    // make number minimal by removing leading zeros
-    while (!slice.is_empty()) && (slice[0] == 0) {
-        if slice.len() > 1 && (slice[1] & 0x80 == 0x80) {
-            break;
-        }
-        slice = &slice[1..];
-    }
-    let mut fixed_ary = [0u8; 8];
-    let start = size_of::<u64>() - slice.len();
-    fixed_ary[start..size_of::<u64>()].copy_from_slice(&slice[..(size_of::<u64>() - start)]);
-    Ok(u64::from_be_bytes(fixed_ary))
+    item.to_u64()
+        .ok_or(Error::new(ErrorKind::InvalidData, "u64::MAX overflow"))
 }
 
 fn u32_from_slice_impl(buf: &[u8], signed: bool) -> Option<u32> {

@@ -59,10 +59,7 @@ pub trait ChiaSerialize {
     fn to_bytes(&self, version: ChiaProtocolVersion) -> Result<Vec<u8>, Error>
     where
         Self: Sized;
-    fn from_bytes<T: AsRef<[u8]>>(
-        bytes: &mut Cursor<T>,
-        version: ChiaProtocolVersion,
-    ) -> Result<Self, Error>
+    fn from_bytes(bytes: &mut Cursor<&[u8]>, version: ChiaProtocolVersion) -> Result<Self, Error>
     where
         Self: Sized;
 }
@@ -73,10 +70,7 @@ impl ChiaSerialize for OffsetDateTime {
     {
         (self.unix_timestamp() as u64).to_bytes(version)
     }
-    fn from_bytes<T: AsRef<[u8]>>(
-        bytes: &mut Cursor<T>,
-        version: ChiaProtocolVersion,
-    ) -> Result<Self, Error>
+    fn from_bytes(bytes: &mut Cursor<&[u8]>, version: ChiaProtocolVersion) -> Result<Self, Error>
     where
         Self: Sized,
     {
@@ -97,10 +91,7 @@ impl ChiaSerialize for String {
         bytes.extend(self.as_bytes());
         Ok(bytes)
     }
-    fn from_bytes<T: AsRef<[u8]>>(
-        bytes: &mut Cursor<T>,
-        _version: ChiaProtocolVersion,
-    ) -> Result<Self, Error>
+    fn from_bytes(bytes: &mut Cursor<&[u8]>, _version: ChiaProtocolVersion) -> Result<Self, Error>
     where
         Self: Sized,
     {
@@ -128,10 +119,7 @@ impl ChiaSerialize for bool {
     {
         Ok(vec![u8::from(*self)])
     }
-    fn from_bytes<T: AsRef<[u8]>>(
-        bytes: &mut Cursor<T>,
-        _version: ChiaProtocolVersion,
-    ) -> Result<Self, Error>
+    fn from_bytes(bytes: &mut Cursor<&[u8]>, _version: ChiaProtocolVersion) -> Result<Self, Error>
     where
         Self: Sized,
     {
@@ -168,10 +156,7 @@ where
         }
         Ok(bytes)
     }
-    fn from_bytes<B: AsRef<[u8]>>(
-        bytes: &mut Cursor<B>,
-        version: ChiaProtocolVersion,
-    ) -> Result<Self, Error>
+    fn from_bytes(bytes: &mut Cursor<&[u8]>, version: ChiaProtocolVersion) -> Result<Self, Error>
     where
         Self: Sized,
     {
@@ -199,10 +184,7 @@ where
         bytes.extend(self.1.to_bytes(version)?);
         Ok(bytes)
     }
-    fn from_bytes<B: AsRef<[u8]>>(
-        bytes: &mut Cursor<B>,
-        version: ChiaProtocolVersion,
-    ) -> Result<Self, Error>
+    fn from_bytes(bytes: &mut Cursor<&[u8]>, version: ChiaProtocolVersion) -> Result<Self, Error>
     where
         Self: Sized,
     {
@@ -228,10 +210,7 @@ where
         bytes.extend(self.2.to_bytes(version)?);
         Ok(bytes)
     }
-    fn from_bytes<B: AsRef<[u8]>>(
-        bytes: &mut Cursor<B>,
-        version: ChiaProtocolVersion,
-    ) -> Result<Self, Error>
+    fn from_bytes(bytes: &mut Cursor<&[u8]>, version: ChiaProtocolVersion) -> Result<Self, Error>
     where
         Self: Sized,
     {
@@ -258,10 +237,7 @@ where
         }
         Ok(bytes)
     }
-    fn from_bytes<B: AsRef<[u8]>>(
-        bytes: &mut Cursor<B>,
-        version: ChiaProtocolVersion,
-    ) -> Result<Self, Error>
+    fn from_bytes(bytes: &mut Cursor<&[u8]>, version: ChiaProtocolVersion) -> Result<Self, Error>
     where
         Self: Sized,
     {
@@ -286,7 +262,7 @@ macro_rules! impl_primitives {
                 fn to_bytes(&self, _version: ChiaProtocolVersion) -> Result<Vec<u8>, Error> {
                     Ok(self.to_be_bytes().to_vec())
                 }
-                fn from_bytes<T: AsRef<[u8]>>(bytes: &mut Cursor<T>, _version: ChiaProtocolVersion) -> Result<Self, std::io::Error> where Self: Sized,
+                fn from_bytes(bytes: &mut Cursor<&[u8]>, _version: ChiaProtocolVersion) -> Result<Self, std::io::Error> where Self: Sized,
                 {
                     let remaining = bytes.get_ref().as_ref().len().saturating_sub(bytes.position() as usize);
                     if remaining < $size {
@@ -398,10 +374,7 @@ impl<K: ChiaSerialize + Eq + Hash, V: ChiaSerialize> ChiaSerialize for HashMap<K
         Ok(bytes)
     }
 
-    fn from_bytes<T: AsRef<[u8]>>(
-        bytes: &mut Cursor<T>,
-        version: ChiaProtocolVersion,
-    ) -> Result<Self, Error>
+    fn from_bytes(bytes: &mut Cursor<&[u8]>, version: ChiaProtocolVersion) -> Result<Self, Error>
     where
         Self: Sized,
     {

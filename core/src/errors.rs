@@ -1,3 +1,63 @@
+use crate::blockchain::sized_bytes::Bytes48;
+use std::error::Error;
+use std::fmt;
+
+#[derive(Debug)]
+pub enum ClvmError {
+    AtomNotValidU64(String),
+    BadEncoding,
+    CostExceeded(u64, u64),
+    DoubleSpend(String),
+    DuplicateCreate(String),
+    ExpectedPairGotAtom(String),
+    ExpectedAtomGotPair(String),
+    InvalidApplyArgs(String),
+    InvalidArgCount(String),
+    InvalidHex(String),
+    InvalidInput(String),
+    InvalidOperator(String),
+    InvalidOperandList(String),
+    InvalidOperandArgs(&'static str, usize),
+    InvalidPublicKey(Bytes48),
+    InvalidSyntax(String),
+    InvalidSignature(String),
+    InvalidSpendbundle(String),
+    IoError(std::io::Error),
+    NoOperatorFound(String),
+    NoPostEval,
+    Overflow(String),
+    PathIntoAtom(String),
+    PostEvalStackEmpty,
+    Raise(String),
+    ReservedOperator(String),
+    SerializationError(String),
+    TooManyAnnouncements,
+    UnexpectedEndOfValues(String),
+    Unimplemented(u8),
+    Unsupported(String),
+    ValueStackEmpty,
+}
+
+impl From<ClvmError> for std::io::Error {
+    fn from(e: ClvmError) -> std::io::Error {
+        std::io::Error::other(e)
+    }
+}
+
+impl From<std::io::Error> for ClvmError {
+    fn from(e: std::io::Error) -> ClvmError {
+        ClvmError::IoError(e)
+    }
+}
+
+impl fmt::Display for ClvmError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
+impl Error for ClvmError {}
+
 // See Source Here https://github.com/Chia-Network/chia-blockchain/blob/main/chia/util/errors.py
 #[derive(serde::Deserialize)]
 pub enum ChiaError {

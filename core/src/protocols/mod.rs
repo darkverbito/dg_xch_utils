@@ -734,7 +734,7 @@ impl ReadStream {
                         Some(Ok(msg)) => {
                             match msg {
                                 Message::Binary(bin_data) => {
-                                    let mut cursor = Cursor::new(&bin_data);
+                                    let mut cursor = Cursor::new(bin_data.as_ref());
                                     match ChiaMessage::from_bytes(&mut cursor, protocol_version) {
                                         Ok(chia_msg) => {
                                             let msg_arc: Arc<ChiaMessage> = Arc::new(chia_msg);

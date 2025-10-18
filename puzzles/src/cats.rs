@@ -34,14 +34,14 @@ pub enum Cat<'a> {
     V2(CatPuzzleCurriedArgs<'a>, CatSolution<'a>),
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub struct CatPuzzleCurriedArgs<'a> {
     pub mod_hash: Bytes32,
     pub tail_program_hash: Bytes32,
     pub inner_puzzle: Program<'a>,
 }
-impl<'a> From<CatPuzzleCurriedArgs<'a>> for SExp {
-    fn from(args: CatPuzzleCurriedArgs<'a>) -> SExp {
+impl<'a> From<&CatPuzzleCurriedArgs<'a>> for SExp<'a> {
+    fn from(args: &CatPuzzleCurriedArgs<'a>) -> SExp<'a> {
         vec![
             args.mod_hash.into(),
             args.tail_program_hash.into(),
@@ -50,16 +50,16 @@ impl<'a> From<CatPuzzleCurriedArgs<'a>> for SExp {
         .into()
     }
 }
-impl<'a> TryFrom<&SExp> for CatPuzzleCurriedArgs<'a> {
+impl<'a> TryFrom<&SExp<'a>> for CatPuzzleCurriedArgs<'a> {
     type Error = Error;
-    fn try_from(sexp: &SExp) -> Result<Self, Self::Error> {
+    fn try_from(sexp: &SExp<'a>) -> Result<Self, Self::Error> {
         let (mod_hash, rest) = sexp.split()?;
         let (tail_program_hash, rest) = rest.split()?;
         let (inner_puzzle, _) = rest.split()?;
         Ok(Self {
             mod_hash: Bytes32::try_from(mod_hash)?,
             tail_program_hash: Bytes32::try_from(tail_program_hash)?,
-            inner_puzzle: Program::new(inner_puzzle.clone()),
+            inner_puzzle: Program::new(inner_puzzle.to_owned()),
         })
     }
 }
@@ -79,10 +79,10 @@ impl<'a> Cat<'a> {
     pub fn curried_tree_hash(&self) -> Result<Bytes32, Error> {
         Ok(match self {
             Cat::V1(args, _) => CAT_1_PROGRAM
-                .curry(&[Program::new(args.clone().into())])?
+                .curry(&[Program::new(args.into())])
                 .tree_hash(),
             Cat::V2(args, _) => CAT_2_PROGRAM
-                .curry(&[Program::new(args.clone().into())])?
+                .curry(&[Program::new(args.into())])
                 .tree_hash(),
         })
     }
@@ -104,16 +104,10 @@ impl<'a> Cat<'a> {
             Cat::V2(_, _) => &CAT_2_PROGRAM,
         }
     }
-    pub fn run(&'a self, solution: CatSolution) -> Result<Program<'a>, Error> {
-        let (_cost, results) = self.puzzle_reveal().run(
-            INFINITE_COST,
-            0,
-            &Program::to(&[
-                SExp::from(self.curried_args().clone()),
-                SExp::from(solution),
-            ]),
-        )?;
-        Ok(results)
+    pub fn run(&'a self, solution: CatSolution<'a>) -> Result<Program<'static>, Error> {
+        let args = Program::to(&[SExp::from(self.curried_args()), SExp::from(solution)]);
+        let (_cost, results) = self.puzzle_reveal().run(INFINITE_COST, 0, &args)?;
+        Ok(results.to_owned())
     }
 }
 
@@ -126,8 +120,8 @@ pub struct CatSolution<'a> {
     prev_subtotal: u64,
     extra_delta: Program<'a>,
 }
-impl<'a> From<CatSolution<'a>> for SExp {
-    fn from(solution: CatSolution<'a>) -> SExp {
+impl<'a> From<CatSolution<'a>> for SExp<'a> {
+    fn from(solution: CatSolution<'a>) -> SExp<'a> {
         vec![
             solution.inner_puzzle_solution.sexp().to_owned(),
             solution.lineage_proof.into(),
@@ -140,9 +134,9 @@ impl<'a> From<CatSolution<'a>> for SExp {
         .into()
     }
 }
-impl<'a> TryFrom<&SExp> for CatSolution<'a> {
+impl<'a> TryFrom<&SExp<'a>> for CatSolution<'a> {
     type Error = Error;
-    fn try_from(sexp: &SExp) -> Result<Self, Self::Error> {
+    fn try_from(sexp: &SExp<'a>) -> Result<Self, Self::Error> {
         let (inner_puzzle_solution, rest) = sexp.split()?;
         let (lineage_proof, rest) = rest.split()?;
         let (prev_coin_id, rest) = rest.split()?;
@@ -151,7 +145,7 @@ impl<'a> TryFrom<&SExp> for CatSolution<'a> {
         let (prev_subtotal, rest) = rest.split()?;
         let (extra_delta, _) = rest.split()?;
         Ok(Self {
-            inner_puzzle_solution: Program::new(inner_puzzle_solution.clone()),
+            inner_puzzle_solution: Program::new(inner_puzzle_solution.to_owned()),
             lineage_proof: LineageProof::try_from(lineage_proof)?,
             prev_coin_id: Bytes32::try_from(prev_coin_id)?,
             this_coin_info: Coin::try_from(this_coin_info)?,
@@ -160,7 +154,7 @@ impl<'a> TryFrom<&SExp> for CatSolution<'a> {
                 .as_int()?
                 .to_u64()
                 .ok_or(Error::new(ErrorKind::InvalidData, "Invalid prev_subtotal"))?,
-            extra_delta: Program::new(extra_delta.clone()),
+            extra_delta: Program::new(extra_delta.to_owned()),
         })
     }
 }
@@ -170,13 +164,13 @@ pub struct NextCoinProof {
     pub inner_puzzle_hash: Bytes32,
     pub amount: u64,
 }
-impl From<NextCoinProof> for SExp {
-    fn from(coin: NextCoinProof) -> SExp {
+impl<'a> From<NextCoinProof> for SExp<'a> {
+    fn from(coin: NextCoinProof) -> SExp<'a> {
         (&coin).into()
     }
 }
-impl From<&NextCoinProof> for SExp {
-    fn from(input: &NextCoinProof) -> SExp {
+impl<'a> From<&NextCoinProof> for SExp<'a> {
+    fn from(input: &NextCoinProof) -> SExp<'a> {
         (&[
             SExp::from(input.parent_coin_info),
             SExp::from(input.inner_puzzle_hash),
@@ -185,7 +179,7 @@ impl From<&NextCoinProof> for SExp {
             .into()
     }
 }
-impl TryFrom<&SExp> for NextCoinProof {
+impl TryFrom<&SExp<'_>> for NextCoinProof {
     type Error = Error;
     fn try_from(sexp: &SExp) -> Result<Self, Self::Error> {
         let (parent_coin_info, rest) = sexp.split()?;

@@ -10,7 +10,6 @@ pub mod plots;
 pub mod pool;
 pub mod protocols;
 pub mod ssl;
-mod tests;
 pub mod traits;
 pub mod utils;
 

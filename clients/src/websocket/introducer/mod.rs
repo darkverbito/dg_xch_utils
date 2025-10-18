@@ -118,7 +118,7 @@ impl MessageHandler for RespondPeersHandler {
                 ),
             ))
         } else {
-            let mut cursor = Cursor::new(&msg.data);
+            let mut cursor = Cursor::new(msg.data.as_slice());
             match peers.read().await.get(&peer_id) {
                 None => {
                     error!("Peer Disconnected before Peer Version could be determined");

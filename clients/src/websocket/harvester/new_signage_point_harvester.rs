@@ -57,7 +57,7 @@ impl<T: PlotManagerAsync + Send + Sync> MessageHandler for NewSignagePointHarves
         } else {
             ChiaProtocolVersion::default()
         };
-        let mut cursor = Cursor::new(msg.data.clone());
+        let mut cursor = Cursor::new(msg.data.as_slice());
         let harvester_point = NewSignagePointHarvester::from_bytes(&mut cursor, protocol_version)?;
         trace!("{:#?}", &harvester_point);
         let plot_counts = Arc::new(PlotCounts::default());

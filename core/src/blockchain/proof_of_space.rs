@@ -46,10 +46,7 @@ impl ChiaSerialize for ProofBytes {
         ChiaSerialize::to_bytes(&self.0, version)
     }
 
-    fn from_bytes<T: AsRef<[u8]>>(
-        bytes: &mut Cursor<T>,
-        version: ChiaProtocolVersion,
-    ) -> Result<Self, Error>
+    fn from_bytes(bytes: &mut Cursor<&[u8]>, version: ChiaProtocolVersion) -> Result<Self, Error>
     where
         Self: Sized,
     {

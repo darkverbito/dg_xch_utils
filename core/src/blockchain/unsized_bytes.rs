@@ -140,10 +140,7 @@ impl ChiaSerialize for UnsizedBytes {
     fn to_bytes(&self, version: ChiaProtocolVersion) -> Result<Vec<u8>, Error> {
         self.bytes.to_bytes(version)
     }
-    fn from_bytes<T: AsRef<[u8]>>(
-        bytes: &mut Cursor<T>,
-        version: ChiaProtocolVersion,
-    ) -> Result<Self, Error>
+    fn from_bytes(bytes: &mut Cursor<&[u8]>, version: ChiaProtocolVersion) -> Result<Self, Error>
     where
         Self: Sized,
     {

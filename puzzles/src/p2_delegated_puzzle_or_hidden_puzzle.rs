@@ -121,7 +121,9 @@ pub fn puzzle_for_synthetic_public_key(
     synthetic_public_key: Bytes48,
 ) -> Result<Program<'static>, Error> {
     let synthetic_public_key = &[Program::to(synthetic_public_key)];
-    P2_DELEGATED_PUZZLE_OR_HIDDEN_PUZZLE_PROGRAM.curry(synthetic_public_key)
+    Ok(P2_DELEGATED_PUZZLE_OR_HIDDEN_PUZZLE_PROGRAM
+        .curry(synthetic_public_key)
+        .to_owned())
 }
 
 pub fn puzzle_hash_for_synthetic_public_key(
@@ -177,7 +179,7 @@ pub fn solution_for_delegated_puzzle(
     delegated_puzzle: Program,
     solution: Program,
 ) -> Program<'static> {
-    Program::to([&NULL_SEXP, delegated_puzzle.sexp(), solution.sexp()])
+    Program::to([&NULL_SEXP, delegated_puzzle.sexp(), solution.sexp()]).to_owned()
 }
 
 #[must_use]
@@ -191,9 +193,12 @@ pub fn solution_for_hidden_puzzle(
         hidden_puzzle.sexp(),
         solution_to_hidden_puzzle.sexp(),
     ])
+    .to_owned()
 }
 
-pub fn solution_for_conditions<T: Into<SExp>>(conditions: T) -> Result<Program<'static>, Error> {
+pub fn solution_for_conditions<T: Into<SExp<'static>>>(
+    conditions: T,
+) -> Result<Program<'static>, Error> {
     let delegated_puzzle = puzzle_for_conditions(conditions)?;
     Ok(solution_for_delegated_puzzle(
         delegated_puzzle,

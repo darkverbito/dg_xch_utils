@@ -3,6 +3,7 @@ use crate::blockchain::sized_bytes::{Bytes32, Bytes48};
 use crate::clvm::parser::{sexp_from_bytes, sexp_to_bytes};
 use crate::clvm::sexp::{AtomBuf, SExp};
 use crate::constants::NULL_SEXP;
+use crate::errors::ClvmError;
 use crate::formatting::{number_from_slice, u32_from_slice, u64_from_bigint};
 use dg_xch_serialize::{ChiaProtocolVersion, ChiaSerialize};
 use log::warn;
@@ -15,9 +16,9 @@ use std::io::{Cursor, Error, ErrorKind};
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub struct Message(usize, [u8; 1024]);
 impl Message {
-    pub fn new(msg: Vec<u8>) -> Result<Message, Error> {
+    pub fn new(msg: Vec<u8>) -> Result<Message, ClvmError> {
         if msg.len() > 1024 {
-            Err(Error::new(ErrorKind::InvalidInput, "Message too long"))
+            Err(ClvmError::InvalidInput("Message too long".to_string()))
         } else {
             let mut buf = [0u8; 1024];
             let length = msg.len();
@@ -54,8 +55,8 @@ impl AsRef<[u8]> for Message {
     }
 }
 
-impl From<&Message> for SExp {
-    fn from(message: &Message) -> SExp {
+impl<'a> From<&Message> for SExp<'a> {
+    fn from(message: &Message) -> SExp<'a> {
         SExp::Atom(AtomBuf::new(message.as_ref().to_vec()))
     }
 }
@@ -91,15 +92,12 @@ impl ChiaSerialize for Message {
         self.as_ref().to_vec().to_bytes(version)
     }
 
-    fn from_bytes<T: AsRef<[u8]>>(
-        bytes: &mut Cursor<T>,
-        version: ChiaProtocolVersion,
-    ) -> Result<Self, Error>
+    fn from_bytes(bytes: &mut Cursor<&[u8]>, version: ChiaProtocolVersion) -> Result<Self, Error>
     where
         Self: Sized,
     {
         let vec_data: Vec<u8> = Vec::from_bytes(bytes, version)?;
-        Message::new(vec_data)
+        Message::new(vec_data).map_err(Into::into)
     }
 }
 
@@ -142,16 +140,17 @@ pub enum ConditionWithArgs {
     AssertBeforeHeightAbsolute(u32),
     SoftFork(u64),
 }
-impl TryFrom<&SExp> for ConditionWithArgs {
-    type Error = Error;
+impl TryFrom<&SExp<'_>> for ConditionWithArgs {
+    type Error = ClvmError;
     fn try_from(sexp: &SExp) -> Result<Self, Self::Error> {
         let (op_code, args) = op_code_with_args_from_sexp(sexp)?;
-        from_opcode_with_args(op_code, args)
+        from_opcode_with_args(op_code, args).map_err(ClvmError::IoError)
     }
 }
 impl Display for ConditionWithArgs {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let (op_code, vars) = self.clone().op_code_with_args();
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let condition = self.clone();
+        let (op_code, vars) = condition.op_code_with_args();
         write!(f, "{op_code} ")?;
         for var in &vars {
             write!(f, "{var} ")?;
@@ -160,9 +159,9 @@ impl Display for ConditionWithArgs {
     }
 }
 
-impl From<&ConditionWithArgs> for SExp {
-    fn from(conditions: &ConditionWithArgs) -> SExp {
-        let mut as_sexp = NULL_SEXP.clone();
+impl<'a> From<&'a ConditionWithArgs> for SExp<'a> {
+    fn from(conditions: &'a ConditionWithArgs) -> SExp<'a> {
+        let mut as_sexp = NULL_SEXP;
         let (op_code, vars) = conditions.op_code_with_args();
         for var in vars.into_iter().rev() {
             as_sexp = var.cons(as_sexp)
@@ -172,7 +171,7 @@ impl From<&ConditionWithArgs> for SExp {
 }
 
 impl ConditionWithArgs {
-    pub fn op_code_with_args(&self) -> (ConditionOpcode, Vec<SExp>) {
+    pub fn op_code_with_args(&self) -> (ConditionOpcode, Vec<SExp<'_>>) {
         match self {
             ConditionWithArgs::Unknown => (ConditionOpcode::Unknown, vec![]),
             ConditionWithArgs::Remark(msg) => (ConditionOpcode::Remark, vec![msg.into()]),
@@ -207,9 +206,9 @@ impl ConditionWithArgs {
                 let mut hints = vec![];
                 if let Some(hint) = hint {
                     for var in hint {
-                        let mut cursor = Cursor::new(var);
+                        let mut cursor = Cursor::new(var.as_slice());
                         let sexp = sexp_from_bytes(&mut cursor).unwrap();
-                        hints.push(sexp);
+                        hints.push(sexp.to_owned());
                     }
                     (
                         ConditionOpcode::CreateCoin,
@@ -760,10 +759,7 @@ impl ChiaSerialize for ConditionWithArgs {
         }
     }
 
-    fn from_bytes<T: AsRef<[u8]>>(
-        bytes: &mut Cursor<T>,
-        version: ChiaProtocolVersion,
-    ) -> Result<Self, Error>
+    fn from_bytes(bytes: &mut Cursor<&[u8]>, version: ChiaProtocolVersion) -> Result<Self, Error>
     where
         Self: Sized,
     {
@@ -1242,12 +1238,12 @@ fn from_opcode_with_args(
     })
 }
 
-impl TryFrom<&SExp> for Vec<ConditionWithArgs> {
-    type Error = Error;
+impl TryFrom<&SExp<'_>> for Vec<ConditionWithArgs> {
+    type Error = ClvmError;
     fn try_from(sexp: &SExp) -> Result<Self, Self::Error> {
         let mut results = Vec::new();
         for arg in sexp.iter() {
-            let arg: Result<ConditionWithArgs, Error> = arg.try_into();
+            let arg: Result<ConditionWithArgs, ClvmError> = arg.try_into();
             match arg {
                 Ok(condition) => {
                     results.push(condition);

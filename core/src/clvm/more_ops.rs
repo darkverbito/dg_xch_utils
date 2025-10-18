@@ -6,6 +6,7 @@ use crate::clvm::parser::sexp_to_bytes;
 use crate::clvm::sexp::{AtomBuf, SExp};
 use crate::clvm::utils::{atom, check_arg_count, check_cost, i32_atom, int_atom, two_ints};
 use crate::constants::{NULL_SEXP, ONE_SEXP};
+use crate::errors::ClvmError;
 use crate::formatting::{number_from_slice, u32_from_slice, u64_from_bigint};
 use crate::traits::SizedBytes;
 use bls12_381::{G1Affine, G1Projective, Scalar};
@@ -16,7 +17,6 @@ use once_cell::sync::Lazy;
 use sha2::Digest;
 use sha2::Sha256;
 use std::convert::TryFrom;
-use std::io::{Error, ErrorKind};
 use std::ops::BitAndAssign;
 use std::ops::BitOrAssign;
 use std::ops::BitXorAssign;
@@ -94,37 +94,37 @@ fn limbs_for_int(v: &BigInt) -> u64 {
     v.bits().div_ceil(8)
 }
 
-fn new_atom_and_cost(cost: u64, buf: &[u8]) -> (u64, SExp) {
+fn new_atom_and_cost(cost: u64, buf: &[u8]) -> (u64, SExp<'static>) {
     let c = buf.len() as u64 * MALLOC_COST_PER_BYTE;
     (cost + c, SExp::Atom(buf.to_vec().into()))
 }
 
-fn malloc_cost(cost: u64, ptr: SExp) -> Result<(u64, SExp), Error> {
+fn malloc_cost(cost: u64, ptr: SExp) -> Result<(u64, SExp), ClvmError> {
     let c = ptr.atom()?.as_ref().len() as u64 * MALLOC_COST_PER_BYTE;
     Ok((cost + c, ptr))
 }
 
-pub fn op_unknown<D: Dialect>(
-    o: &SExp,
-    args: &SExp,
+pub fn op_unknown<'a, D: Dialect>(
+    o: &'a SExp<'a>,
+    args: &'a SExp<'a>,
     max_cost: u64,
-    _dialect: &D,
-) -> Result<(u64, SExp), Error> {
+    _dialect: &'_ D,
+) -> Result<(u64, SExp<'static>), ClvmError> {
     let op = o.atom()?.as_ref();
     if op.is_empty() || (op.len() >= 2 && op[0] == 0xff && op[1] == 0xff) {
-        return Err(Error::new(
-            ErrorKind::Unsupported,
-            format!("Reserved Operator: {:?}", &op),
-        ));
+        return Err(ClvmError::ReservedOperator(format!(
+            "Reserved Operator: {:?}",
+            &op
+        )));
     }
     let cost_function = (op[op.len() - 1] & 0b1100_0000) >> 6;
     let cost_multiplier: u64 = match u32_from_slice(&op[0..op.len() - 1]) {
         Some(v) => u64::from(v),
         None => {
-            return Err(Error::new(
-                ErrorKind::Unsupported,
-                format!("Invalid Operator: {:?}", &op),
-            ));
+            return Err(ClvmError::InvalidOperator(format!(
+                "Invalid Operator: {:?}",
+                &op
+            )));
         }
     };
     let mut cost = match cost_function {
@@ -175,20 +175,17 @@ pub fn op_unknown<D: Dialect>(
     check_cost(cost, max_cost)?;
     cost *= cost_multiplier + 1;
     if cost > u64::from(u32::MAX) {
-        Err(Error::new(
-            ErrorKind::Unsupported,
-            format!("Invalid Operator: {o:?}"),
-        ))
+        Err(ClvmError::Unsupported(format!("Invalid Operator: {o:?}")))
     } else {
-        Ok((cost, NULL_SEXP.clone()))
+        Ok((cost, NULL_SEXP))
     }
 }
 
-pub fn op_sha256<D: Dialect>(
-    args: &SExp,
+pub fn op_sha256<'a, D: Dialect>(
+    args: &'a SExp<'a>,
     max_cost: u64,
-    _dialect: &D,
-) -> Result<(u64, SExp), Error> {
+    _dialect: &'_ D,
+) -> Result<(u64, SExp<'a>), ClvmError> {
     let mut cost = SHA256_BASE_COST;
     let mut byte_count: usize = 0;
     let mut hasher = Sha256::new();
@@ -203,96 +200,178 @@ pub fn op_sha256<D: Dialect>(
     Ok(new_atom_and_cost(cost, &hasher.finalize()))
 }
 
-pub fn op_add<D: Dialect>(args: &SExp, max_cost: u64, _dialect: &D) -> Result<(u64, SExp), Error> {
+pub fn op_add<'a, D: Dialect>(
+    args: &'a SExp<'a>,
+    max_cost: u64,
+    _dialect: &'_ D,
+) -> Result<(u64, SExp<'a>), ClvmError> {
     let mut cost = ARITH_BASE_COST;
     let mut byte_count: usize = 0;
-    let mut total: BigInt = 0.into();
-    for arg in args {
+    let mut promoted = None;
+    let mut total = 0i128;
+    for blob in args {
         cost += ARITH_COST_PER_ARG;
         check_cost(cost + (byte_count as u64 * ARITH_COST_PER_BYTE), max_cost)?;
-        let blob = int_atom(arg, "+")?;
-        let v: BigInt = number_from_slice(blob);
-        byte_count += blob.len();
-        total += v;
+        let blob = int_atom(blob, "+")?;
+        match &mut promoted {
+            Some(promoted) => {
+                *promoted += number_from_slice(blob);
+                byte_count += blob.len();
+            }
+            None => {
+                if blob.len() <= 16 {
+                    let mut int_buf = [0u8; 16];
+                    int_buf[(16 - blob.len())..].copy_from_slice(blob);
+                    byte_count += blob.len();
+                    let val = i128::from_be_bytes(int_buf);
+                    match total.checked_add(val) {
+                        Some(v) => {
+                            total = v;
+                        }
+                        None => {
+                            let mut pro = BigInt::from(total);
+                            pro += BigInt::from(val);
+                            promoted = Some(pro);
+                        }
+                    }
+                } else {
+                    let mut pro = BigInt::from(total);
+                    pro += number_from_slice(blob);
+                    promoted = Some(pro);
+                }
+            }
+        }
     }
-    let total = SExp::try_from(&total)?;
     cost += byte_count as u64 * ARITH_COST_PER_BYTE;
-    malloc_cost(cost, total)
+    malloc_cost(
+        cost,
+        match promoted {
+            Some(promoted) => SExp::try_from(&promoted)?,
+            None => SExp::from(total),
+        },
+    )
 }
 
-pub fn op_subtract<D: Dialect>(
-    args: &SExp,
+pub fn op_subtract<'a, D: Dialect>(
+    args: &'a SExp<'a>,
     max_cost: u64,
-    _dialect: &D,
-) -> Result<(u64, SExp), Error> {
+    _dialect: &'_ D,
+) -> Result<(u64, SExp<'a>), ClvmError> {
     let mut cost = ARITH_BASE_COST;
     let mut byte_count: usize = 0;
-    let mut total: BigInt = 0.into();
     let mut is_first = true;
-    for arg in args {
-        cost += ARITH_COST_PER_ARG;
-        check_cost(cost + byte_count as u64 * ARITH_COST_PER_BYTE, max_cost)?;
-        let blob = int_atom(arg, "-")?;
-        let v: BigInt = number_from_slice(blob);
-        byte_count += blob.len();
-        if is_first {
-            total += v;
-        } else {
-            total -= v;
-        };
-        is_first = false;
-    }
-    let total = SExp::try_from(&total)?;
+    let args = args.ref_list();
+    let atoms = args.iter().try_fold(vec![], |mut v, a| {
+        v.push(int_atom(a, "-")?);
+        Ok::<Vec<&[u8]>, std::io::Error>(v)
+    })?;
+    let total = if atoms.iter().all(|v| v.len() <= 16) {
+        let mut total: i128 = 0;
+        for blob in atoms {
+            cost += ARITH_COST_PER_ARG;
+            check_cost(cost + (byte_count as u64 * ARITH_COST_PER_BYTE), max_cost)?;
+            let mut int_buf = [0u8; 16];
+            int_buf[(16 - blob.len())..].copy_from_slice(blob);
+            byte_count += blob.len();
+            if is_first {
+                total += i128::from_be_bytes(int_buf);
+            } else {
+                total -= i128::from_be_bytes(int_buf);
+            };
+            is_first = false;
+        }
+        SExp::from(total)
+    } else {
+        let mut total: BigInt = 0.into();
+        let mut v: BigInt;
+        for blob in atoms {
+            cost += ARITH_COST_PER_ARG;
+            check_cost(cost + (byte_count as u64 * ARITH_COST_PER_BYTE), max_cost)?;
+            v = number_from_slice(blob);
+            byte_count += blob.len();
+            if is_first {
+                total += v;
+            } else {
+                total -= v;
+            };
+            is_first = false;
+        }
+        SExp::try_from(&total)?
+    };
     cost += byte_count as u64 * ARITH_COST_PER_BYTE;
     malloc_cost(cost, total)
 }
 
-pub fn op_multiply<D: Dialect>(
-    args: &SExp,
+pub fn op_multiply<'a, D: Dialect>(
+    args: &'a SExp<'a>,
     max_cost: u64,
-    _dialect: &D,
-) -> Result<(u64, SExp), Error> {
+    _dialect: &'_ D,
+) -> Result<(u64, SExp<'a>), ClvmError> {
     let mut cost: u64 = MUL_BASE_COST;
     let mut first_iter: bool = true;
-    let mut total: BigInt = 1.into();
-    let mut l0 = 0u64;
-    for arg in args {
-        check_cost(cost, max_cost)?;
-        let blob = int_atom(arg, "*")?;
-        if first_iter {
-            l0 = blob.len() as u64;
-            total = number_from_slice(blob);
-            first_iter = false;
-            continue;
+    let args = args.ref_list();
+    let atoms = args.iter().try_fold(vec![], |mut v, a| {
+        v.push(int_atom(a, "-")?);
+        Ok::<Vec<&[u8]>, std::io::Error>(v)
+    })?;
+    let total = if atoms.iter().all(|v| v.len() <= 16) {
+        let mut total = 1i128;
+        let mut l0 = 128u64;
+        for blob in atoms {
+            check_cost(cost, max_cost)?;
+            let mut int_buf = [0u8; 16];
+            int_buf[(16 - blob.len())..].copy_from_slice(blob);
+            if first_iter {
+                l0 = blob.len() as u64;
+                total = i128::from_be_bytes(int_buf);
+                first_iter = false;
+                continue;
+            }
+            let l1 = blob.len() as u64;
+            total *= i128::from_be_bytes(int_buf);
+            cost += MUL_COST_PER_OP;
+            cost += (l0 + l1) * MUL_LINEAR_COST_PER_BYTE;
+            cost += (l0 * l1) / MUL_SQUARE_COST_PER_BYTE_DIVIDER;
         }
-        let l1 = blob.len() as u64;
-
-        total *= number_from_slice(blob);
-        cost += MUL_COST_PER_OP;
-
-        cost += (l0 + l1) * MUL_LINEAR_COST_PER_BYTE;
-        cost += (l0 * l1) / MUL_SQUARE_COST_PER_BYTE_DIVIDER;
-
-        l0 = limbs_for_int(&total);
-    }
-    let total = SExp::try_from(&total)?;
+        SExp::from(total)
+    } else {
+        let mut total: BigInt = 1.into();
+        let mut l0 = 0u64;
+        let mut v: BigInt;
+        for blob in atoms {
+            check_cost(cost, max_cost)?;
+            v = number_from_slice(blob);
+            if first_iter {
+                l0 = blob.len() as u64;
+                total = v;
+                first_iter = false;
+                continue;
+            }
+            let l1 = blob.len() as u64;
+            total *= v;
+            cost += MUL_COST_PER_OP;
+            cost += (l0 + l1) * MUL_LINEAR_COST_PER_BYTE;
+            cost += (l0 * l1) / MUL_SQUARE_COST_PER_BYTE_DIVIDER;
+            l0 = limbs_for_int(&total);
+        }
+        SExp::try_from(&total)?
+    };
     malloc_cost(cost, total)
 }
 
-pub fn op_div_impl(args: &SExp, mempool: bool) -> Result<(u64, SExp), Error> {
+pub fn op_div_impl<'a>(args: &'a SExp<'a>, mempool: bool) -> Result<(u64, SExp<'a>), ClvmError> {
     let (a0, l0, a1, l1) = two_ints(args, "/")?;
     let cost = DIV_BASE_COST + ((l0 + l1) as u64) * DIV_COST_PER_BYTE;
     if a1.sign() == Sign::NoSign {
-        Err(Error::new(
-            ErrorKind::Unsupported,
-            format!("div with 0 : {:?}", args.first()?),
-        ))
+        Err(ClvmError::Unsupported(format!(
+            "div with 0 : {:?}",
+            args.first()?
+        )))?
     } else {
         if mempool && (a0.sign() == Sign::Minus || a1.sign() == Sign::Minus) {
-            return Err(Error::new(
-                ErrorKind::Unsupported,
-                format!("div operator with negative operands is deprecated: {args:?}"),
-            ));
+            Err(ClvmError::Unsupported(format!(
+                "div operator with negative operands is deprecated: {args:?}"
+            )))?
         }
         let (mut q, r) = a0.div_mod_floor(&a1);
         // this is to preserve a buggy behavior from the initial implementation of this operator.
@@ -304,30 +383,34 @@ pub fn op_div_impl(args: &SExp, mempool: bool) -> Result<(u64, SExp), Error> {
     }
 }
 
-pub fn op_div<D: Dialect>(args: &SExp, _max_cost: u64, _dialect: &D) -> Result<(u64, SExp), Error> {
+pub fn op_div<'a, D: Dialect>(
+    args: &'a SExp<'a>,
+    _max_cost: u64,
+    _dialect: &'_ D,
+) -> Result<(u64, SExp<'a>), ClvmError> {
     op_div_impl(args, false)
 }
 
-pub fn op_div_deprecated<D: Dialect>(
-    args: &SExp,
+pub fn op_div_deprecated<'a, D: Dialect>(
+    args: &'a SExp<'a>,
     _max_cost: u64,
-    _dialect: &D,
-) -> Result<(u64, SExp), Error> {
+    _dialect: &'_ D,
+) -> Result<(u64, SExp<'a>), ClvmError> {
     op_div_impl(args, true)
 }
 
-pub fn op_divmod<D: Dialect>(
-    args: &SExp,
+pub fn op_divmod<'a, D: Dialect>(
+    args: &'a SExp<'a>,
     _max_cost: u64,
-    _dialect: &D,
-) -> Result<(u64, SExp), Error> {
+    _dialect: &'_ D,
+) -> Result<(u64, SExp<'a>), ClvmError> {
     let (a0, l0, a1, l1) = two_ints(args, "divmod")?;
     let cost = DIV_MOD_BASE_COST + ((l0 + l1) as u64) * DIV_MOD_COST_PER_BYTE;
     if a1.sign() == Sign::NoSign {
-        Err(Error::new(
-            ErrorKind::Unsupported,
-            format!("div with 0 : {:?}", args.first()?),
-        ))
+        Err(ClvmError::Unsupported(format!(
+            "div with 0 : {:?}",
+            args.first()?
+        )))
     } else {
         let (q, r) = a0.div_mod_floor(&a1);
         let q1 = SExp::try_from(&q)?;
@@ -340,7 +423,11 @@ pub fn op_divmod<D: Dialect>(
     }
 }
 
-pub fn op_gr<D: Dialect>(args: &SExp, _max_cost: u64, _dialect: &D) -> Result<(u64, SExp), Error> {
+pub fn op_gr<'a, D: Dialect>(
+    args: &'a SExp<'a>,
+    _max_cost: u64,
+    _dialect: &'_ D,
+) -> Result<(u64, SExp<'a>), ClvmError> {
     check_arg_count(args, 2, ">")?;
     let a0 = args.first()?;
     let a1 = args.rest()?.first()?;
@@ -350,18 +437,18 @@ pub fn op_gr<D: Dialect>(args: &SExp, _max_cost: u64, _dialect: &D) -> Result<(u
     Ok((
         cost,
         if number_from_slice(v0) > number_from_slice(v1) {
-            ONE_SEXP.clone() //Todo maybe impl copy
+            ONE_SEXP
         } else {
-            NULL_SEXP.clone() //Todo maybe impl copy
+            NULL_SEXP
         },
     ))
 }
 
-pub fn op_gr_bytes<D: Dialect>(
-    args: &SExp,
+pub fn op_gr_bytes<'a, D: Dialect>(
+    args: &'a SExp<'a>,
     _max_cost: u64,
-    _dialect: &D,
-) -> Result<(u64, SExp), Error> {
+    _dialect: &'_ D,
+) -> Result<(u64, SExp<'a>), ClvmError> {
     check_arg_count(args, 2, ">s")?;
     let a0 = args.first()?;
     let a1 = args.rest()?.first()?;
@@ -378,11 +465,11 @@ pub fn op_gr_bytes<D: Dialect>(
     ))
 }
 
-pub fn op_strlen<D: Dialect>(
-    args: &SExp,
+pub fn op_strlen<'a, D: Dialect>(
+    args: &'a SExp<'a>,
     _max_cost: u64,
-    _dialect: &D,
-) -> Result<(u64, SExp), Error> {
+    _dialect: &'_ D,
+) -> Result<(u64, SExp<'a>), ClvmError> {
     check_arg_count(args, 1, "strlen")?;
     let a0 = args.first()?;
     let v0 = atom(a0, "strlen")?;
@@ -396,17 +483,16 @@ pub fn op_strlen<D: Dialect>(
 #[allow(clippy::cast_possible_truncation)]
 #[allow(clippy::cast_sign_loss)]
 #[allow(clippy::cast_possible_wrap)]
-pub fn op_substr<D: Dialect>(
-    args: &SExp,
+pub fn op_substr<'a, D: Dialect>(
+    args: &'a SExp<'a>,
     _max_cost: u64,
-    _dialect: &D,
-) -> Result<(u64, SExp), Error> {
+    _dialect: &'_ D,
+) -> Result<(u64, SExp<'a>), ClvmError> {
     let ac = args.arg_count(3);
     if !(2..=3).contains(&ac) {
-        return Err(Error::new(
-            ErrorKind::Unsupported,
-            format!("substr takes exactly 2 or 3 arguments: {args:?}"),
-        ));
+        Err(ClvmError::Unsupported(format!(
+            "substr takes exactly 2 or 3 arguments: {args:?}"
+        )))?;
     }
     let a0 = args.first()?;
     let s0 = atom(a0, "substr")?;
@@ -421,10 +507,9 @@ pub fn op_substr<D: Dialect>(
         size as i32
     };
     if i2 < 0 || i1 < 0 || i2 as usize > size || i2 < i1 {
-        Err(Error::new(
-            ErrorKind::Unsupported,
-            format!("invalid indices for substr: {args:?}"),
-        ))
+        Err(ClvmError::Unsupported(format!(
+            "invalid indices for substr: {args:?}"
+        )))
     } else {
         let r = a0.substr(i1 as usize, i2 as usize)?;
         let cost: u64 = 1;
@@ -432,11 +517,11 @@ pub fn op_substr<D: Dialect>(
     }
 }
 
-pub fn op_concat<D: Dialect>(
-    args: &SExp,
+pub fn op_concat<'a, D: Dialect>(
+    args: &'a SExp<'a>,
     max_cost: u64,
-    _dialect: &D,
-) -> Result<(u64, SExp), Error> {
+    _dialect: &'_ D,
+) -> Result<(u64, SExp<'a>), ClvmError> {
     let mut cost = CONCAT_BASE_COST;
     let mut total_size: usize = 0;
     let mut terms = Vec::<&SExp>::new();
@@ -445,10 +530,7 @@ pub fn op_concat<D: Dialect>(
         check_cost(cost + total_size as u64 * CONCAT_COST_PER_BYTE, max_cost)?;
         match arg {
             SExp::Pair(_) => {
-                return Err(Error::new(
-                    ErrorKind::Unsupported,
-                    format!("concat on list: {arg:?}"),
-                ));
+                return Err(ClvmError::Unsupported(format!("concat on list: {arg:?}")));
             }
             SExp::Atom(b) => total_size += b.as_ref().len(),
         };
@@ -462,7 +544,11 @@ pub fn op_concat<D: Dialect>(
     Ok((cost, new_atom))
 }
 
-pub fn op_ash<D: Dialect>(args: &SExp, _max_cost: u64, _dialect: &D) -> Result<(u64, SExp), Error> {
+pub fn op_ash<'a, D: Dialect>(
+    args: &'a SExp<'a>,
+    _max_cost: u64,
+    _dialect: &'_ D,
+) -> Result<(u64, SExp<'a>), ClvmError> {
     check_arg_count(args, 2, "ash")?;
     let a0 = args.first()?;
     let b0 = int_atom(a0, "ash")?;
@@ -471,10 +557,10 @@ pub fn op_ash<D: Dialect>(args: &SExp, _max_cost: u64, _dialect: &D) -> Result<(
     let rest = args.rest()?;
     let a1 = i32_atom(rest.first()?, "ash")?;
     if !(-65535..=65535).contains(&a1) {
-        return Err(Error::new(
-            ErrorKind::Unsupported,
-            format!("shift too large: {:?}", args.rest()?.first()?),
-        ));
+        return Err(ClvmError::Unsupported(format!(
+            "shift too large: {:?}",
+            args.rest()?.first()?
+        )));
     }
 
     let v: BigInt = if a1 > 0 { i0 << a1 } else { i0 >> -a1 };
@@ -484,7 +570,11 @@ pub fn op_ash<D: Dialect>(args: &SExp, _max_cost: u64, _dialect: &D) -> Result<(
     malloc_cost(cost, r)
 }
 
-pub fn op_lsh<D: Dialect>(args: &SExp, _max_cost: u64, _dialect: &D) -> Result<(u64, SExp), Error> {
+pub fn op_lsh<'a, D: Dialect>(
+    args: &'a SExp<'a>,
+    _max_cost: u64,
+    _dialect: &'_ D,
+) -> Result<(u64, SExp<'a>), ClvmError> {
     check_arg_count(args, 2, "lsh")?;
     let a0 = args.first()?;
     let b0 = int_atom(a0, "lsh")?;
@@ -493,10 +583,10 @@ pub fn op_lsh<D: Dialect>(args: &SExp, _max_cost: u64, _dialect: &D) -> Result<(
     let rest = args.rest()?;
     let a1 = i32_atom(rest.first()?, "lsh")?;
     if !(-65535..=65535).contains(&a1) {
-        return Err(Error::new(
-            ErrorKind::Unsupported,
-            format!("shift too large: {:?}", args.rest()?.first()?),
-        ));
+        return Err(ClvmError::Unsupported(format!(
+            "shift too large: {:?}",
+            args.rest()?.first()?
+        )));
     }
     let i0: BigInt = i0.into();
     let v: BigInt = if a1 > 0 { i0 << a1 } else { i0 >> -a1 };
@@ -506,13 +596,13 @@ pub fn op_lsh<D: Dialect>(args: &SExp, _max_cost: u64, _dialect: &D) -> Result<(
     malloc_cost(cost, r)
 }
 
-fn binop_reduction(
+fn binop_reduction<'a>(
     op_name: &'static str,
     initial_value: BigInt,
-    input: &SExp,
+    input: &'a SExp<'a>,
     max_cost: u64,
     op_f: fn(&mut BigInt, &BigInt) -> (),
-) -> Result<(u64, SExp), Error> {
+) -> Result<(u64, SExp<'a>), ClvmError> {
     let mut total = initial_value;
     let mut arg_size: usize = 0;
     let mut cost = LOG_BASE_COST;
@@ -533,11 +623,11 @@ fn logand_op(a: &mut BigInt, b: &BigInt) {
     a.bitand_assign(b);
 }
 
-pub fn op_logand<D: Dialect>(
-    args: &SExp,
+pub fn op_logand<'a, D: Dialect>(
+    args: &'a SExp<'a>,
     max_cost: u64,
-    _dialect: &D,
-) -> Result<(u64, SExp), Error> {
+    _dialect: &'_ D,
+) -> Result<(u64, SExp<'a>), ClvmError> {
     let v: BigInt = (-1).into();
     binop_reduction("logand", v, args, max_cost, logand_op)
 }
@@ -546,11 +636,11 @@ fn logior_op(a: &mut BigInt, b: &BigInt) {
     a.bitor_assign(b);
 }
 
-pub fn op_logior<D: Dialect>(
-    args: &SExp,
+pub fn op_logior<'a, D: Dialect>(
+    args: &'a SExp<'a>,
     max_cost: u64,
-    _dialect: &D,
-) -> Result<(u64, SExp), Error> {
+    _dialect: &'_ D,
+) -> Result<(u64, SExp<'a>), ClvmError> {
     let v: BigInt = 0.into();
     binop_reduction("logior", v, args, max_cost, logior_op)
 }
@@ -559,20 +649,20 @@ fn logxor_op(a: &mut BigInt, b: &BigInt) {
     a.bitxor_assign(b);
 }
 
-pub fn op_logxor<D: Dialect>(
-    args: &SExp,
+pub fn op_logxor<'a, D: Dialect>(
+    args: &'a SExp<'a>,
     max_cost: u64,
-    _dialect: &D,
-) -> Result<(u64, SExp), Error> {
+    _dialect: &'_ D,
+) -> Result<(u64, SExp<'a>), ClvmError> {
     let v: BigInt = (0).into();
     binop_reduction("logxor", v, args, max_cost, logxor_op)
 }
 
-pub fn op_lognot<D: Dialect>(
-    args: &SExp,
+pub fn op_lognot<'a, D: Dialect>(
+    args: &'a SExp<'a>,
     _max_cost: u64,
-    _dialect: &D,
-) -> Result<(u64, SExp), Error> {
+    _dialect: &'_ D,
+) -> Result<(u64, SExp<'a>), ClvmError> {
     check_arg_count(args, 1, "lognot")?;
     let a0 = args.first()?;
     let v0 = int_atom(a0, "lognot")?;
@@ -583,14 +673,22 @@ pub fn op_lognot<D: Dialect>(
     malloc_cost(cost, r)
 }
 
-pub fn op_not<D: Dialect>(args: &SExp, _max_cost: u64, _dialect: &D) -> Result<(u64, SExp), Error> {
+pub fn op_not<'a, D: Dialect>(
+    args: &'a SExp<'a>,
+    _max_cost: u64,
+    _dialect: &'_ D,
+) -> Result<(u64, SExp<'a>), ClvmError> {
     check_arg_count(args, 1, "not")?;
     let r: SExp = SExp::from_bool(!args.first()?.as_bool()).clone();
     let cost = BOOL_BASE_COST;
     Ok((cost, r))
 }
 
-pub fn op_any<D: Dialect>(args: &SExp, max_cost: u64, _dialect: &D) -> Result<(u64, SExp), Error> {
+pub fn op_any<'a, D: Dialect>(
+    args: &'a SExp<'a>,
+    max_cost: u64,
+    _dialect: &'_ D,
+) -> Result<(u64, SExp<'a>), ClvmError> {
     let mut cost = BOOL_BASE_COST;
     let mut is_any = false;
     for arg in args.iter() {
@@ -602,7 +700,11 @@ pub fn op_any<D: Dialect>(args: &SExp, max_cost: u64, _dialect: &D) -> Result<(u
     Ok((cost, total))
 }
 
-pub fn op_all<D: Dialect>(args: &SExp, max_cost: u64, dialect: &D) -> Result<(u64, SExp), Error> {
+pub fn op_all<'a, D: Dialect>(
+    args: &'a SExp<'a>,
+    max_cost: u64,
+    dialect: &'_ D,
+) -> Result<(u64, SExp<'a>), ClvmError> {
     let mut cost = BOOL_BASE_COST;
     let mut is_all = true;
     match args.first() {
@@ -634,38 +736,32 @@ pub fn op_all<D: Dialect>(args: &SExp, max_cost: u64, dialect: &D) -> Result<(u6
     }
 }
 
-pub fn op_softfork<D: Dialect>(
-    args: &SExp,
+pub fn op_softfork<'a, D: Dialect>(
+    args: &'a SExp<'a>,
     max_cost: u64,
-    _dialect: &D,
-) -> Result<(u64, SExp), Error> {
+    _dialect: &'_ D,
+) -> Result<(u64, SExp<'a>), ClvmError> {
     match args.pair() {
         Ok(pair) => {
             let n: BigInt = number_from_slice(int_atom(pair.first(), "softfork")?);
             if n.sign() == Sign::Plus {
                 if n > BigInt::from(max_cost) {
-                    return Err(Error::new(
-                        ErrorKind::Unsupported,
-                        format!("Max Cost({max_cost}) Exceded: {n}"),
-                    ));
+                    return Err(ClvmError::Unsupported(format!(
+                        "Max Cost({max_cost}) Exceded: {n}"
+                    )));
                 }
                 let cost: u64 = TryFrom::try_from(&n).map_err(|e| {
-                    Error::new(
-                        ErrorKind::InvalidData,
-                        format!("Failed to convert Atom to Int: {e:?}"),
-                    )
+                    ClvmError::Unsupported(format!("Failed to convert Atom to Int: {e:?}"))
                 })?;
                 Ok((cost, NULL_SEXP.clone()))
             } else {
-                Err(Error::new(
-                    ErrorKind::Unsupported,
-                    format!("Cost must be > 0, found {n}"),
-                ))
+                Err(ClvmError::Unsupported(format!(
+                    "Cost must be > 0, found {n}"
+                )))
             }
         }
-        _ => Err(Error::new(
-            ErrorKind::Unsupported,
-            "Softfork takes at least 1 argument",
+        _ => Err(ClvmError::Unsupported(
+            "Softfork takes at least 1 argument".to_string(),
         )),
     }
 }
@@ -697,11 +793,11 @@ fn number_to_scalar(n: &BigInt) -> Scalar {
     if sign == Sign::Minus { exp.neg() } else { exp }
 }
 
-pub fn op_pubkey_for_exp<D: Dialect>(
-    args: &SExp,
+pub fn op_pubkey_for_exp<'a, D: Dialect>(
+    args: &'a SExp<'a>,
     _max_cost: u64,
-    _dialect: &D,
-) -> Result<(u64, SExp), Error> {
+    _dialect: &'_ D,
+) -> Result<(u64, SExp<'a>), ClvmError> {
     check_arg_count(args, 1, "pubkey_for_exp")?;
     let a0 = args.first()?;
     let v0 = int_atom(a0, "pubkey_for_exp")?;
@@ -713,11 +809,11 @@ pub fn op_pubkey_for_exp<D: Dialect>(
     Ok(new_atom_and_cost(cost, &point.to_compressed()))
 }
 
-pub fn op_point_add<D: Dialect>(
-    args: &SExp,
+pub fn op_point_add<'a, D: Dialect>(
+    args: &'a SExp<'a>,
     max_cost: u64,
-    _dialect: &D,
-) -> Result<(u64, SExp), Error> {
+    _dialect: &'_ D,
+) -> Result<(u64, SExp<'a>), ClvmError> {
     let mut cost = POINT_ADD_BASE_COST;
     let mut total: G1Projective = G1Projective::identity();
     for arg in args {
@@ -739,59 +835,52 @@ pub fn op_point_add<D: Dialect>(
             let msg = format!(
                 "point_add expects blob, got {blob}: Length of bytes object not equal to G1Element::SIZE"
             );
-            return Err(Error::new(
-                ErrorKind::InvalidData,
-                format!("{msg} {args:?}"),
-            ));
+            Err(ClvmError::Unsupported(format!("{msg} {args:?}")))?;
         }
     }
     let total: G1Affine = total.into();
     Ok(new_atom_and_cost(cost, &total.to_compressed()))
 }
 
-pub fn op_coinid<D: Dialect>(
-    args: &SExp,
+pub fn op_coinid<'a, D: Dialect>(
+    args: &'a SExp<'a>,
     _max_cost: u64,
-    _dialect: &D,
-) -> Result<(u64, SExp), Error> {
+    _dialect: &'_ D,
+) -> Result<(u64, SExp<'a>), ClvmError> {
     let mut args_list = args.as_atom_list();
     if args_list.len() != 3 {
-        return Err(Error::new(
-            ErrorKind::InvalidData,
-            format!("coinid expects 3 args, got {} {args:?}", args_list.len()),
-        ));
+        Err(ClvmError::InvalidArgCount(format!(
+            "coinid expects 3 args, got {} {args:?}",
+            args_list.len()
+        )))?;
     }
     let amount = args_list.pop().expect("Length Already Checked");
     let puzzle_hash = args_list.pop().expect("Length Already Checked");
     let parent_coin_info = args_list.pop().expect("Length Already Checked");
     if parent_coin_info.len() != 32 {
-        return Err(Error::new(
-            ErrorKind::InvalidData,
-            format!("invalid parent coin id, {}", hex::encode(&parent_coin_info)),
-        ));
+        Err(ClvmError::InvalidInput(format!(
+            "invalid parent coin id, {}",
+            hex::encode(&parent_coin_info)
+        )))?;
     }
     if puzzle_hash.len() != 32 {
-        return Err(Error::new(
-            ErrorKind::InvalidData,
-            format!("invalid puzzle hash, {}", hex::encode(&puzzle_hash)),
-        ));
+        Err(ClvmError::InvalidInput(format!(
+            "invalid puzzle hash, {}",
+            hex::encode(&puzzle_hash)
+        )))?;
     }
     let as_int = if !amount.is_empty() {
         let as_int = number_from_slice(&amount);
         if as_int.is_negative() {
-            return Err(Error::new(
-                ErrorKind::InvalidData,
-                format!(
-                    "coin amount cannot be negative, {}",
-                    number_from_slice(&amount)
-                ),
-            ));
+            Err(ClvmError::InvalidInput(format!(
+                "coin amount cannot be negative, {}",
+                number_from_slice(&amount)
+            )))?;
         }
         if amount.len() > 9 || (amount.len() == 9 && amount[0] != 0) {
-            return Err(Error::new(
-                ErrorKind::InvalidData,
-                format!("coin amount exceeds max, {as_int}"),
-            ));
+            Err(ClvmError::InvalidInput(format!(
+                "coin amount exceeds max, {as_int}"
+            )))?;
         }
         as_int
     } else {

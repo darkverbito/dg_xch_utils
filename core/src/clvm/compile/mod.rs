@@ -108,8 +108,9 @@ impl<'a> Compiler<'a> {
         }
         Ok(())
     }
-    fn post_process(&'a self, program: Program<'a>) -> Result<Program<'a>, Error> {
-        assemble_text(&format!("{program:?}"))
+    fn post_process(&'a self, program: Program<'a>) -> Result<Program<'static>, Error> {
+        let as_str = format!("{program:?}");
+        Ok(assemble_text(&as_str)?.to_owned())
     }
     fn process(&'a self) -> Result<Program<'a>, Error> {
         let mut output = None;
@@ -155,7 +156,11 @@ impl<'a> Compiler<'a> {
         })
     }
 
-    fn create_pair_sexp(&self, mut entries: Vec<SExp>, found_end: bool) -> Result<SExp, Error> {
+    fn create_pair_sexp(
+        &'a self,
+        mut entries: Vec<SExp<'a>>,
+        found_end: bool,
+    ) -> Result<SExp<'a>, Error> {
         if entries.is_empty() {
             return if found_end {
                 Ok(NULL_SEXP.clone())
@@ -186,7 +191,7 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    fn process_pair(&'a self, token_stream: &mut IntoIter<Token<'a>>) -> Result<SExp, Error> {
+    fn process_pair(&'a self, token_stream: &mut IntoIter<Token<'a>>) -> Result<SExp<'a>, Error> {
         let mut entries = vec![];
         let mut found_end_cons = false;
         while let Some(token) = token_stream.next() {
@@ -211,7 +216,7 @@ impl<'a> Compiler<'a> {
         &'a self,
         token: Token<'a>,
         token_stream: &mut IntoIter<Token<'a>>,
-    ) -> Result<SExp, Error> {
+    ) -> Result<SExp<'a>, Error> {
         if self
             .functions
             .read()
@@ -255,7 +260,7 @@ impl<'a> Compiler<'a> {
         &'a self,
         token: Token<'a>,
         token_stream: &mut IntoIter<Token<'a>>,
-    ) -> Result<SExp, Error> {
+    ) -> Result<SExp<'a>, Error> {
         let (index, num_args) = self
             .functions
             .read()
@@ -301,7 +306,7 @@ impl<'a> Compiler<'a> {
         &'a self,
         num_args: u32,
         token_stream: &mut IntoIter<Token<'a>>,
-    ) -> Result<SExp, Error> {
+    ) -> Result<SExp<'a>, Error> {
         let mut args = vec![];
         for _ in 0..num_args {
             let token = token_stream.next().ok_or(Error::new(
@@ -334,7 +339,7 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    fn get_program_args_sexp(&'a self) -> Result<SExp, Error> {
+    fn get_program_args_sexp(&'a self) -> Result<SExp<'a>, Error> {
         let mut entries = vec![];
         for func in self.functions.read().clone().into_iter() {
             entries.push(self.get_function_body(func)?);
@@ -359,7 +364,7 @@ impl<'a> Compiler<'a> {
             .cons(rtn.unwrap_or(NULL_SEXP.clone()).cons(QUOTE_SEXP.clone())))
     }
 
-    fn get_function_body(&'a self, function: Function<'a>) -> Result<SExp, Error> {
+    fn get_function_body(&'a self, function: Function<'a>) -> Result<SExp<'a>, Error> {
         let mut tokens = function.function_body.into_iter();
         let args = &function.argument_names;
         self.process_function_pair(&mut tokens, args, 0)
@@ -370,7 +375,7 @@ impl<'a> Compiler<'a> {
         token_stream: &mut IntoIter<Token<'a>>,
         function_args: &[Token<'a>],
         depth: u32,
-    ) -> Result<SExp, Error> {
+    ) -> Result<SExp<'a>, Error> {
         let mut entries = vec![];
         let mut found_end_cons = false;
         while let Some(token) = token_stream.next() {
@@ -402,7 +407,7 @@ impl<'a> Compiler<'a> {
         token: Token<'a>,
         token_stream: &mut IntoIter<Token<'a>>,
         function_args: &[Token<'a>],
-    ) -> Result<SExp, Error> {
+    ) -> Result<SExp<'a>, Error> {
         if self
             .functions
             .read()
@@ -443,7 +448,7 @@ impl<'a> Compiler<'a> {
         &'a self,
         token: Token<'a>,
         token_stream: &mut IntoIter<Token<'a>>,
-    ) -> Result<SExp, Error> {
+    ) -> Result<SExp<'a>, Error> {
         let cloned_func = self
             .inline_functions
             .read()
@@ -499,9 +504,9 @@ impl<'a> Compiler<'a> {
         &'a self,
         token_stream: &mut IntoIter<Token<'a>>,
         function_args: &[Token<'a>],
-        mapped_args: &[SExp],
+        mapped_args: &[SExp<'a>],
         depth: u32,
-    ) -> Result<SExp, Error> {
+    ) -> Result<SExp<'a>, Error> {
         let mut entries = vec![];
         let mut found_end_cons = false;
         while let Some(token) = token_stream.next() {
@@ -542,8 +547,8 @@ impl<'a> Compiler<'a> {
         token: Token<'a>,
         token_stream: &mut IntoIter<Token<'a>>,
         function_args: &[Token<'a>],
-        mapped_args: &[SExp],
-    ) -> Result<SExp, Error> {
+        mapped_args: &[SExp<'a>],
+    ) -> Result<SExp<'a>, Error> {
         if self
             .functions
             .read()
@@ -595,7 +600,7 @@ impl<'a> Compiler<'a> {
         found_sub_functions.is_empty()
     }
 
-    fn get_constant(&'a self, token: Token<'a>) -> Result<SExp, Error> {
+    fn get_constant(&'a self, token: Token<'a>) -> Result<SExp<'a>, Error> {
         let (index, _) = self
             .constants
             .read()
@@ -620,7 +625,7 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    fn get_arg(&'a self, token: Token<'a>) -> Result<SExp, Error> {
+    fn get_arg(&'a self, token: Token<'a>) -> Result<SExp<'a>, Error> {
         let (index, _) = self
             .argument_names
             .read()
