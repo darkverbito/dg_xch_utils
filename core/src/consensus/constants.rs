@@ -153,16 +153,21 @@ pub static SIMULATOR: Lazy<Arc<ConsensusConstants>> = Lazy::new(|| {
             "eb8c4d20b322be8d9fddbf9412016bdffe9a2901d7edb0e364e94266d0e095f7",
         )
         .expect("Failed to parse known good hex"),
+        agg_sig_me_additional_data: hex::decode(
+            "eb8c4d20b322be8d9fddbf9412016bdffe9a2901d7edb0e364e94266d0e095f7",
+        )
+        .expect("Failed to parse known good hex"),
         genesis_pre_farm_farmer_puzzle_hash: Bytes32::from_str(
-            "b1b5203daca45bc00fac9ce11afcfd88a111ba564b3ca5e07ba0f8e31ff66a41",
+            "1e2e27c26e3ca085de2dd0732b63ccbd6fe54983110a045dcb28f6f146b6ad1d",
         )
         .expect("Failed to parse known good hex"),
         genesis_pre_farm_pool_puzzle_hash: Bytes32::from_str(
-            "b1b5203daca45bc00fac9ce11afcfd88a111ba564b3ca5e07ba0f8e31ff66a41",
+            "1e2e27c26e3ca085de2dd0732b63ccbd6fe54983110a045dcb28f6f146b6ad1d",
         )
         .expect("Failed to parse known good hex"),
         hard_fork_height: 0,
         min_plot_size: 18,
+        bech32_prefix: String::from("txch"),
         simulated: true,
         ..Default::default()
     })
