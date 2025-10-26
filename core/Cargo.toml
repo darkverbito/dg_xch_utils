@@ -1,12 +1,12 @@
 [package]
 name = "dg_xch_core"
-version = "3.0.0"
-edition = "2024"
-authors = ["James Hoerr"]
 description = "Core library containing type/error definitions, CLVM tools, Consensus and Pool definitions"
-license = "Apache-2.0"
-homepage = "https://github.com/GalactechsLLC/dg_xch_utils"
-repository = "https://github.com/GalactechsLLC/dg_xch_utils"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
 
 [dependencies]
 async-trait = "0.1.89"

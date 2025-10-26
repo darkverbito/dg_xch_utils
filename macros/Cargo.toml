@@ -1,11 +1,12 @@
 [package]
 name = "dg_xch_macros"
-version = "3.0.0"
-edition = "2024"
 description = "Derive Marcos for Chia Serialization"
-license = "Apache-2.0"
-homepage = "https://github.com/GalactechsLLC/dg_xch_utils"
-repository = "https://github.com/GalactechsLLC/dg_xch_utils"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
 
 [lib]
 proc-macro = true

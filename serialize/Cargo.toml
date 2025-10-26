@@ -1,12 +1,12 @@
 [package]
 name = "dg_xch_serialize"
-version = "3.0.0"
-edition = "2024"
-authors = ["James Hoerr"]
 description = "Low Level Support Package for dg_xch_utils"
-license = "Apache-2.0"
-homepage = "https://github.com/GalactechsLLC/dg_xch_utils"
-repository = "https://github.com/GalactechsLLC/dg_xch_utils"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
 
 [dependencies]
 log = "0.4.28"

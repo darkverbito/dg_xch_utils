@@ -1,7 +1,11 @@
 [package]
 name = "dg_parser_macro"
-version = "3.0.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
 
 [lib]
 proc-macro = true

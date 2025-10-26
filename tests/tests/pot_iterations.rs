@@ -39,21 +39,25 @@ async fn test_calculate_ip_iters() {
     assert!(calculate_ip_iters(&TEST_CONSTANTS, ssi, 123, 100_000).is_err());
     let mut sp_iters = sp_interval_iters * 13;
     //required_iters too high
-    assert!(calculate_ip_iters(
-        &TEST_CONSTANTS,
-        ssi,
-        sp_interval_iters as u8,
-        sp_interval_iters
-    )
-    .is_err());
+    assert!(
+        calculate_ip_iters(
+            &TEST_CONSTANTS,
+            ssi,
+            sp_interval_iters as u8,
+            sp_interval_iters
+        )
+        .is_err()
+    );
     //required_iters too high
-    assert!(calculate_ip_iters(
-        &TEST_CONSTANTS,
-        ssi,
-        sp_interval_iters as u8,
-        sp_interval_iters * 12
-    )
-    .is_err());
+    assert!(
+        calculate_ip_iters(
+            &TEST_CONSTANTS,
+            ssi,
+            sp_interval_iters as u8,
+            sp_interval_iters * 12
+        )
+        .is_err()
+    );
     //required_iters too low (0)
     assert!(calculate_ip_iters(&TEST_CONSTANTS, ssi, sp_interval_iters as u8, 0).is_err());
 

@@ -1,11 +1,12 @@
 [package]
 name = "dg_logger"
-version = "3.0.0"
-edition = "2024"
 description = "Druid Garden Logging Library"
-license = "Apache-2.0"
-homepage = "https://github.com/GalactechsLLC/dg_xch_utils"
-repository = "https://github.com/GalactechsLLC/dg_xch_utils"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
 
 [dependencies]
 bus = "2.4.1"
