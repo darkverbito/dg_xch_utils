@@ -278,9 +278,9 @@ fn connection_handler(
                     }
                 })
                 .ok_or_else(|| {
-                    tungstenite::error::Error::Tls(TlsError::Rustls(
+                    tungstenite::error::Error::Tls(TlsError::Rustls(Box::new(
                         rustls::Error::NoCertificatesPresented,
-                    ))
+                    )))
                 })
                 .map_err(Error::other)?,
         );

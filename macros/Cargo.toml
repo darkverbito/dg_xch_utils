@@ -1,6 +1,6 @@
 [package]
 name = "dg_xch_macros"
-version = "2.2.0"
+version = "3.0.0"
 edition = "2024"
 description = "Derive Marcos for Chia Serialization"
 license = "Apache-2.0"
@@ -11,7 +11,7 @@ repository = "https://github.com/GalactechsLLC/dg_xch_utils"
 proc-macro = true
 
 [dependencies]
-syn = "1.0.109"
-quote = "1.0.40"
-proc-macro2 = "1.0.101"
-proc-macro-crate = "3.1"
+syn = { version = "2.0.108", features = ["full"] }
+quote = "1.0.41"
+proc-macro2 = "1.0.103"
+proc-macro-crate = "3.4"
