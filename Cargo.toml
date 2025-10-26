@@ -20,3 +20,4 @@ members = [
 
 [profile.bench]
 debug = true
+strip = "debuginfo"

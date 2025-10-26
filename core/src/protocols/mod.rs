@@ -9,6 +9,7 @@ pub mod timelord;
 pub mod wallet;
 
 use crate::blockchain::sized_bytes::Bytes32;
+use crate::blockchain::unsized_bytes::UnsizedBytes;
 use crate::utils::await_termination;
 use async_trait::async_trait;
 use dg_xch_macros::ChiaSerial;
@@ -539,7 +540,7 @@ pub trait MessageHandler {
 pub struct ChiaMessage {
     pub msg_type: ProtocolMessageTypes,
     pub id: Option<u16>,
-    pub data: Vec<u8>,
+    pub data: UnsizedBytes,
 }
 impl ChiaMessage {
     pub fn new<T: ChiaSerialize>(
@@ -551,7 +552,7 @@ impl ChiaMessage {
         Ok(ChiaMessage {
             msg_type,
             id,
-            data: msg.to_bytes(version)?,
+            data: UnsizedBytes::new(msg.to_bytes(version)?),
         })
     }
 }

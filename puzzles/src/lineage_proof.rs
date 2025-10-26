@@ -1,6 +1,5 @@
 use dg_xch_core::blockchain::sized_bytes::Bytes32;
 use dg_xch_core::clvm::sexp::SExp;
-use num_traits::ToPrimitive;
 use std::io::{Error, ErrorKind};
 
 pub struct LineageProof {

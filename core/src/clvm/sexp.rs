@@ -1,20 +1,21 @@
-use crate::blockchain::condition_opcode::ConditionOpcode;
 use crate::blockchain::sized_bytes::{
     Bytes4, Bytes8, Bytes32, Bytes48, Bytes96, Bytes100, Bytes480,
 };
 use crate::clvm::assemble::is_hex;
 use crate::clvm::parser::{sexp_from_bytes, sexp_to_bytes};
 use crate::clvm::program::Program;
+use crate::clvm::sexp_ext::SExpNumber;
 use crate::constants::{
     ADD, APPLY, CONS, DIV, DIVMOD, KEYWORD_FROM_ATOM, MUL, NULL_SEXP, ONE_SEXP, QUOTE, SUB,
 };
 use crate::errors::ClvmError;
-use crate::formatting::{number_from_slice, u32_from_slice, u64_from_bigint};
+use crate::formatting::{bigint_to_bytes, number_from_slice, u32_from_slice, u64_from_bigint};
 use crate::traits::SizedBytes;
 use crate::utils::hash_256;
 use dg_xch_serialize::{ChiaProtocolVersion, ChiaSerialize};
 use hex::encode;
-use num_bigint::BigInt;
+use num_bigint::{BigInt, Sign};
+use num_traits::Zero;
 use serde::de::Visitor;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashMap;
@@ -23,94 +24,19 @@ use std::fmt::{Debug, Display, Formatter};
 use std::hash::{Hash, Hasher};
 use std::io::{Cursor, Error};
 use std::mem::replace;
+use std::ops::Deref;
 use std::sync::Arc;
 
-#[derive(Eq)]
 pub enum SExpSource<'a> {
     Owned(SExp<'a>),
     Borrowed(&'a SExp<'a>),
 }
-impl<'a> PartialEq for SExpSource<'a> {
-    fn eq(&self, other: &Self) -> bool {
-        self.as_ref() == other.as_ref()
-    }
-}
-impl<'a> Hash for SExpSource<'a> {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.as_ref().hash(state);
-    }
-}
-impl<'a> AsRef<SExp<'a>> for SExpSource<'a> {
-    #[inline(always)]
-    fn as_ref(&self) -> &SExp<'a> {
+impl<'a> Deref for SExpSource<'a> {
+    type Target = SExp<'a>;
+    fn deref(&self) -> &Self::Target {
         match self {
             SExpSource::Owned(owned) => owned,
             SExpSource::Borrowed(borrowed) => borrowed,
-        }
-    }
-}
-impl SExpSource<'static> {
-    pub fn tree_hash_const(&self) -> Bytes32 {
-        match self {
-            SExpSource::Owned(owned) => owned.tree_hash(),
-            SExpSource::Borrowed(borrowed) => borrowed.tree_hash(),
-        }
-    }
-}
-impl<'a> SExpSource<'a> {
-    pub fn is_owned(&self) -> bool {
-        matches!(self, SExpSource::Owned(_))
-    }
-    pub fn to_owned(&self) -> SExp<'static> {
-        match self {
-            SExpSource::Owned(owned) => owned.to_owned(),
-            SExpSource::Borrowed(borrowed) => (*borrowed).to_owned(),
-        }
-    }
-    #[inline(always)]
-    pub fn atom(&self) -> Result<&AtomBuf<'_>, ClvmError> {
-        match self {
-            SExpSource::Owned(owned) => owned.atom(),
-            SExpSource::Borrowed(borrowed) => borrowed.atom(),
-        }
-    }
-    pub fn tree_hash(&self) -> Bytes32 {
-        match self {
-            SExpSource::Owned(owned) => owned.tree_hash(),
-            SExpSource::Borrowed(borrowed) => borrowed.tree_hash(),
-        }
-    }
-    #[inline(always)]
-    pub fn pair(&self) -> Result<&PairBuf<'_>, ClvmError> {
-        match self {
-            SExpSource::Owned(owned) => owned.pair(),
-            SExpSource::Borrowed(borrowed) => borrowed.pair(),
-        }
-    }
-    #[inline(always)]
-    pub fn first(&self) -> Result<&SExp<'_>, ClvmError> {
-        match self {
-            SExpSource::Owned(owned) => owned.first(),
-            SExpSource::Borrowed(borrowed) => borrowed.first(),
-        }
-    }
-    #[inline(always)]
-    pub fn rest(&self) -> Result<&SExp<'_>, ClvmError> {
-        match self {
-            SExpSource::Owned(owned) => owned.rest(),
-            SExpSource::Borrowed(borrowed) => borrowed.rest(),
-        }
-    }
-    pub fn as_vec(&self) -> Option<Vec<u8>> {
-        match self {
-            SExpSource::Owned(owned) => owned.as_vec(),
-            SExpSource::Borrowed(borrowed) => borrowed.as_vec(),
-        }
-    }
-    pub fn to_map(&self) -> Result<HashMap<&SExp<'_>, &SExp<'_>>, ClvmError> {
-        match self {
-            SExpSource::Owned(owned) => owned.to_map(),
-            SExpSource::Borrowed(borrowed) => borrowed.to_map(),
         }
     }
 }
@@ -120,6 +46,11 @@ pub enum SExp<'a> {
     Atom(AtomBuf<'a>),
     Pair(PairBuf<'a>),
 }
+impl<'a> Default for SExp<'a> {
+    fn default() -> SExp<'a> {
+        NULL_SEXP
+    }
+}
 
 impl<'a> SExp<'a> {
     pub fn to_owned(&self) -> SExp<'static> {
@@ -128,27 +59,25 @@ impl<'a> SExp<'a> {
             SExp::Pair(pair) => SExp::Pair(pair.to_owned()),
         }
     }
-}
-
-impl<'a> IntoIterator for &'a SExp<'a> {
-    type Item = &'a SExp<'a>;
-    type IntoIter = SExpIter<'a>;
-    fn into_iter(self) -> Self::IntoIter {
-        self.iter()
+    #[inline(always)]
+    pub fn maybe_atom(&self) -> Option<&AtomBuf<'_>> {
+        match self {
+            SExp::Atom(a) => Some(a),
+            SExp::Pair(_) => None,
+        }
     }
-}
-impl<'a> Default for SExp<'a> {
-    fn default() -> SExp<'a> {
-        NULL_SEXP.clone()
-    }
-}
-
-impl<'a> SExp<'a> {
     #[inline(always)]
     pub fn atom(&self) -> Result<&AtomBuf<'_>, ClvmError> {
         match self {
             SExp::Atom(a) => Ok(a),
             SExp::Pair(_) => Err(ClvmError::ExpectedAtomGotPair(self.to_string())),
+        }
+    }
+    #[inline(always)]
+    pub fn maybe_pair(&self) -> Option<&PairBuf<'_>> {
+        match self {
+            SExp::Atom(_) => None,
+            SExp::Pair(p) => Some(p),
         }
     }
     #[inline(always)]
@@ -180,9 +109,9 @@ impl<'a> SExp<'a> {
         }
     }
 
-    pub fn as_int(&self) -> Result<BigInt, ClvmError> {
+    pub fn as_int(&self) -> Result<SExpNumber, ClvmError> {
         match self {
-            SExp::Atom(atom) => Ok(BigInt::from_signed_bytes_be(atom.as_ref())),
+            SExp::Atom(atom) => Ok(SExpNumber::from(atom)),
             SExp::Pair(_) => Err(ClvmError::ExpectedAtomGotPair(self.to_string())),
         }
     }
@@ -306,10 +235,7 @@ impl<'a> SExp<'a> {
 
     #[must_use]
     pub fn as_bool(&self) -> bool {
-        match self.atom() {
-            Ok(v0) => !v0.as_ref().is_empty(),
-            _ => true,
-        }
+        self.non_nil()
     }
 
     #[must_use]
@@ -371,21 +297,21 @@ impl<'a> SExp<'a> {
     pub fn substr(&self, start: usize, end: usize) -> Result<SExp<'_>, ClvmError> {
         let atom = &self.atom()?.as_ref();
         if start > atom.len() {
-            Err(ClvmError::InvalidInput(format!(
+            return Err(ClvmError::InvalidInput(format!(
                 "substr start out of bounds: {start} is > {}",
                 atom.len()
-            )))?;
+            )));
         }
         if end > atom.len() {
-            Err(ClvmError::InvalidInput(format!(
+            return Err(ClvmError::InvalidInput(format!(
                 "substr end out of bounds: {end} is > {}",
                 atom.len()
-            )))?;
+            )));
         }
         if end < start {
-            Err(ClvmError::InvalidInput(format!(
+            return Err(ClvmError::InvalidInput(format!(
                 "substr invalid bounds: {start} is > {end}"
-            )))?;
+            )));
         }
         let sub = SExp::Atom(AtomBuf::Owned(atom[start..end].to_vec().into()));
         Ok(sub)
@@ -430,22 +356,13 @@ impl<'a> Debug for SExp<'a> {
     }
 }
 
-impl<'a> TryFrom<&BigInt> for SExp<'a> {
-    type Error = ClvmError;
-    fn try_from(value: &BigInt) -> Result<Self, Self::Error> {
-        let bytes: Vec<u8> = value.to_signed_bytes_be();
-        let mut slice = bytes.as_slice();
-        // make number minimal by removing leading zeros
-        while (!slice.is_empty()) && (slice[0] == 0) {
-            if slice.len() > 1 && (slice[1] & 0x80 == 0x80) {
-                break;
-            }
-            slice = &slice[1..];
-        }
-        Ok(SExp::Atom(slice.to_vec().into()))
+impl<'a> IntoIterator for &'a SExp<'a> {
+    type Item = &'a SExp<'a>;
+    type IntoIter = SExpIter<'a>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
     }
 }
-
 pub struct SExpIter<'a> {
     c: &'a SExp<'a>,
 }
@@ -723,7 +640,7 @@ impl<'a> Display for PairBuf<'a> {
             }
         }
         let mut current = self.rest();
-        while let Ok(p) = current.pair() {
+        while let SExp::Pair(p) = current {
             buffer += &format!(" {}", p.first());
             current = p.rest();
         }
@@ -770,7 +687,7 @@ impl<'a> Debug for PairBuf<'a> {
                     buffer += &format!(" . {a:?}");
                 }
                 SExp::Pair(_) => {
-                    while let Ok(p) = current.pair() {
+                    while let SExp::Pair(p) = current {
                         buffer += &format!(" {:?}", p.first());
                         current = p.rest();
                     }
@@ -852,12 +769,6 @@ impl<'a, const N: usize> From<[&SExp<'a>; N]> for SExp<'a> {
     }
 }
 
-impl<'a, const N: usize> From<&[&SExp<'a>; N]> for SExp<'a> {
-    fn from(ary: &[&SExp<'a>; N]) -> SExp<'a> {
-        ary.as_slice().into()
-    }
-}
-
 impl<'a, const N: usize> From<&[SExp<'a>; N]> for SExp<'a> {
     fn from(ary: &[SExp<'a>; N]) -> SExp<'a> {
         ary.as_slice().into()
@@ -921,12 +832,6 @@ impl<'a, T: Into<SExp<'a>>> From<Option<T>> for SExp<'a> {
     }
 }
 
-impl<'a, T: Into<SExp<'a>>> From<(T, T)> for SExp<'a> {
-    fn from(pair: (T, T)) -> SExp<'a> {
-        pair.0.into().cons(pair.1.into())
-    }
-}
-
 impl<'a> From<&str> for SExp<'a> {
     fn from(string: &str) -> SExp<'a> {
         SExp::Atom(AtomBuf::new(string.as_bytes().to_vec()))
@@ -939,21 +844,142 @@ impl<'a> From<String> for SExp<'a> {
     }
 }
 
+impl<'a> From<&String> for SExp<'a> {
+    fn from(string: &String) -> SExp<'a> {
+        string.clone().into()
+    }
+}
+
+impl<'a> From<&Option<String>> for SExp<'a> {
+    fn from(optional: &Option<String>) -> SExp<'a> {
+        match optional {
+            None => NULL_SEXP,
+            Some(s) => s.into(),
+        }
+    }
+}
+
+impl From<&Vec<String>> for SExp<'static> {
+    fn from(string: &Vec<String>) -> SExp<'static> {
+        string
+            .iter()
+            .map(SExp::from)
+            .collect::<Vec<SExp<'_>>>()
+            .into()
+    }
+}
+
 impl<'a> From<&'a Program<'a>> for SExp<'a> {
     fn from(program: &'a Program) -> SExp<'a> {
         program.sexp().to_owned()
     }
 }
 
-impl<'a> From<ConditionOpcode> for SExp<'a> {
-    fn from(condition_opcode: ConditionOpcode) -> SExp<'a> {
-        SExp::Atom(AtomBuf::new(vec![condition_opcode as u8]))
-    }
-}
-
 impl<'a> From<Vec<u8>> for SExp<'a> {
     fn from(vec: Vec<u8>) -> SExp<'a> {
         SExp::Atom(AtomBuf::new(vec))
+    }
+}
+
+impl<'a> From<&Option<Vec<u8>>> for SExp<'a> {
+    fn from(optional: &Option<Vec<u8>>) -> SExp<'a> {
+        match optional {
+            None => NULL_SEXP,
+            Some(s) => SExp::Atom(AtomBuf::Owned(s.clone().into())),
+        }
+    }
+}
+
+impl From<&Vec<u8>> for SExp<'static> {
+    fn from(vec: &Vec<u8>) -> SExp<'static> {
+        SExp::Atom(AtomBuf::Owned(vec.clone().into()))
+    }
+}
+
+impl<'a> From<Vec<Vec<u8>>> for SExp<'a> {
+    fn from(vec: Vec<Vec<u8>>) -> SExp<'a> {
+        vec.into_iter()
+            .map(Into::into)
+            .collect::<Vec<SExp<'static>>>()
+            .into()
+    }
+}
+
+impl<'a> From<&BigInt> for SExp<'a> {
+    fn from(int: &BigInt) -> SExp<'a> {
+        SExp::Atom(AtomBuf::Owned(Arc::new(bigint_to_bytes(
+            int,
+            int.sign() != Sign::NoSign,
+        ))))
+    }
+}
+
+impl<'a, T, U> From<(T, U)> for SExp<'a>
+where
+    T: Into<SExp<'a>>,
+    U: Into<SExp<'a>>,
+{
+    fn from(val: (T, U)) -> SExp<'a> {
+        (&[val.0.into(), val.1.into()]).into()
+    }
+}
+
+impl<'a, T, U, V> From<(T, U, V)> for SExp<'a>
+where
+    T: Into<SExp<'a>>,
+    U: Into<SExp<'a>>,
+    V: Into<SExp<'a>>,
+{
+    fn from(val: (T, U, V)) -> SExp<'a> {
+        (&[val.0.into(), val.1.into(), val.2.into()]).into()
+    }
+}
+
+impl<'a, T, U> From<Vec<(T, U)>> for SExp<'a>
+where
+    T: Into<SExp<'a>>,
+    U: Into<SExp<'a>>,
+{
+    fn from(val: Vec<(T, U)>) -> SExp<'a> {
+        val.into_iter()
+            .map(Into::into)
+            .collect::<Vec<SExp<'a>>>()
+            .into()
+    }
+}
+
+impl<'a, T, U, V> From<Vec<(T, U, V)>> for SExp<'a>
+where
+    T: Into<SExp<'a>>,
+    U: Into<SExp<'a>>,
+    V: Into<SExp<'a>>,
+{
+    fn from(val: Vec<(T, U, V)>) -> SExp<'a> {
+        val.into_iter()
+            .map(Into::into)
+            .collect::<Vec<SExp<'a>>>()
+            .into()
+    }
+}
+
+impl<'a> From<u8> for SExp<'a> {
+    fn from(u: u8) -> SExp<'a> {
+        SExp::Atom(AtomBuf::new(vec![u]))
+    }
+}
+
+impl<'a> From<&u8> for SExp<'a> {
+    fn from(u: &u8) -> SExp<'a> {
+        (*u).into()
+    }
+}
+
+impl<'a> From<&Option<u8>> for SExp<'a> {
+    fn from(optional: &Option<u8>) -> SExp<'a> {
+        match optional {
+            None => NULL_SEXP,
+            Some(u) => (*u).into(),
+        }
     }
 }
 
@@ -966,14 +992,45 @@ impl<'a> From<&[u8]> for SExp<'a> {
 macro_rules! impl_to_sexp_sized_bytes {
     ($($name: ident);*) => {
         $(
-            impl<'a> From<$name> for SExp<'a> {
-                fn from(bytes: $name) -> SExp<'a> {
+            impl From<$name> for SExp<'static> {
+                fn from(bytes: $name) -> SExp<'static> {
                     SExp::Atom(AtomBuf::new(bytes.bytes().to_vec()))
                 }
             }
-            impl<'a> From<&$name> for SExp<'a> {
-                fn from(bytes: &$name) -> SExp<'a> {
+            impl From<&$name> for SExp<'static> {
+                fn from(bytes: &$name) -> SExp<'static> {
                     SExp::Atom(AtomBuf::new(bytes.bytes().to_vec()))
+                }
+            }
+            impl From<&Option<$name>> for SExp<'static> {
+                fn from(optional: &Option<$name>) -> SExp<'static> {
+                    match optional {
+                        None => NULL_SEXP,
+                        Some(s) => s.into(),
+                    }
+                }
+            }
+            impl From<Vec<$name>> for SExp<'static> {
+                fn from(vals: Vec<$name>) -> SExp<'static> {
+                    vals.as_slice().into()
+                }
+            }
+            impl From<&Vec<$name>> for SExp<'static> {
+                fn from(vals: &Vec<$name>) -> SExp<'static> {
+                    vals.as_slice().into()
+                }
+            }
+            impl From<&[$name]> for SExp<'static> {
+                fn from(vals: &[$name]) -> SExp<'static> {
+                    vals.iter().map(Into::into).collect::<Vec<SExp<'static>>>().into()
+                }
+            }
+            impl From<&Option<Vec<$name>>> for SExp<'static> {
+                fn from(optional: &Option<Vec<$name>>) -> SExp<'static> {
+                    match optional {
+                        None => NULL_SEXP,
+                        Some(s) => s.into(),
+                    }
                 }
             }
         )*
@@ -1012,6 +1069,42 @@ macro_rules! impl_ints {
                     SExp::from(*num)
                 }
             }
+            impl From<&Option<$name>> for SExp<'static> {
+                fn from(optional: &Option<$name>) -> SExp<'static> {
+                    match optional {
+                        None => NULL_SEXP,
+                        Some(s) => s.into(),
+                    }
+                }
+            }
+            impl From<Vec<$name>> for SExp<'static> {
+                fn from(vals: Vec<$name>) -> SExp<'static> {
+                    (&vals).into()
+                }
+            }
+            impl From<&Vec<$name>> for SExp<'static> {
+                fn from(vals: &Vec<$name>) -> SExp<'static> {
+                    vals.as_slice().into()
+                }
+            }
+            impl From<&Vec<Vec<$name>>> for SExp<'static> {
+                fn from(vals: &Vec<Vec<$name>>) -> SExp<'static> {
+                    vals.iter().map(SExp::from).collect::<Vec<SExp<'static>>>().into()
+                }
+            }
+            impl From<&[$name]> for SExp<'static> {
+                fn from(vals: &[$name]) -> SExp<'static> {
+                    vals.iter().map(Into::into).collect::<Vec<SExp<'static>>>().into()
+                }
+            }
+            impl From<&Option<Vec<$name>>> for SExp<'static> {
+                fn from(optional: &Option<Vec<$name>>) -> SExp<'static> {
+                    match optional {
+                        None => NULL_SEXP,
+                        Some(s) => s.into(),
+                    }
+                }
+            }
         )*
     };
     ()=>{};
@@ -1019,7 +1112,6 @@ macro_rules! impl_ints {
 
 impl_ints!(
     usize;
-    u8;
     u16;
     u32;
     u64;
@@ -1045,5 +1137,45 @@ impl ChiaSerialize for SExp<'_> {
         Self: Sized,
     {
         sexp_from_bytes(bytes).map_err(Into::into)
+    }
+}
+impl From<f64> for SExp<'static> {
+    fn from(num: f64) -> SExp<'static> {
+        if num.is_zero() {
+            return NULL_SEXP;
+        }
+        let as_ary = num.to_be_bytes();
+        let mut as_bytes = as_ary.as_slice();
+        while as_bytes.len() > 1 && as_bytes[0] == ((as_bytes[1] & 0x80 > 0) as u8 * 0xFF) {
+            as_bytes = &as_bytes[1..];
+        }
+        SExp::Atom(AtomBuf::new(as_bytes.to_vec()))
+    }
+}
+impl From<&f64> for SExp<'static> {
+    fn from(num: &f64) -> SExp<'static> {
+        SExp::from(*num)
+    }
+}
+impl From<bool> for SExp<'static> {
+    fn from(num: bool) -> SExp<'static> {
+        if num {
+            SExp::Atom(AtomBuf::Borrowed(&[1]))
+        } else {
+            NULL_SEXP
+        }
+    }
+}
+impl From<&bool> for SExp<'static> {
+    fn from(num: &bool) -> SExp<'static> {
+        SExp::from(*num)
+    }
+}
+impl From<&Option<bool>> for SExp<'static> {
+    fn from(val: &Option<bool>) -> SExp<'static> {
+        match val {
+            Some(v) => v.into(),
+            None => NULL_SEXP,
+        }
     }
 }

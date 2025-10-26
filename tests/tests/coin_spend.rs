@@ -21,8 +21,8 @@ mod tests {
         let solution: Program = Program::to(&[SExp::from(puzzle_reveal_hash)]);
         let cs = CoinSpend {
             coin,
-            puzzle_reveal: puzzle_reveal.into(),
-            solution: solution.into(),
+            puzzle_reveal: puzzle_reveal.serialized().unwrap(),
+            solution: solution.serialized().unwrap(),
         };
 
         let max_cost = 1000000u64;

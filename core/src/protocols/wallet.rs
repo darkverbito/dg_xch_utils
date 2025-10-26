@@ -4,6 +4,8 @@ use crate::blockchain::sized_bytes::Bytes32;
 use crate::blockchain::spend_bundle::SpendBundle;
 use crate::blockchain::tx_status::TXStatus;
 use crate::clvm::program::SerializedProgram;
+use crate::clvm::sexp::SExp;
+use crate::constants::NULL_SEXP;
 use dg_xch_macros::ChiaSerial;
 use serde::{Deserialize, Serialize};
 
@@ -74,12 +76,42 @@ pub struct RequestRemovals {
     pub coin_names: Option<Vec<Bytes32>>, //Min Version 0.0.34
 }
 
+pub type NamedCoin = (Bytes32, Option<Coin>);
+impl From<&NamedCoin> for SExp<'static> {
+    fn from(value: &NamedCoin) -> Self {
+        SExp::from((SExp::from(value.0), SExp::from(value.1)))
+    }
+}
+impl From<&Vec<NamedCoin>> for SExp<'static> {
+    fn from(value: &Vec<NamedCoin>) -> Self {
+        value
+            .iter()
+            .map(SExp::from)
+            .collect::<Vec<SExp<'_>>>()
+            .into()
+    }
+}
+
+pub type NamedProofs = Option<Vec<(Bytes32, Vec<u8>)>>;
+impl From<&NamedProofs> for SExp<'static> {
+    fn from(value: &NamedProofs) -> Self {
+        match value {
+            Some(proofs) => proofs
+                .iter()
+                .map(|(k, v)| (SExp::from(k), SExp::from(v)).into())
+                .collect::<Vec<SExp<'_>>>()
+                .into(),
+            None => NULL_SEXP,
+        }
+    }
+}
+
 #[derive(ChiaSerial, Clone, PartialEq, Eq, Serialize, Deserialize, Debug)]
 pub struct RespondRemovals {
-    pub height: u32,                             //Min Version 0.0.34
-    pub header_hash: Bytes32,                    //Min Version 0.0.34
-    pub coins: Vec<(Bytes32, Option<Coin>)>,     //Min Version 0.0.34
-    pub proofs: Option<Vec<(Bytes32, Vec<u8>)>>, //Min Version 0.0.34
+    pub height: u32,           //Min Version 0.0.34
+    pub header_hash: Bytes32,  //Min Version 0.0.34
+    pub coins: Vec<NamedCoin>, //Min Version 0.0.34
+    pub proofs: NamedProofs,   //Min Version 0.0.34
 }
 
 #[derive(ChiaSerial, Clone, PartialEq, Eq, Serialize, Deserialize, Debug)]
@@ -96,13 +128,35 @@ pub struct RequestAdditions {
 }
 
 pub type Proofs = Option<Vec<(Bytes32, Vec<u8>, Option<Vec<u8>>)>>;
+impl From<&Proofs> for SExp<'static> {
+    fn from(value: &Proofs) -> Self {
+        match value {
+            Some(proofs) => proofs
+                .iter()
+                .map(|(k, v, a)| (SExp::from(k), SExp::from(v), SExp::from(a)).into())
+                .collect::<Vec<SExp<'_>>>()
+                .into(),
+            None => NULL_SEXP,
+        }
+    }
+}
+pub type Additions = Vec<(Bytes32, Vec<Coin>)>;
+impl From<&Additions> for SExp<'static> {
+    fn from(additions: &Additions) -> Self {
+        additions
+            .iter()
+            .map(|(k, v)| (SExp::from(k), SExp::from(v)).into())
+            .collect::<Vec<SExp<'_>>>()
+            .into()
+    }
+}
 
 #[derive(ChiaSerial, Clone, PartialEq, Eq, Serialize, Deserialize, Debug)]
 pub struct RespondAdditions {
-    pub height: u32,                      //Min Version 0.0.34
-    pub header_hash: Bytes32,             //Min Version 0.0.34
-    pub coins: Vec<(Bytes32, Vec<Coin>)>, //Min Version 0.0.34
-    pub proofs: Proofs,                   //Min Version 0.0.34
+    pub height: u32,          //Min Version 0.0.34
+    pub header_hash: Bytes32, //Min Version 0.0.34
+    pub coins: Additions,     //Min Version 0.0.34
+    pub proofs: Proofs,       //Min Version 0.0.34
 }
 
 #[derive(ChiaSerial, Clone, PartialEq, Eq, Serialize, Deserialize, Debug)]

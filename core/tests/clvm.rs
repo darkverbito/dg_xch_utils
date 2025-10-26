@@ -1,6 +1,9 @@
+use dg_xch_core::clvm::runtime::ClvmRuntime;
+use dg_xch_core::clvm::utils::MEMPOOL_MODE;
+
 #[test]
 fn test_mod() {
-    use crate::clvm::compile::Compiler;
+    use dg_xch_core::clvm::compile::Compiler;
     use std::borrow::Cow;
     const EXAMPLE_CLSP: &str = "
     (mod (num)
@@ -10,9 +13,10 @@ fn test_mod() {
     let prog = compiler.compile().unwrap();
     assert_eq!("(* 2 (q . 25))", format!("{prog}"))
 }
+
 #[test]
 fn test_defun() {
-    use crate::clvm::compile::Compiler;
+    use dg_xch_core::clvm::compile::Compiler;
     use std::borrow::Cow;
     const EXAMPLE_CLSP: &str = "
     (mod (num)
@@ -33,7 +37,7 @@ fn test_defun() {
 
 #[test]
 fn test_nested_defun() {
-    use crate::clvm::compile::Compiler;
+    use dg_xch_core::clvm::compile::Compiler;
     use std::borrow::Cow;
     const EXAMPLE_CLSP: &str = "
     (mod (num)
@@ -57,7 +61,7 @@ fn test_nested_defun() {
 
 #[test]
 fn test_defun_inline() {
-    use crate::clvm::compile::Compiler;
+    use dg_xch_core::clvm::compile::Compiler;
     use std::borrow::Cow;
     const EXAMPLE_CLSP: &str = "
     (mod (num)
@@ -74,11 +78,11 @@ fn test_defun_inline() {
 
 #[test]
 fn test_multi_constant() {
-    use crate::clvm::assemble::assemble_text;
-    use crate::clvm::compile::Compiler;
-    use crate::clvm::program::Program;
-    use crate::clvm::sexp::SExp;
-    use crate::clvm::utils::INFINITE_COST;
+    use dg_xch_core::clvm::assemble::assemble_text;
+    use dg_xch_core::clvm::compile::Compiler;
+    use dg_xch_core::clvm::program::Program;
+    use dg_xch_core::clvm::sexp::SExp;
+    use dg_xch_core::clvm::utils::INFINITE_COST;
     use std::borrow::Cow;
     const EXAMPLE_CLSP: &str = "
     (mod (num)
@@ -115,7 +119,7 @@ fn test_multi_constant() {
 
 #[test]
 fn test_2_constants() {
-    use crate::clvm::compile::Compiler;
+    use dg_xch_core::clvm::compile::Compiler;
     use std::borrow::Cow;
     const EXAMPLE_CLSP: &str = "
     (mod (num)
@@ -136,10 +140,10 @@ fn test_2_constants() {
 
 #[test]
 fn test_constant_inline() {
-    use crate::clvm::compile::{Compiler, INLINE_CONSTS};
-    use crate::clvm::program::Program;
-    use crate::clvm::sexp::SExp;
-    use crate::clvm::utils::INFINITE_COST;
+    use dg_xch_core::clvm::compile::{Compiler, INLINE_CONSTS};
+    use dg_xch_core::clvm::program::Program;
+    use dg_xch_core::clvm::sexp::SExp;
+    use dg_xch_core::clvm::utils::INFINITE_COST;
     use std::borrow::Cow;
     const EXAMPLE_CLSP: &str = "
     (mod (num)
@@ -164,11 +168,11 @@ fn test_constant_inline() {
 
 #[test]
 fn test_re_assembly() {
-    use crate::clvm::assemble::assemble_text;
-    use crate::clvm::compile::{Compiler, INLINE_CONSTS};
-    use crate::clvm::program::Program;
-    use crate::clvm::sexp::SExp;
-    use crate::clvm::utils::INFINITE_COST;
+    use dg_xch_core::clvm::assemble::assemble_text;
+    use dg_xch_core::clvm::compile::{Compiler, INLINE_CONSTS};
+    use dg_xch_core::clvm::program::Program;
+    use dg_xch_core::clvm::sexp::SExp;
+    use dg_xch_core::clvm::utils::INFINITE_COST;
     use std::borrow::Cow;
     const EXAMPLE_CLSP: &str = "
     (mod (num)
@@ -216,4 +220,80 @@ fn test_re_assembly() {
         results.1.as_int().unwrap()
     );
     assert_eq!(Program::to(133584), results.1);
+}
+
+#[test]
+fn test_runtime_add() {
+    use dg_xch_core::clvm::compile::Compiler;
+    use dg_xch_core::clvm::program::Program;
+    use dg_xch_core::clvm::sexp::SExp;
+    use std::borrow::Cow;
+    const EXAMPLE_CLSP: &str = "
+    (mod (num num2)
+        (+ num num2)
+    )";
+    let compiler = Compiler::new(Cow::Borrowed(EXAMPLE_CLSP.as_bytes()), 0, 0, &[]);
+    let prog = compiler.compile().unwrap();
+    assert_eq!("(+ 2 5)", format!("{prog}"));
+    let args = Program::to(&[SExp::from(10), SExp::from(13)]);
+    let mut runtime = ClvmRuntime::new(u64::MAX, MEMPOOL_MODE);
+    let (_, output) = runtime.run(prog.sexp(), args.sexp()).unwrap();
+    assert_eq!("23", format!("{output}"))
+}
+
+#[test]
+fn test_runtime_sub() {
+    use dg_xch_core::clvm::compile::Compiler;
+    use dg_xch_core::clvm::program::Program;
+    use dg_xch_core::clvm::sexp::SExp;
+    use std::borrow::Cow;
+    const EXAMPLE_CLSP: &str = "
+    (mod (num num2)
+        (- num num2)
+    )";
+    let compiler = Compiler::new(Cow::Borrowed(EXAMPLE_CLSP.as_bytes()), 0, 0, &[]);
+    let prog = compiler.compile().unwrap();
+    assert_eq!("(- 2 5)", format!("{prog}"));
+    let args = Program::to(&[SExp::from(10), SExp::from(13)]);
+    let mut runtime = ClvmRuntime::new(u64::MAX, MEMPOOL_MODE);
+    let (_, output) = runtime.run(prog.sexp(), args.sexp()).unwrap();
+    assert_eq!("-3", format!("{output}"))
+}
+
+#[test]
+fn test_runtime_mul() {
+    use dg_xch_core::clvm::compile::Compiler;
+    use dg_xch_core::clvm::program::Program;
+    use dg_xch_core::clvm::sexp::SExp;
+    use std::borrow::Cow;
+    const EXAMPLE_CLSP: &str = "
+    (mod (num num2)
+        (* num num2)
+    )";
+    let compiler = Compiler::new(Cow::Borrowed(EXAMPLE_CLSP.as_bytes()), 0, 0, &[]);
+    let prog = compiler.compile().unwrap();
+    assert_eq!("(* 2 5)", format!("{prog}"));
+    let args = Program::to(&[SExp::from(10), SExp::from(13)]);
+    let mut runtime = ClvmRuntime::new(u64::MAX, MEMPOOL_MODE);
+    let (_, output) = runtime.run(prog.sexp(), args.sexp()).unwrap();
+    assert_eq!("130", format!("{output}"))
+}
+
+#[test]
+fn test_runtime_div() {
+    use dg_xch_core::clvm::compile::Compiler;
+    use dg_xch_core::clvm::program::Program;
+    use dg_xch_core::clvm::sexp::SExp;
+    use std::borrow::Cow;
+    const EXAMPLE_CLSP: &str = "
+    (mod (num num2)
+        (/ num num2)
+    )";
+    let compiler = Compiler::new(Cow::Borrowed(EXAMPLE_CLSP.as_bytes()), 0, 0, &[]);
+    let prog = compiler.compile().unwrap();
+    assert_eq!("(/ 2 5)", format!("{prog}"));
+    let args = Program::to(&[SExp::from(260), SExp::from(13)]);
+    let mut runtime = ClvmRuntime::new(u64::MAX, MEMPOOL_MODE);
+    let (_, output) = runtime.run(prog.sexp(), args.sexp()).unwrap();
+    assert_eq!("20", format!("{output}"))
 }

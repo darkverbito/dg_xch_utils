@@ -6,8 +6,27 @@ use crate::blockchain::sized_bytes::Bytes32;
 use crate::blockchain::sub_epoch_summary::SubEpochSummary;
 use crate::blockchain::vdf_info::VdfInfo;
 use crate::blockchain::vdf_proof::VdfProof;
+use crate::clvm::sexp::SExp;
 use dg_xch_macros::ChiaSerial;
 use serde::{Deserialize, Serialize};
+
+pub type PreviousRewardChallenge = (Bytes32, u128);
+impl From<&PreviousRewardChallenge> for SExp<'static> {
+    fn from(value: &PreviousRewardChallenge) -> Self {
+        SExp::from((SExp::from(value.0), SExp::from(value.1)))
+    }
+}
+
+pub type PreviousRewardChallenges = Vec<(Bytes32, u128)>;
+impl From<&PreviousRewardChallenges> for SExp<'static> {
+    fn from(previous_reward_challenges: &PreviousRewardChallenges) -> Self {
+        previous_reward_challenges
+            .iter()
+            .map(|(k, v)| (SExp::from(k), SExp::from(v)).into())
+            .collect::<Vec<SExp<'_>>>()
+            .into()
+    }
+}
 
 #[derive(ChiaSerial, Clone, PartialEq, Eq, Serialize, Deserialize, Debug)]
 pub struct NewPeakTimelord {
@@ -16,7 +35,7 @@ pub struct NewPeakTimelord {
     pub deficit: u8,                          //Min Version 0.0.34
     pub sub_slot_iters: u64,                  //Min Version 0.0.34
     pub sub_epoch_summary: Option<SubEpochSummary>, //Min Version 0.0.34
-    pub previous_reward_challenges: Vec<(Bytes32, u128)>, //Min Version 0.0.34
+    pub previous_reward_challenges: PreviousRewardChallenges, //Min Version 0.0.34
     pub last_challenge_sb_or_eos_total_iters: u128, //Min Version 0.0.34
     pub passes_ses_height_but_not_yet_included: bool, //Min Version 0.0.34
 }

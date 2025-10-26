@@ -40,22 +40,22 @@ pub const BACKUP_PATH: u32 = 4;
 pub const SINGLETON_PATH: u32 = 5;
 pub const POOL_AUTH_PATH: u32 = 6;
 
-pub fn hmac_extract_expand(
-    length: usize,
+pub fn hmac_extract_expand<const N: usize>(
     key: &[u8],
     salt: &[u8],
     info: &[u8],
-) -> Result<Vec<u8>, Error> {
+) -> Result<[u8; N], Error> {
     let hk = Hkdf::<Sha256>::new(Some(salt), key);
-    let mut out: Vec<u8> = (0..length).map(|_| 0).collect();
+    let mut out: [u8; N] = [0; N];
     match hk.expand(info, &mut out) {
         Ok(()) => Ok(out),
         Err(e) => Err(Error::new(ErrorKind::InvalidInput, e.to_string())),
     }
 }
 
-fn ikm_to_lamport_sk(ikm: &[u8], salt: &[u8]) -> Result<Vec<u8>, Error> {
-    hmac_extract_expand(32 * 255, ikm, salt, &[])
+fn ikm_to_lamport_sk(ikm: &[u8], salt: &[u8]) -> Result<[u8; 8160], Error> {
+    // 32 * 255
+    hmac_extract_expand::<8160>(ikm, salt, &[])
 }
 
 fn parent_sk_to_lamport_pk(parent_sk: &SecretKey, index: u32) -> Result<Bytes32, Error> {
@@ -64,7 +64,7 @@ fn parent_sk_to_lamport_pk(parent_sk: &SecretKey, index: u32) -> Result<Bytes32,
     let not_ikm: Vec<u8> = ikm.into_iter().map(|e| e ^ 0xFF).collect();
     let lamport0 = ikm_to_lamport_sk(&ikm, &salt)?;
     let lamport1 = ikm_to_lamport_sk(&not_ikm, &salt)?;
-    let mut lamport_pk = vec![];
+    let mut lamport_pk = Vec::with_capacity(lamport0.len() + lamport1.len());
     for i in 0..255 {
         lamport_pk.extend(hash_256(&lamport0[i * 32..(i + 1) * 32]));
     }
@@ -76,7 +76,7 @@ fn parent_sk_to_lamport_pk(parent_sk: &SecretKey, index: u32) -> Result<Bytes32,
 
 fn derive_child_sk(key: &SecretKey, index: u32) -> Result<SecretKey, Error> {
     let lamport_pk = parent_sk_to_lamport_pk(key, index)?;
-    SecretKey::key_gen_v3(&lamport_pk.bytes(), &[])
+    SecretKey::key_gen_v3(lamport_pk.as_ref(), &[])
         .map_err(|e| Error::new(ErrorKind::InvalidInput, format!("{e:?}")))
 }
 

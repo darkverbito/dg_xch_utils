@@ -99,7 +99,7 @@ where
                 return Err(Error::other(format!(
                     "Failed to find Validate Signature for Message: {} - {}",
                     code,
-                    UnsizedBytes::new(msg.as_ref())
+                    UnsizedBytes::new(msg.as_ref().to_vec())
                 )));
             }
             pk_list.push(pk_bytes);
@@ -169,7 +169,7 @@ where
                     if !verify_signature(&pk, msg.as_ref(), &signature) {
                         return Err(Error::other(format!(
                             "Failed to find Validate Signature for Message: {code} - {}",
-                            UnsizedBytes::new(msg.as_ref())
+                            UnsizedBytes::new(msg.data().to_vec())
                         )));
                     }
                     signed_messages += 1;

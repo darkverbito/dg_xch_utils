@@ -3,18 +3,18 @@ use crate::blockchain::sized_bytes::{
 };
 use crate::clvm::assemble::assemble_text;
 use crate::clvm::curry_utils::curry;
-use crate::clvm::dialect::{ChiaDialect, NO_UNKNOWN_OPS};
+use crate::clvm::dialect::NO_UNKNOWN_OPS;
 use crate::clvm::parser::{sexp_from_bytes, sexp_to_bytes};
-use crate::clvm::run_program::run_program;
 use crate::clvm::runtime::ClvmRuntime;
 use crate::clvm::sexp::AtomBuf;
 use crate::clvm::sexp::{SExp, SExpSource};
 use crate::clvm::utils::MEMPOOL_MODE;
-use crate::constants::NULL_PROGRAM;
+use crate::constants::{NULL_PROGRAM, NULL_SEXP};
 use crate::errors::ClvmError;
 use crate::formatting::hex_to_bytes;
 use dg_xch_serialize::{ChiaProtocolVersion, ChiaSerialize};
 use hex::encode;
+use log::warn;
 use num_bigint::BigInt;
 use serde::de::Visitor;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -98,10 +98,10 @@ impl<'a> Program<'a> {
         Program::new(self.sexp.to_owned())
     }
     pub fn sexp(&'a self) -> &'a SExp<'a> {
-        self.sexp.as_ref()
+        &self.sexp
     }
     pub fn serialized(&self) -> Result<SerializedProgram, ClvmError> {
-        sexp_to_bytes(self.sexp.as_ref()).map_err(ClvmError::IoError)
+        sexp_to_bytes(&self.sexp).map_err(ClvmError::IoError)
     }
     pub fn first(&'a self) -> Result<Program<'a>, ClvmError> {
         Ok(Program::new_ref(self.sexp.first()?))
@@ -197,17 +197,17 @@ impl<'a> Program<'a> {
 
     #[must_use]
     pub fn is_atom(&self) -> bool {
-        matches!(self.sexp.as_ref(), SExp::Atom(_))
+        matches!(&*self.sexp, SExp::Atom(_))
     }
 
     #[must_use]
     pub fn is_pair(&self) -> bool {
-        matches!(self.sexp.as_ref(), SExp::Pair(_))
+        matches!(&*self.sexp, SExp::Pair(_))
     }
 
     #[must_use]
     pub fn as_atom(&'a self) -> Option<Program<'a>> {
-        match self.sexp.as_ref() {
+        match &*self.sexp {
             SExp::Atom(_) => Some(Program::new_ref(self.sexp())),
             SExp::Pair(_) => None,
         }
@@ -263,27 +263,11 @@ impl<'a> Program<'a> {
         let (cost, result) = runtime.run(self.sexp(), args.sexp())?;
         Ok((cost, Program::new(result.to_owned())))
     }
-
-    pub fn run_old(
-        &'a self,
-        max_cost: u64,
-        flags: u32,
-        args: &'a Program,
-    ) -> Result<(u64, Program<'static>), ClvmError> {
-        let dialect = ChiaDialect::new(flags | NO_UNKNOWN_OPS);
-        let (cost, result) = match run_program(dialect, self.sexp(), args.sexp(), max_cost, None) {
-            Ok(reduct) => reduct,
-            Err(e) => {
-                return Err(ClvmError::IoError(e));
-            }
-        };
-        Ok((cost, Program::new(result)))
-    }
 }
 impl<'a> Eq for Program<'a> {}
 impl<'a> PartialEq for Program<'a> {
     fn eq(&self, other: &Self) -> bool {
-        self.sexp == other.sexp
+        *self.sexp == *other.sexp
     }
 }
 
@@ -306,13 +290,13 @@ impl<'a> ChiaSerialize for Program<'a> {
 
 impl<'a> Display for Program<'a> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.sexp.as_ref())
+        write!(f, "{}", &*self.sexp)
     }
 }
 
 impl<'a> Debug for Program<'a> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?}", self.sexp.as_ref())
+        write!(f, "{:?}", &*self.sexp)
     }
 }
 
@@ -482,6 +466,36 @@ impl Default for SerializedProgram {
         }
     }
 }
+impl From<&Option<SerializedProgram>> for SExp<'static> {
+    fn from(optional: &Option<SerializedProgram>) -> Self {
+        match optional {
+            Some(p) => SExp::from(p),
+            None => NULL_SEXP,
+        }
+    }
+}
+impl From<SerializedProgram> for SExp<'static> {
+    fn from(value: SerializedProgram) -> Self {
+        SExp::from(&value)
+    }
+}
+impl From<&SerializedProgram> for SExp<'static> {
+    fn from(value: &SerializedProgram) -> Self {
+        let mut cursor = Cursor::new(value.as_ref());
+        match sexp_from_bytes(&mut cursor) {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(
+                    "Failed to Parse SerializedProgram as SExp, Saving as AtomBuf. This is likely an Error: {e:?}"
+                );
+                match &value.buffer {
+                    SerializedSource::Static(v) => SExp::Atom(AtomBuf::new(v.to_vec())),
+                    SerializedSource::Heap(v) => SExp::Atom(AtomBuf::new(v.clone())),
+                }
+            }
+        }
+    }
+}
 
 impl SerializedProgram {
     #[must_use]
@@ -561,6 +575,13 @@ impl AsRef<[u8]> for SerializedProgram {
         }
     }
 }
+// impl TryFrom<&SerializedProgram> for SExp<'_> {
+//     type Error = ClvmError;
+//     fn try_from(value: &SerializedProgram) -> Result<SExp<'static>, Self::Error> {
+//         let mut cursor = Cursor::new(value.buffer.as_ref());
+//         Ok(sexp_from_bytes(&mut cursor)?)
+//     }
+// }
 impl Debug for SerializedProgram {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "0x{}", encode(&self.buffer))

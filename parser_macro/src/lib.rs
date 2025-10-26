@@ -1,5 +1,3 @@
-mod tests;
-
 use bytes::Buf;
 use proc_macro::TokenStream;
 use proc_macro_crate::{FoundCrate, crate_name};
@@ -25,8 +23,6 @@ impl Parse for Args {
     }
 }
 
-/// Public entry point:
-///     parse_program_hex!("ff04ffff0101ff0280")
 #[proc_macro]
 pub fn parse_program_hex(input: TokenStream) -> TokenStream {
     let Args { base, hex, .. } = syn::parse_macro_input!(input as Args);
@@ -48,17 +44,14 @@ pub fn parse_program_hex(input: TokenStream) -> TokenStream {
 fn resolve_crate_path(wanted: &str) -> TokenStream2 {
     match crate_name(wanted) {
         Ok(FoundCrate::Itself) => {
-            // Caller is the same crate we’re targeting (e.g. tests inside that crate)
             let ident = format_ident!("crate");
             quote!(#ident)
         }
         Ok(FoundCrate::Name(actual)) => {
-            // Caller renamed the crate; use the actual name
             let ident = format_ident!("{}", actual);
             quote!(::#ident)
         }
         Err(_) => {
-            // Fallback: assume the published name is usable
             let ident = format_ident!("{}", wanted);
             quote!(::#ident)
         }
@@ -70,15 +63,11 @@ fn compile_error(msg: &str) -> TokenStream {
     ts.into()
 }
 
-const CONS_BOX_MARKER: u8 = 0xff;
-const MAX_SINGLE_BYTE: u8 = 0x7f;
-
-/// Nodes we’ll emit as `static SExp`s
 #[derive(Clone, Debug)]
 enum MNode {
     Null,
-    Atom { i: usize, l: usize }, // slice into shared serialized buffer
-    Pair { l: usize, r: usize }, // child indices (within `nodes`)
+    Atom { i: usize, l: usize },
+    Pair { l: usize, r: usize },
 }
 
 #[derive(Clone, Debug)]
@@ -87,18 +76,8 @@ struct MDag {
     root: usize,
 }
 
-#[derive(Debug)]
-struct ParseError(String);
-
-impl std::fmt::Display for ParseError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
 fn parse_clvm<T: AsRef<[u8]>>(stream: &mut Cursor<T>) -> Result<MDag, String> {
     if !stream.has_remaining() {
-        // constant null program
         return Ok(MDag {
             nodes: vec![MNode::Null],
             root: 0,
@@ -178,41 +157,6 @@ fn parse_clvm<T: AsRef<[u8]>>(stream: &mut Cursor<T>) -> Result<MDag, String> {
 
 fn ensure(cond: bool, msg: &'static str) -> Result<(), String> {
     if cond { Ok(()) } else { Err(msg.into()) }
-}
-
-const MAX_DECODE_SIZE: u64 = 0x0004_0000_0000;
-
-fn decode_size<T: AsRef<[u8]>>(stream: &mut Cursor<T>, initial_b: u8) -> Result<u64, ParseError> {
-    if initial_b & 0x80 == 0 {
-        return Err(ParseError("bad encoding".to_string()));
-    }
-    let mut bit_count = 0;
-    let mut bit_mask: u8 = 0x80;
-    let mut b = initial_b;
-    while b & bit_mask != 0 {
-        bit_count += 1;
-        b &= 0xff ^ bit_mask;
-        bit_mask >>= 1;
-    }
-    let mut size_blob: Vec<u8> = vec![0; bit_count];
-    size_blob[0] = b;
-    if bit_count > 1 {
-        stream
-            .read_exact(&mut size_blob[1..])
-            .map_err(|e| ParseError(format!("{e:?}")))?;
-    }
-    let mut v = 0;
-    if size_blob.len() > 6 {
-        return Err(ParseError("bad encoding".to_string()));
-    }
-    for b in &size_blob {
-        v <<= 8;
-        v += u64::from(*b);
-    }
-    if v >= MAX_DECODE_SIZE {
-        return Err(ParseError("bad encoding".to_string()));
-    }
-    Ok(v)
 }
 
 fn topo_order(dag: &MDag) -> Vec<usize> {
@@ -349,6 +293,7 @@ fn from_hex(b: u8) -> Option<u8> {
     }
 }
 
+use dg_xch_serialize::{CONS_BOX_MARKER, MAX_SINGLE_BYTE, decode_size};
 use sha2::{Digest, Sha256};
 
 fn th_atom(data: &[u8]) -> [u8; 32] {

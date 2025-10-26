@@ -10,7 +10,7 @@ pub fn parse_value(value: &[u8]) -> Result<SExp<'static>, ClvmError> {
         Ok(NULL_SEXP)
     } else {
         match handle_int(value) {
-            Some(v) => bigint_to_bytes(&v, true).map(|v| SExp::Atom(AtomBuf::new(v))),
+            Some(v) => Ok(SExp::Atom(AtomBuf::new(bigint_to_bytes(&v, true)))),
             None => handle_hex(value)?
                 .or_else(|| handle_quote(value).or_else(|| Some(handle_bytes(value))))
                 .ok_or_else(|| {

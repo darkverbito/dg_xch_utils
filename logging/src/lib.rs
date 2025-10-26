@@ -1,22 +1,16 @@
+use bus::{Bus, BusReader};
 #[cfg(feature = "color")]
 use colored::*;
-use log::{Level, Log, Metadata, Record, SetLoggerError, error, warn};
+use log::{Level, Log, Metadata, Record, SetLoggerError};
+use parking_lot::{Mutex, RwLock};
 use serde::de::Error as SerdeError;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::VecDeque;
-use std::io::Error;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread::JoinHandle;
 use std::time::Instant;
 use time::{OffsetDateTime, format_description::FormatItem, macros::format_description};
-use tokio::select;
-#[cfg(not(target_os = "windows"))]
-use tokio::signal::unix::{SignalKind, signal};
-#[cfg(target_os = "windows")]
-use tokio::signal::windows::{ctrl_break, ctrl_c, ctrl_close, ctrl_logoff, ctrl_shutdown};
-use tokio::sync::RwLock;
-use tokio::sync::broadcast::{Receiver, Sender};
-use tokio::task::JoinHandle;
 
 const TIMESTAMP_FORMAT_LOCAL: &[FormatItem] =
     format_description!("[year]-[month]-[day] [hour]:[minute]:[second].[subsecond digits:3]");
@@ -49,7 +43,7 @@ pub struct DruidGardenLogger {
     pub printed_error: AtomicBool,
     pub buffer: Arc<RwLock<VecDeque<LogEvent>>>,
     pub buffer_thread: Arc<JoinHandle<()>>,
-    pub channel: Sender<LogEvent>,
+    pub bus: Mutex<Bus<LogEvent>>,
 }
 
 pub struct DruidGardenLoggerBuilder {
@@ -116,10 +110,17 @@ impl DruidGardenLoggerBuilder {
     }
     pub fn build(mut self) -> DruidGardenLogger {
         self.target_levels.sort_by(|a, b| a.0.cmp(&b.0));
-        let channel = Sender::new(1024);
-        let mut buffer_recv = channel.subscribe();
+        let mut bus = Bus::new(1024);
         let buffer = Arc::new(RwLock::new(VecDeque::new()));
         let thread_buffer_ref = buffer.clone();
+        let thread_buffer_rx = bus.add_rx();
+        let background_run = Arc::new(AtomicBool::new(true));
+        let thread_run = background_run.clone();
+        ctrlc::set_handler(move || {
+            eprintln!("Termination signal received.");
+            thread_run.store(false, Ordering::SeqCst);
+        })
+        .expect("failed to set Ctrl-C handler");
         DruidGardenLogger {
             use_colors: self.use_colors,
             show_thread: self.show_thread,
@@ -132,36 +133,34 @@ impl DruidGardenLoggerBuilder {
             start_instant: Instant::now(),
             printed_error: AtomicBool::new(false),
             buffer,
-            buffer_thread: Arc::new(tokio::spawn(async move {
+            buffer_thread: Arc::new(std::thread::spawn(move || {
                 let mut err_count = 0;
+                let mut thread_buffer_rx = thread_buffer_rx;
+                let run = background_run;
                 loop {
-                    select! {
-                        _ = await_termination() => {
-                            break;
+                    if !run.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    match thread_buffer_rx.recv() {
+                        Ok(v) => {
+                            err_count = 0;
+                            let mut lock = thread_buffer_ref.write();
+                            lock.push_back(v);
+                            while lock.len() > 1024 {
+                                lock.pop_front();
+                            }
                         }
-                        msg = buffer_recv.recv() => {
-                            match msg {
-                                Ok(v) => {
-                                    err_count = 0;
-                                    let mut lock = thread_buffer_ref.write().await;
-                                    lock.push_back(v);
-                                    while lock.len() > 1024 {
-                                        lock.pop_front();
-                                    }
-                                }
-                                Err(e) => {
-                                    err_count += 1;
-                                    if err_count > 5 {
-                                        error!("Failed to receive buffer too many times: {e:?}");
-                                        break;
-                                    }
-                                }
+                        Err(e) => {
+                            err_count += 1;
+                            if err_count > 5 {
+                                eprintln!("Failed to receive buffer too many times: {e:?}");
+                                break;
                             }
                         }
                     }
                 }
             })),
-            channel,
+            bus: Mutex::new(bus),
         }
     }
     pub fn init(self) -> Result<Arc<DruidGardenLogger>, SetLoggerError> {
@@ -189,8 +188,8 @@ impl DruidGardenLogger {
             logger
         })
     }
-    pub fn subscribe(&self) -> Receiver<LogEvent> {
-        self.channel.subscribe()
+    pub fn subscribe(&self) -> BusReader<LogEvent> {
+        self.bus.lock().add_rx()
     }
 }
 
@@ -216,7 +215,7 @@ where
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogEvent {
     #[serde(
         serialize_with = "serialize_level",
@@ -257,7 +256,11 @@ impl Log for DruidGardenLogger {
                         Err(_) => {
                             if !self.printed_error.load(Ordering::SeqCst) {
                                 self.printed_error.store(true, Ordering::SeqCst);
-                                warn!("Failed to detect Local Offset, Defaulting to UTC")
+                                let timestamp_error =
+                                    "Failed to detect Local Offset, Defaulting to UTC"
+                                        .yellow()
+                                        .to_string();
+                                println!("{timestamp_error}")
                             }
                             OffsetDateTime::now_utc()
                         }
@@ -330,42 +333,10 @@ impl Log for DruidGardenLogger {
                 record.args()
             );
         }
-        let _ = self.channel.send(log_event);
+        if let Err(e) = self.bus.lock().try_broadcast(log_event) {
+            eprintln!("Failed to Send Log Event to Buffer: {e:?}")
+        }
     }
 
     fn flush(&self) {}
-}
-
-#[cfg(not(target_os = "windows"))]
-pub async fn await_termination() -> Result<(), Error> {
-    let mut term_signal = signal(SignalKind::terminate())?;
-    let mut int_signal = signal(SignalKind::interrupt())?;
-    let mut quit_signal = signal(SignalKind::quit())?;
-    let mut alarm_signal = signal(SignalKind::alarm())?;
-    let mut hup_signal = signal(SignalKind::hangup())?;
-    select! {
-        _ = term_signal.recv() => (),
-        _ = int_signal.recv() => (),
-        _ = quit_signal.recv() => (),
-        _ = alarm_signal.recv() => (),
-        _ = hup_signal.recv() => ()
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "windows")]
-pub async fn await_termination() -> Result<(), Error> {
-    let mut ctrl_break_signal = ctrl_break()?;
-    let mut ctrl_c_signal = ctrl_c()?;
-    let mut ctrl_close_signal = ctrl_close()?;
-    let mut ctrl_logoff_signal = ctrl_logoff()?;
-    let mut ctrl_shutdown_signal = ctrl_shutdown()?;
-    select! {
-        _ = ctrl_break_signal.recv() => (),
-        _ = ctrl_c_signal.recv() => (),
-        _ = ctrl_close_signal.recv() => (),
-        _ = ctrl_logoff_signal.recv() => (),
-        _ = ctrl_shutdown_signal.recv() => ()
-    }
-    Ok(())
 }

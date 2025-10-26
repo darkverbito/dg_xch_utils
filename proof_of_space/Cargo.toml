@@ -11,7 +11,7 @@ repository = "https://github.com/GalactechsLLC/dg_xch_utils"
 [dependencies]
 async-trait = "0.1.89"
 blake3 = "1.8.2"
-dg_xch_core = {path = "../core", version = "2.2.0", default-features = false }
+dg_xch_core = {path = "../core", default-features = false }
 futures-util = "0.3.31"
 hex = "0.4.3"
 lazy_static = "1.5.0"
@@ -29,6 +29,7 @@ windows-sys = { version = "0.60.2", features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 criterion = { version = "0.5.1", features = ["stable"] }
+dg_logger = { path = "../logging" }
 
 [[bench]]
 name = "compression"

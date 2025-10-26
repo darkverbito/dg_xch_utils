@@ -1,11 +1,10 @@
 use dg_xch_core::consensus::constants::ConsensusConstants;
 use lazy_static::lazy_static;
-use num_bigint::BigInt;
 
 lazy_static! {
     static ref TEST_CONSTANTS: ConsensusConstants = ConsensusConstants {
         num_sps_sub_slot: 32,
-        sub_slot_time_target: BigInt::from(300),
+        sub_slot_time_target: 300,
         ..Default::default()
     };
 }

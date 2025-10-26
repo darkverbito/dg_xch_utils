@@ -4,6 +4,7 @@ use crate::singleton_top_layer::SINGLETON_TOP_LAYER_TREE_HASH;
 use crate::singleton_top_layer_v1_1::SINGLETON_TOP_LAYER_V1_1_TREE_HASH;
 use dg_xch_core::blockchain::condition_opcode::ConditionOpcode;
 use dg_xch_core::blockchain::sized_bytes::{Bytes32, Bytes48};
+use dg_xch_core::blockchain::unsized_bytes::UnsizedBytes;
 use dg_xch_core::clvm::program::Program;
 use dg_xch_core::clvm::sexp::{AtomBuf, SExp};
 use lazy_static::lazy_static;
@@ -81,7 +82,7 @@ pub fn datalayer_singleton_info<'a>(
 pub fn make_create_coin_condition(
     puzzle_hash: Bytes32,
     amount: u64,
-    memos: &[Vec<u8>],
+    memos: &[UnsizedBytes],
 ) -> Vec<SExp<'static>> {
     if memos.is_empty() {
         vec![
@@ -96,7 +97,7 @@ pub fn make_create_coin_condition(
             amount.into(),
             memos
                 .iter()
-                .map(|v| SExp::Atom(AtomBuf::Owned(Arc::new(v.clone()))))
+                .map(|v| SExp::Atom(AtomBuf::Owned(Arc::new(v.as_slice().to_vec()))))
                 .collect::<Vec<SExp>>()
                 .into(),
         ]

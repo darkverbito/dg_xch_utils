@@ -11,6 +11,7 @@ use dg_xch_core::blockchain::condition_opcode::ConditionOpcode;
 use dg_xch_core::blockchain::sized_bytes::{Bytes32, Bytes48};
 use dg_xch_core::blockchain::spend_bundle::SpendBundle;
 use dg_xch_core::blockchain::transaction_record::{TransactionRecord, TransactionType};
+use dg_xch_core::blockchain::unsized_bytes::UnsizedBytes;
 use dg_xch_core::blockchain::wallet_type::{AmountWithPuzzleHash, WalletType};
 use dg_xch_core::clvm::parser::sexp_to_bytes;
 use dg_xch_core::clvm::program::Program;
@@ -909,14 +910,14 @@ pub trait Wallet<T: WalletStore + Send + Sync, C> {
                     primaries.push(AmountWithPuzzleHash {
                         amount,
                         puzzle_hash: *puzzle_hash,
-                        memos: memos.clone(),
+                        memos: memos.clone().into_iter().map(UnsizedBytes::new).collect(),
                     });
                     primaries
                 } else if amount > 0 {
                     vec![AmountWithPuzzleHash {
                         amount,
                         puzzle_hash: *puzzle_hash,
-                        memos: memos.clone(),
+                        memos: memos.clone().into_iter().map(UnsizedBytes::new).collect(),
                     }]
                 } else {
                     vec![]
@@ -999,7 +1000,7 @@ pub trait Wallet<T: WalletStore + Send + Sync, C> {
                 primary_announcement_hash = Some(
                     Announcement {
                         origin_info: coin.name(),
-                        message: message.to_vec(),
+                        message: message.into(),
                         morph_bytes: None,
                     }
                     .name(),

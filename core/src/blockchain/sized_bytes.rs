@@ -69,7 +69,6 @@ macro_rules! impl_const_sized_bytes {
                 }
 
                 let mut out = [0u8; $n];
-                // was: for i in 0..$n { ... }
                 let mut i = 0;
                 while i < $n {
                     let j = i + byte_shift;
@@ -96,7 +95,6 @@ macro_rules! impl_const_sized_bytes {
                 }
 
                 let mut out = [0u8; $n];
-                // iterate from end using while (const-friendly)
                 let mut k = $n;
                 while k > 0 {
                     let i = k - 1;

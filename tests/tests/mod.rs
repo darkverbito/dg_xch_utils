@@ -6,7 +6,6 @@ pub mod condition_opcode;
 pub mod condition_with_args;
 pub mod curry;
 pub mod f_calc;
-pub mod full_node;
 pub mod mempool_item;
 pub mod pot_iterations;
 pub mod program;

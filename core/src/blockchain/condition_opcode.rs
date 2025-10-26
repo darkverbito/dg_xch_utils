@@ -18,8 +18,9 @@ impl From<u64> for ConditionCost {
         }
     }
 }
-#[derive(ChiaSerial, Copy, Clone, Hash, PartialEq, Eq, Serialize, Deserialize, Debug)]
+#[derive(ChiaSerial, Copy, Clone, Hash, PartialEq, Eq, Serialize, Deserialize, Default, Debug)]
 pub enum ConditionOpcode {
+    #[default]
     Unknown = 0,
     Remark = 1,
     AggSigParent = 43,

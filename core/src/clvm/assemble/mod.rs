@@ -1,11 +1,11 @@
 pub mod reader;
 
 use crate::clvm::assemble::reader::{Reader, Token};
+use crate::clvm::compile::utils::parse_value;
 use crate::clvm::program::Program;
 use crate::clvm::sexp::{AtomBuf, SExp};
 use crate::constants::{DOT_CONS, END_CONS, KEYWORD_TO_ATOM, NULL_SEXP, START_CONS};
 use crate::errors::ClvmError;
-use crate::formatting::bigint_to_bytes;
 use hex::decode;
 use num_bigint::BigInt;
 use once_cell::sync::Lazy;
@@ -77,14 +77,7 @@ pub fn handle_token<'a>(
         Ok(NULL_SEXP)
     } else {
         let bytes = token.bytes;
-        match handle_int(bytes) {
-            Some(v) => bigint_to_bytes(&v, true).map(|v| SExp::Atom(AtomBuf::new(v))),
-            None => handle_hex(bytes)?
-                .or_else(|| handle_quote(bytes).or_else(|| Some(handle_bytes(bytes))))
-                .ok_or_else(|| {
-                    ClvmError::InvalidSyntax(format!("Failed to parse Token: {token:?}"))
-                }),
-        }
+        parse_value(bytes)
     }
 }
 

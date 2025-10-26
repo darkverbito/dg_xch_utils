@@ -1,5 +1,4 @@
 pub mod conditions;
-pub mod tests;
 pub mod tokenizer;
 pub mod utils;
 
@@ -11,7 +10,7 @@ use crate::clvm::compile::utils::{
 };
 use crate::clvm::program::Program;
 use crate::clvm::sexp::SExp;
-use crate::constants::{
+pub use crate::constants::{
     APPLY_SEXP, B_KEYWORD_TO_SEXP, CONS_SEXP, INLINE_CONSTS, INLINE_DEFUNS, NULL_SEXP, QUOTE_SEXP,
 };
 use parking_lot::{Mutex, RwLock};

@@ -96,7 +96,7 @@ impl<'a> ClvmRuntime<'a> {
                 }
             };
             if current_cost > max_cost {
-                Err(ClvmError::CostExceeded(current_cost, self.max_cost))?;
+                return Err(ClvmError::CostExceeded(current_cost, self.max_cost));
             }
         }
         let duration = start.elapsed();
@@ -174,7 +174,7 @@ impl<'a> ClvmRuntime<'a> {
                         if buf.as_ref().is_empty() {
                             break;
                         }
-                        Err(ClvmError::InvalidOperandList(operands.to_string()))?;
+                        return Err(ClvmError::InvalidOperandList(operands.to_string()));
                     }
                     SExp::Pair(pair) => {
                         self.op_stack.push(Operation::SwapEval);
@@ -204,11 +204,11 @@ impl<'a> ClvmRuntime<'a> {
                 self.value_stack.push(pair.first());
                 self.value_stack.push(op_list);
                 self.op_stack.push(Operation::Apply);
-                Ok::<u64, ClvmError>(APPLY_COST)?;
+                return Ok(APPLY_COST);
             }
-            Err(ClvmError::InvalidSyntax(format!(
+            return Err(ClvmError::InvalidSyntax(format!(
                 "in ((X)...) syntax X must be lone atom: {pair:?}"
-            )))?;
+            )));
         };
         self.eval_op_atom(op_node, op_list, args)
     }

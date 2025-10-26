@@ -4,13 +4,9 @@ use crate::clvm::sexp::{AtomBuf, PairBuf};
 use crate::constants::NULL_SEXP;
 use crate::errors::ClvmError;
 use bytes::Buf;
+use dg_xch_serialize::{CONS_BOX_MARKER, MAX_SINGLE_BYTE, decode_size, encode_size};
 use std::io::Read;
 use std::io::{Cursor, Write};
-use std::io::{Error, ErrorKind};
-
-const MAX_SINGLE_BYTE: u8 = 0x7f;
-const CONS_BOX_MARKER: u8 = 0xff;
-const MAX_DECODE_SIZE: u64 = 0x0004_0000_0000;
 
 #[derive(Debug, Copy, Clone)]
 enum ParserOp {
@@ -95,68 +91,4 @@ pub fn sexp_to_bytes(sexp: &SExp) -> std::io::Result<SerializedProgram> {
         }
     }
     Ok(buffer.into_inner().into())
-}
-
-#[allow(clippy::cast_possible_truncation)]
-pub fn encode_size(f: &mut dyn Write, size: u64) -> Result<(), Error> {
-    if size < 0x40 {
-        f.write_all(&[(0x80 | size) as u8])?;
-    } else if size < 0x2000 {
-        f.write_all(&[(0xc0 | (size >> 8)) as u8, ((size) & 0xff) as u8])?;
-    } else if size < 0x10_0000 {
-        f.write_all(&[
-            (0xe0 | (size >> 16)) as u8,
-            ((size >> 8) & 0xff) as u8,
-            ((size) & 0xff) as u8,
-        ])?;
-    } else if size < 0x800_0000 {
-        f.write_all(&[
-            (0xf0 | (size >> 24)) as u8,
-            ((size >> 16) & 0xff) as u8,
-            ((size >> 8) & 0xff) as u8,
-            ((size) & 0xff) as u8,
-        ])?;
-    } else if size < 0x4_0000_0000 {
-        f.write_all(&[
-            (0xf8 | (size >> 32)) as u8,
-            ((size >> 24) & 0xff) as u8,
-            ((size >> 16) & 0xff) as u8,
-            ((size >> 8) & 0xff) as u8,
-            ((size) & 0xff) as u8,
-        ])?;
-    } else {
-        return Err(Error::new(ErrorKind::InvalidData, "atom too big"));
-    }
-    Ok(())
-}
-
-pub fn decode_size(stream: &mut dyn Read, initial_b: u8) -> Result<u64, Error> {
-    if initial_b & 0x80 == 0 {
-        return Err(Error::new(ErrorKind::InvalidInput, "bad encoding"));
-    }
-    let mut bit_count = 0;
-    let mut bit_mask: u8 = 0x80;
-    let mut b = initial_b;
-    while b & bit_mask != 0 {
-        bit_count += 1;
-        b &= 0xff ^ bit_mask;
-        bit_mask >>= 1;
-    }
-    let mut size_blob: Vec<u8> = vec![0; bit_count];
-    size_blob[0] = b;
-    if bit_count > 1 {
-        stream.read_exact(&mut size_blob[1..])?;
-    }
-    let mut v = 0;
-    if size_blob.len() > 6 {
-        return Err(Error::new(ErrorKind::InvalidInput, "bad encoding"));
-    }
-    for b in &size_blob {
-        v <<= 8;
-        v += u64::from(*b);
-    }
-    if v >= MAX_DECODE_SIZE {
-        return Err(Error::new(ErrorKind::InvalidInput, "bad encoding"));
-    }
-    Ok(v)
 }

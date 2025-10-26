@@ -1,4 +1,6 @@
 use crate::clvm::program::Program;
+use crate::clvm::sexp::SExp;
+use crate::constants::NULL_SEXP;
 use crate::formatting::prep_hex_str;
 use dg_xch_serialize::{ChiaProtocolVersion, ChiaSerialize};
 use hex::{decode, encode};
@@ -12,31 +14,63 @@ pub struct UnsizedBytes {
     pub bytes: Vec<u8>,
 }
 impl UnsizedBytes {
-    pub fn new(bytes: &[u8]) -> Self {
-        Self {
-            bytes: bytes.to_vec(),
-        }
+    pub fn new(bytes: Vec<u8>) -> Self {
+        Self { bytes }
+    }
+    pub fn as_slice(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+impl From<&[u8]> for UnsizedBytes {
+    fn from(bytes: &[u8]) -> Self {
+        UnsizedBytes::new(bytes.to_vec())
     }
 }
 
 impl From<String> for UnsizedBytes {
     fn from(hex: String) -> Self {
         let bytes: Vec<u8> = decode(prep_hex_str(&hex)).unwrap();
-        UnsizedBytes::new(&bytes)
+        UnsizedBytes::new(bytes)
     }
 }
 
 impl From<&String> for UnsizedBytes {
     fn from(hex: &String) -> Self {
         let bytes: Vec<u8> = decode(prep_hex_str(hex)).unwrap();
-        UnsizedBytes::new(&bytes)
+        UnsizedBytes::new(bytes)
     }
 }
 
 impl From<&str> for UnsizedBytes {
     fn from(hex: &str) -> Self {
         let bytes: Vec<u8> = decode(prep_hex_str(hex)).unwrap();
-        UnsizedBytes::new(&bytes)
+        UnsizedBytes::new(bytes)
+    }
+}
+
+impl From<&UnsizedBytes> for SExp<'static> {
+    fn from(bytes: &UnsizedBytes) -> SExp<'static> {
+        SExp::from(bytes.bytes.clone())
+    }
+}
+
+impl From<&Option<UnsizedBytes>> for SExp<'static> {
+    fn from(bytes: &Option<UnsizedBytes>) -> SExp<'static> {
+        match bytes {
+            Some(b) => SExp::from(b),
+            None => NULL_SEXP,
+        }
+    }
+}
+
+impl From<&Vec<UnsizedBytes>> for SExp<'static> {
+    fn from(bytes: &Vec<UnsizedBytes>) -> SExp<'static> {
+        bytes
+            .iter()
+            .map(SExp::from)
+            .collect::<Vec<SExp<'_>>>()
+            .into()
     }
 }
 
@@ -47,7 +81,7 @@ impl<'a> TryFrom<Program<'a>> for UnsizedBytes {
         let vec = value
             .as_vec()
             .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "Program is not a valid $name"))?;
-        Ok(Self::new(&vec))
+        Ok(Self::new(vec))
     }
 }
 
@@ -58,7 +92,7 @@ impl<'a> TryFrom<&Program<'a>> for UnsizedBytes {
         let vec = value
             .as_vec()
             .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "Program is not a valid $name"))?;
-        Ok(Self::new(&vec))
+        Ok(Self::new(vec))
     }
 }
 impl std::hash::Hash for UnsizedBytes {
@@ -127,7 +161,7 @@ impl fmt::Display for UnsizedBytes {
 
 impl Default for UnsizedBytes {
     fn default() -> UnsizedBytes {
-        UnsizedBytes::new(&[])
+        UnsizedBytes::new(vec![])
     }
 }
 

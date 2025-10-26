@@ -2,7 +2,6 @@ use crate::blockchain::sized_bytes::Bytes32;
 use crate::clvm::sexp::SExp;
 use crate::errors::ClvmError;
 use dg_xch_macros::ChiaSerial;
-use num_traits::ToPrimitive;
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use sha2::Sha256;
@@ -13,21 +12,6 @@ pub struct Coin {
     pub parent_coin_info: Bytes32,
     pub puzzle_hash: Bytes32,
     pub amount: u64,
-}
-impl<'a> From<Coin> for SExp<'a> {
-    fn from(coin: Coin) -> SExp<'a> {
-        (&coin).into()
-    }
-}
-impl<'a> From<&Coin> for SExp<'a> {
-    fn from(coin: &Coin) -> SExp<'a> {
-        (&[
-            SExp::from(coin.parent_coin_info),
-            SExp::from(coin.puzzle_hash),
-            SExp::from(coin.amount),
-        ])
-            .into()
-    }
 }
 impl<'a> TryFrom<&'a SExp<'a>> for Coin {
     type Error = ClvmError;

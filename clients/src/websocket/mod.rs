@@ -321,7 +321,7 @@ impl MessageHandler for OneShotHandler {
         _peers: PeerMap,
     ) -> Result<(), Error> {
         debug!("{:?}", msg.as_ref());
-        let _ = &self.channel.send(msg.data.clone()).await;
+        let _ = &self.channel.send(msg.data.bytes.clone()).await;
         Ok(())
     }
 }

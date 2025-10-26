@@ -30,6 +30,13 @@ impl Message {
         &self.1[0..self.0]
     }
 }
+impl From<[u8; 32]> for Message {
+    fn from(input: [u8; 32]) -> Message {
+        let mut buf = [0u8; 1024];
+        buf[0..32].copy_from_slice(&input);
+        Message(32, buf)
+    }
+}
 
 impl Display for Message {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {

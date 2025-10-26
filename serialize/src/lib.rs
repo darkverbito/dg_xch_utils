@@ -293,7 +293,9 @@ impl_primitives!(
     f64, 8
 );
 
-const MAX_DECODE_SIZE: u64 = 0x0004_0000_0000;
+pub const MAX_DECODE_SIZE: u64 = 0x0004_0000_0000;
+pub const CONS_BOX_MARKER: u8 = 0xff;
+pub const MAX_SINGLE_BYTE: u8 = 0x7f;
 
 #[allow(clippy::cast_possible_truncation)]
 pub fn encode_size(f: &mut dyn Write, size: u64) -> Result<(), Error> {

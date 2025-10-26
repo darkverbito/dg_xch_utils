@@ -8,7 +8,6 @@ use crate::errors::ClvmError;
 use crate::traits::SizedBytes;
 use dg_xch_macros::ChiaSerial;
 use num_bigint::BigInt;
-use num_traits::ToPrimitive;
 use serde::{Deserialize, Serialize};
 
 #[derive(ChiaSerial, Clone, PartialEq, Eq, Serialize, Deserialize, Debug)]

@@ -5,7 +5,6 @@ use dg_xch_core::blockchain::sized_bytes::Bytes32;
 use dg_xch_core::clvm::program::Program;
 use dg_xch_core::clvm::sexp::SExp;
 use dg_xch_core::clvm::utils::INFINITE_COST;
-use num_traits::ToPrimitive;
 use std::io::{Error, ErrorKind};
 
 parse_program_hex!(

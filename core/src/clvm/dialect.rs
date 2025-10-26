@@ -50,7 +50,7 @@ impl Dialect for ChiaDialect {
                 let b = buf.as_ref();
                 if b.len() != 1 {
                     return if (self.flags & NO_UNKNOWN_OPS) != 0 {
-                        Err(ClvmError::Unimplemented(b[0]))?
+                        Err(ClvmError::Unimplemented(b[0]))
                     } else {
                         op_unknown(o, argument_list, max_cost, self)
                     };
