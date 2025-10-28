@@ -1,6 +1,5 @@
 use crate::clvm::program::Program;
 use crate::clvm::sexp::SExp;
-use crate::constants::NULL_SEXP;
 use crate::formatting::prep_hex_str;
 use dg_xch_serialize::{ChiaProtocolVersion, ChiaSerialize};
 use hex::{decode, encode};
@@ -52,25 +51,6 @@ impl From<&str> for UnsizedBytes {
 impl From<&UnsizedBytes> for SExp<'static> {
     fn from(bytes: &UnsizedBytes) -> SExp<'static> {
         SExp::from(bytes.bytes.clone())
-    }
-}
-
-impl From<&Option<UnsizedBytes>> for SExp<'static> {
-    fn from(bytes: &Option<UnsizedBytes>) -> SExp<'static> {
-        match bytes {
-            Some(b) => SExp::from(b),
-            None => NULL_SEXP,
-        }
-    }
-}
-
-impl From<&Vec<UnsizedBytes>> for SExp<'static> {
-    fn from(bytes: &Vec<UnsizedBytes>) -> SExp<'static> {
-        bytes
-            .iter()
-            .map(SExp::from)
-            .collect::<Vec<SExp<'_>>>()
-            .into()
     }
 }
 

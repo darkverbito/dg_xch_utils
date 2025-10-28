@@ -753,25 +753,30 @@ impl<'a> From<Vec<SExp<'a>>> for SExp<'a> {
     }
 }
 
-impl<'a, const N: usize, T: Into<SExp<'a>> + Copy> From<&[T; N]> for SExp<'a> {
-    fn from(ary: &[T; N]) -> SExp<'a> {
+impl<const N: usize, T: ToSExpRef> From<&[T; N]> for SExp<'static> {
+    fn from(ary: &[T; N]) -> SExp<'static> {
         ary.iter()
-            .copied()
-            .map(Into::into)
-            .collect::<Vec<SExp<'a>>>()
+            .map(ToSExpRef::to_sexp_ref)
+            .collect::<Vec<SExp<'_>>>()
             .into()
     }
 }
 
-impl<'a, const N: usize> From<[&SExp<'a>; N]> for SExp<'a> {
-    fn from(ary: [&SExp<'a>; N]) -> SExp<'a> {
-        ary.as_slice().into()
+impl<'a, const N: usize> From<[&'a SExp<'a>; N]> for SExp<'a> {
+    fn from(ary: [&'a SExp<'a>; N]) -> SExp<'a> {
+        ary.iter()
+            .map(|s| (*s).to_owned())
+            .collect::<Vec<SExp<'_>>>()
+            .into()
     }
 }
 
 impl<'a, const N: usize> From<&[SExp<'a>; N]> for SExp<'a> {
     fn from(ary: &[SExp<'a>; N]) -> SExp<'a> {
-        ary.as_slice().into()
+        ary.iter()
+            .map(|s| s.to_owned())
+            .collect::<Vec<SExp<'_>>>()
+            .into()
     }
 }
 impl<'a> From<&[SExp<'a>]> for SExp<'a> {
@@ -813,22 +818,73 @@ impl<'a> From<Vec<Vec<SExp<'a>>>> for SExp<'a> {
             let mut end = NULL_SEXP.clone();
             if !values.is_empty() {
                 for other in values.into_iter() {
-                    end = SExp::from(other.as_slice()).cons(end);
+                    end = SExp::from(other).cons(end);
                 }
             }
-            SExp::from(sexp.as_slice()).cons(end)
+            SExp::from(sexp).cons(end)
         } else {
             NULL_SEXP.clone()
         }
     }
 }
 
-impl<'a, T: Into<SExp<'a>>> From<Option<T>> for SExp<'a> {
-    fn from(optional: Option<T>) -> SExp<'a> {
+impl<T: ToSExpRef> From<&Vec<T>> for SExp<'static> {
+    fn from(s: &Vec<T>) -> SExp<'static> {
+        s.iter()
+            .map(ToSExpRef::to_sexp_ref)
+            .collect::<Vec<SExp<'_>>>()
+            .into()
+    }
+}
+
+impl<T: Into<SExp<'static>>> From<Option<T>> for SExp<'static> {
+    fn from(optional: Option<T>) -> SExp<'static> {
         match optional {
             None => NULL_SEXP.clone(),
             Some(s) => s.into(),
         }
+    }
+}
+trait ToSExpRef {
+    fn to_sexp_ref(&self) -> SExp<'static>;
+}
+impl<T> ToSExpRef for T
+where
+    SExp<'static>: for<'a> From<&'a T>,
+{
+    fn to_sexp_ref(&self) -> SExp<'static> {
+        SExp::from(self)
+    }
+}
+impl<T> From<&Option<T>> for SExp<'static>
+where
+    T: ToSExpRef,
+{
+    fn from(optional: &Option<T>) -> SExp<'static> {
+        match optional {
+            None => NULL_SEXP.clone(),
+            Some(s) => s.to_sexp_ref(),
+        }
+    }
+}
+
+impl<T, U, V> From<&[(T, U, V)]> for SExp<'static>
+where
+    T: ToSExpRef,
+    U: ToSExpRef,
+    V: ToSExpRef,
+{
+    fn from(val: &[(T, U, V)]) -> SExp<'static> {
+        val.iter()
+            .map(|(t, u, v)| {
+                (
+                    t.to_sexp_ref(),
+                    SExp::from((u.to_sexp_ref(), v.to_sexp_ref())),
+                )
+                    .into()
+            })
+            .collect::<Vec<SExp<'static>>>()
+            .into()
     }
 }
 
@@ -850,25 +906,6 @@ impl<'a> From<&String> for SExp<'a> {
     }
 }
 
-impl<'a> From<&Option<String>> for SExp<'a> {
-    fn from(optional: &Option<String>) -> SExp<'a> {
-        match optional {
-            None => NULL_SEXP,
-            Some(s) => s.into(),
-        }
-    }
-}
-
-impl From<&Vec<String>> for SExp<'static> {
-    fn from(string: &Vec<String>) -> SExp<'static> {
-        string
-            .iter()
-            .map(SExp::from)
-            .collect::<Vec<SExp<'_>>>()
-            .into()
-    }
-}
-
 impl<'a> From<&'a Program<'a>> for SExp<'a> {
     fn from(program: &'a Program) -> SExp<'a> {
         program.sexp().to_owned()
@@ -880,22 +917,6 @@ impl<'a> From<Vec<u8>> for SExp<'a> {
         SExp::Atom(AtomBuf::new(vec))
     }
 }
-
-impl<'a> From<&Option<Vec<u8>>> for SExp<'a> {
-    fn from(optional: &Option<Vec<u8>>) -> SExp<'a> {
-        match optional {
-            None => NULL_SEXP,
-            Some(s) => SExp::Atom(AtomBuf::Owned(s.clone().into())),
-        }
-    }
-}
-
-impl From<&Vec<u8>> for SExp<'static> {
-    fn from(vec: &Vec<u8>) -> SExp<'static> {
-        SExp::Atom(AtomBuf::Owned(vec.clone().into()))
-    }
-}
-
 impl<'a> From<Vec<Vec<u8>>> for SExp<'a> {
     fn from(vec: Vec<Vec<u8>>) -> SExp<'a> {
         vec.into_iter()
@@ -914,50 +935,85 @@ impl<'a> From<&BigInt> for SExp<'a> {
     }
 }
 
-impl<'a, T, U> From<(T, U)> for SExp<'a>
+impl<'a, 'b, T, U> From<(T, U)> for SExp<'static>
 where
     T: Into<SExp<'a>>,
-    U: Into<SExp<'a>>,
+    U: Into<SExp<'b>>,
 {
-    fn from(val: (T, U)) -> SExp<'a> {
-        (&[val.0.into(), val.1.into()]).into()
+    fn from(val: (T, U)) -> SExp<'static> {
+        SExp::Pair(PairBuf::Owned((
+            val.0.into().to_owned().into(),
+            val.1.into().to_owned().into(),
+        )))
     }
 }
 
-impl<'a, T, U, V> From<(T, U, V)> for SExp<'a>
+impl<T, U> From<&(T, U)> for SExp<'static>
 where
-    T: Into<SExp<'a>>,
-    U: Into<SExp<'a>>,
-    V: Into<SExp<'a>>,
+    T: ToSExpRef,
+    U: ToSExpRef,
 {
-    fn from(val: (T, U, V)) -> SExp<'a> {
-        (&[val.0.into(), val.1.into(), val.2.into()]).into()
+    fn from(val: &(T, U)) -> SExp<'static> {
+        (val.0.to_sexp_ref(), val.1.to_sexp_ref()).into()
     }
 }
 
-impl<'a, T, U> From<Vec<(T, U)>> for SExp<'a>
+impl<T, U, V> From<&(T, U, V)> for SExp<'static>
+where
+    T: ToSExpRef,
+    U: ToSExpRef,
+    V: ToSExpRef,
+{
+    fn from(val: &(T, U, V)) -> SExp<'static> {
+        SExp::from((
+            val.0.to_sexp_ref(),
+            SExp::from((val.1.to_sexp_ref(), val.2.to_sexp_ref())),
+        ))
+    }
+}
+
+impl<'a, 'b, 'c, T, U, V> From<(T, U, V)> for SExp<'static>
 where
     T: Into<SExp<'a>>,
-    U: Into<SExp<'a>>,
+    U: Into<SExp<'b>>,
+    V: Into<SExp<'c>>,
 {
-    fn from(val: Vec<(T, U)>) -> SExp<'a> {
+    fn from(val: (T, U, V)) -> SExp<'static> {
+        SExp::Pair(PairBuf::Owned((
+            val.0.into().to_owned().into(),
+            SExp::Pair(PairBuf::Owned((
+                val.1.into().to_owned().into(),
+                val.2.into().to_owned().into(),
+            )))
+            .into(),
+        )))
+    }
+}
+
+impl<'a, 'b, T, U> From<Vec<(T, U)>> for SExp<'static>
+where
+    T: Into<SExp<'a>>,
+    U: Into<SExp<'b>>,
+{
+    fn from(val: Vec<(T, U)>) -> SExp<'static> {
         val.into_iter()
             .map(Into::into)
-            .collect::<Vec<SExp<'a>>>()
+            .collect::<Vec<SExp<'static>>>()
             .into()
     }
 }
 
-impl<'a, T, U, V> From<Vec<(T, U, V)>> for SExp<'a>
+impl<'a, 'b, 'c, T, U, V> From<Vec<(T, U, V)>> for SExp<'static>
 where
     T: Into<SExp<'a>>,
-    U: Into<SExp<'a>>,
-    V: Into<SExp<'a>>,
+    U: Into<SExp<'b>>,
+    V: Into<SExp<'c>>,
 {
-    fn from(val: Vec<(T, U, V)>) -> SExp<'a> {
+    fn from(val: Vec<(T, U, V)>) -> SExp<'static> {
         val.into_iter()
             .map(Into::into)
-            .collect::<Vec<SExp<'a>>>()
+            .map(|s: SExp<'_>| s.to_owned())
+            .collect::<Vec<SExp<'static>>>()
             .into()
     }
 }
@@ -971,15 +1027,6 @@ impl<'a> From<u8> for SExp<'a> {
 impl<'a> From<&u8> for SExp<'a> {
     fn from(u: &u8) -> SExp<'a> {
         (*u).into()
-    }
-}
-
-impl<'a> From<&Option<u8>> for SExp<'a> {
-    fn from(optional: &Option<u8>) -> SExp<'a> {
-        match optional {
-            None => NULL_SEXP,
-            Some(u) => (*u).into(),
-        }
     }
 }
 
@@ -1002,35 +1049,12 @@ macro_rules! impl_to_sexp_sized_bytes {
                     SExp::Atom(AtomBuf::new(bytes.bytes().to_vec()))
                 }
             }
-            impl From<&Option<$name>> for SExp<'static> {
-                fn from(optional: &Option<$name>) -> SExp<'static> {
-                    match optional {
-                        None => NULL_SEXP,
-                        Some(s) => s.into(),
-                    }
-                }
-            }
             impl From<Vec<$name>> for SExp<'static> {
                 fn from(vals: Vec<$name>) -> SExp<'static> {
-                    vals.as_slice().into()
-                }
-            }
-            impl From<&Vec<$name>> for SExp<'static> {
-                fn from(vals: &Vec<$name>) -> SExp<'static> {
-                    vals.as_slice().into()
-                }
-            }
-            impl From<&[$name]> for SExp<'static> {
-                fn from(vals: &[$name]) -> SExp<'static> {
-                    vals.iter().map(Into::into).collect::<Vec<SExp<'static>>>().into()
-                }
-            }
-            impl From<&Option<Vec<$name>>> for SExp<'static> {
-                fn from(optional: &Option<Vec<$name>>) -> SExp<'static> {
-                    match optional {
-                        None => NULL_SEXP,
-                        Some(s) => s.into(),
-                    }
+                    vals.iter()
+                        .map(Into::into)
+                        .collect::<Vec<SExp<'_>>>()
+                        .into()
                 }
             }
         )*
@@ -1069,40 +1093,19 @@ macro_rules! impl_ints {
                     SExp::from(*num)
                 }
             }
-            impl From<&Option<$name>> for SExp<'static> {
-                fn from(optional: &Option<$name>) -> SExp<'static> {
-                    match optional {
-                        None => NULL_SEXP,
-                        Some(s) => s.into(),
-                    }
-                }
-            }
             impl From<Vec<$name>> for SExp<'static> {
                 fn from(vals: Vec<$name>) -> SExp<'static> {
                     (&vals).into()
                 }
             }
-            impl From<&Vec<$name>> for SExp<'static> {
-                fn from(vals: &Vec<$name>) -> SExp<'static> {
-                    vals.as_slice().into()
-                }
-            }
-            impl From<&Vec<Vec<$name>>> for SExp<'static> {
-                fn from(vals: &Vec<Vec<$name>>) -> SExp<'static> {
-                    vals.iter().map(SExp::from).collect::<Vec<SExp<'static>>>().into()
+            impl From<&[Vec<$name>]> for SExp<'static> {
+                fn from(vals: &[Vec<$name>]) -> SExp<'static> {
+                    vals.iter().map(Into::into).collect::<Vec<SExp<'static>>>().into()
                 }
             }
             impl From<&[$name]> for SExp<'static> {
                 fn from(vals: &[$name]) -> SExp<'static> {
                     vals.iter().map(Into::into).collect::<Vec<SExp<'static>>>().into()
-                }
-            }
-            impl From<&Option<Vec<$name>>> for SExp<'static> {
-                fn from(optional: &Option<Vec<$name>>) -> SExp<'static> {
-                    match optional {
-                        None => NULL_SEXP,
-                        Some(s) => s.into(),
-                    }
                 }
             }
         )*
@@ -1169,13 +1172,5 @@ impl From<bool> for SExp<'static> {
 impl From<&bool> for SExp<'static> {
     fn from(num: &bool) -> SExp<'static> {
         SExp::from(*num)
-    }
-}
-impl From<&Option<bool>> for SExp<'static> {
-    fn from(val: &Option<bool>) -> SExp<'static> {
-        match val {
-            Some(v) => v.into(),
-            None => NULL_SEXP,
-        }
     }
 }

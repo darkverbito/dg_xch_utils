@@ -11,5 +11,5 @@ pub mod parser;
 pub mod program;
 pub mod runtime;
 pub mod sexp;
-mod sexp_ext;
+pub mod sexp_ext;
 pub mod utils;

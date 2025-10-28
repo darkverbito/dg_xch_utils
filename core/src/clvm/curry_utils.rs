@@ -33,10 +33,14 @@ pub fn curry(program: &'_ Program, args: &[Program<'_>]) -> Program<'static> {
     }
     Program::to(&[
         SExp::from(2),
-        Program::to((SExp::from(1), program.sexp().to_owned()))
+        Program::to((1, program.sexp().to_owned()))
             .sexp()
             .to_owned(),
         fixed_args.sexp().to_owned(),
     ])
     .to_owned()
 }
+
+// SExp::Pair(
+// PairBuf::Owned((SExp::from(1).into(), program.sexp().to_owned().into()))
+// ),

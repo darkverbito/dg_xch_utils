@@ -38,42 +38,6 @@ pub fn derive_chia_serial(input: TokenStream) -> TokenStream {
                 (&val).into()
             }
         }
-        impl From<&Option<#name>> for #core::clvm::sexp::SExp<'static> {
-            fn from(optional: &Option<#name>) -> #core::clvm::sexp::SExp<'static> {
-                match optional {
-                    None => #core::constants::NULL_SEXP,
-                    Some(s) => s.into(),
-                }
-            }
-        }
-        impl From<Vec<#name>> for #core::clvm::sexp::SExp<'static> {
-            fn from(vals: Vec<#name>) -> #core::clvm::sexp::SExp<'static> {
-                vals.as_slice().into()
-            }
-        }
-        impl From<&Vec<Vec<#name>>> for #core::clvm::sexp::SExp<'static> {
-            fn from(vals: &Vec<Vec<#name>>) -> #core::clvm::sexp::SExp<'static> {
-                vals.iter().map(#core::clvm::sexp::SExp::from).collect::<Vec<#core::clvm::sexp::SExp<'_>>>().into()
-            }
-        }
-        impl From<&Vec<#name>> for #core::clvm::sexp::SExp<'static> {
-            fn from(vals: &Vec<#name>) -> #core::clvm::sexp::SExp<'static> {
-                vals.as_slice().into()
-            }
-        }
-        impl From<&[#name]> for #core::clvm::sexp::SExp<'static> {
-            fn from(vals: &[#name]) -> #core::clvm::sexp::SExp<'static> {
-                vals.iter().map(Into::into).collect::<Vec<#core::clvm::sexp::SExp<'static>>>().into()
-            }
-        }
-        impl From<&Option<Vec<#name>>> for #core::clvm::sexp::SExp<'static> {
-            fn from(optional: &Option<Vec<#name>>) -> #core::clvm::sexp::SExp<'static> {
-                match optional {
-                    None => #core::constants::NULL_SEXP,
-                    Some(s) => s.into(),
-                }
-            }
-        }
     };
     generated.into()
 }

@@ -282,11 +282,9 @@ pub fn create_absorb_spend(
                 "Invalid Inner Puzzle when calculating parent info",
             ));
         };
-        let full_solution: Program = Program::to([
-            parent_info.sexp(),
-            &SExp::from(last_coin_spend.coin.amount),
-            inner_sol.sexp(),
-        ]);
+        let coin_amount = SExp::from(last_coin_spend.coin.amount);
+        let full_solution: Program =
+            Program::to([parent_info.sexp(), &coin_amount, inner_sol.sexp()]);
         let full_puzzle_program = create_full_puzzle(&inner_puzzle, launcher_coin.name())?;
         if coin.puzzle_hash != full_puzzle_program.tree_hash() {
             return Err(Error::new(
@@ -414,9 +412,10 @@ pub fn create_travel_spend(
             SExp::from(last_coin_spend.coin.amount),
         ])
     };
+    let singleton_amount = SExp::from(current_singleton.amount);
     let full_solution = Program::to([
         parent_info_list.sexp(),
-        &SExp::from(current_singleton.amount),
+        &singleton_amount,
         inner_solution.sexp(),
     ]);
     let full_puzzle = create_full_puzzle(&inner_puzzle, launcher_coin.name())?;

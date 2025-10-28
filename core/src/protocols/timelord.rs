@@ -6,27 +6,12 @@ use crate::blockchain::sized_bytes::Bytes32;
 use crate::blockchain::sub_epoch_summary::SubEpochSummary;
 use crate::blockchain::vdf_info::VdfInfo;
 use crate::blockchain::vdf_proof::VdfProof;
-use crate::clvm::sexp::SExp;
 use dg_xch_macros::ChiaSerial;
 use serde::{Deserialize, Serialize};
 
 pub type PreviousRewardChallenge = (Bytes32, u128);
-impl From<&PreviousRewardChallenge> for SExp<'static> {
-    fn from(value: &PreviousRewardChallenge) -> Self {
-        SExp::from((SExp::from(value.0), SExp::from(value.1)))
-    }
-}
 
 pub type PreviousRewardChallenges = Vec<(Bytes32, u128)>;
-impl From<&PreviousRewardChallenges> for SExp<'static> {
-    fn from(previous_reward_challenges: &PreviousRewardChallenges) -> Self {
-        previous_reward_challenges
-            .iter()
-            .map(|(k, v)| (SExp::from(k), SExp::from(v)).into())
-            .collect::<Vec<SExp<'_>>>()
-            .into()
-    }
-}
 
 #[derive(ChiaSerial, Clone, PartialEq, Eq, Serialize, Deserialize, Debug)]
 pub struct NewPeakTimelord {

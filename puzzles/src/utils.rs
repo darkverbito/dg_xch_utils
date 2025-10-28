@@ -5,8 +5,11 @@ use crate::singleton_top_layer_v1_1::SINGLETON_TOP_LAYER_V1_1_TREE_HASH;
 use dg_xch_core::blockchain::condition_opcode::ConditionOpcode;
 use dg_xch_core::blockchain::sized_bytes::{Bytes32, Bytes48};
 use dg_xch_core::blockchain::unsized_bytes::UnsizedBytes;
+use dg_xch_core::clvm::parser::sexp_to_bytes;
 use dg_xch_core::clvm::program::Program;
 use dg_xch_core::clvm::sexp::{AtomBuf, SExp};
+use dg_xch_core::clvm::sexp_ext::SExpNumberWithLen;
+use dg_xch_core::errors::ClvmError;
 use lazy_static::lazy_static;
 use log::error;
 use std::sync::Arc;
@@ -29,7 +32,10 @@ pub fn is_singleton_top_layer_v1_1(program: &Program) -> bool {
 
 lazy_static! {
     pub static ref ACS_MU_PH: Bytes32 = Program::to(11u8).tree_hash(); //returns the third argument a.k.a the full solution
-    pub static ref MIRROR_PUZZLE_HASH: Bytes32 = P2_PARENT_PROGRAM.curry(&[Program::to(1u8)]).tree_hash();
+    static ref CURRY_ARG: Vec<Program<'static>> = vec![Program::to(vec![1u8])];
+    pub static ref MIRROR_PROGRAM: Program<'static> = P2_PARENT_PROGRAM.curry(CURRY_ARG.as_slice());
+    pub static ref MIRROR_HEX: String = UnsizedBytes::new(sexp_to_bytes(MIRROR_PROGRAM.sexp()).unwrap().to_bytes()).to_string();
+    pub static ref MIRROR_PUZZLE_HASH: Bytes32 = MIRROR_PROGRAM.tree_hash();
 }
 
 #[derive(Debug)]
@@ -37,6 +43,50 @@ pub struct DataLayerSingletonInfo<'a> {
     pub launcher_id: Program<'a>,
     pub root: Program<'a>,
     pub inner_puzzle: Program<'a>,
+}
+
+pub fn launch_solution_to_singleton_info(
+    launch_solution: Program,
+) -> Result<(Bytes32, u64, Bytes32, Bytes32), ClvmError> {
+    let as_list = launch_solution.sexp().ref_list();
+    if as_list.len() == 3 {
+        let full_puzzle_hash = Bytes32::try_from(as_list[0])?;
+        let amount = SExpNumberWithLen::try_from(as_list[1])?;
+        let root = Bytes32::try_from(as_list[2].first()?)?;
+        let inner_puzzle_hash = Bytes32::try_from(as_list[2].rest()?.first()?)?;
+        Ok((
+            full_puzzle_hash,
+            amount.0.to_u64().unwrap_or_default(),
+            root,
+            inner_puzzle_hash,
+        ))
+    } else {
+        Err(ClvmError::InvalidInput(
+            "Launcher is not a data layer launcher".to_string(),
+        ))?
+    }
+}
+
+pub fn root_from_datalayer_spend(solution: Program) -> Result<Bytes32, ClvmError> {
+    Bytes32::try_from(
+        solution
+            .rest()?
+            .rest()?
+            .first()?
+            .first()?
+            .rest()?
+            .first()?
+            .rest()?
+            .rest()?
+            .first()?
+            .rest()?
+            .rest()?
+            .rest()?
+            .first()?
+            .rest()?
+            .first()?
+            .sexp(),
+    )
 }
 
 pub fn datalayer_singleton_info<'a>(
@@ -58,9 +108,9 @@ pub fn datalayer_singleton_info<'a>(
                         let root = dl_curried_args.at("rff").ok()?.to_owned();
                         let inner_puzzle = dl_curried_args.at("rrrf").ok()?.to_owned();
                         return Some(DataLayerSingletonInfo {
-                            launcher_id,
-                            root,
                             inner_puzzle,
+                            root,
+                            launcher_id,
                         });
                     } else {
                         error!("ACS_MU_PH Mismatch");

@@ -1,4 +1,3 @@
-use crate::clvm::sexp::SExp;
 use dg_xch_macros::ChiaSerial;
 use rustls::DigitallySignedStruct;
 use rustls::SignatureScheme;
@@ -14,15 +13,6 @@ pub enum Capability {
 }
 
 pub type Capabilities = Vec<(u16, String)>;
-impl From<&Capabilities> for SExp<'static> {
-    fn from(capability: &Capabilities) -> Self {
-        capability
-            .iter()
-            .map(|(k, v)| (SExp::from(k), SExp::from(v)).into())
-            .collect::<Vec<SExp<'_>>>()
-            .into()
-    }
-}
 
 #[derive(ChiaSerial, Serialize, Deserialize, Debug, Clone)]
 pub struct Handshake {

@@ -9,7 +9,7 @@ use crate::clvm::runtime::ClvmRuntime;
 use crate::clvm::sexp::AtomBuf;
 use crate::clvm::sexp::{SExp, SExpSource};
 use crate::clvm::utils::MEMPOOL_MODE;
-use crate::constants::{NULL_PROGRAM, NULL_SEXP};
+use crate::constants::NULL_PROGRAM;
 use crate::errors::ClvmError;
 use crate::formatting::hex_to_bytes;
 use dg_xch_serialize::{ChiaProtocolVersion, ChiaSerialize};
@@ -463,14 +463,6 @@ impl Default for SerializedProgram {
     fn default() -> Self {
         SerializedProgram {
             buffer: SerializedSource::Static(&[]),
-        }
-    }
-}
-impl From<&Option<SerializedProgram>> for SExp<'static> {
-    fn from(optional: &Option<SerializedProgram>) -> Self {
-        match optional {
-            Some(p) => SExp::from(p),
-            None => NULL_SEXP,
         }
     }
 }
