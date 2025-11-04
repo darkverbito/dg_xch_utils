@@ -2,10 +2,12 @@ use crate::blockchain::coin::Coin;
 use crate::blockchain::coin_spend::CoinSpend;
 use crate::blockchain::condition_with_args::{ConditionWithArgs, Message};
 use crate::blockchain::sized_bytes::{Bytes32, Bytes48, Bytes96};
+use crate::blockchain::unsized_bytes::UnsizedBytes;
 use crate::blockchain::utils::{pkm_pairs_for_conditions, verify_agg_sig_unsafe_message};
 use crate::clvm::bls_bindings;
 use crate::clvm::bls_bindings::{aggregate_verify_signature, verify_signature};
 use crate::clvm::condition_utils::{agg_sig_additional_data_for_opcode, conditions_for_solution};
+use crate::clvm::program::Program;
 use crate::clvm::utils::{
     COST_CONDITIONS, DISABLE_SIGNATURE_VALIDATION, IGNORE_ASSERT_CONCURRENT_NULL, INFINITE_COST,
     NO_UNKNOWN_OPS,

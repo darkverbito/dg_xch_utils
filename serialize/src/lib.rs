@@ -6,6 +6,7 @@ use std::hash::Hash;
 use std::io::{Cursor, Error, ErrorKind, Read, Write};
 use std::str::FromStr;
 use time::{OffsetDateTime, PrimitiveDateTime};
+use core::num::*;
 
 #[derive(
     Default,
@@ -292,9 +293,6 @@ impl_primitives!(
     f32, 4;
     f64, 8
 );
-
-use core::num::*;
-use std::io;
 
 macro_rules! impl_nz_primitives {
     ($($nz:ty, $base:ty);* $(;)?) => {

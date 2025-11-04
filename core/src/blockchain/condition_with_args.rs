@@ -905,22 +905,15 @@ fn from_opcode_with_args(
                     "Invalid Vars for CreateCoin",
                 ));
             } else {
-                args.reverse();
-                let puzzle_hash = Bytes32::from(args.pop().unwrap_or_default());
-                let amount_bytes = args.pop().unwrap_or_default();
-                let amount = u64_from_bigint(&number_from_slice(&amount_bytes))?;
-                let hints = if args.len() > 2 {
-                    let mut hints = vec![];
-                    while let Some(v) = args.pop() {
-                        if !v.is_empty() {
-                            hints.push(v)
-                        }
-                    }
-                    Some(hints)
+                let hint = if args.len() > 2 {
+                    Some(Bytes32::from(args.pop().unwrap_or_default()))
                 } else {
                     None
                 };
-                ConditionWithArgs::CreateCoin(puzzle_hash, amount, hints)
+                let amount_bytes = args.pop().unwrap_or_default();
+                let amount = u64_from_bigint(&number_from_slice(&amount_bytes))?;
+                let puzzle_hash = Bytes32::from(args.pop().unwrap_or_default());
+                ConditionWithArgs::CreateCoin(puzzle_hash, amount, hint)
             }
         }
         ConditionOpcode::ReserveFee => {
@@ -1005,7 +998,7 @@ fn from_opcode_with_args(
             if args.len() != 3 {
                 return Err(Error::new(
                     ErrorKind::InvalidData,
-                    format!("Invalid Vars for SendMessage- {}", args.len()),
+                    "Invalid Vars for SendMessage",
                 ));
             } else {
                 let message = Message::new(args.pop().unwrap_or_default())?;
@@ -1246,12 +1239,12 @@ fn from_opcode_with_args(
     })
 }
 
-impl TryFrom<&SExp<'_>> for Vec<ConditionWithArgs> {
-    type Error = ClvmError;
+impl TryFrom<&SExp> for Vec<ConditionWithArgs> {
+    type Error = Error;
     fn try_from(sexp: &SExp) -> Result<Self, Self::Error> {
         let mut results = Vec::new();
         for arg in sexp.iter() {
-            let arg: Result<ConditionWithArgs, ClvmError> = arg.try_into();
+            let arg: Result<ConditionWithArgs, Error> = arg.try_into();
             match arg {
                 Ok(condition) => {
                     results.push(condition);

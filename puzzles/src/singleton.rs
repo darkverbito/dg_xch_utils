@@ -24,7 +24,7 @@ pub fn launch_conditions_and_coin_spend(
     comment: Program,
     amount: u64,
 ) -> Result<(Vec<Program>, CoinSpend), Error> {
-    if (amount % 2) == 0 {
+    if amount.is_multiple_of(2) {
         return Err(Error::new(
             ErrorKind::InvalidInput,
             "Coin amount cannot be even. Subtract one mojo.",
