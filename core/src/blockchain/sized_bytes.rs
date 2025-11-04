@@ -428,6 +428,7 @@ impl_sized_bytes!(
     Bytes8, 8;
     Bytes32, 32;
     Bytes48, 48;
+    Bytes64, 64;
     Bytes96, 96;
     Bytes100, 100;
     Bytes480, 480

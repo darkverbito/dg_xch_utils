@@ -1,16 +1,21 @@
 use bytes::Buf;
 use proc_macro::TokenStream;
+use std::fs;
 use proc_macro_crate::{FoundCrate, crate_name};
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use std::io::{Cursor, Read, Seek, SeekFrom};
-use syn::parse::{Parse, ParseStream};
-use syn::{Ident, LitStr, Token};
+use std::path::{Component, Path, PathBuf, PrefixComponent};
+use syn::{
+    parse::{Parse, ParseStream, Parser},
+    punctuated::Punctuated,
+    Expr, Ident, Lit, LitStr, Token, Error,
+};
 
 struct Args {
     base: Ident,
     _comma: Token![,],
-    hex: LitStr,
+    hex_expr: Expr,
 }
 
 impl Parse for Args {
@@ -18,27 +23,184 @@ impl Parse for Args {
         Ok(Self {
             base: input.parse()?,   // e.g., CAT2
             _comma: input.parse()?, // ,
-            hex: input.parse()?,    // "..."
+            hex_expr: input.parse()?,    // "..."
         })
     }
 }
 
 #[proc_macro]
 pub fn parse_program_hex(input: TokenStream) -> TokenStream {
-    let Args { base, hex, .. } = syn::parse_macro_input!(input as Args);
-    let hex = hex.value();
-    let bytes = match decode_hex(hex.as_str()) {
-        Ok(b) => b,
-        Err(e) => return compile_error(&e),
+    let Args { base, hex_expr, .. } = syn::parse_macro_input!(input as Args);
+
+    // decide by expression shape
+    let input_kind = match eval_expr(&hex_expr) {
+        Ok(v) => v,
+        Err(e) => return e.to_compile_error().into(),
     };
+
+    // read bytes
+    let (hex_str, bytes) = match input_kind {
+        InputKind::RawHex(s) => {
+            let b = match decode_hex(s.trim()) { Ok(b) => b, Err(e) => return compile_error(&e) };
+            (s, b)
+        }
+        InputKind::Path(p) => {
+            let path = {
+                let pth = Path::new(&p);
+                if pth.is_absolute() {
+                    pth.to_path_buf()
+                } else {
+                    let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
+                    join_lex_norm(Path::new(&manifest), &p)
+                }
+            };
+            let contents = match fs::read_to_string(&path) {
+                Ok(s) => s,
+                Err(e) => return compile_error(&format!("Failed to read hex file {}: {}", path.display(), e)),
+            };
+            // NEW: keep only hex digits; ignore whitespace/newlines/comments, etc.
+            let cleaned: String = contents.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+            if cleaned.len() % 2 != 0 {
+                return compile_error("hex file has odd number of hex digits after cleanup");
+            }
+            let b = match decode_hex(&cleaned) {
+                Ok(b) => b,
+                Err(e) => return compile_error(&e),
+            };
+            (cleaned, b)
+        }
+    };
+
+    // your existing pipeline
     let mut cursor = Cursor::new(bytes.as_slice());
-    let dag = match parse_clvm(&mut cursor) {
-        Ok(d) => d,
-        Err(e) => return compile_error(&e),
-    };
+    let dag = match parse_clvm(&mut cursor) { Ok(d) => d, Err(e) => return compile_error(&e) };
     let order = topo_order(&dag);
-    let ts = codegen(&base, hex.as_str(), &bytes, &dag, &order);
+    let ts = codegen(&base, hex_str.trim(), &bytes, &dag, &order);
     ts.into()
+}
+
+enum InputKind { RawHex(String), Path(String) }
+
+fn eval_expr(expr: &Expr) -> Result<InputKind, Error> {
+    match expr {
+        Expr::Macro(m) if m.mac.path.is_ident("concat") => {
+            let args: Punctuated<Expr, Token![,]> =
+                m.mac.parse_body_with(Punctuated::<Expr, Token![,]>::parse_terminated)?;
+
+            let mut out = String::new();
+            for (i, e) in args.iter().enumerate() {
+                match e {
+                    Expr::Macro(mm) if mm.mac.path.is_ident("env") => {
+                        if i != 0 {
+                            return Err(Error::new(mm.span(), r#"env!("OUT_DIR") must be first"#));
+                        }
+                        //parse env! body as a LitStr
+                        let var: LitStr = mm.mac.parse_body()?;
+                        if var.value() != "OUT_DIR" {
+                            return Err(Error::new(var.span(), r#"only env!("OUT_DIR") is supported"#));
+                        }
+                        let base = std::env::var("CALLER_OUT_DIR")
+                            .or_else(|_| std::env::var("OUT_DIR"))
+                            .map_err(|_| Error::new(mm.span(), "OUT_DIR not set"))?;
+                        out.push_str(&base);
+                    }
+                    Expr::Lit(l2) => {
+                        if let syn::Lit::Str(s) = &l2.lit {
+                            out.push_str(&s.value());
+                        } else {
+                            return Err(Error::new(l2.span(), "concat! pieces must be string literals or env!(\"OUT_DIR\")"));
+                        }
+                    }
+                    Expr::Group(g) => match eval_expr(&g.expr)? {
+                        InputKind::RawHex(s) | InputKind::Path(s) => out.push_str(&s),
+                    },
+                    _ => return Err(Error::new(e.span(), "unsupported concat! piece")),
+                }
+            }
+            Ok(InputKind::Path(out))
+        }
+
+        Expr::Lit(l) => {
+            if let syn::Lit::Str(s) = &l.lit {
+                let v = s.value();
+                if looks_like_path(&v) {
+                    Ok(InputKind::Path(v))
+                } else if is_probable_hex(&v) {
+                    Ok(InputKind::RawHex(v))
+                } else {
+                    Err(Error::new(
+                        s.span(),
+                        r#"expected raw hex (even-length hex string) or a .hex file path"#,
+                    ))
+                }
+            } else {
+                Err(Error::new(l.lit.span(), "expected string literal"))
+            }
+        }
+
+        Expr::Group(g) => eval_expr(&g.expr),
+        other => Err(Error::new(other.span(), "unsupported expression")),
+    }
+}
+
+fn resolve_to_caller_manifest(s: &str) -> PathBuf {
+    let p = Path::new(s);
+    if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
+        Path::new(&manifest).join(s)
+    }
+}
+
+fn is_probable_hex(s: &str) -> bool {
+    let t = s.trim();
+    !t.is_empty() && t.len() % 2 == 0 && t.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+fn looks_like_path(s: &str) -> bool {
+    let t = s.trim();
+    // quick wins
+    if t.ends_with(".hex") || t.starts_with("./") || t.starts_with("../") || t.starts_with("~/") {
+        return true;
+    }
+    // absolute *nix
+    if t.starts_with(std::path::MAIN_SEPARATOR) {
+        return true;
+    }
+    // absolute Windows "C:\..."
+    if t.len() >= 3 && t.as_bytes()[1] == b':' && (t.as_bytes()[2] == b'\\' || t.as_bytes()[2] == b'/') {
+        return true;
+    }
+    // any path separator
+    if t.contains('/') || t.contains('\\') {
+        return true;
+    }
+    false
+}
+
+fn join_lex_norm(base: &Path, tail: &str) -> PathBuf {
+    let joined = base.join(tail);
+
+    let mut prefix: Option<PrefixComponent> = None;
+    let mut has_root = false;
+    let mut stack: Vec<std::ffi::OsString> = Vec::new();
+
+    for comp in joined.components() {
+        match comp {
+            Component::Prefix(p) => { prefix = Some(p); }
+            Component::RootDir   => { has_root = true; stack.clear(); }
+            Component::CurDir    => {}
+            Component::ParentDir => { let _ = stack.pop(); }
+            Component::Normal(n) => stack.push(n.to_os_string()),
+        }
+    }
+
+    let mut out = PathBuf::new();
+    if let Some(p) = prefix { out.push(p.as_os_str()); }
+    if has_root { out.push(std::path::MAIN_SEPARATOR.to_string()); }
+    for seg in stack { out.push(seg); }
+    out
 }
 
 fn resolve_crate_path(wanted: &str) -> TokenStream2 {
@@ -262,24 +424,24 @@ fn codegen(base: &Ident, hex: &str, bytes: &[u8], dag: &MDag, order: &[usize]) -
 }
 
 fn decode_hex(s: &str) -> Result<Vec<u8>, String> {
-    let s = s.trim();
-    let s = s
-        .strip_prefix("0x")
-        .or_else(|| s.strip_prefix("0X"))
-        .unwrap_or(s);
-
-    if !s.len().is_multiple_of(2) {
-        return Err("Odd Length".into());
+    // Accept whitespace/linebreaks etc. by filtering to hex digits first
+    let mut nibbles = Vec::with_capacity(s.len());
+    for &b in s.as_bytes() {
+        if let Some(v) = from_hex(b) {
+            nibbles.push(v);
+        } else {
+            // ignore non-hex (whitespace, newlines, etc.)
+            // If you prefer strict mode, return Err here instead.
+        }
     }
 
-    let mut out = Vec::with_capacity(s.len() / 2);
-    let bytes = s.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        let hi = from_hex(bytes[i]).ok_or("Invalid Hex Character")?;
-        let lo = from_hex(bytes[i + 1]).ok_or("Invalid Hex Character")?;
-        out.push((hi << 4) | lo);
-        i += 2;
+    if nibbles.len() % 2 != 0 {
+        return Err("Odd number of hex digits".into());
+    }
+
+    let mut out = Vec::with_capacity(nibbles.len() / 2);
+    for i in (0..nibbles.len()).step_by(2) {
+        out.push((nibbles[i] << 4) | nibbles[i + 1]);
     }
     Ok(out)
 }
@@ -295,6 +457,7 @@ fn from_hex(b: u8) -> Option<u8> {
 
 use dg_xch_serialize::{CONS_BOX_MARKER, MAX_SINGLE_BYTE, decode_size};
 use sha2::{Digest, Sha256};
+use syn::spanned::Spanned;
 
 fn th_atom(data: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();

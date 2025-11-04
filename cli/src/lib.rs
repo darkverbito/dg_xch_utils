@@ -519,7 +519,7 @@ pub async fn run_cli() -> Result<(), Error> {
                     cost,
                     spend_bundle.map(|s| {
                         if s.starts_with("0x") {
-                            let decoded = decode(s).expect("String is not valid SpendBundle Hex");
+                            let decoded = decode(s).expect("String is not valid SpendBundle hex");
                             let mut cur = Cursor::new(decoded.as_slice());
                             SpendBundle::from_bytes(&mut cur, ChiaProtocolVersion::default())
                                 .expect("String is not valid SpendBundle Hex")

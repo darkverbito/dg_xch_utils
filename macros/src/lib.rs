@@ -86,18 +86,23 @@ fn create_to_bytes(data: &Data) -> (TokenStream2, TokenStream2) {
                             bytes.extend(dg_xch_serialize::ChiaSerialize::to_bytes(&self.#index, macro_chia_protocol_version)?);
                         }
                     });
+
                     let names = fields.unnamed.iter().enumerate().map(|(i, f)| {
                         let index = Index::from(i);
+                        let name_ident = format_ident!("s_{}", i);
                         quote_spanned! {f.span()=>
-                            let #index = dg_xch_serialize::ChiaSerialize::from_bytes(bytes, macro_chia_protocol_version)?;
+                            let #name_ident = dg_xch_serialize::ChiaSerialize::from_bytes(bytes, macro_chia_protocol_version)?;
                         }
                     });
+
                     let assign = fields.unnamed.iter().enumerate().map(|(i, f)| {
                         let index = Index::from(i);
+                        let name_ident = format_ident!("s_{}", i);
                         quote_spanned! {f.span()=>
-                            #index: #index,
+                            #index: #name_ident,
                         }
                     });
+
                     (
                         quote! {
                             let mut bytes = vec![];

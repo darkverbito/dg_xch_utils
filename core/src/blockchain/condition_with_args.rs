@@ -147,9 +147,9 @@ pub enum ConditionWithArgs {
     AssertBeforeHeightAbsolute(u32),
     SoftFork(u64),
 }
-impl TryFrom<&SExp<'_>> for ConditionWithArgs {
+impl<'a> TryFrom<&'a SExp<'a>> for ConditionWithArgs {
     type Error = ClvmError;
-    fn try_from(sexp: &SExp) -> Result<Self, Self::Error> {
+    fn try_from(sexp: &'a SExp<'a>) -> Result<Self, Self::Error> {
         let (op_code, args) = op_code_with_args_from_sexp(sexp)?;
         from_opcode_with_args(op_code, args).map_err(ClvmError::IoError)
     }
@@ -176,6 +176,7 @@ impl<'a> From<&'a ConditionWithArgs> for SExp<'a> {
         SExp::from(op_code).cons(as_sexp)
     }
 }
+
 
 impl ConditionWithArgs {
     pub fn op_code_with_args(&self) -> (ConditionOpcode, Vec<SExp<'_>>) {

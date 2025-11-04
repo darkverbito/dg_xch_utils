@@ -1,5 +1,5 @@
 use crate::blockchain::sized_bytes::{
-    Bytes4, Bytes8, Bytes32, Bytes48, Bytes96, Bytes100, Bytes480,
+    Bytes4, Bytes8, Bytes32, Bytes48, Bytes64, Bytes96, Bytes100, Bytes480,
 };
 use crate::clvm::assemble::is_hex;
 use crate::clvm::parser::{sexp_from_bytes, sexp_to_bytes};
@@ -26,6 +26,7 @@ use std::io::{Cursor, Error};
 use std::mem::replace;
 use std::ops::Deref;
 use std::sync::Arc;
+use time::{OffsetDateTime, PrimitiveDateTime};
 
 pub enum SExpSource<'a> {
     Owned(SExp<'a>),
@@ -88,14 +89,14 @@ impl<'a> SExp<'a> {
         }
     }
     #[inline(always)]
-    pub fn first(&self) -> Result<&SExp<'_>, ClvmError> {
+    pub fn first(&'a self) -> Result<&SExp<'a>, ClvmError> {
         match self {
             SExp::Atom(_) => Err(ClvmError::ExpectedPairGotAtom(self.to_string())),
             SExp::Pair(p) => Ok(p.first()),
         }
     }
     #[inline(always)]
-    pub fn rest(&self) -> Result<&SExp<'_>, ClvmError> {
+    pub fn rest(&'a self) -> Result<&SExp<'a>, ClvmError> {
         match self {
             SExp::Atom(_) => Err(ClvmError::ExpectedPairGotAtom(self.to_string())),
             SExp::Pair(p) => Ok(p.rest()),
@@ -747,6 +748,33 @@ impl From<(SExp<'static>, SExp<'static>)> for PairBuf<'static> {
     }
 }
 
+impl From<&OffsetDateTime> for SExp<'static> {
+    fn from(date: &OffsetDateTime) -> SExp<'static> {
+        date.to_sexp_ref()
+    }
+}
+impl From<OffsetDateTime> for SExp<'static> {
+    fn from(date: OffsetDateTime) -> SExp<'static> {
+        date.to_sexp_ref()
+    }
+}
+impl From<&PrimitiveDateTime> for SExp<'static> {
+    fn from(date: &PrimitiveDateTime) -> SExp<'static> {
+        date.to_sexp_ref()
+    }
+}
+
+impl From<PrimitiveDateTime> for SExp<'static> {
+    fn from(date: PrimitiveDateTime) -> SExp<'static> {
+        date.to_sexp_ref()
+    }
+}
+impl From<&SExp<'_>> for SExp<'static> {
+    fn from(sexp_ref: &SExp<'_>) -> SExp<'static> {
+        sexp_ref.to_owned()
+    }
+}
+
 impl<'a> From<Vec<SExp<'a>>> for SExp<'a> {
     fn from(vec: Vec<SExp<'a>>) -> SExp<'a> {
         vec.as_slice().into()
@@ -766,15 +794,6 @@ impl<'a, const N: usize> From<[&'a SExp<'a>; N]> for SExp<'a> {
     fn from(ary: [&'a SExp<'a>; N]) -> SExp<'a> {
         ary.iter()
             .map(|s| (*s).to_owned())
-            .collect::<Vec<SExp<'_>>>()
-            .into()
-    }
-}
-
-impl<'a, const N: usize> From<&[SExp<'a>; N]> for SExp<'a> {
-    fn from(ary: &[SExp<'a>; N]) -> SExp<'a> {
-        ary.iter()
-            .map(|s| s.to_owned())
             .collect::<Vec<SExp<'_>>>()
             .into()
     }
@@ -1035,6 +1054,41 @@ impl<'a> From<&[u8]> for SExp<'a> {
         SExp::Atom(AtomBuf::new(ary.to_vec()))
     }
 }
+impl<'a, 'b, K, V> From<HashMap<K, V>> for SExp<'static>
+where
+    K: Into<SExp<'a>>,
+    V: Into<SExp<'b>>,
+{
+    fn from(m: HashMap<K, V>) -> SExp<'static> {
+        let pairs: Vec<SExp<'static>> = m
+            .into_iter()
+            .map(|(k, v)| -> SExp<'static> {
+                let k: SExp<'a> = k.into();
+                let v: SExp<'b> = v.into();
+                (k, v).into() // pair SExp
+            })
+            .collect();
+        pairs.into() // list SExp
+    }
+}
+
+impl<K, V> From<&HashMap<K, V>> for SExp<'static>
+where
+    K: ToSExpRef,
+    V: ToSExpRef,
+{
+    fn from(m: &HashMap<K, V>) -> SExp<'static> {
+        let pairs: Vec<SExp<'static>> = m
+            .iter()
+            .map(|(k, v)| {
+                let k = k.to_sexp_ref();
+                let v = v.to_sexp_ref();
+                (k, v).into()
+            })
+            .collect();
+        pairs.into()
+    }
+}
 
 macro_rules! impl_to_sexp_sized_bytes {
     ($($name: ident);*) => {
@@ -1067,6 +1121,7 @@ impl_to_sexp_sized_bytes!(
     Bytes8;
     Bytes32;
     Bytes48;
+    Bytes64;
     Bytes96;
     Bytes100;
     Bytes480
@@ -1174,3 +1229,79 @@ impl From<&bool> for SExp<'static> {
         SExp::from(*num)
     }
 }
+
+macro_rules! nz_type {
+    (u8)    => { core::num::NonZeroU8 };
+    (u16)   => { core::num::NonZeroU16 };
+    (u32)   => { core::num::NonZeroU32 };
+    (u64)   => { core::num::NonZeroU64 };
+    (u128)  => { core::num::NonZeroU128 };
+    (usize) => { core::num::NonZeroUsize };
+
+    (i8)    => { core::num::NonZeroI8 };
+    (i16)   => { core::num::NonZeroI16 };
+    (i32)   => { core::num::NonZeroI32 };
+    (i64)   => { core::num::NonZeroI64 };
+    (i128)  => { core::num::NonZeroI128 };
+    (isize) => { core::num::NonZeroIsize };
+}
+
+macro_rules! impl_nz_ints {
+    ($($name:ident);* $(;)?) => {
+        $(
+            impl From<nz_type!($name)> for SExp<'static> {
+                fn from(num: nz_type!($name)) -> SExp<'static> {
+                    let as_ary = num.get().to_be_bytes();
+                    let mut as_bytes = as_ary.as_slice();
+
+                    while as_bytes.len() > 1
+                        && as_bytes[0] == (((as_bytes[1] & 0x80) > 0) as u8 * 0xFF)
+                    {
+                        as_bytes = &as_bytes[1..];
+                    }
+
+                    SExp::Atom(AtomBuf::new(as_bytes.to_vec()))
+                }
+            }
+
+            impl From<&nz_type!($name)> for SExp<'static> {
+                fn from(num: &nz_type!($name)) -> SExp<'static> {
+                    SExp::from(*num)
+                }
+            }
+
+            impl From<Vec<nz_type!($name)>> for SExp<'static> {
+                fn from(vals: Vec<nz_type!($name)>) -> SExp<'static> {
+                    (&vals).into()
+                }
+            }
+
+            impl From<&[Vec<nz_type!($name)>]> for SExp<'static> {
+                fn from(vals: &[Vec<nz_type!($name)>]) -> SExp<'static> {
+                    vals.iter().map(Into::into).collect::<Vec<SExp<'static>>>().into()
+                }
+            }
+
+            impl From<&[nz_type!($name)]> for SExp<'static> {
+                fn from(vals: &[nz_type!($name)]) -> SExp<'static> {
+                    vals.iter().map(Into::into).collect::<Vec<SExp<'static>>>().into()
+                }
+            }
+        )*
+    };
+    () => {};
+}
+
+impl_nz_ints!(
+    usize;
+    u16;
+    u32;
+    u64;
+    u128;
+    isize;
+    i8;
+    i16;
+    i32;
+    i64;
+    i128;
+);

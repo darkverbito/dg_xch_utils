@@ -112,7 +112,22 @@ impl Default for ConsensusConstants {
         MAINNET
     }
 }
-
+impl From<ChiaNetwork> for ConsensusConstants {
+    fn from(n: ChiaNetwork) -> Self {
+        match n {
+            ChiaNetwork::Mainnet   => MAINNET,
+            ChiaNetwork::Simulator => SIMULATOR,
+            ChiaNetwork::Testnet0  => TESTNET_0,
+            ChiaNetwork::Testnet2  => TESTNET_2,
+            ChiaNetwork::Testnet3  => TESTNET_3,
+            ChiaNetwork::Testnet4  => TESTNET_4,
+            ChiaNetwork::Testnet5  => TESTNET_5,
+            ChiaNetwork::Testnet7  => TESTNET_7,
+            ChiaNetwork::Testnet10 => TESTNET_10,
+            ChiaNetwork::Testnet11 => TESTNET_11,
+        }
+    }
+}
 pub const MAINNET: ConsensusConstants = ConsensusConstants {
     slot_blocks_target: 32,
     min_blocks_per_challenge_block: 16,

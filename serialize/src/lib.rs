@@ -5,7 +5,7 @@ use std::fmt::{Display, Formatter};
 use std::hash::Hash;
 use std::io::{Cursor, Error, ErrorKind, Read, Write};
 use std::str::FromStr;
-use time::OffsetDateTime;
+use time::{OffsetDateTime, PrimitiveDateTime};
 
 #[derive(
     Default,
@@ -293,6 +293,48 @@ impl_primitives!(
     f64, 8
 );
 
+use core::num::*;
+use std::io;
+
+macro_rules! impl_nz_primitives {
+    ($($nz:ty, $base:ty);* $(;)?) => {
+        $(
+            impl ChiaSerialize for $nz {
+                #[inline]
+                fn to_bytes(&self, _v: ChiaProtocolVersion) -> Result<Vec<u8>, io::Error> {
+                    Ok(self.get().to_be_bytes().to_vec())
+                }
+
+                #[inline]
+                fn from_bytes(cur: &mut Cursor<&[u8]>, _v: ChiaProtocolVersion) -> Result<Self, io::Error> {
+                    let mut buf = [0u8; core::mem::size_of::<$base>()];
+                    cur.read_exact(&mut buf)?;
+                    let v = <$base>::from_be_bytes(buf);
+                    <$nz>::new(v).ok_or_else(|| io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        concat!(stringify!($nz), " cannot be zero"),
+                    ))
+                }
+            }
+        )*
+    };
+}
+
+impl_nz_primitives!(
+    core::num::NonZeroU8,    u8;
+    core::num::NonZeroU16,   u16;
+    core::num::NonZeroU32,   u32;
+    core::num::NonZeroU64,   u64;
+    core::num::NonZeroU128,  u128;
+    core::num::NonZeroI8,    i8;
+    core::num::NonZeroI16,   i16;
+    core::num::NonZeroI32,   i32;
+    core::num::NonZeroI64,   i64;
+    core::num::NonZeroI128,  i128;
+    core::num::NonZeroUsize, usize;
+    core::num::NonZeroIsize, isize;
+);
+
 pub const MAX_DECODE_SIZE: u64 = 0x0004_0000_0000;
 pub const CONS_BOX_MARKER: u8 = 0xff;
 pub const MAX_SINGLE_BYTE: u8 = 0x7f;
@@ -393,5 +435,27 @@ impl<K: ChiaSerialize + Eq + Hash, V: ChiaSerialize> ChiaSerialize for HashMap<K
             map.insert(key, value);
             Ok(map)
         })
+    }
+}
+
+impl ChiaSerialize for PrimitiveDateTime {
+    fn to_bytes(&self, _version: ChiaProtocolVersion) -> Result<Vec<u8>, Error>
+    where
+        Self: Sized,
+    {
+        self.assume_utc().to_bytes(ChiaProtocolVersion::default())
+    }
+    fn from_bytes<>(
+        bytes: &mut Cursor<&[u8]>,
+        _version: ChiaProtocolVersion,
+    ) -> Result<Self, Error>
+    where
+        Self: Sized,
+    {
+        let offset_datatime = OffsetDateTime::from_bytes(bytes, ChiaProtocolVersion::default())?;
+        Ok(PrimitiveDateTime::new(
+            offset_datatime.date(),
+            offset_datatime.time(),
+        ))
     }
 }
