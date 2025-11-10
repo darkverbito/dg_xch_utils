@@ -8,6 +8,7 @@ use dg_xch_core::blockchain::coin::Coin;
 use dg_xch_core::blockchain::coin_record::{CatCoinRecord, CoinRecord};
 use dg_xch_core::blockchain::coin_spend::CoinSpend;
 use dg_xch_core::blockchain::condition_opcode::ConditionOpcode;
+use dg_xch_core::blockchain::condition_with_args::Message;
 use dg_xch_core::blockchain::sized_bytes::{Bytes32, Bytes48};
 use dg_xch_core::blockchain::spend_bundle::SpendBundle;
 use dg_xch_core::blockchain::transaction_record::{TransactionRecord, TransactionType};
@@ -1000,7 +1001,7 @@ pub trait Wallet<T: WalletStore + Send + Sync, C> {
                 primary_announcement_hash = Some(
                     Announcement {
                         origin_info: coin.name(),
-                        message: message.into(),
+                        message: Message::new(message.to_vec())?,
                         morph_bytes: None,
                     }
                     .name(),

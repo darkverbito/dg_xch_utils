@@ -6,7 +6,7 @@ use crate::clvm::curry_utils::curry;
 use crate::clvm::dialect::NO_UNKNOWN_OPS;
 use crate::clvm::parser::{sexp_from_bytes, sexp_to_bytes};
 use crate::clvm::runtime::ClvmRuntime;
-use crate::clvm::sexp::{AtomBuf, PairBuf};
+use crate::clvm::sexp::AtomBuf;
 use crate::clvm::sexp::{SExp, SExpSource};
 use crate::clvm::utils::MEMPOOL_MODE;
 use crate::constants::NULL_PROGRAM;

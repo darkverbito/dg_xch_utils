@@ -115,14 +115,14 @@ impl Default for ConsensusConstants {
 impl From<ChiaNetwork> for ConsensusConstants {
     fn from(n: ChiaNetwork) -> Self {
         match n {
-            ChiaNetwork::Mainnet   => MAINNET,
+            ChiaNetwork::Mainnet => MAINNET,
             ChiaNetwork::Simulator => SIMULATOR,
-            ChiaNetwork::Testnet0  => TESTNET_0,
-            ChiaNetwork::Testnet2  => TESTNET_2,
-            ChiaNetwork::Testnet3  => TESTNET_3,
-            ChiaNetwork::Testnet4  => TESTNET_4,
-            ChiaNetwork::Testnet5  => TESTNET_5,
-            ChiaNetwork::Testnet7  => TESTNET_7,
+            ChiaNetwork::Testnet0 => TESTNET_0,
+            ChiaNetwork::Testnet2 => TESTNET_2,
+            ChiaNetwork::Testnet3 => TESTNET_3,
+            ChiaNetwork::Testnet4 => TESTNET_4,
+            ChiaNetwork::Testnet5 => TESTNET_5,
+            ChiaNetwork::Testnet7 => TESTNET_7,
             ChiaNetwork::Testnet10 => TESTNET_10,
             ChiaNetwork::Testnet11 => TESTNET_11,
         }
@@ -189,14 +189,18 @@ pub const SIMULATOR: ConsensusConstants = ConsensusConstants {
     genesis_challenge: Bytes32::const_hex(
         "eb8c4d20b322be8d9fddbf9412016bdffe9a2901d7edb0e364e94266d0e095f7",
     ),
+    agg_sig_me_additional_data: Bytes32::const_hex(
+        "eb8c4d20b322be8d9fddbf9412016bdffe9a2901d7edb0e364e94266d0e095f7",
+    ),
     genesis_pre_farm_farmer_puzzle_hash: Bytes32::const_hex(
-        "b1b5203daca45bc00fac9ce11afcfd88a111ba564b3ca5e07ba0f8e31ff66a41",
+        "1e2e27c26e3ca085de2dd0732b63ccbd6fe54983110a045dcb28f6f146b6ad1d",
     ),
     genesis_pre_farm_pool_puzzle_hash: Bytes32::const_hex(
-        "b1b5203daca45bc00fac9ce11afcfd88a111ba564b3ca5e07ba0f8e31ff66a41",
+        "1e2e27c26e3ca085de2dd0732b63ccbd6fe54983110a045dcb28f6f146b6ad1d",
     ),
     hard_fork_height: 0,
     min_plot_size: 18,
+    bech32_prefix: "txch",
     simulated: true,
     ..MAINNET
 };

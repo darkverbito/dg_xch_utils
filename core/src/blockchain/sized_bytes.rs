@@ -1,5 +1,6 @@
 use crate::clvm::program::Program;
 use crate::clvm::sexp::SExp;
+use crate::clvm::sexp_ext::SExpNumber;
 use crate::errors::ClvmError;
 use crate::formatting::prep_hex_str;
 use crate::traits::SizedBytes;
@@ -140,6 +141,32 @@ macro_rules! impl_const_sized_bytes {
     )+};
 }
 impl_const_sized_bytes!(4, 8, 32, 48, 96, 100, 480);
+impl<const SIZE: usize> TryFrom<SExpNumber> for SizedBytesImpl<SIZE> {
+    type Error = Error;
+    fn try_from(value: SExpNumber) -> Result<Self, Error> {
+        let bytes = match value {
+            SExpNumber::I128(value) => value.to_be_bytes().to_vec(),
+            SExpNumber::BigInt(value) => value.to_bytes_be().1,
+        };
+        if bytes.len() > SIZE {
+            Err(Error::new(
+                ErrorKind::InvalidInput,
+                format!(
+                    "i128 Too Large, expected {} bytes got {}",
+                    SIZE,
+                    bytes.len()
+                ),
+            ))
+        } else {
+            let mut buf = [0u8; SIZE];
+            let offset = SIZE - bytes.len();
+            for (i, v) in bytes.iter().enumerate() {
+                buf[offset + i] = *v;
+            }
+            Ok(Self { bytes: buf })
+        }
+    }
+}
 impl<const SIZE: usize> SizedBytes<'_, SIZE> for SizedBytesImpl<SIZE> {
     const SIZE: usize = SIZE;
     fn new(bytes: [u8; SIZE]) -> Self {

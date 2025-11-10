@@ -88,7 +88,6 @@ fn create_to_bytes(data: &Data) -> (TokenStream2, TokenStream2) {
                     });
 
                     let names = fields.unnamed.iter().enumerate().map(|(i, f)| {
-                        let index = Index::from(i);
                         let name_ident = format_ident!("s_{}", i);
                         quote_spanned! {f.span()=>
                             let #name_ident = dg_xch_serialize::ChiaSerialize::from_bytes(bytes, macro_chia_protocol_version)?;
@@ -184,7 +183,7 @@ fn create_sexp_from(data: Data) -> TokenStream2 {
             }
         }
         Data::Enum(e) => quote_spanned! {e.enum_token.span()=>
-            #core::clvm::sexp::SExp::from(*val)
+            #core::clvm::sexp::SExp::from(*val as u8)
         },
         Data::Union(_u) => {
             todo!()

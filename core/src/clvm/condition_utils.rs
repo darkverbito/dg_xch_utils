@@ -48,7 +48,7 @@ pub fn agg_sig_additional_data_for_opcode(
         | ConditionOpcode::AggSigParentPuzzle => {
             let mut buffer = agg_sig_data.bytes().to_vec();
             buffer.push(opcode as u8);
-            Bytes32::from(hash_256(&buffer))
+            Bytes32::new(hash_256(&buffer))
         }
         _ => agg_sig_data,
     }

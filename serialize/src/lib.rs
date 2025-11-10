@@ -1,12 +1,16 @@
+use core::num::{
+    NonZeroI8, NonZeroI16, NonZeroI32, NonZeroI64, NonZeroI128, NonZeroIsize, NonZeroU8,
+    NonZeroU16, NonZeroU32, NonZeroU64, NonZeroU128, NonZeroUsize,
+};
 use log::warn;
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::fmt::{Display, Formatter};
 use std::hash::Hash;
+use std::io;
 use std::io::{Cursor, Error, ErrorKind, Read, Write};
 use std::str::FromStr;
 use time::{OffsetDateTime, PrimitiveDateTime};
-use core::num::*;
 
 #[derive(
     Default,
@@ -294,6 +298,43 @@ impl_primitives!(
     f64, 8
 );
 
+macro_rules! impl_arrays {
+    ($($name: ty, $size:expr);*) => {
+        $(
+            impl ChiaSerialize for $name {
+                fn to_bytes(&self, _version: ChiaProtocolVersion) -> Result<Vec<u8>, Error> {
+                    Ok(self.to_vec())
+                }
+                fn from_bytes(bytes: &mut Cursor<&[u8]>, _version: ChiaProtocolVersion) -> Result<Self, std::io::Error> where Self: Sized,
+                {
+                    let remaining = bytes.get_ref().as_ref().len().saturating_sub(bytes.position() as usize);
+                    if remaining < $size {
+                        Err(Error::new(std::io::ErrorKind::InvalidInput, format!("Failed to Parse {}, expected length {}, found {}", stringify!($name), stringify!($size), remaining)))
+                    } else {
+                        let mut buffer: $name = [0; $size];
+                        bytes.read_exact(&mut buffer)?;
+                        Ok(buffer)
+                    }
+                }
+            }
+        )*
+    };
+    ()=>{};
+}
+impl_arrays!(
+    [u8; 4], 4;
+    [u8; 8], 8;
+    [u8; 16], 16;
+    [u8; 24], 24;
+    [u8; 32], 32;
+    [u8; 48], 48;
+    [u8; 64], 64;
+    [u8; 96], 96;
+    [u8; 128], 128;
+    [u8; 256], 256;
+    [u8; 512], 512
+);
+
 macro_rules! impl_nz_primitives {
     ($($nz:ty, $base:ty);* $(;)?) => {
         $(
@@ -319,18 +360,18 @@ macro_rules! impl_nz_primitives {
 }
 
 impl_nz_primitives!(
-    core::num::NonZeroU8,    u8;
-    core::num::NonZeroU16,   u16;
-    core::num::NonZeroU32,   u32;
-    core::num::NonZeroU64,   u64;
-    core::num::NonZeroU128,  u128;
-    core::num::NonZeroI8,    i8;
-    core::num::NonZeroI16,   i16;
-    core::num::NonZeroI32,   i32;
-    core::num::NonZeroI64,   i64;
-    core::num::NonZeroI128,  i128;
-    core::num::NonZeroUsize, usize;
-    core::num::NonZeroIsize, isize;
+    NonZeroU8,    u8;
+    NonZeroU16,   u16;
+    NonZeroU32,   u32;
+    NonZeroU64,   u64;
+    NonZeroU128,  u128;
+    NonZeroI8,    i8;
+    NonZeroI16,   i16;
+    NonZeroI32,   i32;
+    NonZeroI64,   i64;
+    NonZeroI128,  i128;
+    NonZeroUsize, usize;
+    NonZeroIsize, isize;
 );
 
 pub const MAX_DECODE_SIZE: u64 = 0x0004_0000_0000;
@@ -443,10 +484,7 @@ impl ChiaSerialize for PrimitiveDateTime {
     {
         self.assume_utc().to_bytes(ChiaProtocolVersion::default())
     }
-    fn from_bytes<>(
-        bytes: &mut Cursor<&[u8]>,
-        _version: ChiaProtocolVersion,
-    ) -> Result<Self, Error>
+    fn from_bytes(bytes: &mut Cursor<&[u8]>, _version: ChiaProtocolVersion) -> Result<Self, Error>
     where
         Self: Sized,
     {

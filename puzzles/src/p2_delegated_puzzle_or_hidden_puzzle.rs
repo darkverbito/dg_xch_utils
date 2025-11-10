@@ -4,6 +4,7 @@ use dg_parser_macro::parse_program_hex;
 use dg_xch_core::blockchain::sized_bytes::{Bytes32, Bytes48};
 use dg_xch_core::clvm::program::Program;
 use dg_xch_core::clvm::sexp::SExp;
+use dg_xch_core::clvm::sexp_ext::SExpNumber;
 use dg_xch_core::constants::NULL_SEXP;
 use dg_xch_core::curry_and_treehash::{calculate_hash_of_quoted_mod_hash, curry_and_treehash};
 use dg_xch_core::formatting::hex_to_bytes;
@@ -86,7 +87,10 @@ pub fn calculate_synthetic_public_key(
     public_key: Bytes48,
     hidden_puzzle_hash: Bytes32,
 ) -> Result<Bytes48, Error> {
-    let bytes = Bytes32::try_from(calculate_synthetic_offset(public_key, hidden_puzzle_hash))?;
+    let bytes = Bytes32::try_from(SExpNumber::BigInt(calculate_synthetic_offset(
+        public_key,
+        hidden_puzzle_hash,
+    )))?;
     let synthetic_offset: SecretKey = bytes.into();
     let mut agg = AggregatePublicKey::from_public_key(&public_key.into());
     agg.add_public_key(&synthetic_offset.sk_to_pk(), false)
@@ -108,7 +112,7 @@ pub fn calculate_synthetic_secret_key(
     let synthetic_offset =
         calculate_synthetic_offset(public_key.to_bytes().into(), hidden_puzzle_hash);
     let synthetic_secret_exponent = (secret_exponent + synthetic_offset).mod_floor(&GROUP_ORDER);
-    let blob = Bytes32::try_from(synthetic_secret_exponent)?;
+    let blob = Bytes32::try_from(SExpNumber::BigInt(synthetic_secret_exponent))?;
     Ok(SecretKey::from(blob))
 }
 

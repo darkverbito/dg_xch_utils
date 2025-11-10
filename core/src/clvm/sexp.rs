@@ -12,11 +12,15 @@ use crate::errors::ClvmError;
 use crate::formatting::{bigint_to_bytes, number_from_slice, u32_from_slice, u64_from_bigint};
 use crate::traits::SizedBytes;
 use crate::utils::hash_256;
+use core::num::{
+    NonZeroI8, NonZeroI16, NonZeroI32, NonZeroI64, NonZeroI128, NonZeroIsize, NonZeroU8,
+    NonZeroU16, NonZeroU32, NonZeroU64, NonZeroU128, NonZeroUsize,
+};
 use dg_xch_serialize::{ChiaProtocolVersion, ChiaSerialize};
 use hex::encode;
 use num_bigint::{BigInt, Sign};
 use num_traits::Zero;
-use serde::de::Visitor;
+use serde::de::{SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashMap;
 use std::fmt;
@@ -89,14 +93,14 @@ impl<'a> SExp<'a> {
         }
     }
     #[inline(always)]
-    pub fn first(&'a self) -> Result<&SExp<'a>, ClvmError> {
+    pub fn first(&'a self) -> Result<&'a SExp<'a>, ClvmError> {
         match self {
             SExp::Atom(_) => Err(ClvmError::ExpectedPairGotAtom(self.to_string())),
             SExp::Pair(p) => Ok(p.first()),
         }
     }
     #[inline(always)]
-    pub fn rest(&'a self) -> Result<&SExp<'a>, ClvmError> {
+    pub fn rest(&'a self) -> Result<&'a SExp<'a>, ClvmError> {
         match self {
             SExp::Atom(_) => Err(ClvmError::ExpectedPairGotAtom(self.to_string())),
             SExp::Pair(p) => Ok(p.rest()),
@@ -426,7 +430,7 @@ impl<'a> Serialize for AtomBuf<'a> {
     }
 }
 struct AtomBufVisitor;
-impl Visitor<'_> for AtomBufVisitor {
+impl<'de> Visitor<'de> for AtomBufVisitor {
     type Value = AtomBuf<'static>;
 
     fn expecting(&self, formatter: &mut Formatter) -> fmt::Result {
@@ -448,6 +452,28 @@ impl Visitor<'_> for AtomBufVisitor {
         let data = hex::decode(value.as_str()).map_err(|e| E::custom(format!("{}", e)))?;
         Ok(Self::Value::new(data))
     }
+    fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(Self::Value::new(v.to_vec()))
+    }
+    fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(Self::Value::new(v.to_vec()))
+    }
+    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let mut out = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+        while let Some(b) = seq.next_element::<u8>()? {
+            out.push(b);
+        }
+        Ok(AtomBuf::new(out))
+    }
 }
 
 impl<'de> Deserialize<'de> for AtomBuf<'_> {
@@ -455,7 +481,7 @@ impl<'de> Deserialize<'de> for AtomBuf<'_> {
     where
         D: Deserializer<'de>,
     {
-        match deserializer.deserialize_string(AtomBufVisitor) {
+        match deserializer.deserialize_any(AtomBufVisitor) {
             Ok(hex) => Ok(hex),
             Err(er) => Err(er),
         }
@@ -1039,7 +1065,11 @@ where
 
 impl<'a> From<u8> for SExp<'a> {
     fn from(u: u8) -> SExp<'a> {
-        SExp::Atom(AtomBuf::new(vec![u]))
+        if u == 0 {
+            NULL_SEXP
+        } else {
+            SExp::Atom(AtomBuf::new(vec![u]))
+        }
     }
 }
 
@@ -1230,78 +1260,68 @@ impl From<&bool> for SExp<'static> {
     }
 }
 
-macro_rules! nz_type {
-    (u8)    => { core::num::NonZeroU8 };
-    (u16)   => { core::num::NonZeroU16 };
-    (u32)   => { core::num::NonZeroU32 };
-    (u64)   => { core::num::NonZeroU64 };
-    (u128)  => { core::num::NonZeroU128 };
-    (usize) => { core::num::NonZeroUsize };
-
-    (i8)    => { core::num::NonZeroI8 };
-    (i16)   => { core::num::NonZeroI16 };
-    (i32)   => { core::num::NonZeroI32 };
-    (i64)   => { core::num::NonZeroI64 };
-    (i128)  => { core::num::NonZeroI128 };
-    (isize) => { core::num::NonZeroIsize };
+#[inline]
+fn trim_twos_complement_be(mut b: &[u8]) -> &[u8] {
+    while b.len() > 1 && b[0] == (((b[1] & 0x80) != 0) as u8) * 0xFF {
+        b = &b[1..];
+    }
+    b
 }
 
 macro_rules! impl_nz_ints {
-    ($($name:ident);* $(;)?) => {
+    ($($ty:ty),+ $(,)?) => {
         $(
-            impl From<nz_type!($name)> for SExp<'static> {
-                fn from(num: nz_type!($name)) -> SExp<'static> {
-                    let as_ary = num.get().to_be_bytes();
-                    let mut as_bytes = as_ary.as_slice();
-
-                    while as_bytes.len() > 1
-                        && as_bytes[0] == (((as_bytes[1] & 0x80) > 0) as u8 * 0xFF)
-                    {
-                        as_bytes = &as_bytes[1..];
-                    }
-
-                    SExp::Atom(AtomBuf::new(as_bytes.to_vec()))
+            impl From<$ty> for SExp<'static> {
+                #[inline]
+                fn from(num: $ty) -> SExp<'static> {
+                    let raw = num.get().to_be_bytes();
+                    let trimmed = trim_twos_complement_be(&raw);
+                    SExp::Atom(AtomBuf::new(trimmed.to_vec()))
                 }
             }
 
-            impl From<&nz_type!($name)> for SExp<'static> {
-                fn from(num: &nz_type!($name)) -> SExp<'static> {
+            impl From<&$ty> for SExp<'static> {
+                #[inline]
+                fn from(num: &$ty) -> SExp<'static> {
                     SExp::from(*num)
                 }
             }
 
-            impl From<Vec<nz_type!($name)>> for SExp<'static> {
-                fn from(vals: Vec<nz_type!($name)>) -> SExp<'static> {
-                    (&vals).into()
+            impl From<Vec<$ty>> for SExp<'static> {
+                #[inline]
+                fn from(vals: Vec<$ty>) -> SExp<'static> {
+                    (&vals[..]).into()
                 }
             }
 
-            impl From<&[Vec<nz_type!($name)>]> for SExp<'static> {
-                fn from(vals: &[Vec<nz_type!($name)>]) -> SExp<'static> {
+            impl From<&[$ty]> for SExp<'static> {
+                #[inline]
+                fn from(vals: &[$ty]) -> SExp<'static> {
                     vals.iter().map(Into::into).collect::<Vec<SExp<'static>>>().into()
                 }
             }
 
-            impl From<&[nz_type!($name)]> for SExp<'static> {
-                fn from(vals: &[nz_type!($name)]) -> SExp<'static> {
+            impl From<&[Vec<$ty>]> for SExp<'static> {
+                #[inline]
+                fn from(vals: &[Vec<$ty>]) -> SExp<'static> {
                     vals.iter().map(Into::into).collect::<Vec<SExp<'static>>>().into()
                 }
             }
-        )*
+        )+
     };
-    () => {};
 }
 
 impl_nz_ints!(
-    usize;
-    u16;
-    u32;
-    u64;
-    u128;
-    isize;
-    i8;
-    i16;
-    i32;
-    i64;
-    i128;
+    NonZeroUsize,
+    NonZeroU8,
+    NonZeroU16,
+    NonZeroU32,
+    NonZeroU64,
+    NonZeroU128,
+    NonZeroIsize,
+    NonZeroI8,
+    NonZeroI16,
+    NonZeroI32,
+    NonZeroI64,
+    NonZeroI128,
 );

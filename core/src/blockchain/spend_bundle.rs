@@ -2,12 +2,10 @@ use crate::blockchain::coin::Coin;
 use crate::blockchain::coin_spend::CoinSpend;
 use crate::blockchain::condition_with_args::{ConditionWithArgs, Message};
 use crate::blockchain::sized_bytes::{Bytes32, Bytes48, Bytes96};
-use crate::blockchain::unsized_bytes::UnsizedBytes;
 use crate::blockchain::utils::{pkm_pairs_for_conditions, verify_agg_sig_unsafe_message};
 use crate::clvm::bls_bindings;
 use crate::clvm::bls_bindings::{aggregate_verify_signature, verify_signature};
 use crate::clvm::condition_utils::{agg_sig_additional_data_for_opcode, conditions_for_solution};
-use crate::clvm::program::Program;
 use crate::clvm::utils::{
     COST_CONDITIONS, DISABLE_SIGNATURE_VALIDATION, IGNORE_ASSERT_CONCURRENT_NULL, INFINITE_COST,
     NO_UNKNOWN_OPS,
@@ -35,8 +33,8 @@ const ANNOUNCEMENT_LIMIT: u64 = 1024;
 struct ValidationState {
     pub coins_spent: HashSet<Coin>,
     pub coins_created: HashSet<Coin>,
-    pub messages_sent: Vec<(u8, Bytes32, Message, Bytes32)>,
-    pub messages_received: Vec<(u8, Bytes32, Message, Bytes32)>,
+    pub messages_sent: Vec<(u8, Message, Bytes32, Bytes32)>,
+    pub messages_received: Vec<(u8, Message, Bytes32, Bytes32)>,
     pub puzzle_announcements: Vec<(Bytes32, Message)>,
     pub asserted_puzzle_announcements: Vec<Bytes32>,
     pub coin_announcements: Vec<(Bytes32, Message)>,
@@ -71,11 +69,18 @@ struct ValidationState {
     pub birth_height: Option<u32>,
 }
 
-#[derive(ChiaSerial, Clone, PartialEq, Eq, Serialize, Deserialize, Debug, Default)]
+#[derive(ChiaSerial, Clone, PartialEq, Eq, Serialize, Deserialize, Debug)]
 pub struct SpendBundle {
     pub coin_spends: Vec<CoinSpend>,
     pub aggregated_signature: Bytes96,
 }
+
+impl Default for SpendBundle {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
 impl SpendBundle {
     pub fn name(&self) -> Result<Bytes32, Error> {
         Ok(hash_256(&self.to_bytes(ChiaProtocolVersion::default())?).into())
@@ -103,9 +108,11 @@ impl SpendBundle {
 
     #[must_use]
     pub fn empty() -> Self {
+        let mut sig = [0u8; 96];
+        sig[0] = 0xc0; // compressed + infinity flag
         SpendBundle {
             coin_spends: vec![],
-            aggregated_signature: Bytes96::default(),
+            aggregated_signature: sig.into(),
         }
     }
 
@@ -232,7 +239,8 @@ impl SpendBundle {
         let mut max_cost = max_cost.unwrap_or(INFINITE_COST);
         let mut create_conditions = vec![];
         let mut state = ValidationState::default();
-        let additional_data = consensus_constants.agg_sig_me_additional_data;
+        let additional_data =
+            Bytes32::parse(consensus_constants.agg_sig_me_additional_data.as_ref())?;
         for spend in &self.coin_spends {
             let reveal = spend.puzzle_reveal.to_program()?;
             let solution = spend.solution.to_program()?;
@@ -280,7 +288,7 @@ impl SpendBundle {
                                 created_coin.coin_id()
                             )))?;
                         }
-                        create_conditions.push(condition_with_args.clone());
+                        create_conditions.push(condition_with_args);
                     }
                     ConditionWithArgs::AggSigMe(public_key, message) => {
                         max_cost = max_cost
@@ -405,29 +413,29 @@ impl SpendBundle {
                             ))?;
                         }
                     }
-                    ConditionWithArgs::SendMessage(m_type, message_address, message) => {
+                    ConditionWithArgs::SendMessage(m_type, message, message_address) => {
                         state.messages_sent.push((
                             *m_type,
-                            *message_address,
                             *message,
+                            *message_address,
                             spend.coin.coin_id(),
                         ));
                     }
-                    ConditionWithArgs::ReceiveMessage(m_type, message_address, message) => {
+                    ConditionWithArgs::ReceiveMessage(m_type, message, message_address) => {
                         if *message_address == Bytes32::default() {
                             if flags & IGNORE_ASSERT_CONCURRENT_NULL == 0 {
                                 state.messages_received.push((
                                     *m_type,
-                                    *message_address,
                                     *message,
+                                    *message_address,
                                     spend.coin.coin_id(),
                                 ))
                             }
                         } else {
                             state.messages_received.push((
                                 *m_type,
-                                *message_address,
                                 *message,
+                                *message_address,
                                 spend.coin.coin_id(),
                             ));
                         }
@@ -671,15 +679,15 @@ impl SpendBundle {
                 state.messages_sent.len()
             )))?;
         }
-        for (send_type, send_target, send_message, send_source) in &state.messages_sent {
+        for (send_type, send_message, send_target, send_source) in &state.messages_sent {
             if !state
                 .messages_received
                 .iter()
                 .filter(
-                    |(receive_type, receive_target, receive_message, receive_source)| {
-                        receive_target == send_source
+                    |(receive_type, receive_message, receive_target, receive_source)| {
+                        receive_message == send_message
+                            && receive_target == send_source
                             && receive_source == send_target
-                            && receive_message == send_message
                             && send_type == receive_type
                     },
                 )

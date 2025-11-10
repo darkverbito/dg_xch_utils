@@ -1,7 +1,7 @@
-use chacha20poly1305::aead::Aead;
-use chacha20poly1305::aead::generic_array::GenericArray;
-use chacha20poly1305::consts::U32;
-use chacha20poly1305::{XChaCha20Poly1305, XNonce};
+use chacha20poly1305::{
+    Key, XChaCha20Poly1305, XNonce,
+    aead::{Aead, KeyInit},
+};
 use lifehash_lib::Version::Version2;
 use lifehash_lib::lifehash;
 use log::info;
@@ -30,25 +30,19 @@ fn hash_256(data: &[u8]) -> [u8; 32] {
 }
 
 pub fn encrypt(data: &[u8], password: &[u8], nonce: [u8; 24]) -> Result<Vec<u8>, String> {
-    use chacha20poly1305::KeyInit;
     let encryption_key: [u8; 32] = hash_256(password);
-    let key: GenericArray<u8, U32> = GenericArray::<u8, U32>::from(encryption_key);
-    let chacha_key = XChaCha20Poly1305::new(&key);
-    let chacha_nonce = XNonce::from(nonce);
-    chacha_key
-        .encrypt(&chacha_nonce, data)
-        .map_err(|e| e.to_string())
+    let key: Key = Key::from(encryption_key);
+    let cipher = XChaCha20Poly1305::new(&key);
+    let nonce: XNonce = XNonce::from(nonce);
+    cipher.encrypt(&nonce, data).map_err(|e| e.to_string())
 }
 
 pub fn decrypt(data: &[u8], password: &[u8], nonce: [u8; 24]) -> Result<Vec<u8>, String> {
-    use chacha20poly1305::KeyInit;
     let encryption_key: [u8; 32] = hash_256(password);
-    let key: GenericArray<u8, U32> = GenericArray::<u8, U32>::from(encryption_key);
-    let chacha_key = XChaCha20Poly1305::new(&key);
-    let chacha_nonce = XNonce::from(nonce);
-    chacha_key
-        .decrypt(&chacha_nonce, data)
-        .map_err(|e| e.to_string())
+    let key: Key = Key::from(encryption_key);
+    let cipher = XChaCha20Poly1305::new(&key);
+    let nonce: XNonce = XNonce::from(nonce);
+    cipher.decrypt(&nonce, data).map_err(|e| e.to_string())
 }
 
 pub fn load_config_file<T: DeserializeOwned>(
