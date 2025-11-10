@@ -9,6 +9,7 @@ pub mod dialect;
 pub mod more_ops;
 pub mod parser;
 pub mod program;
-pub mod run_program;
+pub mod runtime;
 pub mod sexp;
+pub mod sexp_ext;
 pub mod utils;

@@ -26,8 +26,10 @@ pub struct CatCoinRecord {
     pub delegate: CoinRecord,
     pub version: CatVersion,
     pub asset_id: Bytes32,
-    pub cat_program: Program,
-    pub lineage_proof: Program,
+    #[serde(borrow)]
+    pub cat_program: Program<'static>,
+    #[serde(borrow)]
+    pub lineage_proof: Program<'static>,
     pub parent_coin_spend: CoinSpend,
 }
 

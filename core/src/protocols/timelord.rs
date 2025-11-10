@@ -9,6 +9,10 @@ use crate::blockchain::vdf_proof::VdfProof;
 use dg_xch_macros::ChiaSerial;
 use serde::{Deserialize, Serialize};
 
+pub type PreviousRewardChallenge = (Bytes32, u128);
+
+pub type PreviousRewardChallenges = Vec<(Bytes32, u128)>;
+
 #[derive(ChiaSerial, Clone, PartialEq, Eq, Serialize, Deserialize, Debug)]
 pub struct NewPeakTimelord {
     pub reward_chain_block: RewardChainBlock, //Min Version 0.0.34
@@ -16,7 +20,7 @@ pub struct NewPeakTimelord {
     pub deficit: u8,                          //Min Version 0.0.34
     pub sub_slot_iters: u64,                  //Min Version 0.0.34
     pub sub_epoch_summary: Option<SubEpochSummary>, //Min Version 0.0.34
-    pub previous_reward_challenges: Vec<(Bytes32, u128)>, //Min Version 0.0.34
+    pub previous_reward_challenges: PreviousRewardChallenges, //Min Version 0.0.34
     pub last_challenge_sb_or_eos_total_iters: u128, //Min Version 0.0.34
     pub passes_ses_height_but_not_yet_included: bool, //Min Version 0.0.34
 }

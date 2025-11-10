@@ -3,7 +3,7 @@ use crate::plots::plot_reader::PlotReader;
 use crate::verifier::validate_proof;
 use async_trait::async_trait;
 use dg_xch_core::blockchain::proof_of_space::{
-    calculate_pos_challenge, calculate_prefix_bits, passes_plot_filter, ProofOfSpace,
+    ProofOfSpace, calculate_pos_challenge, calculate_prefix_bits, passes_plot_filter,
 };
 use dg_xch_core::blockchain::sized_bytes::{Bytes32, Bytes48};
 use dg_xch_core::consensus::constants::ConsensusConstants;
@@ -14,8 +14,8 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::io::Error;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use tokio::fs::File;
 use tokio::sync::RwLock;
 
@@ -56,11 +56,15 @@ pub fn verify_and_get_quality_string(
     height: u32,
 ) -> Option<Bytes32> {
     if pos.pool_public_key.is_none() && pos.pool_contract_puzzle_hash.is_none() {
-        warn!("Failed to Verify ProofOfSpace: null value for both pool_public_key and pool_contract_puzzle_hash");
+        warn!(
+            "Failed to Verify ProofOfSpace: null value for both pool_public_key and pool_contract_puzzle_hash"
+        );
         return None;
     }
     if pos.pool_public_key.is_some() && pos.pool_contract_puzzle_hash.is_some() {
-        warn!("Failed to Verify ProofOfSpace: Non Null value for both for pool_public_key and pool_contract_puzzle_hash");
+        warn!(
+            "Failed to Verify ProofOfSpace: Non Null value for both for pool_public_key and pool_contract_puzzle_hash"
+        );
         return None;
     }
     if pos.size < constants.min_plot_size {

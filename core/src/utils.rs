@@ -3,7 +3,7 @@ use sha2::{Digest, Sha256, Sha256VarCore};
 use std::io::Error;
 use tokio::select;
 #[cfg(not(target_os = "windows"))]
-use tokio::signal::unix::{signal, SignalKind};
+use tokio::signal::unix::{SignalKind, signal};
 #[cfg(target_os = "windows")]
 use tokio::signal::windows::{ctrl_break, ctrl_c, ctrl_close, ctrl_logoff, ctrl_shutdown};
 

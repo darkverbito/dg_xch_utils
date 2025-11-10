@@ -1,7 +1,7 @@
-use crate::websocket::farmer::new_proof_or_space::NewProofOfSpaceHandle;
-use crate::websocket::farmer::respond_signatures::RespondSignaturesHandle;
 #[cfg(feature = "metrics")]
 use crate::websocket::WebSocketMetrics;
+use crate::websocket::farmer::new_proof_or_space::NewProofOfSpaceHandle;
+use crate::websocket::farmer::respond_signatures::RespondSignaturesHandle;
 use crate::websocket::{WebsocketServer, WebsocketServerConfig};
 use blst::min_pk::SecretKey;
 use dg_xch_clients::api::pool::PoolClient;
@@ -11,9 +11,9 @@ use dg_xch_core::clvm::bls_bindings::{sign, verify_signature};
 use dg_xch_core::config::PoolWalletConfig;
 use dg_xch_core::protocols::farmer::{FarmerPoolState, FarmerSharedState};
 use dg_xch_core::protocols::pool::{
-    get_current_authentication_token, AuthenticationPayload, GetFarmerRequest, GetFarmerResponse,
-    PoolError, PoolErrorCode, PostFarmerPayload, PostFarmerRequest, PostFarmerResponse,
-    PutFarmerPayload, PutFarmerRequest, PutFarmerResponse,
+    AuthenticationPayload, GetFarmerRequest, GetFarmerResponse, PoolError, PoolErrorCode,
+    PostFarmerPayload, PostFarmerRequest, PostFarmerResponse, PutFarmerPayload, PutFarmerRequest,
+    PutFarmerResponse, get_current_authentication_token,
 };
 use dg_xch_core::protocols::{ChiaMessageFilter, ChiaMessageHandler, ProtocolMessageTypes};
 use dg_xch_core::traits::SizedBytes;
@@ -23,8 +23,8 @@ use dg_xch_serialize::{ChiaProtocolVersion, ChiaSerialize};
 use log::{error, info};
 use std::collections::HashMap;
 use std::io::Error;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 

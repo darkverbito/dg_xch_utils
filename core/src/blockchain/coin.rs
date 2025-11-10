@@ -1,4 +1,6 @@
 use crate::blockchain::sized_bytes::Bytes32;
+use crate::clvm::sexp::SExp;
+use crate::errors::ClvmError;
 use dg_xch_macros::ChiaSerial;
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
@@ -10,6 +12,22 @@ pub struct Coin {
     pub parent_coin_info: Bytes32,
     pub puzzle_hash: Bytes32,
     pub amount: u64,
+}
+impl<'a> TryFrom<&'a SExp<'a>> for Coin {
+    type Error = ClvmError;
+    fn try_from(sexp: &SExp) -> Result<Self, Self::Error> {
+        let (parent_coin_info, rest) = sexp.split()?;
+        let (puzzle_hash, rest) = rest.split()?;
+        let (amount, _) = rest.split()?;
+        Ok(Self {
+            parent_coin_info: Bytes32::try_from(parent_coin_info)?,
+            puzzle_hash: Bytes32::try_from(puzzle_hash)?,
+            amount: amount
+                .as_int()?
+                .to_u64()
+                .ok_or(ClvmError::AtomNotValidU64(amount.to_string()))?,
+        })
+    }
 }
 impl Coin {
     #[must_use]

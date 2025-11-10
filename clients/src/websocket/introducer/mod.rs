@@ -13,8 +13,8 @@ use log::{debug, error, info};
 use rustls::crypto::ring::default_provider;
 use std::collections::{HashMap, HashSet};
 use std::io::{Cursor, Error, ErrorKind};
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
@@ -118,7 +118,7 @@ impl MessageHandler for RespondPeersHandler {
                 ),
             ))
         } else {
-            let mut cursor = Cursor::new(&msg.data);
+            let mut cursor = Cursor::new(msg.data.as_slice());
             match peers.read().await.get(&peer_id) {
                 None => {
                     error!("Peer Disconnected before Peer Version could be determined");
@@ -133,7 +133,7 @@ impl MessageHandler for RespondPeersHandler {
                         .write()
                         .await
                         .peer_list
-                        .extend(peer_list.peer_list.into_iter());
+                        .extend(peer_list.peer_list);
                 }
             }
             Ok(())

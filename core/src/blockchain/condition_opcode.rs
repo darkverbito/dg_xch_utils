@@ -1,4 +1,4 @@
-use crate::clvm::program::Program;
+use crate::clvm::sexp::SExp;
 use dg_xch_macros::ChiaSerial;
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
@@ -18,8 +18,9 @@ impl From<u64> for ConditionCost {
         }
     }
 }
-#[derive(ChiaSerial, Copy, Clone, Hash, PartialEq, Eq, Serialize, Deserialize, Debug)]
+#[derive(ChiaSerial, Copy, Clone, Hash, PartialEq, Eq, Serialize, Deserialize, Default, Debug)]
 pub enum ConditionOpcode {
+    #[default]
     Unknown = 0,
     Remark = 1,
     AggSigParent = 43,
@@ -146,13 +147,12 @@ impl From<u8> for ConditionOpcode {
     }
 }
 
-impl From<&Program> for ConditionOpcode {
-    fn from(value: &Program) -> Self {
+impl From<&SExp<'_>> for ConditionOpcode {
+    fn from(value: &SExp) -> Self {
         value
-            .sexp
             .atom()
             .map(|a| {
-                if let Some(v) = a.data.first() {
+                if let Some(v) = a.as_ref().first() {
                     ConditionOpcode::from(*v)
                 } else {
                     ConditionOpcode::Unknown

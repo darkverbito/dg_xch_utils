@@ -6,21 +6,23 @@ use dg_xch_pos::plots::decompressor::DecompressorPool;
 use dg_xch_pos::plots::disk_plot::DiskPlot;
 use dg_xch_pos::plots::plot_reader::PlotReader;
 use log::Level;
-use std::io::{Error, ErrorKind};
+use std::io::Error;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::available_parallelism;
 use tokio::runtime::{Builder, Runtime};
 
 #[allow(clippy::cast_possible_truncation)]
-fn proof_benchmark(c: &mut Criterion, runtime: &Runtime) {
+fn proof_benchmark(c: &mut Criterion, runtime: &Runtime) -> Result<(), Box<dyn std::error::Error>> {
     let _logger = DruidGardenLogger::build()
         .use_colors(true)
         .current_level(Level::Info)
         .init()
         .map_err(|e| Error::other(format!("{e:?}")))?;
-    let path = Path::new("/home/luna/plot-k32-c05-2023-06-09-02-25-11d916cf9c847158f76affb30a38ca36f83da452c37f4b4d10a1a0addcfa932b.plot");
+    let path = Path::new(
+        "/home/luna/plot-k32-c05-2023-06-09-02-25-11d916cf9c847158f76affb30a38ca36f83da452c37f4b4d10a1a0addcfa932b.plot",
+    );
     let pool = Arc::new(DecompressorPool::new(
         1,
         available_parallelism()
@@ -53,16 +55,22 @@ fn proof_benchmark(c: &mut Criterion, runtime: &Runtime) {
             af7.fetch_add(1, Ordering::Relaxed);
         });
     });
+    Ok(())
 }
 
 #[allow(clippy::cast_possible_truncation)]
-fn quality_then_proof_benchmark(c: &mut Criterion, runtime: &Runtime) {
+fn quality_then_proof_benchmark(
+    c: &mut Criterion,
+    runtime: &Runtime,
+) -> Result<(), Box<dyn std::error::Error>> {
     let _logger = DruidGardenLogger::build()
         .use_colors(true)
         .current_level(Level::Info)
         .init()
         .map_err(|e| Error::other(format!("{e:?}")))?;
-    let path = Path::new("/home/luna/plot-k32-c05-2023-06-09-02-25-11d916cf9c847158f76affb30a38ca36f83da452c37f4b4d10a1a0addcfa932b.plot");
+    let path = Path::new(
+        "/home/luna/plot-k32-c05-2023-06-09-02-25-11d916cf9c847158f76affb30a38ca36f83da452c37f4b4d10a1a0addcfa932b.plot",
+    );
     let pool = Arc::new(DecompressorPool::new(
         1,
         available_parallelism()
@@ -101,16 +109,22 @@ fn quality_then_proof_benchmark(c: &mut Criterion, runtime: &Runtime) {
             af7.fetch_add(1, Ordering::Relaxed);
         });
     });
+    Ok(())
 }
 
 #[allow(clippy::cast_possible_truncation)]
-fn quality_benchmark(c: &mut Criterion, runtime: &Runtime) {
+fn quality_benchmark(
+    c: &mut Criterion,
+    runtime: &Runtime,
+) -> Result<(), Box<dyn std::error::Error>> {
     let _logger = DruidGardenLogger::build()
         .use_colors(true)
         .current_level(Level::Info)
         .init()
         .map_err(|e| Error::other(format!("{e:?}")))?;
-    let path = Path::new("/home/luna/plot-k32-c05-2023-06-09-02-25-11d916cf9c847158f76affb30a38ca36f83da452c37f4b4d10a1a0addcfa932b.plot");
+    let path = Path::new(
+        "/home/luna/plot-k32-c05-2023-06-09-02-25-11d916cf9c847158f76affb30a38ca36f83da452c37f4b4d10a1a0addcfa932b.plot",
+    );
     let pool = Arc::new(DecompressorPool::new(
         1,
         available_parallelism()
@@ -145,19 +159,21 @@ fn quality_benchmark(c: &mut Criterion, runtime: &Runtime) {
                 .unwrap();
         });
     });
+    Ok(())
 }
 
-pub fn benches(runtime: &Runtime) {
+pub fn benches(runtime: &Runtime) -> Result<(), Box<dyn std::error::Error>> {
     let criterion = Criterion::default().configure_from_args();
     let mut criterion = criterion.sample_size(50);
-    quality_benchmark(&mut criterion, runtime);
+    quality_benchmark(&mut criterion, runtime)?;
     let mut criterion = criterion.sample_size(10);
-    proof_benchmark(&mut criterion, runtime);
-    quality_then_proof_benchmark(&mut criterion, runtime);
+    proof_benchmark(&mut criterion, runtime)?;
+    quality_then_proof_benchmark(&mut criterion, runtime)?;
     criterion.final_summary();
+    Ok(())
 }
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let runtime = Builder::new_multi_thread()
         .worker_threads(
             available_parallelism()
@@ -167,5 +183,5 @@ fn main() {
         .thread_name("benchmark runtime")
         .build()
         .unwrap();
-    benches(&runtime);
+    benches(&runtime)
 }

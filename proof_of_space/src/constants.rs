@@ -114,7 +114,7 @@ pub const fn byte_align(num_bits: u32) -> u32 {
     num_bits + (8 - ((num_bits) % 8)) % 8
 }
 pub const BITS_PER_INTERVAL: u32 = 24000; //K_C3BITS_PER_ENTRY * K_CHECKPOINT1INTERVAL as f64 no const float math
-                                          // ChaCha8 block size
+// ChaCha8 block size
 pub const K_F1_BLOCK_SIZE_BITS: u16 = 512;
 // ChaCha8 block size
 pub const K_F1_BLOCK_SIZE: u16 = K_F1_BLOCK_SIZE_BITS / 8;

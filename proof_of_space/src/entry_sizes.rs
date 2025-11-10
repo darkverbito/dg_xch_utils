@@ -1,7 +1,7 @@
 use crate::constants::{
-    byte_align, ucdiv, BITS_PER_INTERVAL, K_CHECKPOINT1INTERVAL, K_ENTRIES_PER_PARK, K_EXTRA_BITS,
+    BITS_PER_INTERVAL, K_CHECKPOINT1INTERVAL, K_ENTRIES_PER_PARK, K_EXTRA_BITS,
     K_MAX_AVERAGE_DELTA, K_MAX_AVERAGE_DELTA_TABLE1, K_OFFSET_SIZE, K_STUB_MINUS_BITS,
-    K_VECTOR_LENS,
+    K_VECTOR_LENS, byte_align, ucdiv,
 };
 use dg_xch_core::plots::PlotTable;
 use std::cmp::max;

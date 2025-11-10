@@ -5,18 +5,21 @@ use crate::wallet_commands::{
 use crate::wallets::plotnft_utils::{get_plotnft_by_launcher_id, scrounge_for_plotnfts};
 use blst::min_pk::SecretKey;
 use clap::Parser;
-use cli::{prompt_for_mnemonic, Cli, RootCommands, WalletAction};
+use cli::{Cli, RootCommands, WalletAction, prompt_for_mnemonic};
 use dg_logger::DruidGardenLogger;
-use dg_xch_clients::api::full_node::{FullnodeAPI, FullnodeExtAPI};
-use dg_xch_clients::api::pool::create_pool_login_url;
-use dg_xch_clients::rpc::full_node::FullnodeClient;
 use dg_xch_clients::ClientSSLConfig;
+use dg_xch_clients::api::pool::create_pool_login_url;
+use dg_xch_clients::rpc::full_node::{
+    FullnodeAPI, FullnodeClient, FullnodeExtAPI, FullnodeHelpers,
+};
 use dg_xch_core::blockchain::sized_bytes::{Bytes32, Bytes48};
 use dg_xch_core::blockchain::spend_bundle::SpendBundle;
 use dg_xch_core::clvm::assemble::{assemble_text, is_hex};
-use dg_xch_core::clvm::program::SerializedProgram;
+use dg_xch_core::clvm::parser::sexp_to_bytes;
+use dg_xch_core::clvm::program::{Program, SerializedProgram};
 use dg_xch_core::clvm::utils::INFINITE_COST;
-use dg_xch_core::consensus::constants::{CONSENSUS_CONSTANTS_MAP, MAINNET};
+use dg_xch_core::consensus::constants::ChiaNetwork::Mainnet;
+use dg_xch_core::consensus::constants::{CONSENSUS_CONSTANTS, ChiaNetwork, MAINNET};
 use dg_xch_keys::{
     encode_puzzle_hash, key_from_mnemonic, master_sk_to_farmer_sk, master_sk_to_pool_sk,
     master_sk_to_wallet_sk, master_sk_to_wallet_sk_unhardened,
@@ -25,7 +28,7 @@ use dg_xch_puzzles::clvm_puzzles::launcher_id_to_p2_puzzle_hash;
 use dg_xch_puzzles::p2_delegated_puzzle_or_hidden_puzzle::puzzle_hash_for_pk;
 use dg_xch_serialize::{ChiaProtocolVersion, ChiaSerialize};
 use hex::{decode, encode};
-use log::{error, info, Level};
+use log::{Level, error, info};
 use std::env;
 use std::io::{Cursor, Error, ErrorKind};
 use std::path::Path;
@@ -62,12 +65,9 @@ pub async fn run_cli() -> Result<(), Error> {
         ssl_ca_crt_path: format!("{}/{}", v, "full_node/private_full_node.crt"),
     });
     let constants = if let Some(network) = cli.network {
-        CONSENSUS_CONSTANTS_MAP
-            .get(&network)
-            .cloned()
-            .unwrap_or_else(|| MAINNET.clone())
+        CONSENSUS_CONSTANTS[ChiaNetwork::from_str(&network).unwrap_or(Mainnet) as usize]
     } else {
-        MAINNET.clone()
+        MAINNET
     };
     match cli.action {
         RootCommands::PrintPlottingInfo { launcher_id } => {
@@ -298,18 +298,6 @@ pub async fn run_cli() -> Result<(), Error> {
                 }
             }
         }
-        RootCommands::GetInitialFreezePeriod => {
-            let client = FullnodeClient::new(&host, port, timeout, ssl, &None)?;
-            let results = client.get_initial_freeze_period().await?;
-            match serde_json::to_string_pretty(&results) {
-                Ok(json) => {
-                    info!("{json}");
-                }
-                Err(e) => {
-                    error!("Failed to convert value to JSON: {e:?}");
-                }
-            }
-        }
         RootCommands::GetNetworkInfo => {
             let client = FullnodeClient::new(&host, port, timeout, ssl, &None)?;
             let results = client.get_network_info().await?;
@@ -531,9 +519,8 @@ pub async fn run_cli() -> Result<(), Error> {
                     cost,
                     spend_bundle.map(|s| {
                         if s.starts_with("0x") {
-                            let mut cur = Cursor::new(
-                                decode(s).expect("String is not valid SpendBundle Hex"),
-                            );
+                            let decoded = decode(s).expect("String is not valid SpendBundle hex");
+                            let mut cur = Cursor::new(decoded.as_slice());
                             SpendBundle::from_bytes(&mut cur, ChiaProtocolVersion::default())
                                 .expect("String is not valid SpendBundle Hex")
                         } else {
@@ -711,7 +698,7 @@ pub async fn run_cli() -> Result<(), Error> {
                 launcher_id,
                 target_address,
                 &mnemonic,
-                constants.clone(),
+                Arc::new(constants),
                 fee.unwrap_or_default(),
             )
             .await?;
@@ -751,7 +738,7 @@ pub async fn run_cli() -> Result<(), Error> {
         }
         RootCommands::CreateWallet { action } => match action {
             WalletAction::WithNFT { .. } => {}
-            WalletAction::Cold => create_cold_wallet()?,
+            WalletAction::Cold => create_cold_wallet(&constants)?,
         },
         RootCommands::Curry {
             program,
@@ -759,29 +746,30 @@ pub async fn run_cli() -> Result<(), Error> {
             output,
         } => {
             let prog_as_path = Path::new(&program);
-            let asrg_as_path = Path::new(&args);
+            let args_as_path = Path::new(&args);
+            let serial_program;
+            let serial_args;
             let program = if prog_as_path.exists() {
-                SerializedProgram::from_file(prog_as_path)
-                    .await?
-                    .to_program()
+                Program::from_file(prog_as_path).await?
             } else if is_hex(program.as_bytes()) {
-                SerializedProgram::from_bytes(program.as_bytes()).to_program()
+                serial_program = SerializedProgram::from_bytes(program.as_bytes());
+                Program::from_serial(&serial_program)?
             } else {
-                assemble_text(&program)?.to_program()
+                assemble_text(&program)?
             };
-            let args = if asrg_as_path.exists() {
-                SerializedProgram::from_file(asrg_as_path)
-                    .await?
-                    .to_program()
+            let args = if args_as_path.exists() {
+                Program::from_file(args_as_path).await?
             } else if is_hex(args.as_bytes()) {
-                SerializedProgram::from_bytes(args.as_bytes()).to_program()
+                serial_args = SerializedProgram::from_bytes(args.as_bytes());
+                Program::from_serial(&serial_args)?
             } else {
-                assemble_text(&args)?.to_program()
+                assemble_text(&args)?
             };
-            let curried_program = program.curry(&args.as_list())?;
+            let arg_list = args.as_list();
+            let curried_program = program.curry(&arg_list);
             match output.unwrap_or_default() {
                 ProgramOutput::Hex => {
-                    println!("{}", encode(&curried_program.serialized))
+                    println!("{}", encode(&sexp_to_bytes(curried_program.sexp())?))
                 }
                 ProgramOutput::String => {
                     println!("{curried_program}")
@@ -795,28 +783,28 @@ pub async fn run_cli() -> Result<(), Error> {
         } => {
             let prog_as_path = Path::new(&program);
             let asrg_as_path = Path::new(&args);
+            let serial_program;
+            let serial_args;
             let program = if prog_as_path.exists() {
-                SerializedProgram::from_file(prog_as_path)
-                    .await?
-                    .to_program()
+                Program::from_file(prog_as_path).await?
             } else if is_hex(program.as_bytes()) {
-                SerializedProgram::from_bytes(program.as_bytes()).to_program()
+                serial_program = SerializedProgram::from_bytes(program.as_bytes());
+                Program::from_serial(&serial_program)?
             } else {
-                assemble_text(&program)?.to_program()
+                assemble_text(&program)?
             };
             let args = if asrg_as_path.exists() {
-                SerializedProgram::from_file(asrg_as_path)
-                    .await?
-                    .to_program()
+                Program::from_file(asrg_as_path).await?
             } else if is_hex(args.as_bytes()) {
-                SerializedProgram::from_bytes(args.as_bytes()).to_program()
+                serial_args = SerializedProgram::from_bytes(args.as_bytes());
+                Program::from_serial(&serial_args)?
             } else {
-                assemble_text(&args)?.to_program()
+                assemble_text(&args)?
             };
             let (_cost, program_output) = program.run(INFINITE_COST, 0, &args)?;
             match output.unwrap_or_default() {
                 ProgramOutput::Hex => {
-                    println!("{}", encode(&program_output.serialized))
+                    println!("{}", encode(&sexp_to_bytes(program_output.sexp())?))
                 }
                 ProgramOutput::String => {
                     println!("{program_output}")

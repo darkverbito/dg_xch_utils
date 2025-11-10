@@ -1,13 +1,14 @@
-use crate::websocket::farmer::{update_pool_farmer_info, FarmerServerConfig};
+use crate::websocket::farmer::{FarmerServerConfig, update_pool_farmer_info};
 use async_trait::async_trait;
-use blst::min_pk::{AggregateSignature, PublicKey, SecretKey, Signature};
 use blst::BLST_ERROR;
+use blst::min_pk::{AggregateSignature, PublicKey, SecretKey, Signature};
 use dg_xch_clients::api::pool::PoolClient;
 use dg_xch_clients::websocket::oneshot;
 use dg_xch_core::blockchain::proof_of_space::{generate_plot_public_key, generate_taproot_sk};
 use dg_xch_core::blockchain::sized_bytes::{Bytes32, Bytes48};
 use dg_xch_core::clvm::bls_bindings::{sign, sign_prepend};
-use dg_xch_core::consensus::constants::{ConsensusConstants, CONSENSUS_CONSTANTS_MAP};
+use dg_xch_core::consensus::constants::ChiaNetwork::Mainnet;
+use dg_xch_core::consensus::constants::{CONSENSUS_CONSTANTS, ChiaNetwork, ConsensusConstants};
 use dg_xch_core::consensus::pot_iterations::{
     calculate_iterations_quality, calculate_sp_interval_iters,
 };
@@ -22,7 +23,7 @@ use dg_xch_core::protocols::harvester::{
     SigningDataKind,
 };
 use dg_xch_core::protocols::pool::{
-    get_current_authentication_token, PoolErrorCode, PostPartialPayload, PostPartialRequest,
+    PoolErrorCode, PostPartialPayload, PostPartialRequest, get_current_authentication_token,
 };
 use dg_xch_core::protocols::{ChiaMessage, MessageHandler, PeerMap, ProtocolMessageTypes};
 use dg_xch_core::traits::SizedBytes;
@@ -34,8 +35,9 @@ use hyper_tungstenite::tungstenite::Message;
 use log::{debug, error, info, warn};
 use std::collections::HashMap;
 use std::io::{Cursor, Error, ErrorKind};
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Instant;
 use tokio::sync::RwLock;
 
@@ -66,13 +68,11 @@ impl<T: PoolClient + Sized + Sync + Send + 'static> MessageHandler for NewProofO
         let peer = peers.read().await.get(&peer_id).cloned();
         if let Some(peer) = peer {
             let protocol_version = *peer.protocol_version.read().await;
-            let mut cursor = Cursor::new(&msg.data);
+            let mut cursor = Cursor::new(msg.data.as_slice());
             let new_pos = NewProofOfSpace::from_bytes(&mut cursor, protocol_version)?;
             if let Some(sps) = self.signage_points.read().await.get(&new_pos.sp_hash) {
-                let constants = CONSENSUS_CONSTANTS_MAP
-                    .get(&self.config.network)
-                    .cloned()
-                    .unwrap_or_default();
+                let constants = CONSENSUS_CONSTANTS
+                    [ChiaNetwork::from_str(&self.config.network).unwrap_or(Mainnet) as usize];
                 for sp in sps {
                     if let Some(qs) = verify_and_get_quality_string(
                         &new_pos.proof,
@@ -304,7 +304,9 @@ impl<T: PoolClient + Sized + Sync + Send + 'static> NewProofOfSpaceHandle<T> {
                 pool_dif,
             )
         } else {
-            warn!("No pool specific difficulty has been set for {p2_singleton_puzzle_hash}, check communication with the pool, skipping this partial to {pool_url}.");
+            warn!(
+                "No pool specific difficulty has been set for {p2_singleton_puzzle_hash}, check communication with the pool, skipping this partial to {pool_url}."
+            );
             return Ok(());
         };
         if required_iters >= calculate_sp_interval_iters(constants, constants.pool_sub_slot_iters)?
@@ -319,7 +321,9 @@ impl<T: PoolClient + Sized + Sync + Send + 'static> NewProofOfSpaceHandle<T> {
             .get(p2_singleton_puzzle_hash)
             .map(|v| v.authentication_token_timeout)
         else {
-            warn!("No pool specific authentication_token_timeout has been set for {p2_singleton_puzzle_hash}, check communication with the pool.");
+            warn!(
+                "No pool specific authentication_token_timeout has been set for {p2_singleton_puzzle_hash}, check communication with the pool."
+            );
             return Ok(());
         };
         let is_eos = new_pos.signage_point_index == 0;
@@ -423,7 +427,9 @@ impl<T: PoolClient + Sized + Sync + Send + 'static> NewProofOfSpaceHandle<T> {
             {
                 self.auth_secret_keys.get(owner_public_key)
             } else {
-                warn!("No pool specific authentication_token_timeout has been set for {p2_singleton_puzzle_hash}, check communication with the pool.");
+                warn!(
+                    "No pool specific authentication_token_timeout has been set for {p2_singleton_puzzle_hash}, check communication with the pool."
+                );
                 return Ok(());
             };
             if let Some(auth_key) = auth_key {
@@ -536,7 +542,9 @@ impl<T: PoolClient + Sized + Sync + Send + 'static> NewProofOfSpaceHandle<T> {
                                 v.pool_errors_24h.push((Instant::now(), format!("{e:?}")));
                             }
                             if e.error_code == PoolErrorCode::ProofNotGoodEnough as u8 {
-                                error!("Partial not good enough, forcing pool farmer update to get our current difficulty.");
+                                error!(
+                                    "Partial not good enough, forcing pool farmer update to get our current difficulty."
+                                );
                                 let _ = update_pool_farmer_info(
                                     self.pool_state.clone(),
                                     p2_singleton_puzzle_hash,

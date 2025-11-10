@@ -1,7 +1,7 @@
 use crate::constants::FSE_MAX_SYMBOL_VALUE;
-use crate::finite_state_entropy::bitstream::{highbit_32, BitDstream, BitDstreamStatus};
+use crate::finite_state_entropy::bitstream::{BitDstream, BitDstreamStatus, highbit_32};
 use crate::finite_state_entropy::{
-    fse_dtable_size_u32, fse_tablestep, FSE_MAX_TABLELOG, FSE_TABLELOG_ABSOLUTE_MAX,
+    FSE_MAX_TABLELOG, FSE_TABLELOG_ABSOLUTE_MAX, fse_dtable_size_u32, fse_tablestep,
 };
 use std::io::{Cursor, Error, ErrorKind, Read};
 use std::sync::Arc;

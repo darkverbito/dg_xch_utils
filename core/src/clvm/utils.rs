@@ -1,6 +1,7 @@
 use crate::clvm::sexp::SExp;
-use crate::formatting::{i32_from_slice, number_from_slice};
-use num_bigint::BigInt;
+use crate::clvm::sexp_ext::SExpNumberWithLen;
+use crate::errors::ClvmError;
+use crate::formatting::i32_from_slice;
 use std::io::{Error, ErrorKind};
 
 pub const NO_NEG_DIV: u32 = 0x0001;
@@ -28,22 +29,16 @@ pub fn check_cost(cost: u64, max_cost: u64) -> Result<(), Error> {
     }
 }
 
-pub fn check_arg_count(args: &SExp, expected: usize, name: &str) -> Result<(), Error> {
+pub fn check_arg_count(args: &SExp, expected: usize, name: &'static str) -> Result<(), ClvmError> {
     if args.arg_count(expected) == expected {
         Ok(())
     } else {
-        Err(Error::new(
-            ErrorKind::InvalidData,
-            format!(
-                "{name} takes exactly {expected} argument{}",
-                if expected == 1 { "" } else { "s" }
-            ),
-        ))
+        Err(ClvmError::InvalidOperandArgs(name, expected))
     }
 }
 
 pub fn int_atom<'a>(args: &'a SExp, op_name: &str) -> Result<&'a [u8], Error> {
-    args.atom().map(|b| b.data.as_slice()).map_err(|_| {
+    args.atom().map(|b| b.as_ref()).map_err(|_| {
         Error::new(
             ErrorKind::InvalidInput,
             format!("{op_name} requires int args: Got {args}"),
@@ -53,21 +48,18 @@ pub fn int_atom<'a>(args: &'a SExp, op_name: &str) -> Result<&'a [u8], Error> {
 
 pub fn atom<'a>(args: &'a SExp, op_name: &str) -> Result<&'a [u8], Error> {
     args.atom()
-        .map(|b| b.data.as_slice())
+        .map(|b| b.as_ref())
         .map_err(|_| Error::new(ErrorKind::InvalidInput, format!("{op_name} on list")))
 }
 
-pub fn two_ints(args: &SExp, op_name: &str) -> Result<(BigInt, usize, BigInt, usize), Error> {
+pub fn two_ints(
+    args: &SExp,
+    op_name: &'static str,
+) -> Result<(SExpNumberWithLen, SExpNumberWithLen), Error> {
     check_arg_count(args, 2, op_name)?;
-    let a0 = args.first()?;
-    let a1 = args.rest()?.first()?;
-    let n0 = int_atom(a0, op_name)?;
-    let n1 = int_atom(a1, op_name)?;
     Ok((
-        number_from_slice(n0),
-        n0.len(),
-        number_from_slice(n1),
-        n1.len(),
+        SExpNumberWithLen::try_from(args.first()?)?,
+        SExpNumberWithLen::try_from(args.rest()?.first()?)?,
     ))
 }
 
@@ -78,7 +70,7 @@ pub fn i32_atom(args: &SExp, op_name: &str) -> Result<i32, Error> {
             format!("{op_name} requires int32 args"),
         ));
     };
-    match i32_from_slice(&buf.data) {
+    match i32_from_slice(buf.as_ref()) {
         Some(v) => Ok(v),
         _ => Err(Error::new(
             ErrorKind::InvalidData,

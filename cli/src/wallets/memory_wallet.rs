@@ -1,29 +1,26 @@
-use crate::wallets::common::{sign_coin_spends, DerivationRecord};
+use crate::wallets::common::{DerivationRecord, sign_coin_spends};
 use crate::wallets::{SecretKeyStore, Wallet, WalletInfo, WalletStore};
 use async_trait::async_trait;
 use blst::min_pk::SecretKey;
 use dashmap::DashMap;
-use dg_xch_clients::api::full_node::FullnodeAPI;
-use dg_xch_clients::rpc::full_node::FullnodeClient;
 use dg_xch_clients::ClientSSLConfig;
+use dg_xch_clients::rpc::full_node::{FullnodeAPI, FullnodeClient};
 use dg_xch_core::blockchain::coin_record::{CatCoinRecord, CoinRecord};
 use dg_xch_core::blockchain::coin_spend::CoinSpend;
 use dg_xch_core::blockchain::sized_bytes::{Bytes32, Bytes48};
 use dg_xch_core::blockchain::spend_bundle::SpendBundle;
 use dg_xch_core::blockchain::wallet_type::{AmountWithPuzzleHash, WalletType};
-use dg_xch_core::clvm::program::{Program, SerializedProgram};
-// use dg_xch_core::clvm::sexp::IntoSExp;
+use dg_xch_core::clvm::program::Program;
 use dg_xch_core::consensus::constants::ConsensusConstants;
-// use dg_xch_puzzles::cats::{CAT_1_PROGRAM, CAT_2_PROGRAM};
 use dg_xch_puzzles::p2_delegated_puzzle_or_hidden_puzzle::{
-    calculate_synthetic_secret_key, DEFAULT_HIDDEN_PUZZLE_HASH,
+    DEFAULT_HIDDEN_PUZZLE_TREE_HASH, calculate_synthetic_secret_key,
 };
 use log::{error, info};
 use num_traits::ToPrimitive;
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind};
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use tokio::sync::Mutex;
 
 pub struct MemoryWalletConfig {
@@ -124,7 +121,7 @@ impl WalletStore for MemoryWalletStore {
                     Error::new(ErrorKind::InvalidInput, format!("MasterKey: {e:?}"))
                 })?;
                 let synthetic_secret_key =
-                    calculate_synthetic_secret_key(&secret_key, *DEFAULT_HIDDEN_PUZZLE_HASH)?;
+                    calculate_synthetic_secret_key(&secret_key, DEFAULT_HIDDEN_PUZZLE_TREE_HASH)?;
                 let _old_key = self.secret_key_store.save_secret_key(&synthetic_secret_key);
                 Ok(v.value().1)
             }
@@ -332,14 +329,14 @@ impl Wallet<MemoryWalletStore, MemoryWalletConfig> for MemoryWallet {
                 "Found change but not Change Puzzle Hash was provided.",
             ));
         }
-        if let Some(change_puzzle_hash) = change_puzzle_hash {
-            if change > 0 {
-                payments.push(AmountWithPuzzleHash {
-                    puzzle_hash: change_puzzle_hash,
-                    amount: change as u64,
-                    memos: vec![],
-                })
-            }
+        if let Some(change_puzzle_hash) = change_puzzle_hash
+            && change > 0
+        {
+            payments.push(AmountWithPuzzleHash {
+                puzzle_hash: change_puzzle_hash,
+                amount: change as u64,
+                memos: vec![],
+            })
         }
         let mut spends = vec![];
         let origin_index = match origin_id {
@@ -374,8 +371,8 @@ impl Wallet<MemoryWalletStore, MemoryWalletConfig> for MemoryWallet {
             let puzzle = self.puzzle_for_puzzle_hash(&coin.coin.puzzle_hash).await?;
             let coin_spend = CoinSpend {
                 coin: coin.coin,
-                puzzle_reveal: SerializedProgram::from(puzzle),
-                solution: SerializedProgram::from(solution),
+                puzzle_reveal: puzzle.serialized()?,
+                solution: solution.serialized()?,
             };
             spends.push(coin_spend);
         }
@@ -394,7 +391,10 @@ impl Wallet<MemoryWalletStore, MemoryWalletConfig> for MemoryWallet {
                 }
             },
             HashMap::with_capacity(0),
-            &self.wallet_info().constants.agg_sig_me_additional_data,
+            self.wallet_info()
+                .constants
+                .agg_sig_me_additional_data
+                .as_ref(),
             self.wallet_info()
                 .constants
                 .max_block_cost_clvm

@@ -22,7 +22,7 @@ use tokio::sync::RwLock;
 use tokio_tungstenite::tungstenite::Message;
 
 pub struct NewSignagePointHandle {
-    pub constants: Arc<ConsensusConstants>,
+    pub constants: ConsensusConstants,
     pub harvester_peers: PeerMap,
     pub signage_points: Arc<RwLock<HashMap<Bytes32, Vec<NewSignagePoint>>>>,
     pub pool_state: Arc<RwLock<HashMap<Bytes32, FarmerPoolState>>>,
@@ -41,7 +41,7 @@ impl MessageHandler for NewSignagePointHandle {
         peer_id: Arc<Bytes32>,
         peers: PeerMap,
     ) -> Result<(), Error> {
-        let mut cursor = Cursor::new(&msg.data);
+        let mut cursor = Cursor::new(msg.data.as_slice());
         let peer = peers.read().await.get(&peer_id).cloned();
         let protocol_version = if let Some(peer) = peer.as_ref() {
             *peer.protocol_version.read().await
@@ -64,7 +64,10 @@ impl MessageHandler for NewSignagePointHandle {
                         pool_contract_puzzle_hash: *p2_singleton_puzzle_hash,
                     });
                 } else {
-                    warn!("No pool specific difficulty has been set for {p2_singleton_puzzle_hash}, check communication with the pool, skipping this signage point, pool: {}", &config.pool_url);
+                    warn!(
+                        "No pool specific difficulty has been set for {p2_singleton_puzzle_hash}, check communication with the pool, skipping this signage point, pool: {}",
+                        &config.pool_url
+                    );
                     continue;
                 }
             }
@@ -80,7 +83,7 @@ impl MessageHandler for NewSignagePointHandle {
             signage_point_index: sp.signage_point_index,
             sp_hash: sp.challenge_chain_sp,
             pool_difficulties,
-            filter_prefix_bits: calculate_prefix_bits(self.constants.as_ref(), sp.peak_height),
+            filter_prefix_bits: calculate_prefix_bits(&self.constants, sp.peak_height),
             last_tx_height: sp.last_tx_height,
         };
         let peers: Vec<Arc<SocketPeer>> = self

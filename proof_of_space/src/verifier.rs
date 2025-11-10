@@ -1,9 +1,9 @@
 use crate::constants::{K_CHECKPOINT1INTERVAL, K_ENTRIES_PER_PARK, K_EXTRA_BITS};
+use crate::plots::PROOF_X_COUNT;
 use crate::plots::decompressor::DecompressorPool;
 use crate::plots::disk_plot::DiskPlot;
 use crate::plots::fx_generator::{forward_prop_f1_to_f7, get_proof_f1_and_meta};
 use crate::plots::plot_reader::PlotReader;
-use crate::plots::PROOF_X_COUNT;
 use crate::utils::bit_reader::BitReader;
 use dg_xch_core::blockchain::sized_bytes::Bytes32;
 use dg_xch_core::plots::{PlotFile, PlotHeader, PlotTable};
@@ -15,8 +15,8 @@ use std::cmp::{max, min};
 use std::io::{Error, ErrorKind};
 use std::mem::size_of;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::Instant;
 use tokio::io::{AsyncRead, AsyncSeek};
@@ -355,7 +355,7 @@ pub async fn check_plot<T: AsRef<Path>>(
             return Err(Error::new(
                 ErrorKind::InvalidData,
                 "Gigahorse Plots are Not Supported",
-            ))
+            ));
         }
     };
     let k = reader.header().k();
@@ -370,7 +370,9 @@ pub async fn check_plot<T: AsRef<Path>>(
         let duration = Instant::now().duration_since(start).as_millis();
         for (index, _quality) in &qualities {
             if duration > 5000 {
-                warn!("\tLooking up qualities took: {duration} ms. This should be below 5 seconds to minimize risk of losing rewards.");
+                warn!(
+                    "\tLooking up qualities took: {duration} ms. This should be below 5 seconds to minimize risk of losing rewards."
+                );
             } else {
                 debug!("\tLooking up qualities took: {duration} ms.");
             }
@@ -378,7 +380,9 @@ pub async fn check_plot<T: AsRef<Path>>(
             let proof = reader.fetch_ordered_proof(*index).await?;
             let proof_duration = Instant::now().duration_since(proof_start).as_millis();
             if proof_duration > 15000 {
-                warn!("\tFinding proof took: {proof_duration} ms. This should be below 15 seconds to minimize risk of losing rewards.");
+                warn!(
+                    "\tFinding proof took: {proof_duration} ms. This should be below 15 seconds to minimize risk of losing rewards."
+                );
             } else {
                 debug!("\tFinding proof took: {proof_duration} ms");
             }

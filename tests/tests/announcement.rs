@@ -1,5 +1,7 @@
 use dg_xch_core::blockchain::announcement::Announcement;
+use dg_xch_core::blockchain::condition_with_args::Message;
 use dg_xch_core::blockchain::sized_bytes::Bytes32;
+use dg_xch_core::blockchain::unsized_bytes::UnsizedBytes;
 use dg_xch_core::traits::SizedBytes;
 use dg_xch_core::utils::hash_256;
 
@@ -9,7 +11,7 @@ fn test_announcement_name_without_morph_bytes() {
     let message = b"Test message".to_vec();
     let announcement = Announcement {
         origin_info,
-        message: message.clone(),
+        message: Message::new(message.clone()).unwrap(),
         morph_bytes: None,
     };
     let name = announcement.name();
@@ -29,8 +31,8 @@ fn test_announcement_name_with_morph_bytes() {
     let morph_bytes = b"Morph data".to_vec();
     let announcement = Announcement {
         origin_info,
-        message: message.clone(),
-        morph_bytes: Some(morph_bytes.clone()),
+        message: Message::new(message.clone()).unwrap(),
+        morph_bytes: Some(UnsizedBytes::new(morph_bytes.clone())),
     };
     let name = announcement.name();
 
@@ -53,7 +55,7 @@ fn test_announcement_name_with_empty_message() {
     let message = Vec::new();
     let announcement = Announcement {
         origin_info,
-        message: message.clone(),
+        message: Message::new(message.clone()).unwrap(),
         morph_bytes: None,
     };
     let name = announcement.name();

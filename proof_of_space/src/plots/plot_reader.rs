@@ -1,17 +1,17 @@
 use crate::constants::{
-    ucdiv, ucdiv64, ucdiv_t, HEADER_MAGIC, HEADER_V2_MAGIC, K_C3R, K_CHECKPOINT1INTERVAL,
-    K_CHECKPOINT2INTERVAL, K_ENTRIES_PER_PARK, K_RVALUES, K_STUB_MINUS_BITS,
+    HEADER_MAGIC, HEADER_V2_MAGIC, K_C3R, K_CHECKPOINT1INTERVAL, K_CHECKPOINT2INTERVAL,
+    K_ENTRIES_PER_PARK, K_RVALUES, K_STUB_MINUS_BITS, ucdiv, ucdiv_t, ucdiv64,
 };
 use crate::encoding;
 use crate::encoding::{ans_decode_deltas, line_point_to_square, line_point_to_square64};
 use crate::entry_sizes::EntrySizes;
-use crate::finite_state_entropy::decompress::{decompress_using_dtable, DTable};
+use crate::finite_state_entropy::decompress::{DTable, decompress_using_dtable};
+use crate::plots::PROOF_X_COUNT;
 use crate::plots::compression::{create_compression_dtable, get_compression_info_for_level};
 use crate::plots::decompressor::{
     CompressedQualitiesRequest, Decompressor, DecompressorPool, LinePoint,
 };
 use crate::plots::fx_generator::F1Generator;
-use crate::plots::PROOF_X_COUNT;
 use crate::utils::bit_reader::BitReader;
 use crate::utils::{bytes_to_u64, open_read_only, open_read_only_async, slice_u128from_bytes};
 use crate::verifier::get_f7_from_proof_and_reorder;
@@ -60,9 +60,9 @@ pub struct PlotReader<
     f1_generator: Arc<F1Generator>,
 }
 impl<
-        F: AsyncSeek + AsyncRead + AsyncSeekExt + AsyncReadExt + Unpin,
-        T: for<'a> PlotFile<'a, F> + Display,
-    > PlotReader<F, T>
+    F: AsyncSeek + AsyncRead + AsyncSeekExt + AsyncReadExt + Unpin,
+    T: for<'a> PlotFile<'a, F> + Display,
+> PlotReader<F, T>
 {
     #[allow(clippy::cast_possible_truncation)]
     pub async fn new(
@@ -359,7 +359,7 @@ impl<
                 return Err(Error::new(
                     ErrorKind::InvalidData,
                     "Gigahorse Plots are Not Supported",
-                ))
+                ));
             }
         };
         let tables = if compression_level == 0 {
@@ -789,8 +789,8 @@ impl<
             c3park += 1;
         }
         let park_count = if c1 == f7 && c3park > 0 { 2 } else { 1 }; // If we got the same c1 as f7, then the previous
-                                                                     // needs to be read as well because we may have duplicate f7s
-                                                                     // in the previous park's last entries.
+        // needs to be read as well because we may have duplicate f7s
+        // in the previous park's last entries.
         let mut first_c3_buffer = self.read_c3park(c3park).await?;
         if first_c3_buffer.is_empty() {
             return Ok((0, 0));

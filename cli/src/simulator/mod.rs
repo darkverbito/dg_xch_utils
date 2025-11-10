@@ -13,8 +13,8 @@ use dg_xch_keys::{decode_puzzle_hash, key_from_mnemonic};
 use lazy_static::lazy_static;
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
@@ -42,7 +42,7 @@ impl<'a> Simulator<'a> {
         network: Option<ConsensusConstants>,
     ) -> Result<Self, Error> {
         Ok(Self {
-            network: network.unwrap_or((**SIMULATOR).clone()),
+            network: network.unwrap_or(SIMULATOR),
             client: SimulatorClient::new(host, port, timeout, additional_headers)?,
             run: Arc::new(AtomicBool::new(false)),
             background: Mutex::new(None),
@@ -79,7 +79,7 @@ impl<'a> Simulator<'a> {
                     id: 0,
                     name: format!("{name}'s Wallet"),
                     wallet_type: WalletType::StandardWallet,
-                    constants: Arc::new(self.network.clone()),
+                    constants: Arc::new(self.network),
                     master_sk: secret_key.clone(),
                     wallet_store: Arc::new(Mutex::new(MemoryWalletStore::new(secret_key, 0))),
                     data: String::new(),

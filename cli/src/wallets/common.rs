@@ -9,6 +9,7 @@ use dg_xch_core::blockchain::wallet_type::WalletType;
 use dg_xch_core::clvm::bls_bindings;
 use dg_xch_core::clvm::bls_bindings::{aggregate_verify_signature, verify_signature};
 use dg_xch_core::clvm::condition_utils::conditions_for_solution;
+use dg_xch_core::clvm::program::Program;
 use dg_xch_core::consensus::constants::ConsensusConstants;
 use dg_xch_core::traits::SizedBytes;
 use log::{debug, error, info, warn};
@@ -40,7 +41,7 @@ where
         vec![coin_spend],
         key_fn,
         pre_calculated_signatures,
-        &constants.agg_sig_me_additional_data,
+        constants.agg_sig_me_additional_data.as_ref(),
         constants.max_block_cost_clvm.to_u64().unwrap(),
     )
     .await
@@ -62,9 +63,10 @@ where
     let mut msg_list: Vec<Vec<u8>> = vec![];
     debug!("Creating Signatures for Coin Spends");
     for coin_spend in &coin_spends {
+        let puzzle_reveal = Program::from_serial(&coin_spend.puzzle_reveal)?;
+        let solution = Program::from_serial(&coin_spend.solution)?;
         //Get AGG_SIG conditions
-        let conditions =
-            conditions_for_solution(&coin_spend.puzzle_reveal, &coin_spend.solution, max_cost)?.0;
+        let conditions = conditions_for_solution(&puzzle_reveal, &solution, max_cost)?.0;
         //Create signature
         for (code, pk_bytes, msg) in
             pkm_pairs_for_conditions(&conditions, coin_spend.coin, additional_data)?
@@ -97,7 +99,7 @@ where
                 return Err(Error::other(format!(
                     "Failed to find Validate Signature for Message: {} - {}",
                     code,
-                    UnsizedBytes::new(msg.as_ref())
+                    UnsizedBytes::new(msg.as_ref().to_vec())
                 )));
             }
             pk_list.push(pk_bytes);
@@ -134,9 +136,10 @@ where
     let mut msg_list: Vec<Vec<u8>> = vec![];
     debug!("Creating Signatures for Coin Spends");
     for coin_spend in &coin_spends {
+        let puzzle_reveal = Program::from_serial(&coin_spend.puzzle_reveal)?;
+        let solution = Program::from_serial(&coin_spend.solution)?;
         //Get AGG_SIG conditions
-        let conditions_dict =
-            conditions_for_solution(&coin_spend.puzzle_reveal, &coin_spend.solution, max_cost)?.0;
+        let conditions_dict = conditions_for_solution(&puzzle_reveal, &solution, max_cost)?.0;
         //Create signature
         let mut total_messages = 0;
         let mut signed_messages = 0;
@@ -166,7 +169,7 @@ where
                     if !verify_signature(&pk, msg.as_ref(), &signature) {
                         return Err(Error::other(format!(
                             "Failed to find Validate Signature for Message: {code} - {}",
-                            UnsizedBytes::new(msg.as_ref())
+                            UnsizedBytes::new(msg.data().to_vec())
                         )));
                     }
                     signed_messages += 1;

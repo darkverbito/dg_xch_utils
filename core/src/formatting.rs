@@ -1,8 +1,14 @@
-use hex::{decode, FromHexError};
-use num_bigint::BigInt;
-use num_traits::{pow, Signed};
+use crate::errors::ClvmError;
+use hex::{FromHexError, decode};
+use num_bigint::{BigInt, Sign};
+use num_traits::{FromPrimitive, Signed, ToPrimitive, Zero, pow};
 use once_cell::sync::Lazy;
+use serde::Deserializer;
+use serde::de::Visitor;
+use std::fmt::Formatter;
 use std::io::{Error, ErrorKind};
+use std::marker::PhantomData;
+use std::str::FromStr;
 
 pub static BIG_ZERO: Lazy<BigInt> = Lazy::new(|| BigInt::from(0));
 pub static BIG_ONE: Lazy<BigInt> = Lazy::new(|| BigInt::from(1));
@@ -25,7 +31,7 @@ pub fn hex_to_bytes<S: AsRef<str>>(hex: S) -> Result<Vec<u8>, FromHexError> {
 #[must_use]
 pub fn number_from_slice(v: &[u8]) -> BigInt {
     if v.is_empty() {
-        0.into()
+        BigInt::zero()
     } else {
         BigInt::from_signed_bytes_be(v)
     }
@@ -57,14 +63,88 @@ pub fn u64_to_bytes(v: u64) -> Vec<u8> {
 }
 
 #[allow(clippy::cast_possible_truncation)]
-pub fn bigint_to_bytes(v_: &BigInt, signed: bool) -> Result<Vec<u8>, Error> {
+pub fn bigint_to_bytes(v: &BigInt, signed: bool) -> Vec<u8> {
+    if v.is_zero() || v.sign() == Sign::NoSign {
+        return vec![];
+    }
+    let mut byte_count = 1;
+    let mut dec = 0;
+    let div = if signed {
+        BIG_ONE.clone()
+    } else {
+        BIG_ZERO.clone()
+    };
+    let b_pow = BigInt::from(1_u64 << 32);
+    if v.is_negative() {
+        let mut right_hand = (-(v.clone()) + BIG_ONE.clone()) * (div + BIG_ONE.clone());
+        while pow(b_pow.clone(), (byte_count - 1) / 4 + 1) < right_hand {
+            byte_count += 4;
+        }
+        right_hand = -(v.clone()) * BIG_TWO.clone();
+        while pow(BIG_TWO.clone(), 8 * byte_count) < right_hand {
+            byte_count += 1;
+        }
+    } else {
+        let mut right_hand = (v.clone() + BIG_ONE.clone()) * (div.clone() + BIG_ONE.clone());
+        while pow(b_pow.clone(), (byte_count - 1) / 4 + 1) < right_hand {
+            byte_count += 4;
+        }
+        right_hand = (v.clone() + BIG_ONE.clone()) * (div + BIG_ONE.clone());
+        while pow(BigInt::from(2_u32), 8 * byte_count) < right_hand {
+            byte_count += 1;
+        }
+    }
+    let extra_byte = usize::from(
+        signed
+            && *v > *BIG_ZERO
+            && ((v.clone() >> ((byte_count - 1) * 8)) & BigInt::from(0x80_u32)) > *BIG_ZERO,
+    );
+    let total_bytes = byte_count + extra_byte;
+    let mut dv = Vec::<u8>::with_capacity(total_bytes);
+    let byte4_remain = byte_count % 4;
+    let byte4_length = (byte_count - byte4_remain) / 4;
+    dv.resize(total_bytes, 0);
+    let (_sign, u32_digits) = v.to_u32_digits();
+    for (i, n) in u32_digits.iter().take(byte4_length).enumerate() {
+        let word_idx = byte4_length - i - 1;
+        let num = u64::from(*n);
+        let pointer = extra_byte + byte4_remain + word_idx * 4;
+        let setval = if v.is_negative() {
+            (1_u64 << 32) - num - u64::from(dec)
+        } else {
+            num
+        };
+        dec = 1;
+        dv[pointer] = ((setval >> 24) & 0xff) as u8;
+        dv[pointer + 1] = ((setval >> 16) & 0xff) as u8;
+        dv[pointer + 2] = ((setval >> 8) & 0xff) as u8;
+        dv[pointer + 3] = (setval & 0xff) as u8;
+    }
+
+    let last_bytes = u32_digits[u32_digits.len() - 1];
+    let transform = |idx| {
+        if v.is_negative() {
+            (((1 << (8 * byte4_remain)) - last_bytes - dec) >> (8 * idx)) as u8
+        } else {
+            (last_bytes >> (8 * idx)) as u8
+        }
+    };
+
+    for i in 0..byte4_remain {
+        dv[extra_byte + i] = transform(byte4_remain - i - 1);
+    }
+
+    dv
+}
+
+#[allow(clippy::cast_possible_truncation)]
+pub fn signed_bigint_to_bytes(v_: &BigInt, signed: bool) -> Result<Vec<u8>, ClvmError> {
     let v = v_.clone();
     if v == *BIG_ZERO {
         return Ok(vec![]);
     }
     if !signed && v.is_negative() {
-        return Err(Error::new(
-            ErrorKind::InvalidInput,
+        return Err(ClvmError::Overflow(
             "OverflowError: can't convert negative int to unsigned".to_string(),
         ));
     }
@@ -145,22 +225,8 @@ pub fn u64_from_bigint(item: &BigInt) -> Result<u64, Error> {
             "cannot convert negative integer to u64",
         ));
     }
-    if *item > u64::MAX.into() {
-        return Err(Error::new(ErrorKind::InvalidData, "u64::MAX exceeded"));
-    }
-    let bytes: Vec<u8> = item.to_signed_bytes_be();
-    let mut slice = bytes.as_slice();
-    // make number minimal by removing leading zeros
-    while (!slice.is_empty()) && (slice[0] == 0) {
-        if slice.len() > 1 && (slice[1] & 0x80 == 0x80) {
-            break;
-        }
-        slice = &slice[1..];
-    }
-    let mut fixed_ary = [0u8; 8];
-    let start = size_of::<u64>() - slice.len();
-    fixed_ary[start..size_of::<u64>()].copy_from_slice(&slice[..(size_of::<u64>() - start)]);
-    Ok(u64::from_be_bytes(fixed_ary))
+    item.to_u64()
+        .ok_or(Error::new(ErrorKind::InvalidData, "u64::MAX overflow"))
 }
 
 fn u32_from_slice_impl(buf: &[u8], signed: bool) -> Option<u32> {
@@ -193,4 +259,119 @@ pub fn u32_from_slice(buf: &[u8]) -> Option<u32> {
 #[must_use]
 pub fn i32_from_slice(buf: &[u8]) -> Option<i32> {
     u32_from_slice_impl(buf, true).map(|v| v as i32)
+}
+
+pub fn parse_u128<'de, D>(d: D) -> Result<u128, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct PU128(PhantomData<fn() -> u128>);
+    impl Visitor<'_> for PU128 {
+        type Value = u128;
+
+        fn expecting(&self, formatter: &mut Formatter) -> std::fmt::Result {
+            formatter.write_str("string or number")
+        }
+
+        fn visit_bool<E>(self, v: bool) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            u128::from_u8(u8::from(v))
+                .ok_or_else(|| serde::de::Error::custom("Invalid Value for bool"))
+        }
+
+        fn visit_i8<E>(self, v: i8) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            u128::from_i8(v).ok_or_else(|| serde::de::Error::custom("Invalid Value for i8"))
+        }
+
+        fn visit_i16<E>(self, v: i16) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            u128::from_i16(v).ok_or_else(|| serde::de::Error::custom("Invalid Value for i16"))
+        }
+
+        fn visit_i32<E>(self, v: i32) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            u128::from_i32(v).ok_or_else(|| serde::de::Error::custom("Invalid Value for i32"))
+        }
+
+        fn visit_i64<E>(self, v: i64) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            u128::from_i64(v).ok_or_else(|| serde::de::Error::custom("Invalid Value for i64"))
+        }
+
+        fn visit_u8<E>(self, v: u8) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            u128::from_u8(v).ok_or_else(|| serde::de::Error::custom("Invalid Value for u8"))
+        }
+
+        fn visit_u16<E>(self, v: u16) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            u128::from_u16(v).ok_or_else(|| serde::de::Error::custom("Invalid Value for u16"))
+        }
+
+        fn visit_u32<E>(self, v: u32) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            u128::from_u32(v).ok_or_else(|| serde::de::Error::custom("Invalid Value for u32"))
+        }
+
+        fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            u128::from_u64(v).ok_or_else(|| serde::de::Error::custom("Invalid Value for u64"))
+        }
+
+        fn visit_f32<E>(self, v: f32) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            u128::from_f32(v).ok_or_else(|| serde::de::Error::custom("Invalid Value for f32"))
+        }
+
+        fn visit_f64<E>(self, v: f64) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            u128::from_f64(v).ok_or_else(|| serde::de::Error::custom("Invalid Value for f64"))
+        }
+
+        fn visit_char<E>(self, v: char) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            u128::from_str(&v.to_string())
+                .map_err(|_| serde::de::Error::custom("Invalid Value for char"))
+        }
+
+        fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            u128::from_str(v).map_err(|_| serde::de::Error::custom("Invalid Value for str"))
+        }
+
+        fn visit_string<E>(self, v: String) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            u128::from_str(&v).map_err(|_| serde::de::Error::custom("Invalid Value for string"))
+        }
+    }
+    d.deserialize_any(PU128(PhantomData))
 }

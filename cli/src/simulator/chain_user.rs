@@ -1,7 +1,7 @@
 use crate::simulator::Simulator;
-use crate::wallets::memory_wallet::MemoryWallet;
 use crate::wallets::Wallet;
-use dg_xch_clients::api::full_node::FullnodeAPI;
+use crate::wallets::memory_wallet::MemoryWallet;
+use dg_xch_clients::rpc::full_node::FullnodeAPI;
 use log::info;
 use std::io::Error;
 use std::sync::Arc;

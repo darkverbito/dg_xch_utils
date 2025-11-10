@@ -1,13 +1,12 @@
-use crate::wallets::plotnft_utils::{
-    get_plotnft_by_launcher_id, submit_next_state_spend_bundle,
-    submit_next_state_spend_bundle_with_key, PlotNFTWallet,
-};
 use crate::wallets::Wallet;
+use crate::wallets::plotnft_utils::{
+    PlotNFTWallet, get_plotnft_by_launcher_id, submit_next_state_spend_bundle,
+    submit_next_state_spend_bundle_with_key,
+};
 use bip39::Mnemonic;
 use blst::min_pk::SecretKey;
-use dg_xch_clients::api::full_node::FullnodeAPI;
 use dg_xch_clients::api::pool::{DefaultPoolClient, PoolClient};
-use dg_xch_clients::rpc::full_node::FullnodeClient;
+use dg_xch_clients::rpc::full_node::{FullnodeAPI, FullnodeClient};
 use dg_xch_core::blockchain::coin_spend::CoinSpend;
 use dg_xch_core::blockchain::sized_bytes::{Bytes32, Bytes48};
 use dg_xch_core::consensus::constants::ConsensusConstants;
@@ -17,12 +16,12 @@ use dg_xch_core::pool::PoolState;
 use dg_xch_core::protocols::pool::GetPoolInfoResponse;
 use dg_xch_core::traits::SizedBytes;
 use dg_xch_keys::{
-    encode_puzzle_hash, fingerprint, key_from_mnemonic_str, master_sk_to_farmer_sk,
-    master_sk_to_pool_sk, master_sk_to_wallet_sk, BLS_SPEC_NUMBER, CHIA_BLOCKCHAIN_NUMBER,
-    FARMER_PATH, POOL_PATH,
+    BLS_SPEC_NUMBER, CHIA_BLOCKCHAIN_NUMBER, FARMER_PATH, POOL_PATH, encode_puzzle_hash,
+    fingerprint, key_from_mnemonic_str, master_sk_to_farmer_sk, master_sk_to_pool_sk,
+    master_sk_to_wallet_sk,
 };
 use dg_xch_puzzles::p2_delegated_puzzle_or_hidden_puzzle::{
-    calculate_synthetic_secret_key, puzzle_hash_for_pk, DEFAULT_HIDDEN_PUZZLE_HASH,
+    DEFAULT_HIDDEN_PUZZLE_TREE_HASH, calculate_synthetic_secret_key, puzzle_hash_for_pk,
 };
 use log::{debug, error, info};
 use std::collections::{HashMap, HashSet};
@@ -31,7 +30,7 @@ use std::ops::Add;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-pub fn create_cold_wallet() -> Result<(), Error> {
+pub fn create_cold_wallet(network: &ConsensusConstants) -> Result<(), Error> {
     let mnemonic = Mnemonic::generate(24)
         .map_err(|e| Error::new(ErrorKind::InvalidInput, format!("{e:?}")))?;
     let master_secret_key = key_from_mnemonic_str(&mnemonic.to_string())?;
@@ -66,7 +65,7 @@ pub fn create_cold_wallet() -> Result<(), Error> {
             .map_err(|e| Error::new(ErrorKind::InvalidInput, format!("MasterKey: {e:?}")))?;
         let address = encode_puzzle_hash(
             &puzzle_hash_for_pk(Bytes48::from(wallet_sk.sk_to_pk().to_bytes()))?,
-            "xch",
+            network.bech32_prefix,
         )?;
         info!("Index: {i}, Address: {address}");
     }
@@ -90,7 +89,7 @@ pub fn keys_for_coinspends(
             let pub_key = sec_key.sk_to_pk();
             let puz_hash = puzzle_hash_for_pk(pub_key.into())?;
             let synthetic_secret_key =
-                calculate_synthetic_secret_key(&sec_key, *DEFAULT_HIDDEN_PUZZLE_HASH)?;
+                calculate_synthetic_secret_key(&sec_key, DEFAULT_HIDDEN_PUZZLE_TREE_HASH)?;
             info!("MasterSK: {master_sk:?}");
             info!("WalletSK: {sec_key:?}");
             info!("SyntheticSK: {synthetic_secret_key:?}");

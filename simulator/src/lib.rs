@@ -1,6 +1,6 @@
 use dg_logger::DruidGardenLogger;
-use log::info;
 use log::Level;
+use log::info;
 use portfu::prelude::ServerBuilder;
 use std::env;
 use std::io::Error;
