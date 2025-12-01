@@ -70,6 +70,17 @@ impl FullnodeClient {
             url_function: Arc::new(get_insecure_url),
         })
     }
+    pub fn dummy() -> Self {
+        Self {
+            client: Default::default(),
+            secure: false,
+            host: "localhost".to_string(),
+            port: 8555,
+            ssl_path: None,
+            additional_headers: None,
+            url_function: Arc::new(get_url),
+        }
+    }
 }
 
 generate_rpc!(
