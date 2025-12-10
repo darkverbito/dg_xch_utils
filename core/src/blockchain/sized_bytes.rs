@@ -17,7 +17,7 @@ use serde::de::Visitor;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::cmp::min;
 use std::io::{Cursor, Error, ErrorKind, Read};
-use std::ops::{BitAnd, BitOr, BitXor, Index, IndexMut, Range, Shl, ShlAssign, Shr, ShrAssign};
+use std::ops::{BitAnd, BitOr, BitXor, Deref, DerefMut, Index, IndexMut, Range, Shl, ShlAssign, Shr, ShrAssign};
 use std::str::FromStr;
 
 #[derive(Copy, Clone)]
@@ -30,6 +30,18 @@ impl<const SIZE: usize> SizedBytesImpl<SIZE> {
     }
     pub const fn const_bytes(&self) -> [u8; SIZE] {
         self.bytes
+    }
+}
+impl<const SIZE: usize> Deref for SizedBytesImpl<SIZE> {
+    type Target = [u8; SIZE];
+
+    fn deref(&self) -> &Self::Target {
+        &self.bytes
+    }
+}
+impl<const SIZE: usize> DerefMut for SizedBytesImpl<SIZE> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.bytes
     }
 }
 macro_rules! impl_const_sized_bytes {
