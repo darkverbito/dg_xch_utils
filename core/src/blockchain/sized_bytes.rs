@@ -17,7 +17,9 @@ use serde::de::Visitor;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::cmp::min;
 use std::io::{Cursor, Error, ErrorKind, Read};
-use std::ops::{BitAnd, BitOr, BitXor, Deref, DerefMut, Index, IndexMut, Range, Shl, ShlAssign, Shr, ShrAssign};
+use std::ops::{
+    BitAnd, BitOr, BitXor, Deref, DerefMut, Index, IndexMut, Range, Shl, ShlAssign, Shr, ShrAssign,
+};
 use std::str::FromStr;
 
 #[derive(Copy, Clone)]
