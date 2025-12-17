@@ -229,6 +229,66 @@ impl SpendBundle {
         self.aggregated_signature = aggsig.to_bytes().into();
         Ok(self)
     }
+
+    pub async fn vault_sign<F, Fut>(
+        mut self,
+        sign_function: F,
+        constants: Option<&ConsensusConstants>,
+    ) -> Result<Self, ClvmError>
+    where
+        F: Fn(&Bytes48, &[u8]) -> Fut,
+        Fut: Future<Output = Result<Signature, ClvmError>>,
+    {
+        let constants = constants.unwrap_or(&MAINNET);
+        let mut signatures: Vec<Signature> = vec![];
+        let mut pk_list: Vec<Bytes48> = vec![];
+        let mut msg_list: Vec<Vec<u8>> = vec![];
+        let max_cost = constants
+            .max_block_cost_clvm
+            .to_u64()
+            .ok_or(ClvmError::AtomNotValidU64(format!(
+                "Invalid Max Cost: {}",
+                constants.max_block_cost_clvm
+            )))?;
+        for coin_spend in self.coin_spends.iter() {
+            let reveal = coin_spend.puzzle_reveal.to_program()?;
+            let solution = coin_spend.solution.to_program()?;
+            //Get AGG_SIG conditions
+            let conditions = conditions_for_solution(&reveal, &solution, max_cost)?.0;
+            //Create signature
+            for (code, pk_bytes, msg) in pkm_pairs_for_conditions(
+                &conditions,
+                coin_spend.coin,
+                constants.agg_sig_me_additional_data.as_ref(),
+            )? {
+                let pk = PublicKey::from_bytes(pk_bytes.as_ref()).map_err(|e| {
+                    error!("Failed to Parse PublicKey: {:?}", e);
+                    ClvmError::InvalidPublicKey(pk_bytes)
+                })?;
+                let signature = (sign_function)(&pk_bytes, msg.as_ref()).await?;
+                if !verify_signature(&pk, msg.as_ref(), &signature) {
+                    Err(ClvmError::InvalidSignature(format!(
+                        "PH({}) Failed to Validate Signature for Message: {} - {}",
+                        pk_bytes, code, msg
+                    )))?;
+                }
+                pk_list.push(pk_bytes);
+                msg_list.push(msg.as_ref().to_vec());
+                signatures.push(signature);
+            }
+        }
+        //Aggregate signatures
+        let sig_refs: Vec<&Signature> = signatures.iter().collect();
+        let msg_list: Vec<&[u8]> = msg_list.iter().map(Vec::as_slice).collect();
+        let aggsig = AggregateSignature::aggregate(&sig_refs, true)
+            .map_err(|e| {
+                ClvmError::InvalidSignature(format!("Failed to aggregate signatures: {e:?}"))
+            })?
+            .to_signature();
+        assert!(aggregate_verify_signature(&pk_list, &msg_list, &aggsig));
+        self.aggregated_signature = aggsig.to_bytes().into();
+        Ok(self)
+    }
     pub fn validate(
         &self,
         max_cost: Option<u64>,
