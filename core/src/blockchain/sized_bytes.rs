@@ -18,7 +18,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::cmp::min;
 use std::io::{Cursor, Error, ErrorKind, Read};
 use std::ops::{
-    BitAnd, BitOr, BitXor, Deref, DerefMut, Index, IndexMut, Range, Shl, ShlAssign, Shr, ShrAssign,
+    Add, BitAnd, BitOr, BitXor, Deref, DerefMut, Index, IndexMut, Range, Shl, ShlAssign, Shr,
+    ShrAssign,
 };
 use std::str::FromStr;
 
@@ -404,6 +405,25 @@ impl<'a, const SIZE: usize> Deserialize<'a> for SizedBytesImpl<SIZE> {
         }
     }
 }
+
+macro_rules! impl_add {
+    ($($n:expr, $m:expr),+ $(,)?) => {
+        $(
+            impl Add for SizedBytesImpl<$n> {
+                type Output = SizedBytesImpl<$m>;
+
+                fn add(self, rhs: Self) -> Self::Output {
+                    let mut out = [0u8; $m];
+                    out[..$n].copy_from_slice(&self.bytes);
+                    out[$n..].copy_from_slice(&rhs.bytes);
+                    SizedBytesImpl { bytes: out }
+                }
+            }
+        )+
+    };
+}
+
+impl_add!(16, 32, 32, 64, 48, 96, 64, 128, 128, 256, 256, 512,);
 
 macro_rules! impl_sized_bytes {
     ($($name: ident, $size:expr);*) => {
