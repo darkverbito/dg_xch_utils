@@ -425,6 +425,27 @@ macro_rules! impl_add {
 
 impl_add!(16, 32, 32, 64, 48, 96, 64, 128, 128, 256, 256, 512,);
 
+macro_rules! impl_split {
+    ($($n:expr, $m:expr);+ $(;)?) => {
+        $(
+            impl SizedBytesImpl<$m> {
+                pub fn split(self) -> ([u8; $n], [u8; $n]) {
+                    #[repr(C)]
+                    #[derive(Clone, Copy)]
+                    struct Halves {
+                        pub a: [u8; $n],
+                        pub b: [u8; $n],
+                    }
+                    let halves = unsafe { std::mem::transmute::<[u8; $m], Halves>(self.bytes) };
+                    (halves.a, halves.b)
+                }
+            }
+        )+
+    };
+}
+
+impl_split!(16, 32; 32, 64; 48, 96; 64, 128; 128, 256; 256, 512;);
+
 macro_rules! impl_sized_bytes {
     ($($name: ident, $size:expr);*) => {
         $(

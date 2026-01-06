@@ -1,4 +1,5 @@
 use crate::blockchain::sized_bytes::Bytes32;
+use std::fmt::Display;
 use std::str::FromStr;
 
 #[derive(Copy, Clone, Eq, PartialEq)]
@@ -110,6 +111,19 @@ pub struct ConsensusConstants {
 impl Default for ConsensusConstants {
     fn default() -> Self {
         MAINNET
+    }
+}
+impl Display for ConsensusConstants {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        if self.simulated {
+            write!(f, "Simulator")
+        } else if self.is_testnet {
+            write!(f, "Testnet")
+        } else if self.bech32_prefix == "xch" {
+            write!(f, "Mainnet")
+        } else {
+            write!(f, "Unknown")
+        }
     }
 }
 impl From<ChiaNetwork> for ConsensusConstants {
