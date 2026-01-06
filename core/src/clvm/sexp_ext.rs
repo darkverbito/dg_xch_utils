@@ -62,13 +62,13 @@ impl<'a> From<&AtomBuf<'a>> for SExpNumber {
         match buf.len() {
             0 => Self::I128(0),
             1 => Self::I128(buf[0] as i128),
-            2 => Self::I128(i16::from_be_bytes(buf[0..2].try_into().unwrap()) as i128),
-            4 => Self::I128(i32::from_be_bytes(buf[0..4].try_into().unwrap()) as i128),
-            8 => Self::I128(i64::from_be_bytes(buf[0..8].try_into().unwrap()) as i128),
-            16 => Self::I128(i128::from_be_bytes(buf[0..16].try_into().unwrap())),
+            2 => Self::I128(u16::from_be_bytes(buf[0..2].try_into().unwrap()) as i128),
+            4 => Self::I128(u32::from_be_bytes(buf[0..4].try_into().unwrap()) as i128),
+            8 => Self::I128(u64::from_be_bytes(buf[0..8].try_into().unwrap()) as i128),
+            16 => Self::I128(u128::from_be_bytes(buf[0..16].try_into().unwrap()) as i128),
             x if x <= 16 => {
                 let mut int_buf = [0u8; 16];
-                int_buf[(16 - buf.len())..].copy_from_slice(buf);
+                int_buf[(16 - x)..].copy_from_slice(buf);
                 Self::I128(i128::from_be_bytes(int_buf))
             }
             _ => Self::BigInt(number_from_slice(buf)),
