@@ -192,13 +192,21 @@ impl Wallet<MemoryWalletStore, MemoryWalletConfig> for MemoryWallet {
         info: WalletInfo<MemoryWalletStore>,
         config: MemoryWalletConfig,
     ) -> Result<Self, Error> {
-        let fullnode_client = FullnodeClient::new(
-            &config.fullnode_host.clone(),
-            config.fullnode_port,
-            60,
-            config.fullnode_ssl_path.clone(),
-            &config.additional_headers.clone(),
-        )?;
+        let fullnode_client = if info.constants.simulated {
+            FullnodeClient::new_simulator(
+                &config.fullnode_host.clone(),
+                config.fullnode_port,
+                60,
+            )?
+        } else {
+            FullnodeClient::new(
+                &config.fullnode_host.clone(),
+                config.fullnode_port,
+                60,
+                config.fullnode_ssl_path.clone(),
+                &config.additional_headers.clone(),
+            )?
+        };
         Ok(Self {
             info,
             config,
