@@ -82,8 +82,7 @@ impl<'a> ClvmRuntime<'a> {
         };
         let mut current_cost: u64 = 0;
         let start = Instant::now();
-        loop {
-            let Some(op) = self.op_stack.pop() else { break };
+        while let Some(op) = self.op_stack.pop() {
             current_cost += match op {
                 Operation::Apply => self.apply_op(max_cost - current_cost)?,
                 Operation::Cons => self.cons()?,
