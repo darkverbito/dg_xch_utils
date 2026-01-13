@@ -185,6 +185,15 @@ impl MemoryWallet {
             },
         )
     }
+    pub async fn public_key(&self, index: u32) -> Result<Bytes48, Error> {
+        Ok(self
+            .wallet_store()
+            .lock()
+            .await
+            .get_derivation_record_at_index(index, false)
+            .await?
+            .pubkey)
+    }
 }
 #[async_trait]
 impl Wallet<MemoryWalletStore, MemoryWalletConfig> for MemoryWallet {
