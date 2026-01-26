@@ -348,7 +348,7 @@ impl SpendBundle {
                                 created_coin.coin_id()
                             )))?;
                         }
-                        create_conditions.push(condition_with_args);
+                        create_conditions.push(condition_with_args.clone());
                     }
                     ConditionWithArgs::AggSigMe(public_key, message) => {
                         max_cost = max_cost
