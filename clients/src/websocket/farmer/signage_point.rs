@@ -13,7 +13,7 @@ use dg_xch_core::protocols::{
     ChiaMessage, MessageHandler, NodeType, PeerMap, ProtocolMessageTypes, SocketPeer,
 };
 use dg_xch_serialize::{ChiaProtocolVersion, ChiaSerialize};
-use log::{debug, info, warn};
+use log::{debug, warn};
 use std::collections::HashMap;
 use std::io::{Cursor, Error};
 use std::sync::Arc;
@@ -72,7 +72,7 @@ impl MessageHandler for NewSignagePointHandle {
                 }
             }
         }
-        info!(
+        debug!(
             "New Signage Point({}): {:?}",
             sp.signage_point_index, sp.challenge_hash
         );
