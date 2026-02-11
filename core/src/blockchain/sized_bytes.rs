@@ -36,7 +36,7 @@ impl<const SIZE: usize> SizedBytesImpl<SIZE> {
     }
 }
 impl<const SIZE: usize> Deref for SizedBytesImpl<SIZE> {
-    type Target = [u8; SIZE];
+    type Target = [u8];
 
     fn deref(&self) -> &Self::Target {
         &self.bytes
@@ -482,7 +482,28 @@ macro_rules! impl_sized_bytes {
             #[cfg(feature = "postgres")]
             impl sqlx::Type<sqlx::Postgres> for $name {
                 fn type_info() -> sqlx::postgres::PgTypeInfo {
-                    sqlx::postgres::PgTypeInfo::with_name(stringify!($name))
+                    <Vec<u8> as sqlx::Type<sqlx::Postgres>>::type_info()
+                }
+                fn compatible(ty: &sqlx::postgres::PgTypeInfo) -> bool {
+                    <Vec<u8> as sqlx::Type<sqlx::Postgres>>::compatible(ty)
+                }
+            }
+            #[cfg(feature = "postgres")]
+            impl<'r> sqlx::Decode<'r, sqlx::Postgres> for $name {
+                fn decode(value: sqlx::postgres::PgValueRef<'r>) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+                    let v = <Vec<u8> as sqlx::Decode<sqlx::Postgres>>::decode(value)?;
+                    Ok($name::parse(&v)?)
+                }
+            }
+            #[cfg(feature = "postgres")]
+            impl<'r> sqlx::Encode<'r, sqlx::Postgres> for $name {
+                fn encode(self, buf: &mut <sqlx::Postgres as sqlx::Database>::ArgumentBuffer<'r>) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> where Self: Sized {
+                    buf.extend_from_slice(&self);
+                    Ok(sqlx::encode::IsNull::No)
+                }
+                fn encode_by_ref(&self, buf: &mut <sqlx::Postgres as sqlx::Database>::ArgumentBuffer<'r>) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
+                    buf.extend_from_slice(&self);
+                    Ok(sqlx::encode::IsNull::No)
                 }
             }
             impl ChiaSerialize for $name {
