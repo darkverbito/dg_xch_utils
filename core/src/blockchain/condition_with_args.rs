@@ -107,7 +107,7 @@ impl ChiaSerialize for Message {
     }
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum ConditionWithArgs {
     Unknown,
     Remark(Message),
@@ -119,7 +119,7 @@ pub enum ConditionWithArgs {
     AggSigParentPuzzle(Bytes48, Message),
     AggSigUnsafe(Bytes48, Message),
     AggSigMe(Bytes48, Message),
-    CreateCoin(Bytes32, u64, Option<Bytes32>),
+    CreateCoin(Bytes32, u64, Vec<Vec<u8>>),
     ReserveFee(u64),
     CreateCoinAnnouncement(Message),
     AssertCoinAnnouncement(Bytes32),
@@ -177,7 +177,7 @@ impl<'a> From<&'a ConditionWithArgs> for SExp<'a> {
 
 impl ConditionWithArgs {
     pub fn op_code_with_args(&self) -> (ConditionOpcode, Vec<SExp<'static>>) {
-        match *self {
+        match self {
             ConditionWithArgs::Unknown => (ConditionOpcode::Unknown, vec![]),
             ConditionWithArgs::Remark(msg) => (ConditionOpcode::Remark, vec![msg.into()]),
             ConditionWithArgs::AggSigParent(key, msg) => {
@@ -472,7 +472,7 @@ impl ChiaSerialize for ConditionWithArgs {
                 bytes.extend(ChiaSerialize::to_bytes(&vars, version)?);
                 Ok(bytes)
             }
-            ConditionWithArgs::CreateCoin(puzzle_hash, amount, hint) => {
+            ConditionWithArgs::CreateCoin(puzzle_hash, amount, memos) => {
                 let mut bytes = vec![];
                 bytes.extend(ChiaSerialize::to_bytes(
                     &ConditionOpcode::CreateCoin,
@@ -482,7 +482,7 @@ impl ChiaSerialize for ConditionWithArgs {
                     ChiaSerialize::to_bytes(puzzle_hash, version)?,
                     ChiaSerialize::to_bytes(amount, version)?,
                 ];
-                if let Some(hint) = hint {
+                if let Some(hint) = memos.first() {
                     vars.push(ChiaSerialize::to_bytes(hint, version)?);
                 }
                 bytes.extend(ChiaSerialize::to_bytes(&vars, version)?);
@@ -885,12 +885,11 @@ fn from_opcode_with_args(
                 let puzzle_hash = Bytes32::from(args.pop().unwrap_or_default());
                 let amount_bytes = args.pop().unwrap_or_default();
                 let amount = u64_from_bigint(&number_from_slice(&amount_bytes))?;
-                let hint = if args.len() > 2 {
-                    Some(Bytes32::from(args.pop().unwrap_or_default()))
-                } else {
-                    None
-                };
-                ConditionWithArgs::CreateCoin(puzzle_hash, amount, hint)
+                let mut memos = vec![];
+                while let Some(val) = args.pop() {
+                    memos.push(val);
+                }
+                ConditionWithArgs::CreateCoin(puzzle_hash, amount, memos)
             }
         }
         ConditionOpcode::ReserveFee => {
