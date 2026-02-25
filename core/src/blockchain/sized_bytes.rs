@@ -36,7 +36,7 @@ impl<const SIZE: usize> SizedBytesImpl<SIZE> {
     }
 }
 impl<const SIZE: usize> Deref for SizedBytesImpl<SIZE> {
-    type Target = [u8; SIZE];
+    type Target = [u8];
 
     fn deref(&self) -> &Self::Target {
         &self.bytes
@@ -372,24 +372,34 @@ impl<const SIZE: usize> std::fmt::Debug for SizedBytesImpl<SIZE> {
     }
 }
 #[cfg(feature = "postgres")]
-impl<'q, const SIZE: usize> sqlx::Encode<'q, sqlx::Postgres> for SizedBytesImpl<SIZE> {
-    fn encode_by_ref(
-        &self,
-        buf: &mut sqlx::postgres::PgArgumentBuffer,
-    ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
-        <&[u8] as sqlx::Encode<'_, sqlx::Postgres>>::encode(self.as_ref(), buf)
-    }
-
-    fn size_hint(&self) -> usize {
-        SIZE
-    }
-}
-#[cfg(feature = "postgres")]
 impl<'r, const SIZE: usize> sqlx::Decode<'r, sqlx::Postgres> for SizedBytesImpl<SIZE> {
     fn decode(value: sqlx::postgres::PgValueRef<'r>) -> Result<Self, sqlx::error::BoxDynError> {
         let bytes = <&[u8] as sqlx::Decode<'_, sqlx::Postgres>>::decode(value)?;
         Ok(Self::parse(bytes)
             .map_err(|e| std::io::Error::new(ErrorKind::InvalidData, e.to_string()))?)
+    }
+}
+#[cfg(feature = "postgres")]
+impl<'r, const SIZE: usize> sqlx::Encode<'r, sqlx::Postgres> for SizedBytesImpl<SIZE> {
+    fn encode(
+        self,
+        buf: &mut <sqlx::Postgres as sqlx::Database>::ArgumentBuffer<'r>,
+    ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError>
+    where
+        Self: Sized,
+    {
+        buf.extend_from_slice(&self);
+        Ok(sqlx::encode::IsNull::No)
+    }
+    fn encode_by_ref(
+        &self,
+        buf: &mut <sqlx::Postgres as sqlx::Database>::ArgumentBuffer<'r>,
+    ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
+        buf.extend_from_slice(self);
+        Ok(sqlx::encode::IsNull::No)
+    }
+    fn size_hint(&self) -> usize {
+        SIZE
     }
 }
 struct SizedBytesImplVisitor<const SIZE: usize>;
@@ -505,7 +515,6 @@ macro_rules! impl_sized_bytes {
                 fn type_info() -> sqlx::postgres::PgTypeInfo {
                     <Vec<u8> as sqlx::Type<sqlx::Postgres>>::type_info()
                 }
-
                 fn compatible(ty: &sqlx::postgres::PgTypeInfo) -> bool {
                     <Vec<u8> as sqlx::Type<sqlx::Postgres>>::compatible(ty)
                 }
