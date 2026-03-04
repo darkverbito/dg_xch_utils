@@ -264,8 +264,11 @@ impl<const SIZE: usize> BitOr<[u8; SIZE]> for SizedBytesImpl<SIZE> {
     }
 }
 impl<const SIZE: usize> Fill for SizedBytesImpl<SIZE> {
-    fn fill<R: Rng + ?Sized>(&mut self, rng: &mut R) {
-        rng.fill_bytes(&mut self.bytes);
+    fn fill_slice<R: Rng + ?Sized>(this: &mut [Self], rng: &mut R) {
+        for slice in this.iter_mut() {
+            let mut_slice: &mut [u8] = slice.deref_mut();
+            rng.fill_bytes(mut_slice);
+        }
     }
 }
 impl<const SIZE: usize> FromStr for SizedBytesImpl<SIZE> {

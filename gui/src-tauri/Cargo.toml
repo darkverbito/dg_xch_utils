@@ -14,26 +14,19 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 shared-types = { path="../shared_crates/shared-types"}
-tauri-build = { version = "2.5.1", features = [] }
-ts-rs = "11.1.0"
+tauri-build = { version = "2.5.5", features = [] }
 
 [dependencies]
-blst = { version = "0.3.15", features = ["portable"] }
-chacha20 = "0.9.1"
 chacha20poly1305 = {version = "0.10.1", default-features = false, features = ["alloc"] }
-dg_xch_core = { path="../../core", version="3.0.0"}
 dg_xch_keys = { path="../../keys", version="3.0.0"}
-dg_xch_puzzles = { path="../../puzzles", version="3.0.0"}
 keyring = "3.6.3"
-petname = "3.0.0-alpha.2"
+#petname = "3.0.0-alpha.2"
 lifehash = "0.1.0"
-rand_chacha = "0.9.0"
-serde_json = "1.0.145"
+rand_chacha = "0.10.0"
+serde_json = "1.0.149"
 serde = { version = "1.0.228", features = ["derive"] }
 sha2 = "0.10.9"
-log = "0.4.28"
+log = "0.4.29"
 shared-types = { path="../shared_crates/shared-types"}
-tauri = { version = "2.9.1", features = [] }
-tauri-plugin-log = "2.7.0"
-ts-rs = "11.1.0"
-rand = "0.8.5"
+tauri = { version = "2.10.2", features = [] }
+tauri-plugin-log = "2.8.0"
