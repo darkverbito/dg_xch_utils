@@ -10,6 +10,7 @@ use const_hex::const_decode_to_array;
 use dg_xch_serialize::ChiaProtocolVersion;
 use dg_xch_serialize::ChiaSerialize;
 use hex::encode;
+use log::warn;
 use num_traits::AsPrimitive;
 use rand::{Fill, Rng};
 use secrecy::zeroize::DefaultIsZeroes;
@@ -22,7 +23,6 @@ use std::ops::{
     ShrAssign,
 };
 use std::str::FromStr;
-use log::warn;
 
 #[derive(Copy, Clone)]
 pub struct SizedBytesImpl<const SIZE: usize> {
@@ -338,7 +338,11 @@ impl<const SIZE: usize> From<[u8; SIZE]> for SizedBytesImpl<SIZE> {
 impl<const SIZE: usize> From<Vec<u8>> for SizedBytesImpl<SIZE> {
     fn from(vec: Vec<u8>) -> SizedBytesImpl<SIZE> {
         if vec.len() > SIZE {
-            warn!("Vec of size {} was truncated to fit a SizedBytes of size {}", vec.len(), SIZE);
+            warn!(
+                "Vec of size {} was truncated to fit a SizedBytes of size {}",
+                vec.len(),
+                SIZE
+            );
         }
         let mut bytes = [0; SIZE];
         bytes[0..min(SIZE, vec.len())].copy_from_slice(&vec[0..min(SIZE, vec.len())]);
