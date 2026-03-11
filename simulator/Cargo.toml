@@ -17,6 +17,6 @@ name = "dg_xch_simulator"
 
 [dependencies]
 dg_logger = { path="../logging", version="3.0.0" }
-log = "0.4.28"
+log = "0.4.29"
 portfu = { version = "1.3.3" }
-tokio = {version = "1.48.0", features=["rt-multi-thread", "sync", "signal", "macros", "process", "time", "fs", "net"]}
+tokio = {version = "1.50.0", features=["rt-multi-thread", "sync", "signal", "macros", "process", "time", "fs", "net"]}

@@ -33,7 +33,7 @@ use dg_xch_serialize::{ChiaProtocolVersion, ChiaSerialize};
 use log::{debug, info};
 use num_traits::ToPrimitive;
 use rand::prelude::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use std::cmp::max;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;

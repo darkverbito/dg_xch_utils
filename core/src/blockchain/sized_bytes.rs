@@ -265,8 +265,11 @@ impl<const SIZE: usize> BitOr<[u8; SIZE]> for SizedBytesImpl<SIZE> {
     }
 }
 impl<const SIZE: usize> Fill for SizedBytesImpl<SIZE> {
-    fn fill<R: Rng + ?Sized>(&mut self, rng: &mut R) {
-        rng.fill_bytes(&mut self.bytes);
+    fn fill_slice<R: Rng + ?Sized>(this: &mut [Self], rng: &mut R) {
+        for slice in this.iter_mut() {
+            let mut_slice: &mut [u8] = slice.deref_mut();
+            rng.fill_bytes(mut_slice);
+        }
     }
 }
 impl<const SIZE: usize> FromStr for SizedBytesImpl<SIZE> {
@@ -373,6 +376,37 @@ impl<const SIZE: usize> Default for SizedBytesImpl<SIZE> {
 impl<const SIZE: usize> std::fmt::Debug for SizedBytesImpl<SIZE> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "0x{}", encode(self.bytes))
+    }
+}
+#[cfg(feature = "postgres")]
+impl<'r, const SIZE: usize> sqlx::Decode<'r, sqlx::Postgres> for SizedBytesImpl<SIZE> {
+    fn decode(value: sqlx::postgres::PgValueRef<'r>) -> Result<Self, sqlx::error::BoxDynError> {
+        let bytes = <&[u8] as sqlx::Decode<'_, sqlx::Postgres>>::decode(value)?;
+        Ok(Self::parse(bytes)
+            .map_err(|e| std::io::Error::new(ErrorKind::InvalidData, e.to_string()))?)
+    }
+}
+#[cfg(feature = "postgres")]
+impl<'r, const SIZE: usize> sqlx::Encode<'r, sqlx::Postgres> for SizedBytesImpl<SIZE> {
+    fn encode(
+        self,
+        buf: &mut <sqlx::Postgres as sqlx::Database>::ArgumentBuffer<'r>,
+    ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError>
+    where
+        Self: Sized,
+    {
+        buf.extend_from_slice(&self);
+        Ok(sqlx::encode::IsNull::No)
+    }
+    fn encode_by_ref(
+        &self,
+        buf: &mut <sqlx::Postgres as sqlx::Database>::ArgumentBuffer<'r>,
+    ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
+        buf.extend_from_slice(self);
+        Ok(sqlx::encode::IsNull::No)
+    }
+    fn size_hint(&self) -> usize {
+        SIZE
     }
 }
 struct SizedBytesImplVisitor<const SIZE: usize>;
@@ -490,24 +524,6 @@ macro_rules! impl_sized_bytes {
                 }
                 fn compatible(ty: &sqlx::postgres::PgTypeInfo) -> bool {
                     <Vec<u8> as sqlx::Type<sqlx::Postgres>>::compatible(ty)
-                }
-            }
-            #[cfg(feature = "postgres")]
-            impl<'r> sqlx::Decode<'r, sqlx::Postgres> for $name {
-                fn decode(value: sqlx::postgres::PgValueRef<'r>) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-                    let v = <Vec<u8> as sqlx::Decode<sqlx::Postgres>>::decode(value)?;
-                    Ok($name::parse(&v)?)
-                }
-            }
-            #[cfg(feature = "postgres")]
-            impl<'r> sqlx::Encode<'r, sqlx::Postgres> for $name {
-                fn encode(self, buf: &mut <sqlx::Postgres as sqlx::Database>::ArgumentBuffer<'r>) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> where Self: Sized {
-                    buf.extend_from_slice(&self);
-                    Ok(sqlx::encode::IsNull::No)
-                }
-                fn encode_by_ref(&self, buf: &mut <sqlx::Postgres as sqlx::Database>::ArgumentBuffer<'r>) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
-                    buf.extend_from_slice(&self);
-                    Ok(sqlx::encode::IsNull::No)
                 }
             }
             impl ChiaSerialize for $name {

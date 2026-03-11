@@ -9,6 +9,6 @@ homepage.workspace = true
 repository.workspace = true
 
 [dependencies]
-log = "0.4.28"
+log = "0.4.29"
 serde = { version = "1.0.228", features = ["derive"] }
-time = "0.3.44"
+time = "0.3.47"
