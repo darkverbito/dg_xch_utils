@@ -111,7 +111,7 @@ impl IntroducerClient {
                 .await?;
             Ok(())
         }
-        let last_update = self.state.read().await.last_update.clone();
+        let last_update = self.state.read().await.last_update;
         match last_update {
             Some(last_update) if last_update.elapsed() > tokio::time::Duration::from_secs(15) => {
                 self.state.write().await.last_update = Some(Instant::now());
