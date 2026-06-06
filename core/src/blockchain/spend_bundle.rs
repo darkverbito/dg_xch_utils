@@ -1,6 +1,6 @@
 use crate::blockchain::coin::Coin;
 use crate::blockchain::coin_spend::CoinSpend;
-use crate::blockchain::condition_with_args::{ConditionWithArgs, Message};
+use crate::blockchain::condition_with_args::{ConditionWithArgs, Message, MessageArgs};
 use crate::blockchain::sized_bytes::{Bytes32, Bytes48, Bytes96};
 use crate::blockchain::utils::{pkm_pairs_for_conditions, verify_agg_sig_unsafe_message};
 use crate::clvm::bls_bindings;
@@ -33,8 +33,8 @@ const ANNOUNCEMENT_LIMIT: u64 = 1024;
 struct ValidationState {
     pub coins_spent: HashSet<Coin>,
     pub coins_created: HashSet<Coin>,
-    pub messages_sent: Vec<(u8, Message, Bytes32, Bytes32)>,
-    pub messages_received: Vec<(u8, Message, Bytes32, Bytes32)>,
+    pub messages_sent: Vec<(u8, Message, MessageArgs, Coin)>,
+    pub messages_received: Vec<(u8, Message, MessageArgs, Coin)>,
     pub puzzle_announcements: Vec<(Bytes32, Message)>,
     pub asserted_puzzle_announcements: Vec<Bytes32>,
     pub coin_announcements: Vec<(Bytes32, Message)>,
@@ -474,21 +474,18 @@ impl SpendBundle {
                         }
                     }
                     ConditionWithArgs::SendMessage(m_type, message, message_address) => {
-                        state.messages_sent.push((
-                            *m_type,
-                            *message,
-                            *message_address,
-                            spend.coin.coin_id(),
-                        ));
+                        state
+                            .messages_sent
+                            .push((*m_type, *message, *message_address, spend.coin));
                     }
                     ConditionWithArgs::ReceiveMessage(m_type, message, message_address) => {
-                        if *message_address == Bytes32::default() {
+                        if *message_address == MessageArgs::None {
                             if flags & IGNORE_ASSERT_CONCURRENT_NULL == 0 {
                                 state.messages_received.push((
                                     *m_type,
                                     *message,
                                     *message_address,
-                                    spend.coin.coin_id(),
+                                    spend.coin,
                                 ))
                             }
                         } else {
@@ -496,7 +493,7 @@ impl SpendBundle {
                                 *m_type,
                                 *message,
                                 *message_address,
-                                spend.coin.coin_id(),
+                                spend.coin,
                             ));
                         }
                     }
@@ -745,10 +742,16 @@ impl SpendBundle {
                 .iter()
                 .filter(
                     |(receive_type, receive_message, receive_target, receive_source)| {
-                        receive_message == send_message
-                            && receive_target == send_source
-                            && receive_source == send_target
-                            && send_type == receive_type
+                        verify_send_recieve(
+                            send_type,
+                            receive_type,
+                            send_message,
+                            receive_message,
+                            send_target,
+                            receive_target,
+                            send_source,
+                            receive_source,
+                        )
                     },
                 )
                 .count()
@@ -761,4 +764,74 @@ impl SpendBundle {
         }
         Ok(state.output_conditions)
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn verify_send_recieve(
+    send_type: &u8,
+    receive_type: &u8,
+    send_message: &Message,
+    receive_message: &Message,
+    send_target: &MessageArgs,
+    receive_target: &MessageArgs,
+    send_source: &Coin,
+    receive_source: &Coin,
+) -> bool {
+    let res = receive_message == send_message
+        && send_type == receive_type
+        && {
+            match send_target {
+                MessageArgs::None => true,
+                MessageArgs::CoinId(id) => receive_source.coin_id() == *id,
+                MessageArgs::Puzzle(hash) => receive_source.puzzle_hash == *hash,
+                MessageArgs::Parent(parent) => receive_source.parent_coin_info == *parent,
+                MessageArgs::Amount(amount) => receive_source.amount == *amount,
+                MessageArgs::ParentPuzzle {
+                    parent,
+                    puzzle_hash,
+                } => {
+                    receive_source.parent_coin_info == *parent
+                        && receive_source.puzzle_hash == *puzzle_hash
+                }
+                MessageArgs::ParentAmount { parent, amount } => {
+                    receive_source.parent_coin_info == *parent && receive_source.amount == *amount
+                }
+                MessageArgs::PuzzleAmount {
+                    puzzle_hash,
+                    amount,
+                } => receive_source.puzzle_hash == *puzzle_hash && receive_source.amount == *amount,
+            }
+        }
+        && {
+            match receive_target {
+                MessageArgs::None => true,
+                MessageArgs::CoinId(id) => send_source.coin_id() == *id,
+                MessageArgs::Puzzle(hash) => send_source.puzzle_hash == *hash,
+                MessageArgs::Parent(parent) => send_source.parent_coin_info == *parent,
+                MessageArgs::Amount(amount) => send_source.amount == *amount,
+                MessageArgs::ParentPuzzle {
+                    parent,
+                    puzzle_hash,
+                } => {
+                    send_source.parent_coin_info == *parent
+                        && send_source.puzzle_hash == *puzzle_hash
+                }
+                MessageArgs::ParentAmount { parent, amount } => {
+                    send_source.parent_coin_info == *parent && send_source.amount == *amount
+                }
+                MessageArgs::PuzzleAmount {
+                    puzzle_hash,
+                    amount,
+                } => send_source.puzzle_hash == *puzzle_hash && send_source.amount == *amount,
+            }
+        };
+    if res {
+        info!(
+            "Verified Send -> Receive with (Send)-{send_source:?} to (Receive)-{receive_target:?}"
+        );
+        info!(
+            "Verified Send <- Receive with (Send)-{send_target:?} to (Receive)-{receive_source:?}"
+        );
+    }
+    res
 }

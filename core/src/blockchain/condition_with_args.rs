@@ -13,6 +13,39 @@ use std::fmt::{Debug, Display, Formatter};
 use std::hash::{Hash, Hasher};
 use std::io::{Cursor, Error, ErrorKind};
 
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+enum MessageArgsType {
+    None,
+    CoinId,
+    Parent,
+    Puzzle,
+    Amount,
+    ParentPuzzle,
+    ParentAmount,
+    PuzzleAmount,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum MessageArgs {
+    None,
+    CoinId(Bytes32),
+    Parent(Bytes32),
+    Puzzle(Bytes32),
+    Amount(u64),
+    ParentPuzzle {
+        parent: Bytes32,
+        puzzle_hash: Bytes32,
+    },
+    ParentAmount {
+        parent: Bytes32,
+        amount: u64,
+    },
+    PuzzleAmount {
+        puzzle_hash: Bytes32,
+        amount: u64,
+    },
+}
+
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub struct Message(usize, [u8; 1024]);
 impl Message {
@@ -127,8 +160,8 @@ pub enum ConditionWithArgs {
     AssertPuzzleAnnouncement(Bytes32),
     AssertConcurrentSpend(Bytes32),
     AssertConcurrentPuzzle(Bytes32),
-    SendMessage(u8, Message, Bytes32),
-    ReceiveMessage(u8, Message, Bytes32),
+    SendMessage(u8, Message, MessageArgs),
+    ReceiveMessage(u8, Message, MessageArgs),
     AssertMyCoinId(Bytes32),
     AssertMyParentId(Bytes32),
     AssertMyPuzzlehash(Bytes32),
@@ -236,14 +269,16 @@ impl ConditionWithArgs {
                 ConditionOpcode::AssertConcurrentPuzzle,
                 vec![puzzle_hash.into()],
             ),
-            ConditionWithArgs::SendMessage(mode, msg, puzzle_hash) => (
-                ConditionOpcode::SendMessage,
-                vec![mode.into(), msg.into(), puzzle_hash.into()],
-            ),
-            ConditionWithArgs::ReceiveMessage(mode, puzzle_hash, msg) => (
-                ConditionOpcode::ReceiveMessage,
-                vec![mode.into(), puzzle_hash.into(), msg.into()],
-            ),
+            ConditionWithArgs::SendMessage(mode, msg, msg_args) => {
+                let mut vars = vec![mode.into(), msg.into()];
+                vars.extend(msg_args_sexp_ary(msg_args));
+                (ConditionOpcode::SendMessage, vars)
+            }
+            ConditionWithArgs::ReceiveMessage(mode, msg, msg_args) => {
+                let mut vars = vec![mode.into(), msg.into()];
+                vars.extend(msg_args_sexp_ary(msg_args));
+                (ConditionOpcode::ReceiveMessage, vars)
+            }
             ConditionWithArgs::AssertMyCoinId(puzzle_hash) => {
                 (ConditionOpcode::AssertMyCoinId, vec![puzzle_hash.into()])
             }
@@ -558,31 +593,31 @@ impl ChiaSerialize for ConditionWithArgs {
                 bytes.extend(ChiaSerialize::to_bytes(&vars, version)?);
                 Ok(bytes)
             }
-            ConditionWithArgs::SendMessage(mode, msg, puzzle_hash) => {
+            ConditionWithArgs::SendMessage(mode, msg, msg_args) => {
                 let mut bytes = vec![];
                 bytes.extend(ChiaSerialize::to_bytes(
                     &ConditionOpcode::SendMessage,
                     version,
                 )?);
-                let vars = vec![
+                let mut vars = vec![
                     ChiaSerialize::to_bytes(mode, version)?,
                     ChiaSerialize::to_bytes(msg, version)?,
-                    ChiaSerialize::to_bytes(puzzle_hash, version)?,
                 ];
+                vars.extend(message_args_bytes(msg_args, version)?);
                 bytes.extend(ChiaSerialize::to_bytes(&vars, version)?);
                 Ok(bytes)
             }
-            ConditionWithArgs::ReceiveMessage(puzzle_hash, mode, msg) => {
+            ConditionWithArgs::ReceiveMessage(mode, msg, msg_args) => {
                 let mut bytes = vec![];
                 bytes.extend(ChiaSerialize::to_bytes(
                     &ConditionOpcode::ReceiveMessage,
                     version,
                 )?);
-                let vars = vec![
-                    ChiaSerialize::to_bytes(puzzle_hash, version)?,
+                let mut vars = vec![
                     ChiaSerialize::to_bytes(mode, version)?,
                     ChiaSerialize::to_bytes(msg, version)?,
                 ];
+                vars.extend(message_args_bytes(msg_args, version)?);
                 bytes.extend(ChiaSerialize::to_bytes(&vars, version)?);
                 Ok(bytes)
             }
@@ -971,44 +1006,62 @@ fn from_opcode_with_args(
             }
         }
         ConditionOpcode::SendMessage => {
-            if args.len() != 3 {
+            if args.len() < 2 {
                 return Err(Error::new(
                     ErrorKind::InvalidData,
                     "Invalid Vars for SendMessage",
                 ));
-            } else {
-                let puzzle_hash = Bytes32::from(args.pop().unwrap_or_default());
-                let message = Message::new(args.pop().unwrap_or_default())?;
-                let mode = args.pop().unwrap_or_default();
-                if mode.len() != 1 {
-                    return Err(Error::new(
-                        ErrorKind::InvalidData,
-                        "Invalid Mode for SendMessage",
-                    ));
-                }
-                let mode = mode[0];
-                ConditionWithArgs::SendMessage(mode, message, puzzle_hash)
             }
+            args.reverse();
+            let mode_atom = args.pop().expect("Mode is always present - checked above");
+            if mode_atom.len() != 1 {
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    "Invalid Mode for SendMessage",
+                ));
+            }
+            let mode = mode_atom[0];
+            if mode & 0b1100_0000 != 0 {
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    "Invalid Mode for SendMessage",
+                ));
+            }
+            let message = Message::new(
+                args.pop()
+                    .expect("Message is always present - checked above"),
+            )?;
+            let msg_args = message_args(send_message_mode(mode), args, "SendMessage")?;
+            ConditionWithArgs::SendMessage(mode, message, msg_args)
         }
         ConditionOpcode::ReceiveMessage => {
-            if args.len() != 3 {
+            if args.len() < 2 {
                 return Err(Error::new(
                     ErrorKind::InvalidData,
                     "Invalid Vars for ReceiveMessage",
                 ));
-            } else {
-                let puzzle_hash = Bytes32::from(args.pop().unwrap_or_default());
-                let message = Message::new(args.pop().unwrap_or_default())?;
-                let mode = args.pop().unwrap_or_default();
-                if mode.len() != 1 {
-                    return Err(Error::new(
-                        ErrorKind::InvalidData,
-                        "Invalid Mode for ReceiveMessage",
-                    ));
-                }
-                let mode = mode[0];
-                ConditionWithArgs::ReceiveMessage(mode, message, puzzle_hash)
             }
+            args.reverse();
+            let mode_atom = args.pop().expect("Mode is always present - checked above");
+            if mode_atom.len() != 1 {
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    "Invalid Mode for ReceiveMessage",
+                ));
+            }
+            let mode = mode_atom[0];
+            if mode & 0b1100_0000 != 0 {
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    "Invalid Mode for ReceiveMessage",
+                ));
+            }
+            let message = Message::new(
+                args.pop()
+                    .expect("Message is always present - checked above"),
+            )?;
+            let msg_args = message_args(receive_message_mode(mode), args, "ReceiveMessage")?;
+            ConditionWithArgs::ReceiveMessage(mode, message, msg_args)
         }
         ConditionOpcode::AssertMyCoinId => {
             if args.len() != 1 {
@@ -1215,6 +1268,181 @@ fn from_opcode_with_args(
     })
 }
 
+fn send_message_mode(mode: u8) -> MessageArgsType {
+    let receiver_bits = mode & 0b111;
+    message_mode(receiver_bits)
+}
+
+fn receive_message_mode(mode: u8) -> MessageArgsType {
+    let sender_bits = (mode >> 3) & 0b111;
+    message_mode(sender_bits)
+}
+
+fn message_mode(bits: u8) -> MessageArgsType {
+    match bits & 0b111 {
+        0b000 => MessageArgsType::None,         // none
+        0b001 => MessageArgsType::Amount,       // amount
+        0b010 => MessageArgsType::Puzzle,       // puzzle hash
+        0b011 => MessageArgsType::PuzzleAmount, // puzzle hash + amount
+        0b100 => MessageArgsType::Parent,       // parent
+        0b101 => MessageArgsType::ParentAmount, // parent + amount
+        0b110 => MessageArgsType::ParentPuzzle, // parent + puzzle hash
+        0b111 => MessageArgsType::CoinId,       // coin id, NOT parent+puzzle+amount
+        _ => unreachable!(),
+    }
+}
+
+fn msg_args_sexp_ary(msg_args: &MessageArgs) -> Vec<SExp<'static>> {
+    match msg_args {
+        MessageArgs::None => vec![],
+        MessageArgs::CoinId(coin_id) => vec![SExp::from(coin_id)],
+        MessageArgs::Parent(parent) => vec![SExp::from(parent)],
+        MessageArgs::Puzzle(puzzle_hash) => vec![SExp::from(puzzle_hash)],
+        MessageArgs::Amount(amount) => vec![SExp::from(amount)],
+        MessageArgs::ParentPuzzle {
+            parent,
+            puzzle_hash,
+        } => vec![SExp::from(parent), SExp::from(puzzle_hash)],
+        MessageArgs::ParentAmount { parent, amount } => {
+            vec![SExp::from(parent), SExp::from(amount)]
+        }
+        MessageArgs::PuzzleAmount {
+            puzzle_hash,
+            amount,
+        } => vec![SExp::from(puzzle_hash), SExp::from(amount)],
+    }
+}
+fn message_args_bytes(
+    msg_args: &MessageArgs,
+    version: ChiaProtocolVersion,
+) -> Result<Vec<Vec<u8>>, Error> {
+    Ok(match msg_args {
+        MessageArgs::None => vec![],
+        MessageArgs::CoinId(coin_id) => vec![ChiaSerialize::to_bytes(coin_id, version)?],
+        MessageArgs::Parent(parent) => vec![ChiaSerialize::to_bytes(parent, version)?],
+        MessageArgs::Puzzle(puzzle_hash) => vec![ChiaSerialize::to_bytes(puzzle_hash, version)?],
+        MessageArgs::Amount(amount) => vec![ChiaSerialize::to_bytes(amount, version)?],
+        MessageArgs::ParentPuzzle {
+            parent,
+            puzzle_hash,
+        } => vec![
+            ChiaSerialize::to_bytes(parent, version)?,
+            ChiaSerialize::to_bytes(puzzle_hash, version)?,
+        ],
+        MessageArgs::ParentAmount { parent, amount } => vec![
+            ChiaSerialize::to_bytes(parent, version)?,
+            ChiaSerialize::to_bytes(amount, version)?,
+        ],
+        MessageArgs::PuzzleAmount {
+            puzzle_hash,
+            amount,
+        } => vec![
+            ChiaSerialize::to_bytes(puzzle_hash, version)?,
+            ChiaSerialize::to_bytes(amount, version)?,
+        ],
+    })
+}
+
+fn message_args(
+    mode: MessageArgsType,
+    mut args: Vec<Vec<u8>>,
+    send_or_recieve: &'static str,
+) -> Result<MessageArgs, ClvmError> {
+    Ok(match mode {
+        MessageArgsType::None => MessageArgs::None,
+        MessageArgsType::CoinId => {
+            let coin_id = Bytes32::from(args.pop().ok_or_else(|| {
+                Error::new(
+                    ErrorKind::InvalidData,
+                    format!("Too Few Vars for {send_or_recieve}"),
+                )
+            })?);
+            MessageArgs::CoinId(coin_id)
+        }
+        MessageArgsType::Parent => {
+            let parent = Bytes32::from(args.pop().ok_or_else(|| {
+                Error::new(
+                    ErrorKind::InvalidData,
+                    format!("Too Few Vars for {send_or_recieve}"),
+                )
+            })?);
+            MessageArgs::Parent(parent)
+        }
+        MessageArgsType::Puzzle => {
+            let puzzle = Bytes32::from(args.pop().ok_or_else(|| {
+                Error::new(
+                    ErrorKind::InvalidData,
+                    format!("Too Few Vars for {send_or_recieve}"),
+                )
+            })?);
+            MessageArgs::Puzzle(puzzle)
+        }
+        MessageArgsType::Amount => {
+            let amount_vec = args.pop().ok_or_else(|| {
+                Error::new(
+                    ErrorKind::InvalidData,
+                    format!("Too Few Vars for {send_or_recieve}"),
+                )
+            })?;
+            let amount = u64_from_bigint(&number_from_slice(&amount_vec))?;
+            MessageArgs::Amount(amount)
+        }
+        MessageArgsType::ParentPuzzle => {
+            let parent = Bytes32::from(args.pop().ok_or_else(|| {
+                Error::new(
+                    ErrorKind::InvalidData,
+                    format!("Too Few Vars for {send_or_recieve}"),
+                )
+            })?);
+            let puzzle_hash = Bytes32::from(args.pop().ok_or_else(|| {
+                Error::new(
+                    ErrorKind::InvalidData,
+                    format!("Too Few Vars for {send_or_recieve}"),
+                )
+            })?);
+            MessageArgs::ParentPuzzle {
+                parent,
+                puzzle_hash,
+            }
+        }
+        MessageArgsType::ParentAmount => {
+            let parent = Bytes32::from(args.pop().ok_or_else(|| {
+                Error::new(
+                    ErrorKind::InvalidData,
+                    format!("Too Few Vars for {send_or_recieve}"),
+                )
+            })?);
+            let amount_vec = args.pop().ok_or_else(|| {
+                Error::new(
+                    ErrorKind::InvalidData,
+                    format!("Too Few Vars for {send_or_recieve}"),
+                )
+            })?;
+            let amount = u64_from_bigint(&number_from_slice(&amount_vec))?;
+            MessageArgs::ParentAmount { parent, amount }
+        }
+        MessageArgsType::PuzzleAmount => {
+            let puzzle_hash = Bytes32::from(args.pop().ok_or_else(|| {
+                Error::new(
+                    ErrorKind::InvalidData,
+                    format!("Too Few Vars for {send_or_recieve}"),
+                )
+            })?);
+            let amount_vec = args.pop().ok_or_else(|| {
+                Error::new(
+                    ErrorKind::InvalidData,
+                    format!("Too Few Vars for {send_or_recieve}"),
+                )
+            })?;
+            let amount = u64_from_bigint(&number_from_slice(&amount_vec))?;
+            MessageArgs::PuzzleAmount {
+                puzzle_hash,
+                amount,
+            }
+        }
+    })
+}
+
 impl TryFrom<&SExp<'_>> for Vec<ConditionWithArgs> {
     type Error = ClvmError;
     fn try_from(sexp: &SExp) -> Result<Self, Self::Error> {
@@ -1284,5 +1512,70 @@ pub fn op_code_with_args_from_sexp(sexp: &SExp) -> Result<(ConditionOpcode, Vec<
         ))
     } else {
         Ok((opcode, vars))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn send_message_round_trips_with_flat_receiver_args() {
+        let parent = Bytes32::from([1u8; 32].to_vec());
+        let puzzle_hash = Bytes32::from([2u8; 32].to_vec());
+        let condition = ConditionWithArgs::SendMessage(
+            0b00_000_110,
+            Message::new(vec![0xaa, 0xbb]).unwrap(),
+            MessageArgs::ParentPuzzle {
+                parent,
+                puzzle_hash,
+            },
+        );
+
+        let sexp = SExp::from(&condition);
+        let reparsed = ConditionWithArgs::try_from(&sexp).unwrap();
+
+        assert_eq!(reparsed, condition);
+    }
+
+    #[test]
+    fn receive_message_round_trips_with_message_before_sender_args() {
+        let parent = Bytes32::from([3u8; 32].to_vec());
+        let amount = 42u64;
+        let condition = ConditionWithArgs::ReceiveMessage(
+            0b00_101_000,
+            Message::new(vec![0xcc]).unwrap(),
+            MessageArgs::ParentAmount { parent, amount },
+        );
+
+        let sexp = SExp::from(&condition);
+        let reparsed = ConditionWithArgs::try_from(&sexp).unwrap();
+
+        assert_eq!(reparsed, condition);
+    }
+
+    #[test]
+    fn send_message_with_none_does_not_emit_placeholder_arg() {
+        let condition =
+            ConditionWithArgs::SendMessage(0, Message::new(vec![0xdd]).unwrap(), MessageArgs::None);
+
+        let (_, args) = op_code_with_args_from_sexp(&SExp::from(&condition)).unwrap();
+
+        assert_eq!(args.len(), 2);
+        assert_eq!(args[0], Vec::<u8>::new());
+        assert_eq!(args[1], vec![0xdd]);
+    }
+
+    #[test]
+    fn message_modes_reject_reserved_high_bits() {
+        let condition = [
+            SExp::from(66u8),
+            SExp::from(0b0100_0000u8),
+            SExp::from(vec![0x01]),
+        ]
+        .as_slice()
+        .into();
+
+        assert!(ConditionWithArgs::try_from(&condition).is_err());
     }
 }
