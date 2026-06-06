@@ -250,7 +250,6 @@ where
         if !aggregate_verify_signature(&pk_list, &msg_list, &aggsig) {
             return Err(Error::other("Failed to Validate Aggregate Signature"));
         }
-        assert!(aggregate_verify_signature(&pk_list, &msg_list, &aggsig));
         SpendBundle {
             coin_spends,
             aggregated_signature: Bytes96::from(aggsig),
