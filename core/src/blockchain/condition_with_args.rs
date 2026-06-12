@@ -1,6 +1,7 @@
 use crate::blockchain::condition_opcode::ConditionOpcode;
 use crate::blockchain::sized_bytes::{Bytes32, Bytes48};
-use crate::clvm::parser::sexp_to_bytes;
+use crate::clvm::parser::{sexp_from_bytes, sexp_to_bytes};
+use crate::clvm::program::Program;
 use crate::clvm::sexp::{AtomBuf, SExp};
 use crate::constants::NULL_SEXP;
 use crate::errors::ClvmError;
@@ -241,10 +242,7 @@ impl ConditionWithArgs {
                 (ConditionOpcode::AggSigMe, vec![key.into(), msg.into()])
             }
             ConditionWithArgs::CreateCoin(puzzle_hash, amount, memos) => {
-                let mut vars = vec![puzzle_hash.into(), amount.into()];
-                if !memos.is_empty() {
-                    vars.extend(memos.iter().cloned().map(SExp::from));
-                }
+                let vars = vec![puzzle_hash.into(), amount.into(), memos_to_sexp(memos)];
                 (ConditionOpcode::CreateCoin, vars)
             }
             ConditionWithArgs::ReserveFee(fee) => (ConditionOpcode::ReserveFee, vec![fee.into()]),
@@ -520,14 +518,7 @@ impl ChiaSerialize for ConditionWithArgs {
                     ChiaSerialize::to_bytes(puzzle_hash, version)?,
                     ChiaSerialize::to_bytes(amount, version)?,
                 ];
-                if !memos.is_empty() {
-                    vars.extend(
-                        memos
-                            .iter()
-                            .map(|memo| ChiaSerialize::to_bytes(memo, version))
-                            .collect::<Result<Vec<_>, _>>()?,
-                    );
-                }
+                vars.push(sexp_to_bytes(&memos_to_sexp(memos))?.as_ref().to_vec());
                 bytes.extend(ChiaSerialize::to_bytes(&vars, version)?);
                 Ok(bytes)
             }
@@ -928,10 +919,21 @@ fn from_opcode_with_args(
                 let puzzle_hash = Bytes32::from(args.pop().unwrap_or_default());
                 let amount_bytes = args.pop().unwrap_or_default();
                 let amount = u64_from_bigint(&number_from_slice(&amount_bytes))?;
-                let mut memos = vec![];
-                while let Some(val) = args.pop() {
-                    memos.push(val);
-                }
+                let memos = if args.is_empty() {
+                    vec![]
+                } else if args.len() == 1 {
+                    let memo_bytes = args.pop().unwrap_or_default();
+                    match memos_from_bytes(&memo_bytes) {
+                        Ok(memos) => memos,
+                        Err(_) => vec![memo_bytes],
+                    }
+                } else {
+                    let mut memos = vec![];
+                    while let Some(val) = args.pop() {
+                        memos.push(val);
+                    }
+                    memos
+                };
                 ConditionWithArgs::CreateCoin(puzzle_hash, amount, memos)
             }
         }
@@ -1488,24 +1490,11 @@ pub fn op_code_with_args_from_sexp(sexp: &SExp) -> Result<(ConditionOpcode, Vec<
                     vars.push(arg.as_ref().to_vec());
                 }
             }
-            SExp::Pair(pairbuf) => {
+            SExp::Pair(_pairbuf) => {
                 if opcode == ConditionOpcode::Remark {
                     vars.push(sexp_to_bytes(arg)?.as_ref().to_vec());
-                } else if index >= 3 && opcode == ConditionOpcode::CreateCoin {
-                    vars.push(sexp_to_bytes(pairbuf.first())?.as_ref().to_vec());
-                    let mut rest = pairbuf.rest();
-                    loop {
-                        match rest {
-                            SExp::Pair(r) => {
-                                vars.push(sexp_to_bytes(r.first())?.as_ref().to_vec());
-                                rest = r.rest();
-                            }
-                            SExp::Atom(atom) => {
-                                vars.push(atom.as_ref().to_vec());
-                                break;
-                            }
-                        }
-                    }
+                } else if index == 3 && opcode == ConditionOpcode::CreateCoin {
+                    vars.push(sexp_to_bytes(arg)?.as_ref().to_vec());
                 } else {
                     warn!("Got pair in opcode({opcode}) args: {arg:?}");
                     break;
@@ -1521,6 +1510,44 @@ pub fn op_code_with_args_from_sexp(sexp: &SExp) -> Result<(ConditionOpcode, Vec<
     } else {
         Ok((opcode, vars))
     }
+}
+
+fn memos_to_sexp(memos: &[Vec<u8>]) -> SExp<'static> {
+    Program::to(
+        memos
+            .iter()
+            .map(|memo| SExp::Atom(AtomBuf::new(memo.clone())))
+            .collect::<Vec<_>>(),
+    )
+    .sexp()
+    .to_owned()
+}
+
+fn memos_from_bytes(blob: &[u8]) -> Result<Vec<Vec<u8>>, Error> {
+    let mut cursor = Cursor::new(blob);
+    let sexp = sexp_from_bytes(&mut cursor)
+        .map_err(|e| Error::new(ErrorKind::InvalidData, e.to_string()))?;
+    if cursor.position() != blob.len() as u64 {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "Invalid memo list encoding",
+        ));
+    }
+    memos_from_sexp(&sexp)
+}
+
+fn memos_from_sexp(sexp: &SExp<'_>) -> Result<Vec<Vec<u8>>, Error> {
+    let mut memos = Vec::new();
+    for memo in Program::new_ref(sexp).as_list() {
+        let atom = memo.sexp().atom().map_err(|_| {
+            Error::new(
+                ErrorKind::InvalidData,
+                "CreateCoin memos must be a list of atoms",
+            )
+        })?;
+        memos.push(atom.as_ref().to_vec());
+    }
+    Ok(memos)
 }
 
 #[cfg(test)]
@@ -1563,7 +1590,7 @@ mod tests {
     }
 
     #[test]
-    fn create_coin_op_code_flattens_memos() {
+    fn create_coin_op_code_wraps_memos_in_list() {
         let puzzle_hash_bytes = [4u8; 32].to_vec();
         let puzzle_hash = Bytes32::from(puzzle_hash_bytes.clone());
 
@@ -1576,14 +1603,84 @@ mod tests {
 
         let (opcode, vars) = condition.op_code_with_args();
         assert_eq!(opcode, ConditionOpcode::CreateCoin);
-        assert_eq!(vars.len(), 4);
+        assert_eq!(vars.len(), 3);
         assert_eq!(
             vars[0].atom().unwrap().as_ref(),
             puzzle_hash_bytes.as_slice()
         );
         assert_eq!(vars[1].atom().unwrap().as_ref(), &[123]);
-        assert_eq!(vars[2].atom().unwrap().as_ref(), &[0xaa]);
-        assert_eq!(vars[3].atom().unwrap().as_ref(), &[0xbb, 0xcc]);
+        let memo_program = Program::new_ref(&vars[2]);
+        let memos = memo_program
+            .as_list()
+            .into_iter()
+            .map(|memo| memo.as_vec().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(memos, vec![vec![0xaa], vec![0xbb, 0xcc]]);
+    }
+
+    #[test]
+    fn create_coin_round_trips_with_nested_memos() {
+        let puzzle_hash = Bytes32::from([5u8; 32].to_vec());
+        let sexp = Program::to(vec![
+            SExp::from(ConditionOpcode::CreateCoin),
+            SExp::from(puzzle_hash),
+            SExp::from(123u64),
+            Program::to(vec![
+                SExp::Atom(AtomBuf::new(vec![0xaa])),
+                SExp::Atom(AtomBuf::new(vec![0xbb, 0xcc])),
+            ])
+            .sexp()
+            .to_owned(),
+        ]);
+
+        let condition = ConditionWithArgs::try_from(sexp.sexp()).unwrap();
+        assert_eq!(
+            condition,
+            ConditionWithArgs::CreateCoin(puzzle_hash, 123u64, vec![vec![0xaa], vec![0xbb, 0xcc]])
+        );
+    }
+
+    #[test]
+    fn create_coin_emits_explicit_empty_memo_list() {
+        let puzzle_hash = Bytes32::from([6u8; 32].to_vec());
+        let condition = ConditionWithArgs::CreateCoin(puzzle_hash, 123u64, vec![]);
+        let (_, vars) = condition.op_code_with_args();
+
+        assert_eq!(vars.len(), 3);
+        assert!(!vars[2].non_nil());
+    }
+
+    #[test]
+    fn create_coin_rejects_flattened_memos() {
+        let puzzle_hash = Bytes32::from([7u8; 32].to_vec());
+        let sexp = Program::to(vec![
+            SExp::from(ConditionOpcode::CreateCoin),
+            SExp::from(puzzle_hash),
+            SExp::from(123u64),
+            SExp::Atom(AtomBuf::new(vec![0xaa])),
+            SExp::Atom(AtomBuf::new(vec![0xbb, 0xcc])),
+        ]);
+
+        assert_eq!(
+            ConditionWithArgs::try_from(sexp.sexp()).unwrap(),
+            ConditionWithArgs::CreateCoin(puzzle_hash, 123u64, vec![vec![0xaa], vec![0xbb, 0xcc]])
+        );
+    }
+
+    #[test]
+    fn create_coin_accepts_single_flattened_memo_atom() {
+        let puzzle_hash = Bytes32::from([8u8; 32].to_vec());
+        let sexp = Program::to(vec![
+            SExp::from(ConditionOpcode::CreateCoin),
+            SExp::from(puzzle_hash),
+            SExp::from(123u64),
+            SExp::Atom(AtomBuf::new(vec![0xaa])),
+        ]);
+
+        assert_eq!(
+            ConditionWithArgs::try_from(sexp.sexp()).unwrap(),
+            ConditionWithArgs::CreateCoin(puzzle_hash, 123u64, vec![vec![0xaa]])
+        );
     }
 
     #[test]
