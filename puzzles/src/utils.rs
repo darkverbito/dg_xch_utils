@@ -141,16 +141,19 @@ pub fn make_create_coin_condition(
             amount.into(),
         ]
     } else {
-        vec![
+        let mut condition = vec![
             ConditionOpcode::CreateCoin.into(),
             puzzle_hash.into(),
             amount.into(),
-            memos
-                .iter()
-                .map(|v| SExp::Atom(AtomBuf::Owned(Arc::new(v.as_slice().to_vec()))))
-                .collect::<Vec<SExp>>()
-                .into(),
-        ]
+        ];
+        if !memos.is_empty() {
+            condition.extend(
+                memos
+                    .iter()
+                    .map(|v| SExp::Atom(AtomBuf::Owned(Arc::new(v.as_slice().to_vec())))),
+            );
+        }
+        condition
     }
 }
 
@@ -243,4 +246,24 @@ pub fn make_assert_my_puzzlehash(puzzlehash: Bytes32) -> Vec<SExp<'static>> {
 #[must_use]
 pub fn make_assert_my_amount(amount: u64) -> Vec<SExp<'static>> {
     vec![ConditionOpcode::AssertMyAmount.into(), amount.into()]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn create_coin_condition_flattens_memos() {
+        let puzzle_hash = Bytes32::from([5u8; 32].to_vec());
+        let condition =
+            make_create_coin_condition(
+                puzzle_hash,
+                123,
+                &[UnsizedBytes::new(vec![0xaa]), UnsizedBytes::new(vec![0xbb, 0xcc])],
+            );
+
+        assert_eq!(condition.len(), 5);
+        assert_eq!(condition[3].atom().unwrap().as_ref(), &[0xaa]);
+        assert_eq!(condition[4].atom().unwrap().as_ref(), &[0xbb, 0xcc]);
+    }
 }

@@ -240,10 +240,13 @@ impl ConditionWithArgs {
             ConditionWithArgs::AggSigMe(key, msg) => {
                 (ConditionOpcode::AggSigMe, vec![key.into(), msg.into()])
             }
-            ConditionWithArgs::CreateCoin(puzzle_hash, amount, hint) => (
-                ConditionOpcode::CreateCoin,
-                vec![puzzle_hash.into(), amount.into(), hint.into()],
-            ),
+            ConditionWithArgs::CreateCoin(puzzle_hash, amount, memos) => {
+                let mut vars = vec![puzzle_hash.into(), amount.into()];
+                if !memos.is_empty() {
+                    vars.extend(memos.iter().cloned().map(SExp::from));
+                }
+                (ConditionOpcode::CreateCoin, vars)
+            }
             ConditionWithArgs::ReserveFee(fee) => (ConditionOpcode::ReserveFee, vec![fee.into()]),
             ConditionWithArgs::CreateCoinAnnouncement(puzzle_hash) => (
                 ConditionOpcode::CreateCoinAnnouncement,
@@ -517,8 +520,13 @@ impl ChiaSerialize for ConditionWithArgs {
                     ChiaSerialize::to_bytes(puzzle_hash, version)?,
                     ChiaSerialize::to_bytes(amount, version)?,
                 ];
-                if let Some(hint) = memos.first() {
-                    vars.push(ChiaSerialize::to_bytes(hint, version)?);
+                if !memos.is_empty() {
+                    vars.extend(
+                        memos
+                            .iter()
+                            .map(|memo| ChiaSerialize::to_bytes(memo, version))
+                            .collect::<Result<Vec<_>, _>>()?,
+                    );
                 }
                 bytes.extend(ChiaSerialize::to_bytes(&vars, version)?);
                 Ok(bytes)
@@ -1552,6 +1560,34 @@ mod tests {
         let reparsed = ConditionWithArgs::try_from(&sexp).unwrap();
 
         assert_eq!(reparsed, condition);
+    }
+
+    #[test]
+    fn create_coin_op_code_flattens_memos() {
+        let puzzle_hash_bytes = [4u8; 32].to_vec();
+        let puzzle_hash = Bytes32::from(puzzle_hash_bytes.clone());
+
+        let condition_no_memo = ConditionWithArgs::CreateCoin(
+            puzzle_hash,
+            123u64,
+            vec![],
+        );
+        println!("condition_no_memo: {}", condition_no_memo);
+
+        let condition = ConditionWithArgs::CreateCoin(
+            puzzle_hash,
+            123u64,
+            vec![vec![0xaa], vec![0xbb, 0xcc]],
+        );
+        println!("condition_with_memo: {}", condition);
+
+        let (opcode, vars) = condition.op_code_with_args();
+        assert_eq!(opcode, ConditionOpcode::CreateCoin);
+        assert_eq!(vars.len(), 4);
+        assert_eq!(vars[0].atom().unwrap().as_ref(), puzzle_hash_bytes.as_slice());
+        assert_eq!(vars[1].atom().unwrap().as_ref(), &[123]);
+        assert_eq!(vars[2].atom().unwrap().as_ref(), &[0xaa]);
+        assert_eq!(vars[3].atom().unwrap().as_ref(), &[0xbb, 0xcc]);
     }
 
     #[test]
