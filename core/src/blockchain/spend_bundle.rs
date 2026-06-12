@@ -321,6 +321,11 @@ impl SpendBundle {
             }
             let conditions_with_args: Vec<ConditionWithArgs> =
                 output_conditions_program.sexp().try_into()?;
+            if print {
+                info!("Validating Spend of: {:?}", spend.coin);
+                info!("Reveal: {reveal}");
+                info!("Solution: {solution}");
+            }
             for condition_with_args in conditions_with_args {
                 if print {
                     info!("{condition_with_args}");
@@ -714,14 +719,14 @@ impl SpendBundle {
         }
         if !state.asserted_coin_announcements.is_empty() {
             let mut announcements = HashSet::<Bytes32>::new();
-            for (coin_id, msg) in state.coin_announcements {
+            for (coin_id, msg) in &state.coin_announcements {
                 let mut buffer = Vec::with_capacity(32 + msg.data().len());
                 buffer.extend_from_slice(coin_id.as_ref());
                 buffer.extend_from_slice(msg.data());
                 announcements.insert(hash_256(&buffer).into());
             }
-            for announcement in state.asserted_coin_announcements {
-                if !announcements.contains(&announcement) {
+            for announcement in &state.asserted_coin_announcements {
+                if !announcements.contains(announcement) {
                     Err(ClvmError::InvalidSpendbundle(
                         "Failed to Assert Coin Announcement".to_string(),
                     ))?;
@@ -761,6 +766,23 @@ impl SpendBundle {
                     "Mismatch on Send and Receive messages".to_string(),
                 ))?;
             }
+        }
+        if print {
+            info!("Spendbundle Validated");
+            info!("Total Cost: {}", state.total_cost);
+            info!("Total Announcements: {}", state.total_announcements);
+            info!("Total Reserved Fee: {}", state.total_reserved_fee);
+            info!("Total Coins Spent: {}", state.coins_spent.len());
+            info!("Total Coins Created: {}", state.coins_created.len());
+            info!("Total Coins Announced: {}", state.coin_announcements.len());
+            info!(
+                "Total Puzzle Announcements: {}",
+                state.puzzle_announcements.len()
+            );
+            info!("Total Messages Sent: {}", state.messages_sent.len());
+            info!("Total Messages Received: {}", state.messages_received.len());
+            info!("Total Agg Sig Pairs: {}", state.pkm_pairs.len());
+            info!("Total Agg Sig Amounts: {}", state.agg_sig_amounts.len());
         }
         Ok(state.output_conditions)
     }
