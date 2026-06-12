@@ -255,12 +255,14 @@ mod tests {
     #[test]
     fn create_coin_condition_flattens_memos() {
         let puzzle_hash = Bytes32::from([5u8; 32].to_vec());
-        let condition =
-            make_create_coin_condition(
-                puzzle_hash,
-                123,
-                &[UnsizedBytes::new(vec![0xaa]), UnsizedBytes::new(vec![0xbb, 0xcc])],
-            );
+        let condition = make_create_coin_condition(
+            puzzle_hash,
+            123,
+            &[
+                UnsizedBytes::new(vec![0xaa]),
+                UnsizedBytes::new(vec![0xbb, 0xcc]),
+            ],
+        );
 
         assert_eq!(condition.len(), 5);
         assert_eq!(condition[3].atom().unwrap().as_ref(), &[0xaa]);
