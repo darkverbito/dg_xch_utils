@@ -263,3 +263,76 @@ where
     };
     Ok(spend_bundle)
 }
+
+pub async fn partial_signature_vault<F, Fut>(
+    coin_spends: Vec<CoinSpend>,
+    key_fn: F,
+    additional_data: &[u8],
+    max_cost: u64,
+) -> Result<SpendBundle, Error>
+where
+    F: Fn(&Bytes48, &[u8]) -> Fut,
+    Fut: Future<Output = Result<Option<Signature>, Error>>,
+{
+    let mut signatures: Vec<Signature> = vec![];
+    let mut pk_list: Vec<Bytes48> = vec![];
+    let mut msg_list: Vec<Vec<u8>> = vec![];
+    debug!("Creating Signatures for Coin Spends");
+    for coin_spend in &coin_spends {
+        let puzzle_reveal = Program::from_serial(&coin_spend.puzzle_reveal)?;
+        let solution = Program::from_serial(&coin_spend.solution)?;
+        //Get AGG_SIG conditions
+        let conditions_dict = conditions_for_solution(&puzzle_reveal, &solution, max_cost)?.0;
+        //Create signature
+        let mut total_messages = 0;
+        let mut signed_messages = 0;
+        for (code, pk_bytes, msg) in
+            pkm_pairs_for_conditions(&conditions_dict, coin_spend.coin, additional_data)?
+        {
+            let pk = PublicKey::from_bytes(pk_bytes.as_ref()).map_err(|e| {
+                Error::other(format!(
+                    "Failed to parse Public key: {}, {:?}",
+                    hex::encode(pk_bytes),
+                    e
+                ))
+            })?;
+            total_messages += 1;
+            if let Some(signature) = (key_fn)(&pk_bytes, msg.as_ref()).await? {
+                info!("Signing Partial Message");
+                if !verify_signature(&pk, msg.as_ref(), &signature) {
+                    return Err(Error::other(format!(
+                        "Failed to find Validate Signature for Message: {code} - {}",
+                        UnsizedBytes::new(msg.data().to_vec())
+                    )));
+                }
+                signed_messages += 1;
+                pk_list.push(pk_bytes);
+                msg_list.push(msg.as_ref().to_vec());
+                signatures.push(signature);
+            }
+        }
+        info!("Signed {signed_messages}/{total_messages} messages");
+    }
+    let spend_bundle = if !signatures.is_empty() {
+        info!("Creating Aggregate signature");
+        let sig_refs: Vec<&Signature> = signatures.iter().collect();
+        let msg_list: Vec<&[u8]> = msg_list.iter().map(Vec::as_slice).collect();
+        let aggsig = AggregateSignature::aggregate(&sig_refs, true)
+            .map_err(|e| Error::other(format!("Failed to aggregate signatures: {e:?}")))?
+            .to_signature();
+        if !aggregate_verify_signature(&pk_list, &msg_list, &aggsig) {
+            return Err(Error::other("Failed to Validate Aggregate Signature"));
+        }
+        SpendBundle {
+            coin_spends,
+            aggregated_signature: Bytes96::from(aggsig),
+        }
+    } else {
+        info!("Empty Signature List");
+        SpendBundle {
+            coin_spends,
+            aggregated_signature: Bytes96::default(),
+        }
+    };
+    Ok(spend_bundle)
+}
