@@ -14,6 +14,8 @@ enum ParserOp {
     Cons,
 }
 
+const BACK_REFERENCE: u8 = 0xfe;
+
 #[allow(clippy::cast_possible_truncation)]
 pub fn sexp_from_bytes(stream: &mut Cursor<&[u8]>) -> Result<SExp<'static>, ClvmError> {
     if !stream.has_remaining() {
@@ -65,6 +67,167 @@ pub fn sexp_from_bytes(stream: &mut Cursor<&[u8]>) -> Result<SExp<'static>, Clvm
     val_buf
         .pop()
         .ok_or_else(|| ClvmError::InvalidSyntax("Failed to Parse SExp".to_string()))
+}
+
+#[allow(clippy::cast_possible_truncation)]
+pub fn sexp_from_bytes_backrefs(stream: &mut Cursor<&[u8]>) -> Result<SExp<'static>, ClvmError> {
+    if !stream.has_remaining() {
+        return Ok(NULL_SEXP);
+    }
+    let mut byte_buf = [0; 1];
+    let mut op_buf = vec![ParserOp::Exp];
+    let mut val_buf = Vec::<(SExp<'static>, Option<SExp<'static>>)>::new();
+    while let Some(op) = op_buf.pop() {
+        match op {
+            ParserOp::Exp => {
+                if !stream.has_remaining() {
+                    return Err(ClvmError::UnexpectedEndOfValues(
+                        "Unexpected End of SExp Stream".to_string(),
+                    ));
+                }
+                stream.read_exact(&mut byte_buf)?;
+                if byte_buf[0] == CONS_BOX_MARKER {
+                    op_buf.push(ParserOp::Cons);
+                    op_buf.push(ParserOp::Exp);
+                    op_buf.push(ParserOp::Exp);
+                } else if byte_buf[0] == BACK_REFERENCE {
+                    let path = parse_backref_path(stream)?;
+                    let backref = traverse_backref_path(&mut val_buf, &path)?;
+                    val_buf.push((backref, None));
+                } else {
+                    val_buf.push((parse_atom_from_first_byte(stream, byte_buf[0])?, None));
+                }
+            }
+            ParserOp::Cons => {
+                let Some((second, _)) = val_buf.pop() else {
+                    return Err(ClvmError::BadEncoding);
+                };
+                let Some((first, _)) = val_buf.pop() else {
+                    return Err(ClvmError::BadEncoding);
+                };
+                val_buf.push((
+                    SExp::Pair(PairBuf::Owned((first.into(), second.into()))),
+                    None,
+                ));
+            }
+        }
+    }
+    val_buf
+        .pop()
+        .map(|(sexp, _)| sexp)
+        .ok_or_else(|| ClvmError::InvalidSyntax("Failed to Parse SExp".to_string()))
+}
+
+fn parse_atom_from_first_byte(
+    stream: &mut Cursor<&[u8]>,
+    first_byte: u8,
+) -> Result<SExp<'static>, ClvmError> {
+    if first_byte == 0x80 {
+        Ok(NULL_SEXP)
+    } else if first_byte <= MAX_SINGLE_BYTE {
+        Ok(SExp::Atom(AtomBuf::new(vec![first_byte])))
+    } else {
+        let blob_size = decode_size(stream, first_byte)?;
+        if stream.remaining() < blob_size as usize {
+            return Err(ClvmError::BadEncoding);
+        }
+        let mut blob: Vec<u8> = vec![0; blob_size as usize];
+        stream.read_exact(&mut blob)?;
+        Ok(SExp::Atom(AtomBuf::new(blob)))
+    }
+}
+
+fn parse_backref_path(stream: &mut Cursor<&[u8]>) -> Result<Vec<u8>, ClvmError> {
+    if !stream.has_remaining() {
+        return Err(ClvmError::UnexpectedEndOfValues(
+            "Unexpected End of backreference path".to_string(),
+        ));
+    }
+    let mut byte_buf = [0; 1];
+    stream.read_exact(&mut byte_buf)?;
+    if byte_buf[0] == CONS_BOX_MARKER || byte_buf[0] == BACK_REFERENCE {
+        return Err(ClvmError::SerializationError(
+            "Backreference path must be an atom".to_string(),
+        ));
+    }
+    Ok(match parse_atom_from_first_byte(stream, byte_buf[0])? {
+        SExp::Atom(atom) => atom.as_ref().to_vec(),
+        SExp::Pair(_) => unreachable!("parse_atom_from_first_byte only returns atoms"),
+    })
+}
+
+fn traverse_backref_path(
+    values: &mut [(SExp<'static>, Option<SExp<'static>>)],
+    path: &[u8],
+) -> Result<SExp<'static>, ClvmError> {
+    let mut parsing_sexp = values.is_empty();
+    let mut stack_index = values.len().saturating_sub(1);
+    let first_non_zero = path
+        .iter()
+        .position(|byte| *byte != 0)
+        .unwrap_or(path.len());
+    if first_non_zero >= path.len() {
+        return Ok(NULL_SEXP);
+    }
+    let sentinel = 0x80_u8 >> path[first_non_zero].leading_zeros();
+    let mut byte_index = path.len() - 1;
+    let mut bitmask = 0x01_u8;
+    let mut current = NULL_SEXP;
+
+    while byte_index > first_non_zero || bitmask < sentinel {
+        let take_rest = path[byte_index] & bitmask != 0;
+        if parsing_sexp {
+            match current {
+                SExp::Pair(ref pair) => {
+                    current = if take_rest {
+                        pair.rest().to_owned()
+                    } else {
+                        pair.first().to_owned()
+                    };
+                }
+                SExp::Atom(_) => {
+                    return Err(ClvmError::SerializationError(
+                        "Backreference path entered an atom".to_string(),
+                    ));
+                }
+            }
+        } else if take_rest {
+            if stack_index == 0 {
+                parsing_sexp = true;
+                current = NULL_SEXP;
+            } else {
+                stack_index -= 1;
+            }
+        } else {
+            parsing_sexp = true;
+            current = values[stack_index].0.clone();
+        }
+
+        if bitmask == 0x80 {
+            bitmask = 0x01;
+            byte_index = byte_index.saturating_sub(1);
+        } else {
+            bitmask <<= 1;
+        }
+    }
+
+    if parsing_sexp {
+        return Ok(current);
+    }
+
+    let mut stack_list = NULL_SEXP;
+    for value in values.iter_mut().take(stack_index + 1) {
+        if let Some(cached) = &value.1 {
+            stack_list = cached.clone();
+        } else {
+            stack_list = SExp::Pair(PairBuf::Owned((
+                value.0.clone().into(),
+                stack_list.clone().into(),
+            )));
+            value.1 = Some(stack_list.clone());
+        }
+    }
+    Ok(stack_list)
 }
 
 pub fn sexp_to_bytes(sexp: &SExp) -> std::io::Result<SerializedProgram> {

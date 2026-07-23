@@ -1,6 +1,8 @@
+pub mod block_generator;
 pub mod block_rewards;
 pub mod coinbase;
 pub mod constants;
+pub mod generator_puzzles;
 pub mod overrides;
 pub mod pot_iterations;
 

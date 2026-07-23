@@ -59,7 +59,7 @@ impl fmt::Display for ClvmError {
 impl Error for ClvmError {}
 
 // See Source Here https://github.com/Chia-Network/chia-blockchain/blob/main/chia/util/errors.py
-#[derive(serde::Deserialize)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Deserialize)]
 pub enum ChiaError {
     DoesNotExtend = -1,
     BadHeaderSignature = -2,
@@ -199,4 +199,5 @@ pub enum ChiaError {
     InternalProtocolError = 125,
     InvalidSpendBundle = 126,
     FailedGettingGeneratorMultiprocessing = 127,
+    ComplexGeneratorReceived = 148,
 }

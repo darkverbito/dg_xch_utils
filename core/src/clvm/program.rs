@@ -4,7 +4,7 @@ use crate::blockchain::sized_bytes::{
 use crate::clvm::assemble::assemble_text;
 use crate::clvm::curry_utils::curry;
 use crate::clvm::dialect::NO_UNKNOWN_OPS;
-use crate::clvm::parser::{sexp_from_bytes, sexp_to_bytes};
+use crate::clvm::parser::{sexp_from_bytes, sexp_from_bytes_backrefs, sexp_to_bytes};
 use crate::clvm::runtime::ClvmRuntime;
 use crate::clvm::sexp::AtomBuf;
 use crate::clvm::sexp::{SExp, SExpSource};
@@ -88,6 +88,10 @@ impl<'a> Program<'a> {
     pub fn from_serial(serial: &'a SerializedProgram) -> Result<Self, ClvmError> {
         let mut cursor = Cursor::new(serial.buffer.as_ref());
         Ok(Self::new(sexp_from_bytes(&mut cursor)?))
+    }
+    pub fn from_serial_backrefs(serial: &'a SerializedProgram) -> Result<Self, ClvmError> {
+        let mut cursor = Cursor::new(serial.buffer.as_ref());
+        Ok(Self::new(sexp_from_bytes_backrefs(&mut cursor)?))
     }
     pub fn new_ref(sexp: &'a SExp) -> Program<'a> {
         Program {
@@ -502,6 +506,9 @@ impl SerializedProgram {
                 ClvmError::InvalidHex(format!("Failed to convert {hex_str} to SerializedProgram"))
             })?),
         })
+    }
+    pub fn to_program_backrefs(&self) -> Result<Program<'static>, ClvmError> {
+        Ok(Program::from_serial_backrefs(self)?.to_owned())
     }
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
