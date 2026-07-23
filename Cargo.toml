@@ -14,7 +14,8 @@ members = [
     "serialize",
     "servers",
     "simulator",
-    "tests"
+    "tests",
+    "vdf"
 ]
 
 [workspace.package]
