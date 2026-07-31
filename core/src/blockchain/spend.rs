@@ -24,6 +24,10 @@ pub struct Spend {
     pub agg_sig_puzzle_amount: Vec<(UnsizedBytes, UnsizedBytes)>,
     pub agg_sig_parent_amount: Vec<(UnsizedBytes, UnsizedBytes)>,
     pub agg_sig_parent_puzzle: Vec<(UnsizedBytes, UnsizedBytes)>,
+    pub create_coin_announcements: Vec<UnsizedBytes>,
+    pub assert_coin_announcements: Vec<Bytes32>,
+    pub create_puzzle_announcements: Vec<UnsizedBytes>,
+    pub assert_puzzle_announcements: Vec<Bytes32>,
     pub flags: u32,
 }
 

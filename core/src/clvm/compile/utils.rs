@@ -1,18 +1,21 @@
 use crate::clvm::assemble::{handle_bytes, handle_hex, handle_int, handle_quote};
 use crate::clvm::sexp::{AtomBuf, SExp};
 use crate::constants::NULL_SEXP;
+use crate::errors::ClvmError;
 use crate::formatting::bigint_to_bytes;
 use std::io::{Error, ErrorKind};
 
-pub fn parse_value(value: &[u8]) -> Result<SExp, Error> {
+pub fn parse_value(value: &[u8]) -> Result<SExp<'static>, ClvmError> {
     if value.is_empty() {
-        Ok(NULL_SEXP.clone())
+        Ok(NULL_SEXP)
     } else {
         match handle_int(value) {
-            Some(v) => bigint_to_bytes(&v, true).map(|v| SExp::Atom(AtomBuf::new(v))),
+            Some(v) => Ok(SExp::Atom(AtomBuf::new(bigint_to_bytes(&v, true)))),
             None => handle_hex(value)?
                 .or_else(|| handle_quote(value).or_else(|| Some(handle_bytes(value))))
-                .ok_or_else(|| Error::other(format!("Failed to parse Value: {value:?}"))),
+                .ok_or_else(|| {
+                    ClvmError::InvalidInput(format!("Failed to parse Value: {value:?}"))
+                }),
         }
     }
 }

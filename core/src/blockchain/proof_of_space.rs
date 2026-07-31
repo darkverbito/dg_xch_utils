@@ -1,4 +1,5 @@
 use crate::blockchain::sized_bytes::{Bytes32, Bytes48};
+use crate::clvm::sexp::SExp;
 use crate::consensus::constants::ConsensusConstants;
 use crate::formatting::prep_hex_str;
 use crate::traits::SizedBytes;
@@ -46,10 +47,7 @@ impl ChiaSerialize for ProofBytes {
         ChiaSerialize::to_bytes(&self.0, version)
     }
 
-    fn from_bytes<T: AsRef<[u8]>>(
-        bytes: &mut Cursor<T>,
-        version: ChiaProtocolVersion,
-    ) -> Result<Self, Error>
+    fn from_bytes(bytes: &mut Cursor<&[u8]>, version: ChiaProtocolVersion) -> Result<Self, Error>
     where
         Self: Sized,
     {
@@ -115,6 +113,12 @@ impl AsRef<[u8]> for ProofBytes {
 impl From<Vec<u8>> for ProofBytes {
     fn from(bytes: Vec<u8>) -> ProofBytes {
         ProofBytes(bytes)
+    }
+}
+
+impl From<&ProofBytes> for SExp<'static> {
+    fn from(bytes: &ProofBytes) -> SExp<'static> {
+        SExp::from(bytes.0.clone())
     }
 }
 

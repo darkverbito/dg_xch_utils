@@ -1,41 +1,40 @@
 pub mod reader;
 
 use crate::clvm::assemble::reader::{Reader, Token};
-use crate::clvm::parser::sexp_to_bytes;
-use crate::clvm::program::SerializedProgram;
+use crate::clvm::compile::utils::parse_value;
+use crate::clvm::program::Program;
 use crate::clvm::sexp::{AtomBuf, SExp};
 use crate::constants::{DOT_CONS, END_CONS, KEYWORD_TO_ATOM, NULL_SEXP, START_CONS};
-use crate::formatting::bigint_to_bytes;
+use crate::errors::ClvmError;
 use hex::decode;
 use num_bigint::BigInt;
 use once_cell::sync::Lazy;
 use regex::Regex;
-use std::io::{Error, ErrorKind};
 
-pub fn assemble_text(s: &str) -> Result<SerializedProgram, Error> {
+pub fn assemble_text(s: &'_ str) -> Result<Program<'static>, ClvmError> {
     let mut reader = Reader::new(s.as_bytes());
     let sexp = tokenize_exp(&mut reader)?;
-    Ok(SerializedProgram::from_bytes(&sexp_to_bytes(&sexp)?))
+    Ok(Program::new(sexp).to_owned())
 }
 
-pub fn tokenize_exp(tokens: &mut Reader) -> Result<SExp, Error> {
+pub fn tokenize_exp(tokens: &mut Reader) -> Result<SExp<'static>, ClvmError> {
     if let Some(token) = tokens.next() {
         handle_token(&token, tokens)
     } else {
-        Ok(NULL_SEXP.clone())
+        Ok(NULL_SEXP)
     }
 }
 
-pub fn tokenize_cons(tokens: &mut Reader) -> Result<SExp, Error> {
+pub fn tokenize_cons(tokens: &mut Reader) -> Result<SExp<'static>, ClvmError> {
     if let Some(token) = tokens.next() {
         handle_cons(&token, tokens)
     } else {
-        Ok(NULL_SEXP.clone())
+        Ok(NULL_SEXP)
     }
 }
-pub fn handle_cons(token: &Token, tokens: &mut Reader) -> Result<SExp, Error> {
+pub fn handle_cons(token: &'_ Token, tokens: &mut Reader) -> Result<SExp<'static>, ClvmError> {
     if token == &END_CONS {
-        Ok(NULL_SEXP.clone())
+        Ok(NULL_SEXP)
     } else {
         let first = handle_token(token, tokens)?;
         if let Some(token) = tokens.next() {
@@ -45,48 +44,40 @@ pub fn handle_cons(token: &Token, tokens: &mut Reader) -> Result<SExp, Error> {
                     if token == END_CONS {
                         Ok(first.cons(rest))
                     } else {
-                        Err(Error::new(
-                            ErrorKind::InvalidData,
-                            format!("Illegal dot expression at position: {}", token.index),
-                        ))
+                        Err(ClvmError::InvalidInput(format!(
+                            "Illegal dot expression at position: {}",
+                            token.index
+                        )))
                     }
                 } else {
-                    Err(Error::new(
-                        ErrorKind::InvalidData,
-                        format!(
-                            "Unexpected end of source while parsing dot cons at: {}",
-                            token.index
-                        ),
-                    ))
+                    Err(ClvmError::InvalidInput(format!(
+                        "Unexpected end of source while parsing dot cons at: {}",
+                        token.index
+                    )))
                 }
             } else {
                 Ok(first.cons(handle_cons(&token, tokens)?))
             }
         } else {
-            Err(Error::new(
-                ErrorKind::InvalidData,
-                format!(
-                    "Unexpected end of source while parsing cons at: {}",
-                    &token.index
-                ),
-            ))
+            Err(ClvmError::UnexpectedEndOfValues(format!(
+                "Unexpected end of source while parsing cons at: {}",
+                token.index
+            )))
         }
     }
 }
 
-pub fn handle_token(token: &Token, tokens: &mut Reader) -> Result<SExp, Error> {
+pub fn handle_token<'a>(
+    token: &'a Token<'a>,
+    tokens: &'a mut Reader,
+) -> Result<SExp<'static>, ClvmError> {
     if token == &START_CONS {
         tokenize_cons(tokens)
     } else if token.bytes.is_empty() {
-        Ok(NULL_SEXP.clone())
+        Ok(NULL_SEXP)
     } else {
         let bytes = token.bytes;
-        match handle_int(bytes) {
-            Some(v) => bigint_to_bytes(&v, true).map(|v| SExp::Atom(AtomBuf::new(v))),
-            None => handle_hex(bytes)?
-                .or_else(|| handle_quote(bytes).or_else(|| Some(handle_bytes(bytes))))
-                .ok_or_else(|| Error::other(format!("Failed to parse Token: {token:?}"))),
-        }
+        parse_value(bytes)
     }
 }
 
@@ -103,7 +94,7 @@ pub fn is_quote(chars: &[u8]) -> bool {
 }
 
 #[must_use]
-pub fn handle_bytes(bytes: &[u8]) -> SExp {
+pub fn handle_bytes(bytes: &[u8]) -> SExp<'static> {
     let mut bytes = bytes;
     if bytes[0] == b'#' {
         bytes = &bytes[1..];
@@ -116,7 +107,7 @@ pub fn handle_bytes(bytes: &[u8]) -> SExp {
 }
 
 #[must_use]
-pub fn handle_quote(token: &[u8]) -> Option<SExp> {
+pub fn handle_quote(token: &[u8]) -> Option<SExp<'static>> {
     if is_quote(token) {
         Some(SExp::Atom(AtomBuf::new(
             token[1..(token.len() - 1)].to_vec(),
@@ -126,19 +117,18 @@ pub fn handle_quote(token: &[u8]) -> Option<SExp> {
     }
 }
 
-pub fn handle_hex(token: &[u8]) -> Result<Option<SExp>, Error> {
+pub fn handle_hex(token: &[u8]) -> Result<Option<SExp<'static>>, ClvmError> {
     if is_hex(token) {
-        let mut bytes = if token.len() % 2 > 0 {
+        let mut bytes = if !token.len().is_multiple_of(2) {
             vec![b'0']
         } else {
             vec![]
         };
         bytes.extend(token[2..].to_vec());
-        let as_hex = String::from_utf8(bytes).map_err(|e| {
-            Error::new(ErrorKind::InvalidInput, format!("Invalid Hex Value: {e:?}"))
-        })?;
+        let as_hex = String::from_utf8(bytes)
+            .map_err(|e| ClvmError::InvalidHex(format!("Invalid Hex Value: {e:?}")))?;
         Ok(Some(SExp::Atom(AtomBuf::new(decode(as_hex).map_err(
-            |e| Error::new(ErrorKind::InvalidInput, format!("Invalid Hex Value: {e:?}")),
+            |e| ClvmError::InvalidHex(format!("Invalid Hex Value: {e:?}")),
         )?))))
     } else {
         Ok(None)

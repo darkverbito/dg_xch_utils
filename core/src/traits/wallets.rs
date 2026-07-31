@@ -1,9 +1,7 @@
 use crate::blockchain::coin_record::{CatCoinRecord, CoinRecord};
 use crate::blockchain::sized_bytes::{Bytes32, Bytes48};
-use crate::puzzles::p2_delegated_puzzle_or_hidden_puzzle::puzzle_hash_for_pk;
 use async_trait::async_trait;
-use blst::min_pk::SecretKey;
-use secrecy::{ExposeSecret, SecretBox};
+use secrecy::SecretBox;
 use std::io::Error;
 
 pub struct Derivation {
@@ -53,19 +51,5 @@ pub trait Wallet {
             unspent.iter().map(|v| v.coin.amount as u128).sum()
         }
     }
-    async fn get_derivation(&self, index: u32, hardened: bool) -> Result<Derivation, Error> {
-        let wallet_sk: SecretBox<Bytes32> = self.secret_key(index, hardened).await;
-        let secret_key: SecretBox<SecretKey> =
-            SecretBox::new(Box::new(Into::<SecretKey>::into(wallet_sk.expose_secret())));
-        let pubkey = Bytes48::from(secret_key.expose_secret().sk_to_pk().to_bytes());
-        let puzzle_hash = puzzle_hash_for_pk(pubkey)?;
-        self.save_puzzle_hash_and_public_key(puzzle_hash, pubkey)
-            .await;
-        Ok(Derivation {
-            index,
-            puzzle_hash,
-            pubkey,
-            hardened,
-        })
-    }
+    async fn get_derivation(&self, index: u32, hardened: bool) -> Result<Derivation, Error>;
 }

@@ -27,7 +27,7 @@ impl<T: PlotManagerAsync + Send + Sync> MessageHandler for RequestSignaturesHand
         peers: PeerMap,
     ) -> Result<(), Error> {
         debug!("{:?}", msg.msg_type);
-        let mut cursor = Cursor::new(msg.data.clone());
+        let mut cursor = Cursor::new(msg.data.as_slice());
         let peer = peers.read().await.get(&peer_id).cloned();
         let protocol_version = if let Some(peer) = peer.as_ref() {
             *peer.protocol_version.read().await

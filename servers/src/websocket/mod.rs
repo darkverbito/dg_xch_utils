@@ -7,8 +7,8 @@ use dg_xch_core::protocols::{
     ChiaMessageHandler, NodeType, PeerMap, SocketPeer, WebsocketConnection, WebsocketMsgStream,
 };
 use dg_xch_core::ssl::{
-    generate_ca_signed_cert_data, load_certs, load_certs_from_bytes, load_private_key,
-    load_private_key_from_bytes, AllowAny, SslInfo,
+    AllowAny, SslInfo, generate_ca_signed_cert_data, load_certs, load_certs_from_bytes,
+    load_private_key, load_private_key_from_bytes,
 };
 use dg_xch_core::traits::SizedBytes;
 use dg_xch_core::utils::hash_256;
@@ -18,7 +18,7 @@ use hyper::body::{Bytes, Incoming};
 use hyper::server::conn::http1::Builder;
 use hyper::service::service_fn;
 use hyper::{Request, Response};
-use hyper_tungstenite::{is_upgrade_request, upgrade, HyperWebsocket};
+use hyper_tungstenite::{HyperWebsocket, is_upgrade_request, upgrade};
 use hyper_util::rt::TokioIo;
 use log::{debug, error};
 #[cfg(feature = "metrics")]
@@ -29,8 +29,8 @@ use std::collections::HashMap;
 use std::io::{Error, ErrorKind};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::select;
@@ -70,15 +70,15 @@ impl WebsocketServer {
             (
                 load_certs(&format!(
                     "{}/{}",
-                    &ssl_info.root_path, &ssl_info.certs.private_crt
+                    ssl_info.root_path, ssl_info.certs.private_crt
                 ))?,
                 load_private_key(&format!(
                     "{}/{}",
-                    &ssl_info.root_path, &ssl_info.certs.private_key
+                    ssl_info.root_path, ssl_info.certs.private_key
                 ))?,
                 load_certs(&format!(
                     "{}/{}",
-                    &ssl_info.root_path, &ssl_info.ca.private_crt
+                    ssl_info.root_path, ssl_info.ca.private_crt
                 ))?,
             )
         } else {
@@ -153,10 +153,9 @@ impl WebsocketServer {
                                 Ok(stream) => {
                                     let addr = stream.get_ref().0.peer_addr().ok();
                                     let mut peer_id = None;
-                                    if let Some(certs) = stream.get_ref().1.peer_certificates() {
-                                        if !certs.is_empty() {
+                                    if let Some(certs) = stream.get_ref().1.peer_certificates()
+                                        && !certs.is_empty() {
                                             peer_id = Some(Bytes32::new(hash_256(&certs[0])));
-                                        }
                                     }
                                     let peer_id = Arc::new(peer_id);
                                     let service = service_fn(move |req| {
@@ -279,9 +278,9 @@ fn connection_handler(
                     }
                 })
                 .ok_or_else(|| {
-                    tungstenite::error::Error::Tls(TlsError::Rustls(
+                    tungstenite::error::Error::Tls(TlsError::Rustls(Box::new(
                         rustls::Error::NoCertificatesPresented,
-                    ))
+                    )))
                 })
                 .map_err(Error::other)?,
         );

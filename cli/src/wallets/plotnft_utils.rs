@@ -3,8 +3,7 @@ use crate::wallets::memory_wallet::{MemoryWalletConfig, MemoryWalletStore};
 use crate::wallets::{Wallet, WalletInfo, WalletStore};
 use async_trait::async_trait;
 use blst::min_pk::SecretKey;
-use dg_xch_clients::api::full_node::FullnodeAPI;
-use dg_xch_clients::rpc::full_node::FullnodeClient;
+use dg_xch_clients::rpc::full_node::{FullnodeAPI, FullnodeClient, FullnodeHelpers};
 use dg_xch_core::blockchain::announcement::Announcement;
 use dg_xch_core::blockchain::coin_record::CoinRecord;
 use dg_xch_core::blockchain::coin_spend::CoinSpend;
@@ -25,9 +24,9 @@ use dg_xch_keys::{
 use dg_xch_puzzles::clvm_puzzles::{
     create_full_puzzle, create_travel_spend, get_most_recent_singleton_coin_from_coin_spend,
     launcher_coin_spend_to_extra_data, pool_state_to_inner_puzzle, solution_to_pool_state,
-    SINGLETON_LAUNCHER_HASH,
 };
 use dg_xch_puzzles::p2_delegated_puzzle_or_hidden_puzzle::puzzle_hash_for_pk;
+use dg_xch_puzzles::singleton_launcher::SINGLETON_LAUNCHER_TREE_HASH;
 use log::info;
 use num_traits::cast::ToPrimitive;
 use std::collections::HashMap;
@@ -108,8 +107,8 @@ impl Wallet<MemoryWalletStore, MemoryWalletConfig> for PlotNFTWallet {
             scrounge_for_standard_coins(self.fullnode_client.clone(), &puzzle_hashes).await?;
         let store = self.info.wallet_store.lock().await;
         let coins = store.standard_coins();
-        coins.lock().await.extend(spend.into_iter());
-        coins.lock().await.extend(unspent.into_iter());
+        coins.lock().await.extend(spend);
+        coins.lock().await.extend(unspent);
         Ok(true)
     }
 
@@ -436,13 +435,13 @@ pub async fn get_current_pool_state(
         Some(_) => {
             return Err(Error::new(
                 ErrorKind::InvalidData,
-                format!("Genesis coin {} not spent", &launcher_id.to_string()),
+                format!("Genesis coin {} not spent", launcher_id),
             ));
         }
         None => {
             return Err(Error::new(
                 ErrorKind::NotFound,
-                format!("Can not find genesis coin {}", &launcher_id),
+                format!("Can not find genesis coin {}", launcher_id),
             ));
         }
     }
@@ -530,7 +529,7 @@ pub async fn scrounge_for_plotnfts(
         thread_pool.spawn(async move {
             let coin_spend = client.get_coin_spend(&spent_coin).await?;
             for child in coin_spend.additions()? {
-                if child.puzzle_hash == *SINGLETON_LAUNCHER_HASH {
+                if child.puzzle_hash == SINGLETON_LAUNCHER_TREE_HASH {
                     let launcher_id = child.name();
                     if let Some(plotnft) =
                         get_plotnft_by_launcher_id(client.clone(), launcher_id, None).await?
@@ -554,7 +553,7 @@ pub async fn scrounge_for_plotnfts(
                     thread_pool.spawn(async move {
                         let coin_spend = client.get_coin_spend(&spent_coin).await?;
                         for child in coin_spend.additions()? {
-                            if child.puzzle_hash == *SINGLETON_LAUNCHER_HASH {
+                            if child.puzzle_hash == SINGLETON_LAUNCHER_TREE_HASH {
                                 let launcher_id = child.name();
                                 if let Some(plotnft) = get_plotnft_by_launcher_id(client.clone(), launcher_id, None).await? {
                                     plotnfts.lock().await.push(plotnft);
@@ -705,17 +704,15 @@ pub async fn submit_next_state_spend_bundle(
             info!("Transaction Submitted Successfully. Waiting for coin to show as spent...");
             loop {
                 if let Ok(Some(record)) = client.get_coin_record_by_name(&coin_to_find.name()).await
-                {
-                    if let Ok(Some(record)) = client
+                    && let Ok(Some(record)) = client
                         .get_coin_record_by_name(&record.coin.parent_coin_info)
                         .await
-                    {
-                        info!(
-                            "Found spent parent coin, Parent Coin was spent at {}",
-                            record.spent_block_index
-                        );
-                        break;
-                    }
+                {
+                    info!(
+                        "Found spent parent coin, Parent Coin was spent at {}",
+                        record.spent_block_index
+                    );
+                    break;
                 }
                 tokio::time::sleep(Duration::from_secs(10)).await;
                 info!("Waiting for plot_nft spend to appear...");
@@ -759,17 +756,15 @@ pub async fn submit_next_state_spend_bundle_with_key(
             info!("Transaction Submitted Successfully. Waiting for coin to show as spent...");
             loop {
                 if let Ok(Some(record)) = client.get_coin_record_by_name(&coin_to_find.name()).await
-                {
-                    if let Ok(Some(record)) = client
+                    && let Ok(Some(record)) = client
                         .get_coin_record_by_name(&record.coin.parent_coin_info)
                         .await
-                    {
-                        info!(
-                            "Found spent parent coin, Parent Coin was spent at {}",
-                            record.spent_block_index
-                        );
-                        break;
-                    }
+                {
+                    info!(
+                        "Found spent parent coin, Parent Coin was spent at {}",
+                        record.spent_block_index
+                    );
+                    break;
                 }
                 tokio::time::sleep(Duration::from_secs(10)).await;
                 info!("Waiting for plot_nft spend to appear...");

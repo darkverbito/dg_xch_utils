@@ -1,11 +1,10 @@
 use dg_xch_core::consensus::constants::ConsensusConstants;
 use lazy_static::lazy_static;
-use num_bigint::BigInt;
 
 lazy_static! {
     static ref TEST_CONSTANTS: ConsensusConstants = ConsensusConstants {
         num_sps_sub_slot: 32,
-        sub_slot_time_target: BigInt::from(300),
+        sub_slot_time_target: 300,
         ..Default::default()
     };
 }
@@ -40,21 +39,25 @@ async fn test_calculate_ip_iters() {
     assert!(calculate_ip_iters(&TEST_CONSTANTS, ssi, 123, 100_000).is_err());
     let mut sp_iters = sp_interval_iters * 13;
     //required_iters too high
-    assert!(calculate_ip_iters(
-        &TEST_CONSTANTS,
-        ssi,
-        sp_interval_iters as u8,
-        sp_interval_iters
-    )
-    .is_err());
+    assert!(
+        calculate_ip_iters(
+            &TEST_CONSTANTS,
+            ssi,
+            sp_interval_iters as u8,
+            sp_interval_iters
+        )
+        .is_err()
+    );
     //required_iters too high
-    assert!(calculate_ip_iters(
-        &TEST_CONSTANTS,
-        ssi,
-        sp_interval_iters as u8,
-        sp_interval_iters * 12
-    )
-    .is_err());
+    assert!(
+        calculate_ip_iters(
+            &TEST_CONSTANTS,
+            ssi,
+            sp_interval_iters as u8,
+            sp_interval_iters * 12
+        )
+        .is_err()
+    );
     //required_iters too low (0)
     assert!(calculate_ip_iters(&TEST_CONSTANTS, ssi, sp_interval_iters as u8, 0).is_err());
 

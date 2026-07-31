@@ -13,4 +13,6 @@ concurrency:
 jobs:
   lint-and-build:
     name: Lint and Build
+    permissions:
+      contents: read
     uses: ./.github/workflows/lint-and-build.yml

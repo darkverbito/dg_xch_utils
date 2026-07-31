@@ -1,4 +1,4 @@
-use crate::finite_state_entropy::decompress::{parse_d_table, DTable};
+use crate::finite_state_entropy::decompress::{DTable, parse_d_table};
 use once_cell::sync::Lazy;
 use std::sync::Arc;
 

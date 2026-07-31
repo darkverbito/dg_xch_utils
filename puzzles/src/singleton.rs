@@ -1,6 +1,3 @@
-use crate::clvm_puzzles::{
-    SINGLETON_LAUNCHER, SINGLETON_LAUNCHER_HASH, SINGLETON_MOD, SINGLETON_MOD_HASH,
-};
 use dg_xch_core::blockchain::coin::Coin;
 use dg_xch_core::blockchain::coin_spend::CoinSpend;
 use dg_xch_core::blockchain::condition_opcode::ConditionOpcode;
@@ -9,6 +6,8 @@ use dg_xch_core::clvm::sexp::IntoSExp;
 use dg_xch_core::traits::SizedBytes;
 use dg_xch_core::utils::hash_256;
 use std::io::{Error, ErrorKind};
+use dg_xch_core::puzzles::singleton_launcher::{SINGLETON_LAUNCHER, SINGLETON_LAUNCHER_HASH};
+use dg_xch_core::puzzles::singleton_top_layer::{SINGLETON_TOP_LAYER, SINGLETON_TOP_LAYER_HASH};
 
 #[must_use]
 pub fn generate_launcher_coin(coin: &Coin, amount: u64) -> Coin {
@@ -25,7 +24,7 @@ pub fn launch_conditions_and_coin_spend(
     comment: Program,
     amount: u64,
 ) -> Result<(Vec<Program>, CoinSpend), Error> {
-    if (amount % 2) == 0 {
+    if amount.is_multiple_of(2) {
         return Err(Error::new(
             ErrorKind::InvalidInput,
             "Coin amount cannot be even. Subtract one mojo.",
@@ -34,7 +33,7 @@ pub fn launch_conditions_and_coin_spend(
     let launcher_coin: Coin = generate_launcher_coin(&coin, amount);
     let args = vec![
         Program::to((
-            SINGLETON_MOD_HASH.to_sexp(),
+            SINGLETON_TOP_LAYER_HASH.to_sexp(),
             (
                 launcher_coin.name().to_sexp(),
                 SINGLETON_LAUNCHER_HASH.to_sexp(),
@@ -43,16 +42,16 @@ pub fn launch_conditions_and_coin_spend(
         )),
         Program::to(inner_puzzle),
     ];
-    let curried_singleton: Program = SINGLETON_MOD.curry(&args)?;
-    let launcher_solution = Program::to(vec![
-        curried_singleton.tree_hash().to_sexp(),
-        amount.to_sexp(),
-        comment.to_sexp(),
+    let curried_singleton: Program = SINGLETON_TOP_LAYER.curry(&args)?;
+    let launcher_solution = Program::to(&[
+        curried_singleton.tree_hash().into(),
+        amount.into(),
+        comment.into(),
     ]);
-    let create_launcher = Program::to(vec![
-        ConditionOpcode::CreateCoin.to_sexp(),
-        SINGLETON_LAUNCHER_HASH.to_sexp(),
-        amount.to_sexp(),
+    let create_launcher = Program::to(&[
+        ConditionOpcode::CreateCoin.into(),
+        SINGLETON_LAUNCHER_HASH.into(),
+        amount.into(),
     ]);
     let mut buf = vec![0; 64];
     buf[0..32].copy_from_slice(&launcher_coin.name().bytes());

@@ -1,11 +1,10 @@
 use crate::clvm::assemble::reader::Token;
 use crate::clvm::program::Program;
-use crate::clvm::sexp::{AtomBuf, IntoSExp, SExp};
+use crate::clvm::sexp::{AtomBuf, SExp};
 use num_bigint::BigUint;
 use once_cell::sync::Lazy;
-use std::clone::Clone;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::convert::Into;
 
 //Keywords
 pub const QUOTE: u8 = 0x01;
@@ -81,28 +80,24 @@ pub static KEYWORD_FROM_ATOM: Lazy<HashMap<Vec<u8>, String>> =
 pub static KEYWORD_TO_ATOM: Lazy<HashMap<String, Vec<u8>>> =
     Lazy::new(|| HashMap::from(PAIRS.map(|(k, v)| (v.to_string(), vec![k]))));
 pub static B_KEYWORD_TO_SEXP: Lazy<HashMap<&[u8], SExp>> =
-    Lazy::new(|| HashMap::from(PAIRS.map(|(k, v)| (v.as_bytes(), k.to_sexp()))));
+    Lazy::new(|| HashMap::from(PAIRS.map(|(k, v)| (v.as_bytes(), k.into()))));
 pub static B_KEYWORD_TO_ATOM: Lazy<HashMap<&[u8], Vec<u8>>> =
     Lazy::new(|| HashMap::from(PAIRS.map(|(k, v)| (v.as_bytes(), vec![k]))));
 
-pub static CONS_SEXP: Lazy<SExp> = Lazy::new(|| SExp::Atom(AtomBuf::new(vec![CONS])));
-pub static APPLY_SEXP: Lazy<SExp> = Lazy::new(|| SExp::Atom(AtomBuf::new(vec![APPLY])));
-pub static QUOTE_SEXP: Lazy<SExp> = Lazy::new(|| SExp::Atom(AtomBuf::new(vec![QUOTE])));
-pub static NULL_SEXP: Lazy<SExp> = Lazy::new(|| SExp::Atom(vec![].into()));
-pub static NULL_CELL: Lazy<Arc<SExp>> = Lazy::new(|| Arc::new(SExp::Atom(vec![].into())));
-pub static ONE_SEXP: Lazy<SExp> = Lazy::new(|| SExp::Atom(AtomBuf::new(vec![1])));
-pub static NULL_PROG: Lazy<Program> = Lazy::new(|| Program {
-    sexp: NULL_SEXP.clone(),
-    serialized: vec![],
-});
+pub const CONS_SEXP: SExp = SExp::Atom(AtomBuf::Borrowed(&[CONS]));
+pub const APPLY_SEXP: SExp = SExp::Atom(AtomBuf::Borrowed(&[APPLY]));
+pub const QUOTE_SEXP: SExp = SExp::Atom(AtomBuf::Borrowed(&[QUOTE]));
+pub const NULL_SEXP: SExp = SExp::Atom(AtomBuf::Borrowed(&[]));
+pub const ONE_SEXP: SExp = SExp::Atom(AtomBuf::Borrowed(&[1]));
+pub const NULL_PROGRAM: Program<'static> = Program::new_const(NULL_SEXP);
 
 //Assembler + Compiler
-pub const EOL_CHARS: [u8; 2] = [b'\r', b'\n'];
-pub const START_CONS_CHARS: [u8; 2] = [b'(', b'.'];
+pub const EOL_CHARS: [u8; 2] = *b"\r\n";
+pub const START_CONS_CHARS: [u8; 2] = *b"(.";
 pub const END_CONS_CHAR: u8 = b')';
-pub const CONS_CHARS: [u8; 3] = [b'(', b'.', b')'];
-pub const QUOTE_CHARS: [u8; 2] = [b'\'', b'"'];
-pub const SPACE_CHARS: [u8; 2] = [b' ', b'\t'];
+pub const CONS_CHARS: [u8; 3] = *b"(.)";
+pub const QUOTE_CHARS: [u8; 2] = *b"'\"";
+pub const SPACE_CHARS: [u8; 2] = *b" \t";
 pub const COMMENT_CHAR: u8 = b';';
 
 pub const START_CONS: Token = Token {

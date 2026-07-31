@@ -8,8 +8,8 @@ use crate::blockchain::reward_chain_block_unfinished::RewardChainBlockUnfinished
 use crate::blockchain::reward_chain_subslot::RewardChainSubSlot;
 use crate::blockchain::sized_bytes::{Bytes32, Bytes48, Bytes96};
 use crate::config::PoolWalletConfig;
-use crate::protocols::error::RecentErrors;
 use crate::protocols::PeerMap;
+use crate::protocols::error::RecentErrors;
 use blst::min_pk::SecretKey;
 use dg_xch_macros::ChiaSerial;
 use dg_xch_serialize::ChiaProtocolVersion;
@@ -26,8 +26,8 @@ use prometheus::{Histogram, HistogramOpts, Opts, Registry};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::io::Error;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 use time::OffsetDateTime;
 use tokio::sync::RwLock;
@@ -114,10 +114,10 @@ impl dg_xch_serialize::ChiaSerialize for NewSignagePoint {
         }
         Ok(bytes)
     }
-    fn from_bytes<T: AsRef<[u8]>>(
-        bytes: &mut std::io::Cursor<T>,
+    fn from_bytes(
+        bytes: &mut std::io::Cursor<&[u8]>,
         version: ChiaProtocolVersion,
-    ) -> Result<Self, std::io::Error>
+    ) -> Result<Self, Error>
     where
         Self: Sized,
     {
@@ -222,8 +222,8 @@ impl dg_xch_serialize::ChiaSerialize for DeclareProofOfSpace {
         }
         Ok(bytes)
     }
-    fn from_bytes<T: AsRef<[u8]>>(
-        bytes: &mut std::io::Cursor<T>,
+    fn from_bytes(
+        bytes: &mut std::io::Cursor<&[u8]>,
         version: ChiaProtocolVersion,
     ) -> Result<Self, std::io::Error>
     where
@@ -302,8 +302,8 @@ impl dg_xch_serialize::ChiaSerialize for RequestSignedValues {
         }
         Ok(bytes)
     }
-    fn from_bytes<T: AsRef<[u8]>>(
-        bytes: &mut std::io::Cursor<T>,
+    fn from_bytes(
+        bytes: &mut std::io::Cursor<&[u8]>,
         version: ChiaProtocolVersion,
     ) -> Result<Self, std::io::Error>
     where

@@ -2,7 +2,7 @@ use crate::version;
 use crate::websocket::harvester::HarvesterServerConfig;
 use async_trait::async_trait;
 use dg_xch_core::blockchain::sized_bytes::Bytes32;
-use dg_xch_core::protocols::shared::{Handshake, CAPABILITIES};
+use dg_xch_core::protocols::shared::{CAPABILITIES, Handshake};
 use dg_xch_core::protocols::{
     ChiaMessage, MessageHandler, NodeType, PeerMap, ProtocolMessageTypes,
 };
@@ -24,7 +24,7 @@ impl MessageHandler for HandshakeHandle {
         peers: PeerMap,
     ) -> Result<(), Error> {
         if let Some(peer) = peers.read().await.get(&peer_id).cloned() {
-            let mut cursor = Cursor::new(&msg.data);
+            let mut cursor = Cursor::new(msg.data.as_slice());
             let handshake =
                 Handshake::from_bytes(&mut cursor, *peer.protocol_version.read().await)?;
             *peer.node_type.write().await = NodeType::from(handshake.node_type);

@@ -1,11 +1,16 @@
+use core::num::{
+    NonZeroI8, NonZeroI16, NonZeroI32, NonZeroI64, NonZeroI128, NonZeroIsize, NonZeroU8,
+    NonZeroU16, NonZeroU32, NonZeroU64, NonZeroU128, NonZeroUsize,
+};
 use log::warn;
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::fmt::{Display, Formatter};
 use std::hash::Hash;
+use std::io;
 use std::io::{Cursor, Error, ErrorKind, Read, Write};
 use std::str::FromStr;
-use time::OffsetDateTime;
+use time::{OffsetDateTime, PrimitiveDateTime};
 
 #[derive(
     Default,
@@ -59,10 +64,7 @@ pub trait ChiaSerialize {
     fn to_bytes(&self, version: ChiaProtocolVersion) -> Result<Vec<u8>, Error>
     where
         Self: Sized;
-    fn from_bytes<T: AsRef<[u8]>>(
-        bytes: &mut Cursor<T>,
-        version: ChiaProtocolVersion,
-    ) -> Result<Self, Error>
+    fn from_bytes(bytes: &mut Cursor<&[u8]>, version: ChiaProtocolVersion) -> Result<Self, Error>
     where
         Self: Sized;
 }
@@ -73,10 +75,7 @@ impl ChiaSerialize for OffsetDateTime {
     {
         (self.unix_timestamp() as u64).to_bytes(version)
     }
-    fn from_bytes<T: AsRef<[u8]>>(
-        bytes: &mut Cursor<T>,
-        version: ChiaProtocolVersion,
-    ) -> Result<Self, Error>
+    fn from_bytes(bytes: &mut Cursor<&[u8]>, version: ChiaProtocolVersion) -> Result<Self, Error>
     where
         Self: Sized,
     {
@@ -97,10 +96,7 @@ impl ChiaSerialize for String {
         bytes.extend(self.as_bytes());
         Ok(bytes)
     }
-    fn from_bytes<T: AsRef<[u8]>>(
-        bytes: &mut Cursor<T>,
-        _version: ChiaProtocolVersion,
-    ) -> Result<Self, Error>
+    fn from_bytes(bytes: &mut Cursor<&[u8]>, _version: ChiaProtocolVersion) -> Result<Self, Error>
     where
         Self: Sized,
     {
@@ -128,10 +124,7 @@ impl ChiaSerialize for bool {
     {
         Ok(vec![u8::from(*self)])
     }
-    fn from_bytes<T: AsRef<[u8]>>(
-        bytes: &mut Cursor<T>,
-        _version: ChiaProtocolVersion,
-    ) -> Result<Self, Error>
+    fn from_bytes(bytes: &mut Cursor<&[u8]>, _version: ChiaProtocolVersion) -> Result<Self, Error>
     where
         Self: Sized,
     {
@@ -168,10 +161,7 @@ where
         }
         Ok(bytes)
     }
-    fn from_bytes<B: AsRef<[u8]>>(
-        bytes: &mut Cursor<B>,
-        version: ChiaProtocolVersion,
-    ) -> Result<Self, Error>
+    fn from_bytes(bytes: &mut Cursor<&[u8]>, version: ChiaProtocolVersion) -> Result<Self, Error>
     where
         Self: Sized,
     {
@@ -199,10 +189,7 @@ where
         bytes.extend(self.1.to_bytes(version)?);
         Ok(bytes)
     }
-    fn from_bytes<B: AsRef<[u8]>>(
-        bytes: &mut Cursor<B>,
-        version: ChiaProtocolVersion,
-    ) -> Result<Self, Error>
+    fn from_bytes(bytes: &mut Cursor<&[u8]>, version: ChiaProtocolVersion) -> Result<Self, Error>
     where
         Self: Sized,
     {
@@ -228,10 +215,7 @@ where
         bytes.extend(self.2.to_bytes(version)?);
         Ok(bytes)
     }
-    fn from_bytes<B: AsRef<[u8]>>(
-        bytes: &mut Cursor<B>,
-        version: ChiaProtocolVersion,
-    ) -> Result<Self, Error>
+    fn from_bytes(bytes: &mut Cursor<&[u8]>, version: ChiaProtocolVersion) -> Result<Self, Error>
     where
         Self: Sized,
     {
@@ -258,10 +242,7 @@ where
         }
         Ok(bytes)
     }
-    fn from_bytes<B: AsRef<[u8]>>(
-        bytes: &mut Cursor<B>,
-        version: ChiaProtocolVersion,
-    ) -> Result<Self, Error>
+    fn from_bytes(bytes: &mut Cursor<&[u8]>, version: ChiaProtocolVersion) -> Result<Self, Error>
     where
         Self: Sized,
     {
@@ -286,7 +267,7 @@ macro_rules! impl_primitives {
                 fn to_bytes(&self, _version: ChiaProtocolVersion) -> Result<Vec<u8>, Error> {
                     Ok(self.to_be_bytes().to_vec())
                 }
-                fn from_bytes<T: AsRef<[u8]>>(bytes: &mut Cursor<T>, _version: ChiaProtocolVersion) -> Result<Self, std::io::Error> where Self: Sized,
+                fn from_bytes(bytes: &mut Cursor<&[u8]>, _version: ChiaProtocolVersion) -> Result<Self, std::io::Error> where Self: Sized,
                 {
                     let remaining = bytes.get_ref().as_ref().len().saturating_sub(bytes.position() as usize);
                     if remaining < $size {
@@ -317,7 +298,85 @@ impl_primitives!(
     f64, 8
 );
 
-const MAX_DECODE_SIZE: u64 = 0x0004_0000_0000;
+macro_rules! impl_arrays {
+    ($($name: ty, $size:expr);*) => {
+        $(
+            impl ChiaSerialize for $name {
+                fn to_bytes(&self, _version: ChiaProtocolVersion) -> Result<Vec<u8>, Error> {
+                    Ok(self.to_vec())
+                }
+                fn from_bytes(bytes: &mut Cursor<&[u8]>, _version: ChiaProtocolVersion) -> Result<Self, std::io::Error> where Self: Sized,
+                {
+                    let remaining = bytes.get_ref().as_ref().len().saturating_sub(bytes.position() as usize);
+                    if remaining < $size {
+                        Err(Error::new(std::io::ErrorKind::InvalidInput, format!("Failed to Parse {}, expected length {}, found {}", stringify!($name), stringify!($size), remaining)))
+                    } else {
+                        let mut buffer: $name = [0; $size];
+                        bytes.read_exact(&mut buffer)?;
+                        Ok(buffer)
+                    }
+                }
+            }
+        )*
+    };
+    ()=>{};
+}
+impl_arrays!(
+    [u8; 4], 4;
+    [u8; 8], 8;
+    [u8; 16], 16;
+    [u8; 24], 24;
+    [u8; 32], 32;
+    [u8; 48], 48;
+    [u8; 64], 64;
+    [u8; 96], 96;
+    [u8; 128], 128;
+    [u8; 256], 256;
+    [u8; 512], 512
+);
+
+macro_rules! impl_nz_primitives {
+    ($($nz:ty, $base:ty);* $(;)?) => {
+        $(
+            impl ChiaSerialize for $nz {
+                #[inline]
+                fn to_bytes(&self, _v: ChiaProtocolVersion) -> Result<Vec<u8>, io::Error> {
+                    Ok(self.get().to_be_bytes().to_vec())
+                }
+
+                #[inline]
+                fn from_bytes(cur: &mut Cursor<&[u8]>, _v: ChiaProtocolVersion) -> Result<Self, io::Error> {
+                    let mut buf = [0u8; core::mem::size_of::<$base>()];
+                    cur.read_exact(&mut buf)?;
+                    let v = <$base>::from_be_bytes(buf);
+                    <$nz>::new(v).ok_or_else(|| io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        concat!(stringify!($nz), " cannot be zero"),
+                    ))
+                }
+            }
+        )*
+    };
+}
+
+impl_nz_primitives!(
+    NonZeroU8,    u8;
+    NonZeroU16,   u16;
+    NonZeroU32,   u32;
+    NonZeroU64,   u64;
+    NonZeroU128,  u128;
+    NonZeroI8,    i8;
+    NonZeroI16,   i16;
+    NonZeroI32,   i32;
+    NonZeroI64,   i64;
+    NonZeroI128,  i128;
+    NonZeroUsize, usize;
+    NonZeroIsize, isize;
+);
+
+pub const MAX_DECODE_SIZE: u64 = 0x0004_0000_0000;
+pub const CONS_BOX_MARKER: u8 = 0xff;
+pub const MAX_SINGLE_BYTE: u8 = 0x7f;
 
 #[allow(clippy::cast_possible_truncation)]
 pub fn encode_size(f: &mut dyn Write, size: u64) -> Result<(), Error> {
@@ -398,10 +457,7 @@ impl<K: ChiaSerialize + Eq + Hash, V: ChiaSerialize> ChiaSerialize for HashMap<K
         Ok(bytes)
     }
 
-    fn from_bytes<T: AsRef<[u8]>>(
-        bytes: &mut Cursor<T>,
-        version: ChiaProtocolVersion,
-    ) -> Result<Self, Error>
+    fn from_bytes(bytes: &mut Cursor<&[u8]>, version: ChiaProtocolVersion) -> Result<Self, Error>
     where
         Self: Sized,
     {
@@ -418,5 +474,24 @@ impl<K: ChiaSerialize + Eq + Hash, V: ChiaSerialize> ChiaSerialize for HashMap<K
             map.insert(key, value);
             Ok(map)
         })
+    }
+}
+
+impl ChiaSerialize for PrimitiveDateTime {
+    fn to_bytes(&self, _version: ChiaProtocolVersion) -> Result<Vec<u8>, Error>
+    where
+        Self: Sized,
+    {
+        self.assume_utc().to_bytes(ChiaProtocolVersion::default())
+    }
+    fn from_bytes(bytes: &mut Cursor<&[u8]>, _version: ChiaProtocolVersion) -> Result<Self, Error>
+    where
+        Self: Sized,
+    {
+        let offset_datatime = OffsetDateTime::from_bytes(bytes, ChiaProtocolVersion::default())?;
+        Ok(PrimitiveDateTime::new(
+            offset_datatime.date(),
+            offset_datatime.time(),
+        ))
     }
 }

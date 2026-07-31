@@ -1,4 +1,5 @@
 pub mod full_node;
+pub mod rpc_generator;
 pub mod simulator;
 pub mod wallet;
 
@@ -121,32 +122,58 @@ pub async fn post<T, S: std::hash::BuildHasher>(
 where
     T: DeserializeOwned,
 {
-    let mut request_builder = client.post(url);
-    if let Some(headers) = additional_headers {
-        for (k, v) in headers {
-            request_builder = request_builder.header(k, v);
+    // Build request + headers
+    let mut rb = client.post(url);
+    if let Some(h) = additional_headers {
+        for (k, v) in h {
+            rb = rb.header(k, v);
         }
     }
-    match request_builder.json(data).send().await {
-        Ok(resp) => {
-            let body = resp.text().await.map_err(|e| ChiaRpcError {
-                error: Some(format!("{e}")),
-                success: false,
-            })?;
-            match serde_json::from_str(body.as_str()) {
-                Ok(t) => Ok(t),
-                Err(_) => match serde_json::from_str::<ChiaRpcError>(body.as_str()) {
-                    Ok(e) => Err(e),
-                    Err(e) => Err(ChiaRpcError {
-                        error: Some(format!("{e}")),
-                        success: false,
-                    }),
-                },
-            }
-        }
-        Err(e) => Err(ChiaRpcError {
-            error: Some(format!("{e}")),
+
+    // Send
+    let resp = rb.json(data).send().await.map_err(|e| ChiaRpcError {
+        error: Some(format!("request error: {e}")),
+        success: false,
+    })?;
+
+    let status = resp.status();
+    let body = resp.text().await.map_err(|e| ChiaRpcError {
+        error: Some(format!("read body error: {e}")),
+        success: false,
+    })?;
+
+    if !status.is_success() {
+        return Err(ChiaRpcError {
+            error: Some(format!("http {status}: {body}")),
             success: false,
-        }),
+        });
     }
+
+    // Parse once
+    let val: Value = serde_json::from_str(&body).map_err(|e| ChiaRpcError {
+        error: Some(format!("json parse error: {e}; body: {body}")),
+        success: false,
+    })?;
+
+    // Respect RPC envelope: success must be true for Ok(...)
+    if let Some(success) = val.get("success").and_then(|b| b.as_bool())
+        && !success
+    {
+        // Extract server error if present
+        let err_msg = val
+            .get("error")
+            .and_then(|e| e.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("server returned success=false: {body}"));
+        return Err(ChiaRpcError {
+            error: Some(err_msg),
+            success: false,
+        });
+    }
+
+    // Now decode into T. If this fails while success==true, it's a decode error (still an error).
+    serde_json::from_value::<T>(val).map_err(|e| ChiaRpcError {
+        error: Some(format!("response decode error: {e}; body: {body}")),
+        success: false,
+    })
 }

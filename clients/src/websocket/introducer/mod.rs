@@ -2,6 +2,7 @@ use crate::websocket::{WsClient, WsClientConfig};
 use async_trait::async_trait;
 use dg_xch_core::blockchain::peer_info::TimestampedPeerInfo;
 use dg_xch_core::blockchain::sized_bytes::Bytes32;
+use dg_xch_core::blockchain::unsized_bytes::UnsizedBytes;
 use dg_xch_core::constants::{CHIA_CA_CRT, CHIA_CA_KEY};
 use dg_xch_core::protocols::introducer::RespondPeersIntroducer;
 use dg_xch_core::protocols::{
@@ -13,14 +14,17 @@ use log::{debug, error, info};
 use rustls::crypto::ring::default_provider;
 use std::collections::{HashMap, HashSet};
 use std::io::{Cursor, Error, ErrorKind};
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::time::Instant;
 use tokio::sync::RwLock;
+use tokio_tungstenite::tungstenite::Message;
 use uuid::Uuid;
 
 #[derive(Default)]
 pub struct IntroducerState {
     pub peer_list: HashSet<TimestampedPeerInfo>,
+    pub last_update: Option<Instant>,
 }
 
 pub struct IntroducerClient {
@@ -44,7 +48,7 @@ impl IntroducerClient {
                 _peer_id: Arc<Bytes32>,
                 _peers: PeerMap,
             ) -> Result<(), Error> {
-                debug!("Got websocket Message: {}", msg.msg_type);
+                debug!("Got websocket Message: {:#?}", msg);
                 Ok(())
             }
         }
@@ -76,7 +80,7 @@ impl IntroducerClient {
         ])));
         let client = WsClient::with_ca(
             client_config,
-            NodeType::Introducer,
+            NodeType::FullNode,
             handles,
             run,
             CHIA_CA_CRT.as_bytes(),
@@ -90,6 +94,40 @@ impl IntroducerClient {
     pub async fn join(self) -> Result<(), Error> {
         self.client.connection.write().await.shutdown().await?;
         self.client.join().await
+    }
+    pub async fn request_peers(&self) -> Result<(), Error> {
+        async fn send_message(client: &WsClient) -> Result<(), Error> {
+            let message_bytes = ChiaMessage {
+                msg_type: ProtocolMessageTypes::RequestPeersIntroducer,
+                id: None,
+                data: UnsizedBytes::new(vec![]),
+            }
+            .to_bytes(Default::default())?;
+            client
+                .connection
+                .write()
+                .await
+                .send(Message::Binary(message_bytes.into()))
+                .await?;
+            Ok(())
+        }
+        let last_update = self.state.read().await.last_update;
+        match last_update {
+            Some(last_update) if last_update.elapsed() > tokio::time::Duration::from_secs(15) => {
+                self.state.write().await.last_update = Some(Instant::now());
+                send_message(&self.client).await
+            }
+            None => {
+                self.state.write().await.last_update = Some(Instant::now());
+                send_message(&self.client).await
+            }
+            _ => Ok(()),
+        }
+    }
+
+    pub async fn get_peers(&self) -> Vec<TimestampedPeerInfo> {
+        let state = self.state.read().await;
+        state.peer_list.iter().cloned().collect()
     }
 
     #[must_use]
@@ -118,7 +156,7 @@ impl MessageHandler for RespondPeersHandler {
                 ),
             ))
         } else {
-            let mut cursor = Cursor::new(&msg.data);
+            let mut cursor = Cursor::new(msg.data.as_slice());
             match peers.read().await.get(&peer_id) {
                 None => {
                     error!("Peer Disconnected before Peer Version could be determined");
@@ -133,7 +171,7 @@ impl MessageHandler for RespondPeersHandler {
                         .write()
                         .await
                         .peer_list
-                        .extend(peer_list.peer_list.into_iter());
+                        .extend(peer_list.peer_list);
                 }
             }
             Ok(())

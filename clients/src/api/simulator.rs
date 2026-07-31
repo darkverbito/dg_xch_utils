@@ -1,4 +1,5 @@
-use crate::api::responses::{AutoFarmResp, EmptyResponse};
+use crate::api::responses::EmptyResponse;
+use crate::api::responses::simulator_responses::AutoFarmResp;
 use crate::rpc::ChiaRpcError;
 use async_trait::async_trait;
 use dg_xch_core::blockchain::sized_bytes::Bytes32;

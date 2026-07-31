@@ -177,7 +177,7 @@ impl RadixSorter {
             swap(input, output);
             shift += SHIFT_BASE;
         }
-        if max_iter % 2 == 0 {
+        if max_iter.is_multiple_of(2) {
             output.copy_from_slice(input);
         }
     }
@@ -204,7 +204,7 @@ impl RadixSorter {
             swap(&mut key_input, &mut key_output);
             shift += SHIFT_BASE;
         }
-        if max_iter % 2 == 0 {
+        if max_iter.is_multiple_of(2) {
             output.copy_from_slice(input);
         }
     }
@@ -212,7 +212,7 @@ impl RadixSorter {
 
 #[test]
 pub fn sort_test() -> Result<(), std::io::Error> {
-    use rand::prelude::*;
+    use rand::random;
     use rayon::prelude::*;
     use std::time::Instant;
     let count = 2_097_152;
@@ -227,8 +227,7 @@ pub fn sort_test() -> Result<(), std::io::Error> {
     println!("Starting Sort of {count} entries {test_count} times");
     for i in 0..test_count {
         input.par_iter_mut().for_each(|v| {
-            let mut rng = thread_rng();
-            *v = rng.gen::<u64>();
+            *v = random::<u64>();
         });
         start = Instant::now();
         sorter.sort_keyed(8, &mut input, &mut output, &mut key_input, &mut key_output);

@@ -2,6 +2,7 @@ use crate::blockchain::sized_bytes::Bytes32;
 use dg_xch_macros::ChiaSerial;
 use serde::{Deserialize, Serialize};
 
+// Mainnet hashes the five fields below; future wire-format changes require an activation-height gate.
 #[derive(ChiaSerial, Copy, Clone, PartialEq, Eq, Serialize, Deserialize, Debug)]
 pub struct SubEpochSummary {
     pub prev_subepoch_summary_hash: Bytes32,

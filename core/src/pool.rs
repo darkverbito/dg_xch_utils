@@ -2,11 +2,12 @@ use crate::blockchain::coin_spend::CoinSpend;
 use crate::blockchain::sized_bytes::{Bytes32, Bytes48};
 use crate::clvm::program::Program;
 use crate::constants::POOL_STATE_IDENTIFIER;
+use crate::errors::ClvmError;
 use dg_xch_macros::ChiaSerial;
 use dg_xch_serialize::{ChiaProtocolVersion, ChiaSerialize};
 use num_traits::ToPrimitive;
 use serde::{Deserialize, Serialize};
-use std::io::{Cursor, Error, ErrorKind};
+use std::io::Cursor;
 use std::string::String;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,31 +39,29 @@ pub struct PoolState {
 }
 
 impl PoolState {
-    pub fn from_extra_data_program(program: &Program) -> Result<Self, Error> {
+    pub fn from_extra_data_program(program: &Program) -> Result<Self, ClvmError> {
         let extra_data_cons_boxes: Vec<Program> = program
             .as_list()
             .into_iter()
             .filter(|p| {
-                if let Ok(f) = p.first() {
-                    if let Ok(ai) = f.as_int() {
-                        if let Some(au) = ai.to_u8() {
-                            return char::from(au) == POOL_STATE_IDENTIFIER;
-                        }
-                    }
+                if let Ok(f) = p.first()
+                    && let Ok(ai) = f.as_int()
+                    && let Some(au) = ai.to_u8()
+                {
+                    return char::from(au) == POOL_STATE_IDENTIFIER;
                 }
                 false
             })
             .collect();
         if extra_data_cons_boxes.is_empty() || extra_data_cons_boxes.len() > 1 {
-            return Err(Error::new(ErrorKind::InvalidInput, "Invalid PlotNFT"));
+            return Err(ClvmError::InvalidSyntax("Invalid PlotNFT".to_string()));
         }
-        let mut cursor = Cursor::new(
-            extra_data_cons_boxes[0]
-                .rest()?
-                .as_vec()
-                .unwrap_or_default(),
-        );
-        Self::from_bytes(&mut cursor, ChiaProtocolVersion::default())
+        let data = extra_data_cons_boxes[0]
+            .rest()?
+            .as_vec()
+            .unwrap_or_default();
+        let mut cursor = Cursor::new(data.as_slice());
+        Self::from_bytes(&mut cursor, ChiaProtocolVersion::default()).map_err(ClvmError::IoError)
     }
 }
 

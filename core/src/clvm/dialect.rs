@@ -1,10 +1,15 @@
 use crate::clvm::sexp::SExp;
-use std::io::{Error, ErrorKind};
+
 pub trait Dialect {
     fn quote_kw(&self) -> &[u8];
     fn apply_kw(&self) -> &[u8];
     fn print_kw(&self) -> &[u8];
-    fn op(&self, op: SExp, args: SExp, max_cost: u64) -> Result<(u64, SExp), Error>;
+    fn op<'a>(
+        &self,
+        op: &'a SExp<'a>,
+        args: &'a SExp<'a>,
+        max_cost: u64,
+    ) -> Result<(u64, SExp<'a>), ClvmError>;
 }
 use crate::clvm::core_ops::{op_cons, op_eq, op_first, op_if, op_listp, op_raise, op_rest};
 use crate::clvm::more_ops::{
@@ -13,6 +18,7 @@ use crate::clvm::more_ops::{
     op_point_add, op_pubkey_for_exp, op_sha256, op_softfork, op_strlen, op_substr, op_subtract,
     op_unknown,
 };
+use crate::errors::ClvmError;
 
 // division with negative numbers are disallowed
 pub const NO_NEG_DIV: u32 = 0x0001;
@@ -27,29 +33,31 @@ pub struct ChiaDialect {
 
 impl ChiaDialect {
     #[must_use]
-    pub fn new(flags: u32) -> ChiaDialect {
+    pub const fn new(flags: u32) -> ChiaDialect {
         ChiaDialect { flags }
     }
 }
-
+type OpFn = for<'a> fn(&'a SExp<'a>, u64, &ChiaDialect) -> Result<(u64, SExp<'a>), ClvmError>;
 impl Dialect for ChiaDialect {
-    fn op(&self, o: SExp, argument_list: SExp, max_cost: u64) -> Result<(u64, SExp), Error> {
-        match &o {
+    fn op<'a>(
+        &self,
+        o: &'a SExp<'a>,
+        argument_list: &'a SExp<'a>,
+        max_cost: u64,
+    ) -> Result<(u64, SExp<'a>), ClvmError> {
+        match o {
             SExp::Atom(buf) => {
-                let b = &buf.data;
+                let b = buf.as_ref();
                 if b.len() != 1 {
                     return if (self.flags & NO_UNKNOWN_OPS) != 0 {
-                        return Err(Error::new(
-                            ErrorKind::InvalidData,
-                            format!("unimplemented operator: {o:?}"),
-                        ));
+                        Err(ClvmError::Unimplemented(b[0]))
                     } else {
-                        op_unknown(&o, &argument_list, max_cost, self)
+                        op_unknown(o, argument_list, max_cost, self)
                     };
                 }
                 match b.first() {
                     Some(v) => {
-                        let f = match *v {
+                        let f: OpFn = match *v {
                             3 => op_if,
                             4 => op_cons,
                             5 => op_first,
@@ -106,27 +114,18 @@ impl Dialect for ChiaDialect {
                             // 61 => op_mod,
                             _ => {
                                 return if (self.flags & NO_UNKNOWN_OPS) != 0 {
-                                    Err(Error::new(
-                                        ErrorKind::InvalidData,
-                                        format!("unimplemented operator: {o:?}"),
-                                    ))
+                                    Err(ClvmError::Unimplemented(b[0]))
                                 } else {
-                                    op_unknown(&o, &argument_list, max_cost, self)
+                                    op_unknown(o, argument_list, max_cost, self)
                                 };
                             }
                         };
-                        f(&argument_list, max_cost, self)
+                        f(argument_list, max_cost, self)
                     }
-                    None => Err(Error::new(
-                        ErrorKind::InvalidData,
-                        format!("no operator found: {o:?}"),
-                    )),
+                    None => Err(ClvmError::NoOperatorFound(o.to_string())),
                 }
             }
-            SExp::Pair(_) => Err(Error::new(
-                ErrorKind::InvalidData,
-                format!("Expected Atom, got Pair: {o:?}"),
-            )),
+            SExp::Pair(_) => Err(ClvmError::ExpectedAtomGotPair(o.to_string())),
         }
     }
 

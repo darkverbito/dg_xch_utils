@@ -24,7 +24,7 @@ pub fn calculate_sp_interval_iters(
     constants: &ConsensusConstants,
     sub_slot_iters: u64,
 ) -> Result<u64, Error> {
-    if sub_slot_iters % u64::from(constants.num_sps_sub_slot) != 0 {
+    if !sub_slot_iters.is_multiple_of(u64::from(constants.num_sps_sub_slot)) {
         Err(Error::new(
             ErrorKind::InvalidData,
             format!("Invalid SubSlot Iterations: {sub_slot_iters}"),
@@ -63,7 +63,12 @@ pub fn calculate_ip_iters(
             format!("Invalid sp iters {sp_iters} for this ssi {sub_slot_iters}"),
         ))
     } else if required_iters >= sp_interval_iters || required_iters == 0 {
-        Err(Error::new(ErrorKind::InvalidData, format!("Required iters {required_iters} is not below the sp interval iters {sp_interval_iters}, {sub_slot_iters} or not > 0.")))
+        Err(Error::new(
+            ErrorKind::InvalidData,
+            format!(
+                "Required iters {required_iters} is not below the sp interval iters {sp_interval_iters}, {sub_slot_iters} or not > 0."
+            ),
+        ))
     } else {
         Ok(
             (sp_iters + constants.num_sp_intervals_extra * sp_interval_iters + required_iters)

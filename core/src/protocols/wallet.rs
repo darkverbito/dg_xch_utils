@@ -74,12 +74,15 @@ pub struct RequestRemovals {
     pub coin_names: Option<Vec<Bytes32>>, //Min Version 0.0.34
 }
 
+pub type NamedCoin = (Bytes32, Option<Coin>);
+pub type NamedProofs = Option<Vec<(Bytes32, Vec<u8>)>>;
+
 #[derive(ChiaSerial, Clone, PartialEq, Eq, Serialize, Deserialize, Debug)]
 pub struct RespondRemovals {
-    pub height: u32,                             //Min Version 0.0.34
-    pub header_hash: Bytes32,                    //Min Version 0.0.34
-    pub coins: Vec<(Bytes32, Option<Coin>)>,     //Min Version 0.0.34
-    pub proofs: Option<Vec<(Bytes32, Vec<u8>)>>, //Min Version 0.0.34
+    pub height: u32,           //Min Version 0.0.34
+    pub header_hash: Bytes32,  //Min Version 0.0.34
+    pub coins: Vec<NamedCoin>, //Min Version 0.0.34
+    pub proofs: NamedProofs,   //Min Version 0.0.34
 }
 
 #[derive(ChiaSerial, Clone, PartialEq, Eq, Serialize, Deserialize, Debug)]
@@ -96,13 +99,14 @@ pub struct RequestAdditions {
 }
 
 pub type Proofs = Option<Vec<(Bytes32, Vec<u8>, Option<Vec<u8>>)>>;
+pub type Additions = Vec<(Bytes32, Vec<Coin>)>;
 
 #[derive(ChiaSerial, Clone, PartialEq, Eq, Serialize, Deserialize, Debug)]
 pub struct RespondAdditions {
-    pub height: u32,                      //Min Version 0.0.34
-    pub header_hash: Bytes32,             //Min Version 0.0.34
-    pub coins: Vec<(Bytes32, Vec<Coin>)>, //Min Version 0.0.34
-    pub proofs: Proofs,                   //Min Version 0.0.34
+    pub height: u32,          //Min Version 0.0.34
+    pub header_hash: Bytes32, //Min Version 0.0.34
+    pub coins: Additions,     //Min Version 0.0.34
+    pub proofs: Proofs,       //Min Version 0.0.34
 }
 
 #[derive(ChiaSerial, Clone, PartialEq, Eq, Serialize, Deserialize, Debug)]

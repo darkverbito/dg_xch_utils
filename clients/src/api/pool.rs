@@ -4,16 +4,16 @@ use blst::min_pk::{AggregateSignature, SecretKey, Signature};
 use dg_xch_core::blockchain::sized_bytes::Bytes32;
 use dg_xch_core::clvm::bls_bindings::sign;
 use dg_xch_core::protocols::pool::{
-    get_current_authentication_token, AuthenticationPayload, GetFarmerRequest, GetFarmerResponse,
-    GetPoolInfoResponse, PoolError, PoolErrorCode, PostFarmerRequest, PostFarmerResponse,
-    PostPartialRequest, PostPartialResponse, PutFarmerRequest, PutFarmerResponse,
+    AuthenticationPayload, GetFarmerRequest, GetFarmerResponse, GetPoolInfoResponse, PoolError,
+    PoolErrorCode, PostFarmerRequest, PostFarmerResponse, PostPartialRequest, PostPartialResponse,
+    PutFarmerRequest, PutFarmerResponse, get_current_authentication_token,
 };
 use dg_xch_core::utils::hash_256;
 use dg_xch_serialize::{ChiaProtocolVersion, ChiaSerialize};
 use log::{debug, warn};
 use reqwest::{Client, RequestBuilder};
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::io::{Error, ErrorKind};
@@ -216,7 +216,7 @@ async fn send_request<
                 let text = resp.text().await.unwrap_or_default();
                 warn!(
                     "Failed to {method}, Bad Status Code: {:?}, {}",
-                    &status, &text
+                    status, text
                 );
                 Err(PoolError {
                     error_code: PoolErrorCode::RequestFailed as u8,

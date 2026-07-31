@@ -4,6 +4,10 @@ use crate::blockchain::spend_bundle::SpendBundle;
 use dg_xch_macros::ChiaSerial;
 use serde::{Deserialize, Serialize};
 
+pub type SentTo = (String, u8, Option<String>);
+
+pub type TransactionMemos = (Bytes32, Vec<Vec<u8>>);
+
 #[derive(ChiaSerial, Clone, PartialEq, Eq, Serialize, Deserialize, Debug)]
 pub struct TransactionRecord {
     pub confirmed_at_height: u32,
@@ -17,12 +21,12 @@ pub struct TransactionRecord {
     pub additions: Vec<Coin>,
     pub removals: Vec<Coin>,
     pub wallet_id: u32,
-    pub sent_to: Vec<(String, u8, Option<String>)>,
+    pub sent_to: Vec<SentTo>,
     pub trade_id: Option<Bytes32>,
     #[serde(alias = "type")]
     pub transaction_type: u32,
     pub name: Bytes32,
-    pub memos: Vec<(Bytes32, Vec<Vec<u8>>)>,
+    pub memos: Vec<TransactionMemos>,
 }
 
 pub enum TransactionType {

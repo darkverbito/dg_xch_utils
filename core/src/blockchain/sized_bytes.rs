@@ -1,44 +1,201 @@
 use crate::clvm::program::Program;
 use crate::clvm::sexp::SExp;
+use crate::clvm::sexp_ext::SExpNumber;
+use crate::errors::ClvmError;
 use crate::formatting::prep_hex_str;
 use crate::traits::SizedBytes;
 use blst::min_pk::{PublicKey, SecretKey, Signature};
 use bytes::Buf;
+use const_hex::const_decode_to_array;
 use dg_xch_serialize::ChiaProtocolVersion;
 use dg_xch_serialize::ChiaSerialize;
 use hex::encode;
+use log::warn;
 use num_traits::AsPrimitive;
-use rand::distributions::Standard;
-use rand::prelude::Distribution;
 use rand::{Fill, Rng};
 use secrecy::zeroize::DefaultIsZeroes;
 use serde::de::Visitor;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::cmp::min;
 use std::io::{Cursor, Error, ErrorKind, Read};
-use std::ops::{BitXor, Index, IndexMut, Range};
+use std::ops::{
+    Add, BitAnd, BitOr, BitXor, Deref, DerefMut, Index, IndexMut, Range, Shl, ShlAssign, Shr,
+    ShrAssign,
+};
 use std::str::FromStr;
 
 #[derive(Copy, Clone)]
 pub struct SizedBytesImpl<const SIZE: usize> {
     bytes: [u8; SIZE],
 }
+impl<const SIZE: usize> SizedBytesImpl<SIZE> {
+    pub const fn const_new(bytes: [u8; SIZE]) -> Self {
+        Self { bytes }
+    }
+    pub const fn const_bytes(&self) -> [u8; SIZE] {
+        self.bytes
+    }
+}
+impl<const SIZE: usize> Deref for SizedBytesImpl<SIZE> {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        &self.bytes
+    }
+}
+impl<const SIZE: usize> DerefMut for SizedBytesImpl<SIZE> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.bytes
+    }
+}
+macro_rules! impl_const_sized_bytes {
+    ($($n:literal),+ $(,)?) => {$(
+        impl SizedBytesImpl<$n>  {
+            #[track_caller]
+            pub const fn const_hex(hex: &str) -> Self {
+                let bytes = hex.as_bytes();
+                let has_prefix = bytes.len() >= 2
+                    && bytes[0] == b'0'
+                    && (bytes[1] == b'x' || bytes[1] == b'X');
+                let modifier = has_prefix as usize * 2;
+                if bytes.len() != $n * 2 + modifier{
+                    panic!(concat!("hex length is wrong for Bytes", stringify!($n)));
+                }
+                match const_decode_to_array::<$n>(bytes) {
+                    Ok(bytes) => Self { bytes },
+                    Err(_) => panic!(concat!("invalid hex for Bytes", stringify!($n))),
+                }
+            }
+            pub const fn const_bitand(self, rhs: SizedBytesImpl<$n>) -> SizedBytesImpl<$n> {
+                let mut out = [0u8; $n];
+                let mut i = 0;
+                while i < $n {
+                    out[i] = self.bytes[i] & rhs.bytes[i];
+                    i += 1;
+                }
+                Self { bytes: out }
+            }
+            pub const fn const_shl(self, rhs: usize) -> Self {
+                if $n == 0 { return self; }
+
+                let byte_shift = rhs / 8;
+                let bit_shift  = rhs % 8;
+
+                if byte_shift >= $n {
+                    return Self { bytes: [0u8; $n] };
+                }
+
+                let mut out = [0u8; $n];
+                let mut i = 0;
+                while i < $n {
+                    let j = i + byte_shift;
+                    if j >= $n { break; }
+
+                    let mut b = self.bytes[j] << bit_shift;
+                    if bit_shift != 0 && j + 1 < $n {
+                        b |= self.bytes[j + 1] >> (8 - bit_shift);
+                    }
+                    out[i] = b;
+                    i += 1;
+                }
+
+                Self { bytes: out }
+            }
+            pub const fn const_shr(self, rhs: usize) -> Self {
+                if $n == 0 { return self; }
+
+                let byte_shift = rhs / 8;
+                let bit_shift  = rhs % 8;
+
+                if byte_shift >= $n {
+                    return Self { bytes: [0u8; $n] };
+                }
+
+                let mut out = [0u8; $n];
+                let mut k = $n;
+                while k > 0 {
+                    let i = k - 1;
+                    if i < byte_shift { break; }
+                    let j = i - byte_shift;
+
+                    let mut b = self.bytes[j] >> bit_shift;
+                    if bit_shift != 0 && j > 0 {
+                        b |= self.bytes[j - 1] << (8 - bit_shift);
+                    }
+                    out[i] = b;
+                    k -= 1;
+                }
+
+                Self { bytes: out }
+            }
+        }
+        impl Shl<usize> for SizedBytesImpl<$n> {
+            type Output = Self;
+
+            fn shl(self, rhs: usize) -> Self::Output {
+                self.const_shl(rhs)
+            }
+        }
+        impl ShlAssign<usize> for SizedBytesImpl<$n> {
+            fn shl_assign(&mut self, rhs: usize) {
+                *self = *self << rhs;
+            }
+        }
+        impl Shr<usize> for SizedBytesImpl<$n> {
+            type Output = Self;
+
+            fn shr(self, rhs: usize) -> Self::Output {
+                self.const_shr(rhs)
+            }
+        }
+
+        impl ShrAssign<usize> for SizedBytesImpl<$n> {
+            fn shr_assign(&mut self, rhs: usize) {
+                *self = *self >> rhs;
+            }
+        }
+    )+};
+}
+impl_const_sized_bytes!(4, 8, 32, 48, 96, 100, 480);
+impl<const SIZE: usize> TryFrom<SExpNumber> for SizedBytesImpl<SIZE> {
+    type Error = Error;
+    fn try_from(value: SExpNumber) -> Result<Self, Error> {
+        let bytes = match value {
+            SExpNumber::I128(value) => value.to_be_bytes().to_vec(),
+            SExpNumber::BigInt(value) => value.to_bytes_be().1,
+        };
+        if bytes.len() > SIZE {
+            Err(Error::new(
+                ErrorKind::InvalidInput,
+                format!(
+                    "i128 Too Large, expected {} bytes got {}",
+                    SIZE,
+                    bytes.len()
+                ),
+            ))
+        } else {
+            let mut buf = [0u8; SIZE];
+            let offset = SIZE - bytes.len();
+            for (i, v) in bytes.iter().enumerate() {
+                buf[offset + i] = *v;
+            }
+            Ok(Self { bytes: buf })
+        }
+    }
+}
 impl<const SIZE: usize> SizedBytes<'_, SIZE> for SizedBytesImpl<SIZE> {
     const SIZE: usize = SIZE;
     fn new(bytes: [u8; SIZE]) -> Self {
         Self { bytes }
     }
-    fn parse(bytes: &[u8]) -> Result<Self, Error> {
+    fn parse(bytes: &[u8]) -> Result<Self, ClvmError> {
         let mut buf = [0u8; SIZE];
         if bytes.len() > SIZE {
-            Err(Error::new(
-                ErrorKind::InvalidInput,
-                format!(
-                    "Too Many Bytes Sent to parse, expected {} got {}",
-                    SIZE,
-                    bytes.len()
-                ),
-            ))
+            Err(ClvmError::InvalidInput(format!(
+                "Too Many Bytes Sent to parse, expected {} got {}",
+                SIZE,
+                bytes.len()
+            )))
         } else {
             let offset = SIZE - bytes.len();
             for (i, v) in bytes.iter().enumerate() {
@@ -52,6 +209,7 @@ impl<const SIZE: usize> SizedBytes<'_, SIZE> for SizedBytesImpl<SIZE> {
         self.bytes
     }
 }
+
 impl<const SIZE: usize> BitXor for SizedBytesImpl<SIZE> {
     type Output = Self;
 
@@ -70,38 +228,52 @@ impl<const SIZE: usize> BitXor<[u8; SIZE]> for SizedBytesImpl<SIZE> {
         Self::new(output)
     }
 }
-#[tokio::test]
-pub async fn test() {
-    let first: [u8; 32] = rand::random();
-    let second: [u8; 32] = rand::random();
-    let first = Bytes32::new(first);
-    let second = Bytes32::new(second);
-    let product = first ^ second;
-    let should_be_second = product ^ first;
-    let should_be_first = product ^ second;
-    println!("first: {:?}", first);
-    println!("second: {:?}", second);
-    println!("product: {:?}", product);
-    println!("should_be_second: {:?}", should_be_second);
-    println!("should_be_first: {:?}", should_be_first);
-    assert_eq!(first, should_be_first);
-    assert_eq!(second, should_be_second);
-}
-impl<const SIZE: usize> Fill for SizedBytesImpl<SIZE> {
-    fn try_fill<R: Rng + ?Sized>(&mut self, rng: &mut R) -> Result<(), rand::Error> {
-        rng.fill_bytes(&mut self.bytes);
-        Ok(())
+impl<const SIZE: usize> BitAnd for SizedBytesImpl<SIZE> {
+    type Output = Self;
+
+    fn bitand(self, rhs: Self) -> Self::Output {
+        self & rhs.bytes
     }
 }
-impl<const SIZE: usize> Distribution<SizedBytesImpl<SIZE>> for Standard {
-    fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> SizedBytesImpl<SIZE> {
-        let mut slf = SizedBytesImpl { bytes: [0u8; SIZE] };
-        rng.fill(&mut slf);
-        slf
+impl<const SIZE: usize> BitAnd<[u8; SIZE]> for SizedBytesImpl<SIZE> {
+    type Output = Self;
+
+    fn bitand(self, rhs: [u8; SIZE]) -> Self::Output {
+        let mut output: [u8; SIZE] = [0; SIZE];
+        for ((x, y), o) in self.bytes.iter().zip(rhs.iter()).zip(output.iter_mut()) {
+            *o = x & y;
+        }
+        Self::new(output)
+    }
+}
+impl<const SIZE: usize> BitOr for SizedBytesImpl<SIZE> {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        self | rhs.bytes
+    }
+}
+impl<const SIZE: usize> BitOr<[u8; SIZE]> for SizedBytesImpl<SIZE> {
+    type Output = Self;
+
+    fn bitor(self, rhs: [u8; SIZE]) -> Self::Output {
+        let mut output: [u8; SIZE] = [0; SIZE];
+        for ((x, y), o) in self.bytes.iter().zip(rhs.iter()).zip(output.iter_mut()) {
+            *o = x | y;
+        }
+        Self::new(output)
+    }
+}
+impl<const SIZE: usize> Fill for SizedBytesImpl<SIZE> {
+    fn fill_slice<R: Rng + ?Sized>(this: &mut [Self], rng: &mut R) {
+        for slice in this.iter_mut() {
+            let mut_slice: &mut [u8] = slice.deref_mut();
+            rng.fill_bytes(mut_slice);
+        }
     }
 }
 impl<const SIZE: usize> FromStr for SizedBytesImpl<SIZE> {
-    type Err = Error;
+    type Err = ClvmError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         s.try_into()
@@ -165,6 +337,13 @@ impl<const SIZE: usize> From<[u8; SIZE]> for SizedBytesImpl<SIZE> {
 }
 impl<const SIZE: usize> From<Vec<u8>> for SizedBytesImpl<SIZE> {
     fn from(vec: Vec<u8>) -> SizedBytesImpl<SIZE> {
+        if vec.len() > SIZE {
+            warn!(
+                "Vec of size {} was truncated to fit a SizedBytes of size {}",
+                vec.len(),
+                SIZE
+            );
+        }
         let mut bytes = [0; SIZE];
         bytes[0..min(SIZE, vec.len())].copy_from_slice(&vec[0..min(SIZE, vec.len())]);
         SizedBytesImpl { bytes }
@@ -179,13 +358,12 @@ impl<const SIZE: usize> IntoIterator for SizedBytesImpl<SIZE> {
     }
 }
 impl<const SIZE: usize> TryFrom<&str> for SizedBytesImpl<SIZE> {
-    type Error = Error;
+    type Error = ClvmError;
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         Self::parse(&hex::decode(prep_hex_str(value)).map_err(|e| {
-            Error::new(
-                ErrorKind::InvalidInput,
-                format!("Hex string {value} is not a Valid Bytes{SIZE}: {e:?}"),
-            )
+            ClvmError::InvalidInput(format!(
+                "Hex string {value} is not a Valid Bytes{SIZE}: {e:?}"
+            ))
         })?)
     }
 }
@@ -202,6 +380,37 @@ impl<const SIZE: usize> Default for SizedBytesImpl<SIZE> {
 impl<const SIZE: usize> std::fmt::Debug for SizedBytesImpl<SIZE> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "0x{}", encode(self.bytes))
+    }
+}
+#[cfg(feature = "postgres")]
+impl<'r, const SIZE: usize> sqlx::Decode<'r, sqlx::Postgres> for SizedBytesImpl<SIZE> {
+    fn decode(value: sqlx::postgres::PgValueRef<'r>) -> Result<Self, sqlx::error::BoxDynError> {
+        let bytes = <&[u8] as sqlx::Decode<'_, sqlx::Postgres>>::decode(value)?;
+        Ok(Self::parse(bytes)
+            .map_err(|e| std::io::Error::new(ErrorKind::InvalidData, e.to_string()))?)
+    }
+}
+#[cfg(feature = "postgres")]
+impl<'r, const SIZE: usize> sqlx::Encode<'r, sqlx::Postgres> for SizedBytesImpl<SIZE> {
+    fn encode(
+        self,
+        buf: &mut <sqlx::Postgres as sqlx::Database>::ArgumentBuffer<'r>,
+    ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError>
+    where
+        Self: Sized,
+    {
+        buf.extend_from_slice(&self);
+        Ok(sqlx::encode::IsNull::No)
+    }
+    fn encode_by_ref(
+        &self,
+        buf: &mut <sqlx::Postgres as sqlx::Database>::ArgumentBuffer<'r>,
+    ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
+        buf.extend_from_slice(self);
+        Ok(sqlx::encode::IsNull::No)
+    }
+    fn size_hint(&self) -> usize {
+        SIZE
     }
 }
 struct SizedBytesImplVisitor<const SIZE: usize>;
@@ -239,50 +448,93 @@ impl<'a, const SIZE: usize> Deserialize<'a> for SizedBytesImpl<SIZE> {
     }
 }
 
+macro_rules! impl_add {
+    ($($n:expr, $m:expr),+ $(,)?) => {
+        $(
+            impl Add for SizedBytesImpl<$n> {
+                type Output = SizedBytesImpl<$m>;
+
+                fn add(self, rhs: Self) -> Self::Output {
+                    let mut out = [0u8; $m];
+                    out[..$n].copy_from_slice(&self.bytes);
+                    out[$n..].copy_from_slice(&rhs.bytes);
+                    SizedBytesImpl { bytes: out }
+                }
+            }
+        )+
+    };
+}
+
+impl_add!(16, 32, 32, 64, 48, 96, 64, 128, 128, 256, 256, 512,);
+
+macro_rules! impl_split {
+    ($($n:expr, $m:expr);+ $(;)?) => {
+        $(
+            impl SizedBytesImpl<$m> {
+                pub fn split(self) -> ([u8; $n], [u8; $n]) {
+                    #[repr(C)]
+                    #[derive(Clone, Copy)]
+                    struct Halves {
+                        pub a: [u8; $n],
+                        pub b: [u8; $n],
+                    }
+                    let halves = unsafe { std::mem::transmute::<[u8; $m], Halves>(self.bytes) };
+                    (halves.a, halves.b)
+                }
+            }
+        )+
+    };
+}
+
+impl_split!(16, 32; 32, 64; 48, 96; 64, 128; 128, 256; 256, 512;);
+
 macro_rules! impl_sized_bytes {
     ($($name: ident, $size:expr);*) => {
         $(
             pub type $name = SizedBytesImpl<$size>;
             impl DefaultIsZeroes for SizedBytesImpl<$size> {}
-            impl TryFrom<Program> for $name {
-                type Error = Error;
+            impl<'a> TryFrom<Program<'a>> for $name {
+                type Error = ClvmError;
                 fn try_from(value: Program) -> Result<Self, Self::Error> {
-                    let vec = value.as_vec().ok_or_else(|| Error::new(ErrorKind::InvalidInput, format!("Program is not a valid {}",  stringify!($name))))?;
+                    let vec = value.as_vec().ok_or_else(|| ClvmError::InvalidInput(format!("Program is not a valid {}",  stringify!($name))))?;
                     Self::parse(&vec)
                 }
             }
-            impl TryFrom<&Program> for $name {
-                type Error = Error;
+            impl<'a> TryFrom<&Program<'a>> for $name {
+                type Error = ClvmError;
                 fn try_from(value: &Program) -> Result<Self, Self::Error> {
-                    let vec = value.as_vec().ok_or_else(|| Error::new(ErrorKind::InvalidInput, format!("Program is not a valid {}",  stringify!($name))))?;
+                    let vec = value.as_vec().ok_or_else(|| ClvmError::InvalidInput(format!("Program is not a valid {}",  stringify!($name))))?;
                     Self::parse(&vec)
                 }
             }
-            impl TryFrom<SExp> for $name {
-                type Error = Error;
+            impl TryFrom<SExp<'_>> for $name {
+                type Error = ClvmError;
                 fn try_from(value: SExp) -> Result<Self, Self::Error> {
-                    let vec = value.as_vec().ok_or_else(|| Error::new(ErrorKind::InvalidInput, format!("SExp is not a valid {}",  stringify!($name))))?;
+                    let vec = value.as_vec().ok_or_else(|| ClvmError::InvalidInput(format!("SExp is not a valid {}",  stringify!($name))))?;
                     Self::parse(&vec)
                 }
             }
-            impl TryFrom<&SExp> for $name {
-                type Error = Error;
+            impl TryFrom<&SExp<'_>> for $name {
+                type Error = ClvmError;
                 fn try_from(value: &SExp) -> Result<Self, Self::Error> {
-                    let vec = value.as_vec().ok_or_else(|| Error::new(ErrorKind::InvalidInput, format!("SExp is not a valid {}",  stringify!($name))))?;
+                    let vec = value.as_vec().ok_or_else(|| ClvmError::InvalidInput(format!("SExp is not a valid {}",  stringify!($name))))?;
                     Self::parse(&vec)
                 }
             }
             #[cfg(feature = "postgres")]
             impl sqlx::Type<sqlx::Postgres> for $name {
                 fn type_info() -> sqlx::postgres::PgTypeInfo {
-                    sqlx::postgres::PgTypeInfo::with_name(stringify!($name))
+                    <Vec<u8> as sqlx::Type<sqlx::Postgres>>::type_info()
+                }
+                fn compatible(ty: &sqlx::postgres::PgTypeInfo) -> bool {
+                    <Vec<u8> as sqlx::Type<sqlx::Postgres>>::compatible(ty)
                 }
             }
             impl ChiaSerialize for $name {
                 fn to_bytes(&self, _version: ChiaProtocolVersion) -> Result<Vec<u8>, std::io::Error> {
                     Ok(self.bytes().to_vec())
                 }
-                fn from_bytes<T: AsRef<[u8]>>(bytes: &mut Cursor<T>, _version: ChiaProtocolVersion) -> Result<Self, Error> where Self: Sized,
+                fn from_bytes(bytes: &mut Cursor<&[u8]>, _version: ChiaProtocolVersion) -> Result<Self, Error> where Self: Sized,
                 {
                     if bytes.remaining() < $size {
                         Err(Error::new(ErrorKind::InvalidInput, format!("Failed to Parse {}, expected length {}, found {}", stringify!($name),  $size, bytes.remaining())))
@@ -303,6 +555,7 @@ impl_sized_bytes!(
     Bytes8, 8;
     Bytes32, 32;
     Bytes48, 48;
+    Bytes64, 64;
     Bytes96, 96;
     Bytes100, 100;
     Bytes480, 480

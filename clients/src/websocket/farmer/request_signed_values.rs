@@ -26,7 +26,7 @@ impl MessageHandler for RequestSignedValuesHandle {
         peer_id: Arc<Bytes32>,
         peers: PeerMap,
     ) -> Result<(), Error> {
-        let mut cursor = Cursor::new(&msg.data);
+        let mut cursor = Cursor::new(msg.data.as_slice());
         let peer = peers.read().await.get(&peer_id).cloned();
         let protocol_version = if let Some(peer) = peer.as_ref() {
             *peer.protocol_version.read().await
@@ -101,10 +101,10 @@ impl MessageHandler for RequestSignedValuesHandle {
             self.recent_errors
                 .write()
                 .await
-                .add(format!("Do not have quality {}", &request.quality_string));
+                .add(format!("Do not have quality {}", request.quality_string));
             Err(Error::new(
                 ErrorKind::NotFound,
-                format!("Do not have quality {}", &request.quality_string),
+                format!("Do not have quality {}", request.quality_string),
             ))
         }
     }

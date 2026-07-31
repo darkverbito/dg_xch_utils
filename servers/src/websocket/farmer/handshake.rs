@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use blst::min_pk::SecretKey;
 use dg_xch_core::blockchain::sized_bytes::{Bytes32, Bytes48};
 use dg_xch_core::protocols::harvester::HarvesterHandshake;
-use dg_xch_core::protocols::shared::{Handshake, CAPABILITIES};
+use dg_xch_core::protocols::shared::{CAPABILITIES, Handshake};
 use dg_xch_core::protocols::{
     ChiaMessage, MessageHandler, NodeType, PeerMap, ProtocolMessageTypes,
 };
@@ -29,7 +29,7 @@ impl MessageHandler for HandshakeHandle {
         peer_id: Arc<Bytes32>,
         peers: PeerMap,
     ) -> Result<(), Error> {
-        let mut cursor = Cursor::new(&msg.data);
+        let mut cursor = Cursor::new(msg.data.as_slice());
         let peer = peers.read().await.get(&peer_id).cloned();
         let protocol_version = if let Some(peer) = peer.as_ref() {
             *peer.protocol_version.read().await
@@ -37,7 +37,7 @@ impl MessageHandler for HandshakeHandle {
             ChiaProtocolVersion::default()
         };
         let handshake = Handshake::from_bytes(&mut cursor, protocol_version)?;
-        debug!("New Peer: {}", &peer_id);
+        debug!("New Peer: {}", peer_id);
         if let Some(peer) = peers.read().await.get(&peer_id).cloned() {
             let (network_id, server_port) = {
                 let cfg = self.config.clone();
@@ -76,7 +76,7 @@ impl MessageHandler for HandshakeHandle {
             if NodeType::Harvester as u8 == handshake.node_type {
                 let farmer_public_keys = self.farmer_private_keys.keys().copied().collect();
                 let pool_public_keys = self.pool_public_keys.keys().copied().collect();
-                info! {"Harvester Connected. Sending Keys: ({:?}n {:?})", &farmer_public_keys, &pool_public_keys}
+                info! {"Harvester Connected. Sending Keys: ({:?}n {:?})", farmer_public_keys, pool_public_keys}
                 peer.websocket
                     .write()
                     .await

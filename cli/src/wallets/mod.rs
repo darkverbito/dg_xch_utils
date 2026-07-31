@@ -1,18 +1,21 @@
-use crate::wallets::common::{sign_coin_spends, DerivationRecord};
+use crate::wallets::common::{DerivationRecord, sign_coin_spends};
 use async_trait::async_trait;
 use blst::min_pk::SecretKey;
-use dashmap::mapref::one::Ref;
 use dashmap::DashMap;
+use dashmap::mapref::one::Ref;
 use dg_xch_core::blockchain::announcement::Announcement;
 use dg_xch_core::blockchain::coin::Coin;
 use dg_xch_core::blockchain::coin_record::{CatCoinRecord, CoinRecord};
 use dg_xch_core::blockchain::coin_spend::CoinSpend;
 use dg_xch_core::blockchain::condition_opcode::ConditionOpcode;
+use dg_xch_core::blockchain::condition_with_args::Message;
 use dg_xch_core::blockchain::sized_bytes::{Bytes32, Bytes48};
 use dg_xch_core::blockchain::spend_bundle::SpendBundle;
 use dg_xch_core::blockchain::transaction_record::{TransactionRecord, TransactionType};
+use dg_xch_core::blockchain::unsized_bytes::UnsizedBytes;
 use dg_xch_core::blockchain::wallet_type::{AmountWithPuzzleHash, WalletType};
-use dg_xch_core::clvm::program::{Program, SerializedProgram};
+use dg_xch_core::clvm::parser::sexp_to_bytes;
+use dg_xch_core::clvm::program::Program;
 use dg_xch_core::clvm::utils::INFINITE_COST;
 use dg_xch_core::consensus::constants::ConsensusConstants;
 use dg_xch_core::traits::SizedBytes;
@@ -30,7 +33,7 @@ use dg_xch_serialize::{ChiaProtocolVersion, ChiaSerialize};
 use log::{debug, info};
 use num_traits::ToPrimitive;
 use rand::prelude::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use std::cmp::max;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -56,7 +59,10 @@ impl SecretKeyStore {
         )
     }
     #[must_use]
-    pub fn secret_key_for_public_key(&self, pub_key: &Bytes48) -> Option<Ref<Bytes48, Bytes32>> {
+    pub fn secret_key_for_public_key(
+        &self,
+        pub_key: &Bytes48,
+    ) -> Option<Ref<'_, Bytes48, Bytes32>> {
         self.keys.get(pub_key)
     }
 }
@@ -188,7 +194,12 @@ pub trait WalletStore {
         let min_coin_amount = min_coin_amount.unwrap_or(0);
         let exclude_coin_amounts = exclude_coin_amounts.unwrap_or_default();
         if amount as u128 > spendable_amount {
-            Err(Error::new(ErrorKind::InvalidInput, format!("Can't select amount higher than our spendable balance.  Amount: {amount}, spendable: {spendable_amount}")))
+            Err(Error::new(
+                ErrorKind::InvalidInput,
+                format!(
+                    "Can't select amount higher than our spendable balance.  Amount: {amount}, spendable: {spendable_amount}"
+                ),
+            ))
         } else {
             debug!("About to select coins for amount {amount}");
             let max_num_coins = 500;
@@ -216,12 +227,20 @@ pub trait WalletStore {
                 valid_spendable_coins.push(coin_record.coin);
             }
             if sum_spendable_coins < amount {
-                return Err(Error::new(ErrorKind::InvalidInput, format!("Transaction for {amount} is greater than spendable balance of {sum_spendable_coins}. There may be other transactions pending or our minimum coin amount is too high.")));
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    format!(
+                        "Transaction for {amount} is greater than spendable balance of {sum_spendable_coins}. There may be other transactions pending or our minimum coin amount is too high."
+                    ),
+                ));
             }
             if amount == 0 && sum_spendable_coins == 0 {
-                return Err(Error::new(ErrorKind::InvalidInput, "No coins available to spend, you can not create a coin with an amount of 0, without already having coins."));
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    "No coins available to spend, you can not create a coin with an amount of 0, without already having coins.",
+                ));
             }
-            valid_spendable_coins.sort_by(|f, s| f.amount.cmp(&s.amount));
+            valid_spendable_coins.sort_by_key(|f| f.amount);
             if let Some(c) = check_for_exact_match(&valid_spendable_coins, amount) {
                 info!("Selected coin with an exact match: {c:?}");
                 Ok(HashSet::from([c]))
@@ -238,7 +257,9 @@ pub trait WalletStore {
                 }
                 if smaller_coin_sum == amount && smaller_coins.len() < max_num_coins && amount != 0
                 {
-                    debug!("Selected all smaller coins because they equate to an exact match of the target: {smaller_coins:?}");
+                    debug!(
+                        "Selected all smaller coins because they equate to an exact match of the target: {smaller_coins:?}"
+                    );
                     Ok(smaller_coins.iter().copied().collect())
                 } else if smaller_coin_sum < amount {
                     let smallest_coin =
@@ -247,7 +268,12 @@ pub trait WalletStore {
                         debug!("Selected closest greater coin: {}", smallest_coin.name());
                         Ok(HashSet::from([smallest_coin]))
                     } else {
-                        return Err(Error::new(ErrorKind::InvalidInput, format!("Transaction of {amount} mojo is greater than available sum {all_sum} mojos.")));
+                        return Err(Error::new(
+                            ErrorKind::InvalidInput,
+                            format!(
+                                "Transaction of {amount} mojo is greater than available sum {all_sum} mojos."
+                            ),
+                        ));
                     }
                 } else if smaller_coin_sum > amount {
                     let mut coin_set = knapsack_coin_algorithm(
@@ -269,7 +295,12 @@ pub trait WalletStore {
                             if let Some(greater_coin) = greater_coin {
                                 coin_set = Some(HashSet::from([greater_coin]));
                             } else {
-                                return Err(Error::new(ErrorKind::InvalidInput, format!("Transaction of {amount} mojo would use more than {max_num_coins} coins. Try sending a smaller amount")));
+                                return Err(Error::new(
+                                    ErrorKind::InvalidInput,
+                                    format!(
+                                        "Transaction of {amount} mojo would use more than {max_num_coins} coins. Try sending a smaller amount"
+                                    ),
+                                ));
                             }
                         }
                     }
@@ -282,7 +313,9 @@ pub trait WalletStore {
                 } else {
                     match select_smallest_coin_over_target(amount, &valid_spendable_coins) {
                         Some(coin) => {
-                            debug!("Resorted to selecting smallest coin over target due to dust.: {coin:?}");
+                            debug!(
+                                "Resorted to selecting smallest coin over target due to dust.: {coin:?}"
+                            );
                             Ok(HashSet::from([coin]))
                         }
                         None => Err(Error::new(
@@ -363,7 +396,7 @@ fn knapsack_coin_algorithm(
         let mut target_reached = false;
         while n_pass < 2 && !target_reached {
             for coin in smaller_coins {
-                if (n_pass == 0 && rand.gen::<bool>())
+                if (n_pass == 0 && rand.random::<bool>())
                     || (n_pass == 1 && !selected_coins.contains(coin))
                 {
                     if selected_coins.len() > max_num_coins {
@@ -428,7 +461,7 @@ pub trait Wallet<T: WalletStore + Send + Sync, C> {
         }
         Ok(hashes)
     }
-    fn puzzle_for_pk(&self, public_key: Bytes48) -> Result<Program, Error> {
+    fn puzzle_for_pk(&self, public_key: Bytes48) -> Result<Program<'_>, Error> {
         puzzle_for_pk(public_key)
     }
     fn puzzle_hash_for_pk(&self, public_key: Bytes48) -> Result<Bytes32, Error> {
@@ -455,7 +488,7 @@ pub trait Wallet<T: WalletStore + Send + Sync, C> {
         puzzle_announcements: Option<HashSet<Vec<u8>>>,
         puzzle_announcements_to_assert: Option<HashSet<Bytes32>>,
         fee: u64,
-    ) -> Result<Program, Error> {
+    ) -> Result<Program<'_>, Error> {
         let mut condition_list = vec![];
         for primary in primaries {
             condition_list.push(make_create_coin_condition(
@@ -688,7 +721,10 @@ pub trait Wallet<T: WalletStore + Send + Sync, C> {
                 }
             },
             HashMap::with_capacity(0),
-            &self.wallet_info().constants.agg_sig_me_additional_data,
+            self.wallet_info()
+                .constants
+                .agg_sig_me_additional_data
+                .as_ref(),
             self.wallet_info()
                 .constants
                 .max_block_cost_clvm
@@ -778,14 +814,24 @@ pub trait Wallet<T: WalletStore + Send + Sync, C> {
         if !ignore_max_send_amount {
             let max_send = self.wallet_store().lock().await.get_max_send_amount().await;
             if total_amount > max_send {
-                return Err(Error::new(ErrorKind::InvalidInput, format!("Can't send more than {max_send} mojos in a single transaction, got {total_amount}")));
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    format!(
+                        "Can't send more than {max_send} mojos in a single transaction, got {total_amount}"
+                    ),
+                ));
             }
             debug!("Max send amount: {max_send}");
         }
         let coins_set: HashSet<Coin>;
         if coins.is_none() {
             if total_amount > total_balance {
-                return Err(Error::new(ErrorKind::InvalidInput, format!("Can't spend more than wallet balance: {total_balance} mojos, tried to spend: {total_amount} mojos")));
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    format!(
+                        "Can't spend more than wallet balance: {total_balance} mojos, tried to spend: {total_amount} mojos"
+                    ),
+                ));
             }
             coins_set = self
                 .wallet_store()
@@ -865,14 +911,14 @@ pub trait Wallet<T: WalletStore + Send + Sync, C> {
                     primaries.push(AmountWithPuzzleHash {
                         amount,
                         puzzle_hash: *puzzle_hash,
-                        memos: memos.clone(),
+                        memos: memos.clone().into_iter().map(UnsizedBytes::new).collect(),
                     });
                     primaries
                 } else if amount > 0 {
                     vec![AmountWithPuzzleHash {
                         amount,
                         puzzle_hash: *puzzle_hash,
-                        memos: memos.clone(),
+                        memos: memos.clone().into_iter().map(UnsizedBytes::new).collect(),
                     }]
                 } else {
                     vec![]
@@ -955,17 +1001,19 @@ pub trait Wallet<T: WalletStore + Send + Sync, C> {
                 primary_announcement_hash = Some(
                     Announcement {
                         origin_info: coin.name(),
-                        message: message.to_vec(),
+                        message: Message::new(message.to_vec())?,
                         morph_bytes: None,
                     }
                     .name(),
                 );
-                info!("Reveal: {} ", hex::encode(&puzzle.serialized));
-                info!("Solution: {} ", hex::encode(&solution.serialized));
+                let puzzle_reveal = sexp_to_bytes(puzzle.sexp())?;
+                let solution = sexp_to_bytes(solution.sexp())?;
+                info!("Reveal: {} ", hex::encode(&puzzle_reveal));
+                info!("Solution: {} ", hex::encode(&solution));
                 spends.push(CoinSpend {
                     coin: *coin,
-                    puzzle_reveal: SerializedProgram::from_bytes(&puzzle.serialized),
-                    solution: SerializedProgram::from_bytes(&solution.serialized),
+                    puzzle_reveal,
+                    solution,
                 });
                 break;
             }
@@ -985,12 +1033,10 @@ pub trait Wallet<T: WalletStore + Send + Sync, C> {
                 None,
                 0,
             )?;
-            info!("Reveal: {} ", hex::encode(&puzzle.serialized));
-            info!("Solution: {} ", hex::encode(&solution.serialized));
             spends.push(CoinSpend {
                 coin,
-                puzzle_reveal: SerializedProgram::from_bytes(&puzzle.serialized),
-                solution: SerializedProgram::from_bytes(&solution.serialized),
+                puzzle_reveal: puzzle.serialized()?,
+                solution: solution.serialized()?,
             });
         }
         info!("Spends is {:?}", spends);
@@ -1001,17 +1047,32 @@ pub trait Wallet<T: WalletStore + Send + Sync, C> {
 pub fn compute_memos_for_spend(
     coin_spend: &CoinSpend,
 ) -> Result<HashMap<Bytes32, Vec<Vec<u8>>>, Error> {
-    let (_, result) = coin_spend
-        .puzzle_reveal
-        .run_with_cost(INFINITE_COST, &coin_spend.solution.to_program())?;
+    let program = Program::from_serial(&coin_spend.puzzle_reveal)?;
+    let args = Program::from_serial(&coin_spend.solution)?;
+    let (_, result) = program.run_with_cost(INFINITE_COST, &args)?;
     let mut memos = HashMap::default();
     let result_list = result.as_list();
     for condition in result_list {
         let mut conditions: Vec<Program> = condition.as_list();
-        if ConditionOpcode::from(&conditions[0]) == ConditionOpcode::CreateCoin
+        if ConditionOpcode::from(conditions[0].sexp()) == ConditionOpcode::CreateCoin
             && conditions.len() >= 4
         {
-            let memo_list = conditions.remove(3);
+            let trailing_args = conditions.split_off(3);
+            let memo_list = if trailing_args.len() > 1
+                || (trailing_args[0].is_atom() && trailing_args[0].sexp().non_nil())
+            {
+                // Backward compatibility: older local code flattened memos as extra args.
+                trailing_args
+                    .into_iter()
+                    .map(|memo| memo.as_vec().unwrap_or_default())
+                    .collect::<Vec<Vec<u8>>>()
+            } else {
+                trailing_args[0]
+                    .as_list()
+                    .into_iter()
+                    .map(|v| v.as_vec().unwrap_or_default())
+                    .collect::<Vec<Vec<u8>>>()
+            };
             let amount = conditions.remove(2);
             let puzzle_hash = conditions.remove(1);
             //If only 3 elements (opcode + 2 args), there is no memo, this is ph, amount
@@ -1023,13 +1084,170 @@ pub fn compute_memos_for_spend(
                     .to_u64()
                     .ok_or(Error::new(ErrorKind::InvalidInput, "invalid amount"))?,
             };
-            let memo_list = memo_list
-                .as_list()
-                .into_iter()
-                .map(|v| v.as_vec().unwrap_or_default())
-                .collect::<Vec<Vec<u8>>>();
             memos.insert(coin_added.name(), memo_list);
         }
     }
     Ok(memos)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dg_xch_core::clvm::sexp::{AtomBuf, SExp};
+    use dg_xch_puzzles::p2_conditions::puzzle_for_conditions;
+
+    #[test]
+    fn compute_memos_for_spend_reads_nested_memo_list() {
+        let parent_coin = Coin {
+            parent_coin_info: Bytes32::from([1u8; 32].to_vec()),
+            puzzle_hash: Bytes32::from([2u8; 32].to_vec()),
+            amount: 500,
+        };
+        let created_puzzle_hash = Bytes32::from([3u8; 32].to_vec());
+        let conditions = vec![make_create_coin_condition(
+            created_puzzle_hash,
+            123,
+            &[
+                UnsizedBytes::new(vec![0xaa]),
+                UnsizedBytes::new(vec![0xbb, 0xcc]),
+            ],
+        )];
+        let puzzle = puzzle_for_conditions(conditions.clone()).unwrap();
+        let full_solution = solution_for_conditions(conditions).unwrap();
+        let coin_spend = CoinSpend {
+            coin: parent_coin,
+            puzzle_reveal: puzzle.serialized().unwrap(),
+            solution: Program::to(0).serialized().unwrap(),
+        };
+        println!(
+            "coin_spend_solution_hex={}",
+            hex::encode(coin_spend.solution.clone())
+        );
+        println!(
+            "coin_spend_puzzle_reveal_hex={}",
+            hex::encode(coin_spend.puzzle_reveal.clone())
+        );
+        assert_eq!(
+            dg_xch_core::blockchain::unsized_bytes::UnsizedBytes::new(
+                full_solution.serialized().unwrap().to_bytes()
+            )
+            .to_string(),
+            "0xff80ffff01ffff33ffa00303030303030303030303030303030303030303030303030303030303030303ff7bffff81aaff82bbcc808080ff8080"
+        );
+
+        let memos = compute_memos_for_spend(&coin_spend).unwrap();
+        let created_coin = Coin {
+            parent_coin_info: parent_coin.name(),
+            puzzle_hash: created_puzzle_hash,
+            amount: 123,
+        };
+        assert_eq!(
+            memos.get(&created_coin.name()),
+            Some(&vec![vec![0xaa], vec![0xbb, 0xcc]])
+        );
+    }
+
+    #[test]
+    fn compute_memos_for_spend_reads_explicit_empty_memo_list() {
+        let parent_coin = Coin {
+            parent_coin_info: Bytes32::from([1u8; 32].to_vec()),
+            puzzle_hash: Bytes32::from([2u8; 32].to_vec()),
+            amount: 500,
+        };
+        let created_puzzle_hash = Bytes32::from([4u8; 32].to_vec());
+        let conditions = vec![make_create_coin_condition(created_puzzle_hash, 123, &[])];
+        let puzzle = puzzle_for_conditions(conditions.clone()).unwrap();
+        let full_solution = solution_for_conditions(conditions).unwrap();
+        let coin_spend = CoinSpend {
+            coin: parent_coin,
+            puzzle_reveal: puzzle.serialized().unwrap(),
+            solution: Program::to(0).serialized().unwrap(),
+        };
+        println!(
+            "coin_spend_empty_memos_solution_hex={}",
+            hex::encode(coin_spend.solution.clone())
+        );
+        println!(
+            "coin_spend_empty_memos_puzzle_reveal_hex={}",
+            hex::encode(coin_spend.puzzle_reveal.clone())
+        );
+        assert_eq!(
+            dg_xch_core::blockchain::unsized_bytes::UnsizedBytes::new(
+                full_solution.serialized().unwrap().to_bytes()
+            )
+            .to_string(),
+            "0xff80ffff01ffff33ffa00404040404040404040404040404040404040404040404040404040404040404ff7bff808080ff8080"
+        );
+
+        let memos = compute_memos_for_spend(&coin_spend).unwrap();
+        let created_coin = Coin {
+            parent_coin_info: parent_coin.name(),
+            puzzle_hash: created_puzzle_hash,
+            amount: 123,
+        };
+        assert_eq!(memos.get(&created_coin.name()), Some(&Vec::new()));
+    }
+
+    #[test]
+    fn compute_memos_for_spend_accepts_flattened_legacy_memos() {
+        let parent_coin = Coin {
+            parent_coin_info: Bytes32::from([1u8; 32].to_vec()),
+            puzzle_hash: Bytes32::from([2u8; 32].to_vec()),
+            amount: 500,
+        };
+        let created_puzzle_hash = Bytes32::from([9u8; 32].to_vec());
+        let legacy_condition = Program::to(vec![
+            SExp::from(ConditionOpcode::CreateCoin),
+            SExp::from(created_puzzle_hash),
+            SExp::from(123u64),
+            SExp::Atom(AtomBuf::new(vec![0xaa])),
+            SExp::Atom(AtomBuf::new(vec![0xbb, 0xcc])),
+        ]);
+        let puzzle = puzzle_for_conditions(vec![legacy_condition.sexp().to_owned()]).unwrap();
+        let coin_spend = CoinSpend {
+            coin: parent_coin,
+            puzzle_reveal: puzzle.serialized().unwrap(),
+            solution: Program::to(0).serialized().unwrap(),
+        };
+
+        let memos = compute_memos_for_spend(&coin_spend).unwrap();
+        let created_coin = Coin {
+            parent_coin_info: parent_coin.name(),
+            puzzle_hash: created_puzzle_hash,
+            amount: 123,
+        };
+        assert_eq!(
+            memos.get(&created_coin.name()),
+            Some(&vec![vec![0xaa], vec![0xbb, 0xcc]])
+        );
+    }
+
+    #[test]
+    fn compute_memos_for_spend_accepts_helper_style_no_memo_arg() {
+        let parent_coin = Coin {
+            parent_coin_info: Bytes32::from([1u8; 32].to_vec()),
+            puzzle_hash: Bytes32::from([2u8; 32].to_vec()),
+            amount: 500,
+        };
+        let created_puzzle_hash = Bytes32::from([10u8; 32].to_vec());
+        let helper_style_condition = Program::to(vec![
+            SExp::from(ConditionOpcode::CreateCoin),
+            SExp::from(created_puzzle_hash),
+            SExp::from(123u64),
+        ]);
+        let puzzle = puzzle_for_conditions(vec![helper_style_condition.sexp().to_owned()]).unwrap();
+        let coin_spend = CoinSpend {
+            coin: parent_coin,
+            puzzle_reveal: puzzle.serialized().unwrap(),
+            solution: Program::to(0).serialized().unwrap(),
+        };
+
+        let memos = compute_memos_for_spend(&coin_spend).unwrap();
+        let created_coin = Coin {
+            parent_coin_info: parent_coin.name(),
+            puzzle_hash: created_puzzle_hash,
+            amount: 123,
+        };
+        assert_eq!(memos.get(&created_coin.name()), None);
+    }
 }

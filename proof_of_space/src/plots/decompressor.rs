@@ -5,16 +5,16 @@ use crate::plots::compression::{
     get_max_table_pairs_for_compression_level,
 };
 use crate::plots::fx_generator::{
-    generate_fx_for_pairs_table2, generate_fx_for_pairs_table3, generate_fx_for_pairs_table4,
-    generate_fx_for_pairs_table5, generate_fx_for_pairs_table6, F1Generator,
+    F1Generator, generate_fx_for_pairs_table2, generate_fx_for_pairs_table3,
+    generate_fx_for_pairs_table4, generate_fx_for_pairs_table5, generate_fx_for_pairs_table6,
 };
 use crate::plots::{
-    ForwardPropResult, Group, K32Meta2, K32Meta4, Pair, ProofTable, BB_PLOT_VERSION,
-    MIN_TABLE_PAIRS, POST_PROOF_CMP_X_COUNT, POST_PROOF_X_COUNT, PROOF_X_COUNT,
+    BB_PLOT_VERSION, ForwardPropResult, Group, K32Meta2, K32Meta4, MIN_TABLE_PAIRS,
+    POST_PROOF_CMP_X_COUNT, POST_PROOF_X_COUNT, PROOF_X_COUNT, Pair, ProofTable,
 };
 use crate::utils::radix_sort::RadixSorter;
 use crate::utils::span::Span;
-use crate::utils::{calc_thread_vars, ThreadVars};
+use crate::utils::{ThreadVars, calc_thread_vars};
 use dg_xch_core::blockchain::sized_bytes::Bytes32;
 use dg_xch_core::plots::PlotTable;
 use log::{debug, error};
@@ -28,8 +28,8 @@ use std::mem::swap;
 use std::num::NonZeroUsize;
 use std::ops::{Add, AddAssign, Div, Mul, Sub};
 use std::ptr::copy_nonoverlapping;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::available_parallelism;
 use std::time::Instant;
 
@@ -56,29 +56,29 @@ pub struct GroupScanJob {
     pub final_group_entries: *mut u32,
 }
 unsafe impl<
-        T: Div<Output = T>
-            + Mul<Output = T>
-            + Eq
-            + PartialEq
-            + Sub<Output = T>
-            + Add<Output = T>
-            + AddAssign
-            + Copy
-            + One,
-    > Send for ThreadVars<T>
+    T: Div<Output = T>
+        + Mul<Output = T>
+        + Eq
+        + PartialEq
+        + Sub<Output = T>
+        + Add<Output = T>
+        + AddAssign
+        + Copy
+        + One,
+> Send for ThreadVars<T>
 {
 }
 unsafe impl<
-        T: Div<Output = T>
-            + Mul<Output = T>
-            + Eq
-            + PartialEq
-            + Sub<Output = T>
-            + Add<Output = T>
-            + AddAssign
-            + Copy
-            + One,
-    > Sync for ThreadVars<T>
+    T: Div<Output = T>
+        + Mul<Output = T>
+        + Eq
+        + PartialEq
+        + Sub<Output = T>
+        + Add<Output = T>
+        + AddAssign
+        + Copy
+        + One,
+> Sync for ThreadVars<T>
 {
 }
 unsafe impl Send for GroupScanJob {}
@@ -413,7 +413,7 @@ impl Decompressor {
             let x2 = u64::from(x_groups[j + 1]);
             let group_index = i / 2;
             let table: &mut ProofTable = &mut tables[1usize];
-            if i % 2 == 0 {
+            if i.is_multiple_of(2) {
                 table.begin_group(group_index);
             }
             if let Err(e) =
@@ -1853,11 +1853,11 @@ impl Decompressor {
                 out_pairs,
             };
             let table: &mut ProofTable = &mut tables[1isize];
-            for (i, j) in (0..num_xgroups).zip((0..x_groups.len()).step_by(2)) {
+            for (i, j) in (0usize..num_xgroups).zip((0..x_groups.len()).step_by(2)) {
                 let x1 = u64::from(x_groups[j]);
                 let x2 = u64::from(x_groups[j + 1]);
                 let group_index = i / 2;
-                if i % 2 == 0 {
+                if i.is_multiple_of(2) {
                     table.begin_group(group_index);
                 }
                 if let Err(e) = Self::process_table1bucket(

@@ -1,7 +1,7 @@
-use crate::chacha8::{chacha8_get_keystream, chacha8_keysetup, ChachaContext};
+use crate::chacha8::{ChachaContext, chacha8_get_keystream, chacha8_keysetup};
 use crate::constants::{
-    cdiv, ucdiv, ucdiv64, PlotEntry, K_BC, K_EXTRA_BITS, K_EXTRA_BITS_POW, K_F1_BLOCK_SIZE_BITS,
-    K_VECTOR_LENS, L_TARGETS,
+    K_BC, K_EXTRA_BITS, K_EXTRA_BITS_POW, K_F1_BLOCK_SIZE_BITS, K_VECTOR_LENS, L_TARGETS,
+    PlotEntry, cdiv, ucdiv, ucdiv64,
 };
 use crate::utils::bit_reader::BitReader;
 use crate::utils::slice_u64from_bytes;

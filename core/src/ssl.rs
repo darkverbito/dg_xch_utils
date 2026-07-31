@@ -3,38 +3,37 @@ use der::asn1::{Ia5String, UtcTime};
 use der::pem::LineEnding;
 use der::{DateTime, EncodePem};
 use log::{error, info};
-use rand::Rng;
 use rsa::pkcs1::DecodeRsaPrivateKey;
 use rsa::pkcs1v15::SigningKey;
 use rsa::pkcs8::{DecodePrivateKey, EncodePrivateKey, EncodePublicKey};
-use rustls::client::danger::HandshakeSignatureValid;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, UnixTime};
-use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
-use rustls::server::ParsedCertificate;
 use rustls::DigitallySignedStruct;
 use rustls::DistinguishedName;
 use rustls::SignatureScheme;
-use rustls_pemfile::{certs, read_one, Item};
+use rustls::client::danger::HandshakeSignatureValid;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, UnixTime};
+use rustls::server::ParsedCertificate;
+use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
+use rustls_pemfile::{Item, certs, read_one};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::collections::HashMap;
 use std::fs;
-use std::fs::{create_dir_all, File, OpenOptions};
+use std::fs::{File, OpenOptions, create_dir_all};
 use std::io::{BufReader, Error, ErrorKind, Write};
 use std::ops::{Add, Sub};
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
+use x509_cert::Certificate;
 use x509_cert::builder::{Builder, CertificateBuilder, Profile};
 use x509_cert::der::DecodePem;
-use x509_cert::ext::pkix::name::GeneralName;
 use x509_cert::ext::pkix::SubjectAltName;
+use x509_cert::ext::pkix::name::GeneralName;
 use x509_cert::name::Name;
 use x509_cert::serial_number::SerialNumber;
 use x509_cert::spki::SubjectPublicKeyInfo;
 use x509_cert::time::{Time, Validity};
-use x509_cert::Certificate;
 
 #[derive(Debug)]
 pub struct AllowAny {}
@@ -99,10 +98,7 @@ pub fn load_certs(filename: &str) -> Result<Vec<CertificateDer<'static>>, Error>
     let mut reader = BufReader::new(cert_file);
     let mut output = vec![];
     for cert in certs(&mut reader) {
-        match cert {
-            Ok(cert) => output.push(cert.to_owned()),
-            Err(err) => return Err(Error::other(err)),
-        }
+        output.push(cert.map_err(Error::other)?.to_owned());
     }
     Ok(output)
 }
@@ -111,10 +107,7 @@ pub fn load_certs_from_bytes(bytes: &[u8]) -> Result<Vec<CertificateDer<'static>
     let mut reader = BufReader::new(bytes);
     let mut output = vec![];
     for cert in certs(&mut reader) {
-        match cert {
-            Ok(cert) => output.push(cert.to_owned()),
-            Err(err) => return Err(Error::other(err)),
-        }
+        output.push(cert.map_err(Error::other)?.to_owned());
     }
     Ok(output)
 }
@@ -218,7 +211,8 @@ pub fn generate_ca_signed_cert_data(
     let root_key = rsa::RsaPrivateKey::from_pkcs1_pem(&String::from_utf8_lossy(key_data))
         .or_else(|_| rsa::RsaPrivateKey::from_pkcs8_pem(&String::from_utf8_lossy(key_data)))
         .map_err(|e| Error::other(format!("Failed to load Root Key: {e:?}")))?;
-    let mut rng = rand::thread_rng();
+    use rsa::rand_core::RngCore;
+    let mut rng = rsa::rand_core::OsRng;
     let cert_key =
         rsa::RsaPrivateKey::new(&mut rng, 2048).map_err(|e| Error::other(format!("{e:?}")))?;
     let pub_key = cert_key.to_public_key();
@@ -236,7 +230,7 @@ pub fn generate_ca_signed_cert_data(
             enable_key_agreement: false,
             enable_key_encipherment: false,
         },
-        SerialNumber::from(rng.gen::<u32>()),
+        SerialNumber::from(rng.next_u32()),
         Validity {
             not_before: Time::UtcTime(
                 UtcTime::from_system_time(SystemTime::now().sub(Duration::from_secs(60 * 60 * 24)))
@@ -282,7 +276,8 @@ pub fn make_ca_cert(cert_path: &Path, key_path: &Path) -> Result<(Vec<u8>, Vec<u
 }
 
 fn make_ca_cert_data() -> Result<(Vec<u8>, Vec<u8>), Error> {
-    let mut rng = rand::rngs::OsRng;
+    use rsa::rand_core::RngCore;
+    let mut rng = rsa::rand_core::OsRng;
     let root_key = rsa::RsaPrivateKey::new(&mut rng, 2048).expect("failed to generate a key");
     let pub_key = root_key.to_public_key();
     let signing_key: SigningKey<Sha256> = SigningKey::new(root_key.clone());
@@ -300,7 +295,7 @@ fn make_ca_cert_data() -> Result<(Vec<u8>, Vec<u8>), Error> {
             issuer: name.clone(),
             path_len_constraint: None,
         },
-        SerialNumber::from(rng.gen::<u32>()),
+        SerialNumber::from(rng.next_u32()),
         Validity {
             not_before: Time::UtcTime(
                 UtcTime::from_system_time(SystemTime::UNIX_EPOCH)

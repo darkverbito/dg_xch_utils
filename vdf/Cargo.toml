@@ -1,0 +1,19 @@
+[package]
+name = "dg_xch_vdf"
+description = "Pure Rust VDF validation for Chia consensus"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[dependencies]
+dg_xch_core = { path = "../core", version = "3.0.0", default-features = false }
+num-bigint = "0.4.6"
+num-integer = "0.1.46"
+num-traits = "0.2.19"
+sha2 = "0.10.9"
+
+[dev-dependencies]
+hex = "0.4.3"

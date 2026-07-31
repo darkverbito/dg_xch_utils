@@ -2,6 +2,7 @@ use crate::blockchain::coin_record::CoinRecord;
 use crate::blockchain::sized_bytes::{Bytes32, Bytes48};
 use crate::clvm::program::Program;
 use crate::constants::{DELAY_PUZZLEHASH_IDENTIFIER, DELAY_TIME_IDENTIFIER};
+use crate::errors::ClvmError;
 use crate::pool::PoolState;
 use crate::traits::SizedBytes;
 use hex::encode;
@@ -61,10 +62,10 @@ pub trait PlotFile<'a, F: AsyncSeek + AsyncRead> {
             }
         };
         let address = table_pointers[plot_table as usize];
-        if let Some(next) = table_pointers.get(plot_table as usize + 1) {
-            if *next > address {
-                return next - address;
-            }
+        if let Some(next) = table_pointers.get(plot_table as usize + 1)
+            && *next > address
+        {
+            return next - address;
         }
         self.plot_size() - address
     }
@@ -357,42 +358,39 @@ pub struct PlotNftExtraData {
     pub delay_puzzle_hash: Bytes32,
 }
 impl PlotNftExtraData {
-    pub fn from_program(program: &Program) -> Result<Self, Error> {
+    pub fn from_program(program: &Program) -> Result<Self, ClvmError> {
         let pool_state = PoolState::from_extra_data_program(program)?;
         let extra_data_program_list = program.as_list();
-        let delay_time_programs: Vec<Program> = extra_data_program_list
+        let delay_time_programs: Vec<&Program> = extra_data_program_list
             .iter()
             .filter(|p| {
-                if let Ok(f) = p.first() {
-                    if let Ok(ai) = f.as_int() {
-                        if let Some(au) = ai.to_u8() {
-                            return char::from(au) == DELAY_TIME_IDENTIFIER;
-                        }
-                    }
+                if let Ok(f) = p.first()
+                    && let Ok(ai) = f.as_int()
+                    && let Some(au) = ai.to_u8()
+                {
+                    return char::from(au) == DELAY_TIME_IDENTIFIER;
                 }
                 false
             })
-            .cloned()
             .collect();
         if delay_time_programs.is_empty() || delay_time_programs.len() > 1 {
-            return Err(Error::new(ErrorKind::InvalidInput, "Invalid PlotNFT"));
+            return Err(ClvmError::InvalidInput("Invalid PlotNFT".to_string()));
         }
         let delay_time = delay_time_programs[0].rest()?.as_int()?;
-        let extra_data_programs: Vec<Program> = extra_data_program_list
-            .into_iter()
+        let extra_data_programs: Vec<&Program> = extra_data_program_list
+            .iter()
             .filter(|p| {
-                if let Ok(f) = p.first() {
-                    if let Ok(ai) = f.as_int() {
-                        if let Some(au) = ai.to_u8() {
-                            return char::from(au) == DELAY_PUZZLEHASH_IDENTIFIER;
-                        }
-                    }
+                if let Ok(f) = p.first()
+                    && let Ok(ai) = f.as_int()
+                    && let Some(au) = ai.to_u8()
+                {
+                    return char::from(au) == DELAY_PUZZLEHASH_IDENTIFIER;
                 }
                 false
             })
             .collect();
         if extra_data_programs.is_empty() || extra_data_programs.len() > 1 {
-            return Err(Error::new(ErrorKind::InvalidInput, "Invalid PlotNFT"));
+            return Err(ClvmError::InvalidInput("Invalid PlotNFT".to_string()));
         }
         Ok(PlotNftExtraData {
             pool_state,

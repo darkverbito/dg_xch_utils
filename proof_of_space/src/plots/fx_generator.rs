@@ -1,16 +1,16 @@
 use crate::chacha8::{
-    chacha8_get_keystream, chacha8_get_keystream_unsafe, chacha8_keysetup, ChachaContext,
+    ChachaContext, chacha8_get_keystream, chacha8_get_keystream_unsafe, chacha8_keysetup,
 };
 use crate::constants::{
-    ucdiv_t, K_BC, K_EXTRA_BITS, K_F1_BLOCK_SIZE, K_F1_BLOCK_SIZE_BITS, L_TARGETS,
+    K_BC, K_EXTRA_BITS, K_F1_BLOCK_SIZE, K_F1_BLOCK_SIZE_BITS, L_TARGETS, ucdiv_t,
 };
 use crate::plots::{
-    get_meta_in, get_meta_out, K32Meta1, K32Meta2, K32Meta3, K32Meta4, Pair, PROOF_X_COUNT,
+    K32Meta1, K32Meta2, K32Meta3, K32Meta4, PROOF_X_COUNT, Pair, get_meta_in, get_meta_out,
 };
 use crate::utils::bit_reader::BitReader;
 use crate::utils::radix_sort::RadixSorter;
 use crate::utils::span::Span;
-use crate::utils::{bytes_to_u64, calc_thread_vars, ThreadVars};
+use crate::utils::{ThreadVars, bytes_to_u64, calc_thread_vars};
 use blake3::Hasher;
 use dg_xch_core::plots::PlotTable;
 use log::debug;

@@ -1,5 +1,5 @@
 use crate::constants::ucdiv_t;
-use std::cmp::{max, min, Ordering};
+use std::cmp::{Ordering, max, min};
 use std::io::{Error, ErrorKind, Seek, SeekFrom};
 use std::mem::size_of;
 use std::ops;
@@ -190,7 +190,7 @@ impl BitReader {
             let mut split =
                 split_number_by_prefix(self.buffer[start_index >> 6], 64, (start_index & 63) as u8);
             let mut result = split.1;
-            if end_index % 64 > 0 {
+            if !end_index.is_multiple_of(64) {
                 let bucket_size = if end_index >> 6 == self.buffer.len() - 1 {
                     self.last_size
                 } else {
@@ -260,7 +260,7 @@ impl BitReader {
             let mut split =
                 split_number_by_prefix(self.buffer[start_bucket], 64, (start_index % 64) as u8);
             let mut result = split.1;
-            if end_index % 64 > 0 {
+            if !end_index.is_multiple_of(64) {
                 let bucket_size = if end_bucket == (self.buffer.len() - 1) {
                     self.last_size
                 } else {
@@ -332,13 +332,13 @@ impl BitReader {
                 result.append_value(self.buffer[i], 64);
                 i += 1;
             }
-            if end_index % 64 > 0 {
+            if !end_index.is_multiple_of(64) {
                 let bucket_size = if end_bucket == (self.buffer.len() - 1) {
                     self.last_size
                 } else {
                     64
                 }; //u8?
-                   // Get the suffix from the last bucket.
+                // Get the suffix from the last bucket.
                 split = split_number_by_prefix(
                     self.buffer[end_bucket],
                     bucket_size as u8,

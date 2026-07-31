@@ -2,7 +2,7 @@ use crate::websocket::harvester::harvester_handshake::HarvesterHandshakeHandle;
 use crate::websocket::harvester::new_signage_point_harvester::NewSignagePointHarvesterHandle;
 use crate::websocket::harvester::request_signatures::RequestSignaturesHandle;
 use crate::websocket::{WsClient, WsClientConfig};
-use dg_xch_core::consensus::constants::{ConsensusConstants, CONSENSUS_CONSTANTS_MAP, MAINNET};
+use dg_xch_core::consensus::constants::{CONSENSUS_CONSTANTS, ChiaNetwork, ConsensusConstants};
 use dg_xch_core::constants::{CHIA_CA_CRT, CHIA_CA_KEY};
 use dg_xch_core::protocols::harvester::HarvesterState;
 use dg_xch_core::protocols::{
@@ -10,9 +10,10 @@ use dg_xch_core::protocols::{
 };
 use dg_xch_pos::PlotManagerAsync;
 use std::collections::HashMap;
-use std::io::Error;
-use std::sync::atomic::AtomicBool;
+use std::io::{Error, ErrorKind};
+use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 pub mod harvester_handshake;
@@ -31,9 +32,9 @@ impl HarvesterClient {
         run: Arc<AtomicBool>,
         timeout: u64,
     ) -> Result<Self, Error> {
-        let constants = CONSENSUS_CONSTANTS_MAP
-            .get(&client_config.network_id)
-            .unwrap_or(&MAINNET);
+        let network = ChiaNetwork::from_str(&client_config.network_id)
+            .map_err(|e| Error::new(ErrorKind::InvalidData, e))?;
+        let constants = CONSENSUS_CONSTANTS[network as usize];
         let handles = Arc::new(RwLock::new(handles(
             constants,
             plot_manager.clone(),
@@ -64,7 +65,7 @@ impl HarvesterClient {
 }
 
 fn handles<T: PlotManagerAsync + Send + Sync + 'static>(
-    constants: &'static ConsensusConstants,
+    constants: ConsensusConstants,
     plot_manager: Arc<RwLock<T>>,
     plots_ready: Arc<AtomicBool>,
     harvester_state: Arc<RwLock<HarvesterState>>,
