@@ -1459,12 +1459,7 @@ impl TryFrom<&SExp<'_>> for Vec<ConditionWithArgs> {
         let mut results = Vec::new();
         for arg in sexp.iter() {
             let arg: Result<ConditionWithArgs, ClvmError> = arg.try_into();
-            match arg {
-                Ok(condition) => {
-                    results.push(condition);
-                }
-                Err(error) => return Err(error),
-            }
+            results.push(arg?);
         }
         Ok(results)
     }
@@ -1491,9 +1486,9 @@ pub fn op_code_with_args_from_sexp(sexp: &SExp) -> Result<(ConditionOpcode, Vec<
                 }
             }
             SExp::Pair(_pairbuf) => {
-                if opcode == ConditionOpcode::Remark {
-                    vars.push(sexp_to_bytes(arg)?.as_ref().to_vec());
-                } else if index == 3 && opcode == ConditionOpcode::CreateCoin {
+                if opcode == ConditionOpcode::Remark
+                    || (index == 3 && opcode == ConditionOpcode::CreateCoin)
+                {
                     vars.push(sexp_to_bytes(arg)?.as_ref().to_vec());
                 } else {
                     warn!("Got pair in opcode({opcode}) args: {arg:?}");
