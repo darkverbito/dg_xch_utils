@@ -16,6 +16,9 @@ use dg_xch_core::blockchain::vdf_output::VdfOutput;
 use dg_xch_core::blockchain::vdf_proof::VdfProof;
 use dg_xch_core::clvm::bls_bindings::verify_signature;
 use dg_xch_core::consensus::constants::ConsensusConstants;
+use dg_xch_core::consensus::deficit::calculate_deficit;
+use dg_xch_core::consensus::difficulty_adjustment::BlockRecordProvider;
+use dg_xch_core::consensus::make_sub_epoch_summary::make_sub_epoch_summary;
 use dg_xch_core::consensus::pot_iterations::{
     calculate_ip_iters, calculate_iterations_quality, calculate_sp_interval_iters,
     calculate_sp_iters, is_overflow_block,
@@ -102,47 +105,18 @@ impl BlockCache {
     }
 }
 
+// The promoted `dg_xch_core` consensus primitives (`make_sub_epoch_summary`, and the difficulty
+// retarget helpers) look records up through `BlockRecordProvider`. `BlockCache` is that provider for the
+// recent-chain path — an `Option` on miss, which the promoted fns turn into a fail-closed `Err`.
+impl BlockRecordProvider for BlockCache {
+    fn block_record(&self, header_hash: Bytes32) -> Option<&BlockRecord> {
+        self.by_hash.get(&header_hash)
+    }
+}
+
 // `BlockRecord`'s consensus accessors (`first_in_sub_slot`/`is_transaction_block`/`is_challenge_block`/
 // `ip_iters`) now live as methods on `dg_xch_core::BlockRecord`. `ip_iters` there returns the native
 // `std::io::Error` from `calculate_ip_iters`; call sites here map it to `WeightProofError`.
-
-/// `calculate_deficit` (ref `chia/consensus/deficit.py:7`) — the deficit state machine at a block.
-pub(crate) fn calculate_deficit(
-    c: &ConsensusConstants,
-    height: u32,
-    prev_b: Option<&BlockRecord>,
-    overflow: bool,
-    num_finished_sub_slots: usize,
-) -> u8 {
-    let min = c.min_blocks_per_challenge_block;
-    if height == 0 {
-        return min - 1;
-    }
-    // height != 0 ⇒ prev_b present in a well-formed chain; fail-closed callers guarantee this.
-    let prev_deficit = prev_b.map_or(min, |p| p.deficit);
-    if prev_deficit == min {
-        // Prev sb must be an overflow sb. However maybe it's in a different sub-slot.
-        if overflow {
-            if num_finished_sub_slots > 0 {
-                prev_deficit - 1
-            } else {
-                prev_deficit
-            }
-        } else {
-            prev_deficit - 1
-        }
-    } else if prev_deficit == 0 {
-        if num_finished_sub_slots == 0 {
-            0
-        } else if num_finished_sub_slots == 1 {
-            if overflow { min } else { min - 1 }
-        } else {
-            min - 1
-        }
-    } else {
-        prev_deficit - 1
-    }
-}
 
 /// `validate_pospace_and_get_required_iters` (ref `chia/consensus/pot_iterations.py:50`). Returns
 /// `Ok(None)` when the proof of space is invalid (reference returns `None`), `Ok(Some(iters))` otherwise.
@@ -324,63 +298,6 @@ fn can_finish_sub_and_full_epoch(
         }
     }
     Ok((true, height_can_be_first_in_epoch(c, height + 1)))
-}
-
-/// `make_sub_epoch_summary` (ref `make_sub_epoch_summary.py:22`). Reconstructs the SES expected at
-/// `blocks_included_height`. dg_xch's `SubEpochSummary` is the mainnet-active 5-field form (no
-/// `challenge_merkle_root`) — matching the fixture's on-chain hashes; do not add the 6th field until it
-/// activates. In the recent path `prev_ses_block` is always `None`, so the walk-back finds it.
-fn make_sub_epoch_summary(
-    c: &ConsensusConstants,
-    blocks: &BlockCache,
-    blocks_included_height: u32,
-    prev_prev_block: &BlockRecord,
-    new_difficulty: Option<u64>,
-    new_sub_slot_iters: Option<u64>,
-) -> Result<SubEpochSummary, WeightProofError> {
-    if prev_prev_block.height != blocks_included_height.wrapping_sub(2) {
-        return Err(WeightProofError::Rejected("make_ses: prev_prev height"));
-    }
-    // First sub_epoch.
-    if (u64::from(blocks_included_height) + u64::from(c.max_sub_slot_blocks))
-        / u64::from(c.sub_epoch_blocks)
-        <= 1
-    {
-        return Ok(SubEpochSummary {
-            prev_subepoch_summary_hash: c.genesis_challenge,
-            reward_chain_hash: c.genesis_challenge,
-            num_blocks_overflow: 0,
-            new_difficulty: None,
-            new_sub_slot_iters: None,
-        });
-    }
-    let mut curr = prev_prev_block;
-    while curr.sub_epoch_summary_included.is_none() {
-        curr = blocks.block_record(curr.prev_hash)?;
-    }
-    let prev_ses_block = curr;
-    let included = prev_ses_block
-        .sub_epoch_summary_included
-        .as_ref()
-        .ok_or(WeightProofError::Rejected("make_ses: no included ses"))?;
-    let reward_slot_hashes =
-        prev_ses_block
-            .finished_reward_slot_hashes
-            .as_ref()
-            .ok_or(WeightProofError::Rejected(
-                "make_ses: no reward slot hashes",
-            ))?;
-    let prev_ses = hash_of(included)?;
-    Ok(SubEpochSummary {
-        prev_subepoch_summary_hash: prev_ses,
-        reward_chain_hash: *reward_slot_hashes.last().ok_or(WeightProofError::Rejected(
-            "make_ses: empty reward slot hashes",
-        ))?,
-        num_blocks_overflow: u8::try_from(prev_ses_block.height % c.sub_epoch_blocks)
-            .map_err(|_| WeightProofError::Rejected("make_ses: overflow count"))?,
-        new_difficulty,
-        new_sub_slot_iters,
-    })
 }
 
 /// `get_signage_point_vdf_info` (ref `vdf_info_computation.py:11`). Returns
@@ -1032,7 +949,8 @@ fn validate_unfinished_header_block(
                         None
                     },
                     if can_finish_epoch { Some(vs.ssi) } else { None },
-                )?;
+                )
+                .map_err(|_| e("make_sub_epoch_summary"))?;
                 if hash_of(&expected)? != seh {
                     return Err(e("INVALID_SUB_EPOCH_SUMMARY"));
                 }
