@@ -1,8 +1,11 @@
 use crate::blockchain::proof_of_space::ProofOfSpace;
-use crate::blockchain::sized_bytes::Bytes96;
+use crate::blockchain::sized_bytes::{Bytes32, Bytes96};
 use crate::blockchain::vdf_info::VdfInfo;
+use crate::utils::hash_256;
 use dg_xch_macros::ChiaSerial;
+use dg_xch_serialize::{ChiaProtocolVersion, ChiaSerialize};
 use serde::{Deserialize, Serialize};
+use std::io::Error;
 
 #[derive(ChiaSerial, Clone, PartialEq, Eq, Serialize, Deserialize, Debug)]
 pub struct ChallengeBlockInfo {
@@ -10,4 +13,20 @@ pub struct ChallengeBlockInfo {
     pub challenge_chain_sp_vdf: Option<VdfInfo>,
     pub challenge_chain_sp_signature: Bytes96,
     pub challenge_chain_ip_vdf: VdfInfo,
+}
+
+impl ChallengeBlockInfo {
+    /// chia `std_hash(bytes(challenge_block_info))`. The consensus hash of this challenge-block info:
+    /// sha256 over its streamable encoding. This is the value a block record carries as
+    /// `challenge_block_info_hash`, used as the infused-challenge-chain challenge for challenge blocks. As
+    /// a blockchain (not network) type its encoding — hence this hash — is independent of the negotiated
+    /// protocol version.
+    ///
+    /// # Errors
+    /// Returns an error if the streamable encoding of the challenge-block info fails.
+    pub fn hash(&self) -> Result<Bytes32, Error> {
+        Ok(Bytes32::from(hash_256(
+            self.to_bytes(ChiaProtocolVersion::default())?,
+        )))
+    }
 }

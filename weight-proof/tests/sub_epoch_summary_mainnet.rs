@@ -1,21 +1,10 @@
-//! Mainnet hash-exact cross-check for the promoted `make_sub_epoch_summary` in `dg_xch_core`.
-//!
-//! A real mainnet weight proof (tip height 9,054,698) carries one [`SubEpochData`] per sub-epoch. Chained
-//! genesis-anchored (each summary links the previous by hash), these reconstruct the *actual on-chain*
-//! [`SubEpochSummary`] sequence — the same reconstruction the weight-proof verifier proves terminates in
-//! the sub-epoch-summary hash mainnet committed in its recent chain (see `weight_proof_parity.rs`, which
-//! pins the first/last SES hashes as golden scalars).
-//!
-//! This test then drives the *promoted* [`make_sub_epoch_summary`] over block records carrying those real
-//! previous summaries and reward-chain hashes, and asserts the summary it reconstructs hashes to mainnet's
-//! real on-chain SES hash. Because `make_sub_epoch_summary` derives `prev_subepoch_summary_hash` itself by
-//! hashing the previous summary (it is not fed in), the match proves the promoted function reproduces
-//! chia's exact field assembly and streamable hashing — a hash-exact proof, thousands of times over.
+// Mainnet hash-exact cross-check for make_sub_epoch_summary against the real on-chain SES sequence.
+
+mod common;
 
 use std::collections::HashMap;
-use std::io::Cursor;
-use std::path::PathBuf;
 
+use common::load_fixture;
 use dg_xch_core::blockchain::block_record::BlockRecord;
 use dg_xch_core::blockchain::sized_bytes::Bytes32;
 use dg_xch_core::blockchain::sub_epoch_summary::SubEpochSummary;
@@ -24,16 +13,6 @@ use dg_xch_core::blockchain::vdf_output::VdfOutput;
 use dg_xch_core::blockchain::weight_proof::WeightProof;
 use dg_xch_core::consensus::constants::MAINNET;
 use dg_xch_core::consensus::make_sub_epoch_summary::make_sub_epoch_summary;
-use dg_xch_serialize::{ChiaProtocolVersion, ChiaSerialize};
-
-fn load_fixture() -> WeightProof {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/weight_proof_mainnet_9054698.bin");
-    let data = std::fs::read(path).expect("mainnet weight-proof fixture present");
-    let mut cur = Cursor::new(data.as_slice());
-    WeightProof::from_bytes(&mut cur, ChiaProtocolVersion::default())
-        .expect("real mainnet weight proof deserializes")
-}
 
 fn empty_vdf() -> VdfOutput {
     VdfOutput {
@@ -41,9 +20,6 @@ fn empty_vdf() -> VdfOutput {
     }
 }
 
-/// A block record carrying the fields `make_sub_epoch_summary` reads: `height`, `prev_hash`, the included
-/// previous summary, and the finished reward-slot hashes. Every other field is a valid placeholder the
-/// reconstruction never inspects.
 fn ses_block(
     height: u32,
     included: SubEpochSummary,
@@ -78,9 +54,7 @@ fn ses_block(
     }
 }
 
-/// Genesis-anchored reconstruction of the real on-chain sub-epoch-summary sequence from the proof's
-/// public `sub_epochs`, mirroring chia's `_map_sub_epoch_summaries`. This is the verifier's oracle side —
-/// it is exactly the chain `weight_proof_parity.rs` proves ends in mainnet's committed SES hash.
+// Genesis-anchored reconstruction of the on-chain SES sequence from wp.sub_epochs (chia _map_sub_epoch_summaries).
 fn real_sub_epoch_summaries(wp: &WeightProof) -> Vec<SubEpochSummary> {
     let mut prev = MAINNET.genesis_challenge;
     let mut out = Vec::with_capacity(wp.sub_epochs.len());
@@ -98,12 +72,6 @@ fn real_sub_epoch_summaries(wp: &WeightProof) -> Vec<SubEpochSummary> {
     out
 }
 
-/// Every real sub-epoch summary (past the genesis-anchored first) is reconstructed hash-exact by the
-/// promoted `make_sub_epoch_summary`. The previous summary is supplied as the included summary on the
-/// prev-sub-epoch-summary block; `make_sub_epoch_summary` re-derives `prev_subepoch_summary_hash` by
-/// hashing it, `reward_chain_hash` from the block's last finished reward-slot hash, and
-/// `num_blocks_overflow` from that block's height mod `SUB_EPOCH_BLOCKS` — so a match proves the full
-/// field-assembly-and-hash path against mainnet.
 #[test]
 fn make_sub_epoch_summary_matches_mainnet_ses_hashes() {
     let wp = load_fixture();
@@ -167,8 +135,6 @@ fn make_sub_epoch_summary_matches_mainnet_ses_hashes() {
     eprintln!("  last  match: SES #{lk} -> {lh}");
 }
 
-/// The genesis-anchored first-sub-epoch branch: when `blocks_included_height` still falls inside the first
-/// sub-epoch, the summary is fixed to the genesis-challenge anchors with no retarget, per chia.
 #[test]
 fn make_sub_epoch_summary_returns_genesis_anchored_first_summary() {
     let blocks: HashMap<Bytes32, BlockRecord> = HashMap::new();

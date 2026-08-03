@@ -1,8 +1,11 @@
 use crate::blockchain::proof_of_space::ProofOfSpace;
 use crate::blockchain::sized_bytes::{Bytes32, Bytes96};
 use crate::blockchain::vdf_info::VdfInfo;
+use crate::utils::hash_256;
 use dg_xch_macros::ChiaSerial;
+use dg_xch_serialize::{ChiaProtocolVersion, ChiaSerialize};
 use serde::{Deserialize, Serialize};
+use std::io::Error;
 
 #[derive(ChiaSerial, Clone, PartialEq, Eq, Serialize, Deserialize, Debug)]
 pub struct RewardChainBlockUnfinished {
@@ -14,4 +17,19 @@ pub struct RewardChainBlockUnfinished {
     pub challenge_chain_sp_signature: Bytes96,
     pub reward_chain_sp_vdf: Option<VdfInfo>,
     pub reward_chain_sp_signature: Bytes96,
+}
+
+impl RewardChainBlockUnfinished {
+    /// chia `std_hash(bytes(unfinished_reward_block))`. The consensus hash of this unfinished reward-chain
+    /// block: sha256 over its streamable encoding. Header validation checks it against the foliage block
+    /// data's `unfinished_reward_block_hash`. As a blockchain (not network) type its encoding — hence this
+    /// hash — is independent of the negotiated protocol version.
+    ///
+    /// # Errors
+    /// Returns an error if the streamable encoding of the unfinished reward-chain block fails.
+    pub fn hash(&self) -> Result<Bytes32, Error> {
+        Ok(Bytes32::from(hash_256(
+            self.to_bytes(ChiaProtocolVersion::default())?,
+        )))
+    }
 }

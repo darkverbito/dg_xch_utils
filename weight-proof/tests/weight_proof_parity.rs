@@ -1,8 +1,8 @@
 // Parity and tamper tests using a committed mainnet weight proof.
 
-use std::io::Cursor;
-use std::path::PathBuf;
+mod common;
 
+use common::{fixtures_dir, load_fixture};
 use dg_xch_core::blockchain::sized_bytes::{Bytes32, Bytes96};
 use dg_xch_core::blockchain::sub_epoch_summary::SubEpochSummary;
 use dg_xch_core::blockchain::weight_proof::WeightProof;
@@ -19,18 +19,6 @@ const GOLDEN_FIRST_SES_HASH: &str =
     "6c6c5401c7b912fafbc7c99b7ef6d469ba0e349616766e006f0e588ae0d7057b";
 const GOLDEN_LAST_SES_HASH: &str =
     "b70b1e645bd16bbde565dd595250f5c1cc944e9e75495ef80a25f09f5c554593";
-
-fn fixtures_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
-}
-
-fn load_fixture() -> WeightProof {
-    let data = std::fs::read(fixtures_dir().join("weight_proof_mainnet_9054698.bin"))
-        .expect("mainnet weight-proof fixture present");
-    let mut cur = Cursor::new(data.as_slice());
-    WeightProof::from_bytes(&mut cur, ChiaProtocolVersion::default())
-        .expect("real mainnet weight proof deserializes")
-}
 
 /// The reference's `std_hash(ses)` is sha256 over the streamable bytes of the SubEpochSummary.
 fn ses_hash_hex(ses: &SubEpochSummary) -> String {
