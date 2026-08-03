@@ -1,30 +1,13 @@
-//! Mainnet cross-check for the difficulty-adjustment retarget math in `dg_xch_core`.
-//!
-//! A real mainnet weight proof (tip height 9,054,698) carries one [`SubEpochData`] per sub-epoch, and at
-//! every epoch boundary that record pins the *actual on-chain* `new_difficulty` and `new_sub_slot_iters`
-//! the network switched to. Those are the values chia's `_get_next_difficulty` / `_get_next_sub_slot_iters`
-//! produced live. This test loads all of them and asserts that the post-formula transforms implemented in
-//! `dg_xch_core` (`truncate_to_significant_bits`, `count_significant_bits`, the NUM_SPS_SUB_SLOT rounding,
-//! and the DIFFICULTY_CHANGE_MAX_FACTOR clamp) reproduce the shape of every real retarget.
+// Mainnet cross-check for the difficulty-adjustment retarget math: every real on-chain retarget must
+// satisfy the significant-bit truncation, NUM_SPS_SUB_SLOT rounding, and DIFFICULTY_CHANGE_MAX_FACTOR clamp.
 
-use std::io::Cursor;
-use std::path::PathBuf;
+mod common;
 
-use dg_xch_core::blockchain::weight_proof::WeightProof;
+use common::load_fixture;
 use dg_xch_core::consensus::constants::MAINNET;
 use dg_xch_core::consensus::difficulty_adjustment::{
     count_significant_bits, truncate_to_significant_bits,
 };
-use dg_xch_serialize::{ChiaProtocolVersion, ChiaSerialize};
-
-fn load_fixture() -> WeightProof {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/weight_proof_mainnet_9054698.bin");
-    let data = std::fs::read(path).expect("mainnet weight-proof fixture present");
-    let mut cur = Cursor::new(data.as_slice());
-    WeightProof::from_bytes(&mut cur, ChiaProtocolVersion::default())
-        .expect("real mainnet weight proof deserializes")
-}
 
 #[test]
 fn mainnet_retargets_match_significant_bits_and_rounding() {
