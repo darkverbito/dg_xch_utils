@@ -175,6 +175,31 @@ impl CoinStore for PostgresStore {
         rollback_to_on(conn, fork_height).await
     }
 
+    async fn ensure_reorg_indexes(&self) -> Result<(), StoreError> {
+        // Built NON-concurrently, unlike `build_indexes`' `CREATE INDEX CONCURRENTLY`. Two reasons:
+        // (1) the caller is the reorg itself (not a live tip-serving build), and it is not applying
+        // coins meanwhile, so the brief SHARE lock a plain build takes is free here; (2) a
+        // CONCURRENTLY build interrupted by a crash/SIGTERM leaves an INVALID index that
+        // `IF NOT EXISTS` then skips forever (a permanent seq-scan trap), whereas a plain build that
+        // is killed rolls back cleanly and the next reorg simply retries. Same index NAMES as
+        // migration 0006, so a later `build_indexes` (CONCURRENTLY IF NOT EXISTS) is a no-op, and
+        // vice versa. Idempotent: once the index exists this is a catalog check.
+        // confirmed_index is block-sequential (append order) → ~0.98 heap-correlated, so a BRIN
+        // serves the "confirmed_index > $1" rollback range in kilobytes and is near-free on insert.
+        // spent_index is not heap-correlated (create-early/spend-late), so it stays a btree.
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS coin_record_confirmed_index ON coin_record USING BRIN (confirmed_index)",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS coin_record_spent_index ON coin_record (spent_index)",
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     #[cfg(feature = "coin-index")]
     async fn get_unspent_by_puzzle_hash(
         &self,

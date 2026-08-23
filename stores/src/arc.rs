@@ -53,6 +53,11 @@ impl<T: CoinStore + Send + Sync> CoinStore for Arc<T> {
     ) -> Result<u64, StoreError> {
         (**self).rollback_to_in(batch, fork_height).await
     }
+    // Must delegate: the trait default is a no-op, so without this Arc<PostgresStore> would silently
+    // skip the reorg-index build (the engine's store is Arc-wrapped on the live path).
+    async fn ensure_reorg_indexes(&self) -> Result<(), StoreError> {
+        (**self).ensure_reorg_indexes().await
+    }
 
     #[cfg(feature = "coin-index")]
     async fn get_unspent_by_puzzle_hash(

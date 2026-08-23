@@ -790,23 +790,9 @@ where
         // sub_slot_iters_starting into the record and every descendant would inherit the poisoned value
         // (the required_iters-over-sp-interval rejections just after sub-epoch boundaries).
         let candidate = self.store.get_block_record(&header_hash).await?;
-        let prev_tx = match prev.as_ref() {
-            // Checkpoint anchor: no local ancestor. The candidate record's attested
-            // prev-transaction-block height keeps the CLVM flag ladder and time-lock context in
-            // the current fork regime instead of collapsing to height 0 (genesis flags).
-            None => candidate
-                .as_ref()
-                .map_or((0u32, None), |c| (c.prev_transaction_block_height, None)),
-            Some(p) if p.is_transaction_block() => (p.height, p.timestamp),
-            Some(p) => match self
-                .store
-                .get_block_record_by_height(p.prev_transaction_block_height)
-                .await?
-            {
-                Some(r) => (r.height, r.timestamp),
-                None => (p.prev_transaction_block_height, None),
-            },
-        };
+        let prev_tx = self
+            .prev_tx_context(prev.as_ref(), candidate.as_ref())
+            .await?;
         // Height/weight continuity against the parent record (before any body work).
         if let Some(p) = prev.as_ref() {
             let height = block.height();
@@ -1525,10 +1511,97 @@ where
         Ok(self.store.get_block_record(hash).await?)
     }
 
-    // Build the ForkView for `block`: walk parent-ward through the unapplied deltas (staged
-    // window blocks, then pending orphan branches) until the last store-applied ancestor — the
-    // fork point. A parent absent from both the overlay and the store is the checkpoint-anchor
-    // bootstrap (pre-anchor state is trusted wholesale, fork view empty).
+    // Previous-TRANSACTION-block context (height, timestamp) for the CLVM flag ladder and the
+    // time-lock conditions: chia validates ASSERT_HEIGHT/SECONDS against the previous transaction
+    // block's height/timestamp, never this block's own. `candidate` is this block's own
+    // headers-first record (if the fast-sync header pass stored one); it grounds the checkpoint
+    // anchor when the local ancestor is missing (weight-proof-attested prev-tx height). Shared by
+    // `prepare_delta` and the store-backed fork reconstruction (`delta_from_store`).
+    async fn prev_tx_context(
+        &self,
+        prev: Option<&BlockRecord>,
+        candidate: Option<&BlockRecord>,
+    ) -> Result<(u32, Option<u64>), NodeError> {
+        Ok(match prev {
+            // Checkpoint anchor: no local ancestor. The candidate record's attested
+            // prev-transaction-block height keeps the CLVM flag ladder and time-lock context in
+            // the current fork regime instead of collapsing to height 0 (genesis flags).
+            None => candidate.map_or((0u32, None), |c| (c.prev_transaction_block_height, None)),
+            Some(p) if p.is_transaction_block() => (p.height, p.timestamp),
+            Some(p) => match self
+                .store
+                .get_block_record_by_height(p.prev_transaction_block_height)
+                .await?
+            {
+                Some(r) => (r.height, r.timestamp),
+                None => (p.prev_transaction_block_height, None),
+            },
+        })
+    }
+
+    // Fold one already-validated branch delta into the fork view: its additions become
+    // fork-visible unspent coins (keyed by name), its removals become fork-visible spends. Shared
+    // by the in-memory-overlay and store-fallback halves of the fork walk.
+    fn fold_delta_into_view(view: &mut ForkView, d: &BlockDelta) {
+        for a in &d.additions {
+            view.additions.insert(a.coin.name(), *a);
+        }
+        view.removals.extend(d.removals.iter().copied());
+    }
+
+    /// Rebuild a stored-but-non-confirmed branch block's already-validated coin delta from the
+    /// DURABLE store (its persisted body + record) — chia's `ForkInfo` / `advance_fork_info`
+    /// rebuilt from the block store instead of an in-memory cache. The in-memory
+    /// `pending`/`staged_deltas` caches are bounded and lost on restart; the store is
+    /// authoritative and unbounded, so a fork of ANY depth (and one that surfaces only after a
+    /// process restart) can be reconstructed. The coin delta is re-derived exactly as the block
+    /// was first validated — chia re-runs `get_name_puzzle_conditions` for every fork block — via
+    /// the pure body half only, so there is no recursion into the fork view.
+    ///
+    /// # Errors
+    /// [`NodeError::Invalid`] if the record or the body is absent from the store (a branch block
+    /// must have been persisted by `persist_archive` when it first arrived); a body-validation
+    /// error if the persisted body no longer validates; [`NodeError::Store`] on a store failure.
+    async fn delta_from_store(&self, hash: &Bytes32) -> Result<BlockDelta, NodeError> {
+        let record = self.store.get_block_record(hash).await?.ok_or_else(|| {
+            NodeError::Invalid(format!("fork block {hash} has no record in the store"))
+        })?;
+        let block = self.store.get_block(hash).await?.ok_or_else(|| {
+            NodeError::Invalid(format!(
+                "fork block {hash} at height {} has no body in the store; cannot rebuild the fork \
+                 coin context",
+                record.height
+            ))
+        })?;
+        let (conds, additions, removals) = if block.is_transaction_block() {
+            let prev = self
+                .prev_record_by(block.prev_header_hash(), block.height())
+                .await?;
+            let generator_refs = self
+                .resolve_generator_refs(&block.transactions_generator_ref_list)
+                .await?;
+            let prev_tx = self.prev_tx_context(prev.as_ref(), Some(&record)).await?;
+            self.validate_body(&block, &generator_refs, prev_tx, None)?
+        } else {
+            (None, Vec::new(), Vec::new())
+        };
+        self.derive_delta(&block, record, conds, additions, removals)
+    }
+
+    // Build the ForkView for `block`: walk parent-ward from its prev hash to the first CONFIRMED
+    // ancestor — the fork point, at ANY depth — folding every unapplied ancestor's coin delta into
+    // the view along the way. The delta comes from the in-memory overlay when present (staged
+    // window blocks, then pending orphan branches) and otherwise is REBUILT FROM THE DURABLE STORE
+    // (`delta_from_store`): chia's `find_fork_point.lookup_fork_chain` (walk store block-records to
+    // the fork) + `advance_fork_info` (re-derive each fork block's coin delta). There is no
+    // reorg-depth horizon — the in-memory caches are bounded and volatile (lost on restart), the
+    // store is not, so a heavier valid branch is reconstructed regardless of fork depth or a
+    // restart (chia has no such horizon; blockchain.py:495-510 weight-only fork choice +
+    // coin_store.py:705-727 unfloored rollback). A parent absent from both the overlay and the
+    // store is the checkpoint-anchor bootstrap (pre-anchor state is trusted wholesale, fork view
+    // empty). The walk streams one ancestor at a time (O(1) beyond the accumulated coin delta,
+    // which the in-cache walk already accumulated); a non-strictly-decreasing height is a corrupt
+    // store, surfaced as such — never a refusal of a valid fork.
     async fn fork_view(&self, block: &FullBlock) -> Result<ForkView, NodeError> {
         let height = block.height();
         let mut view = ForkView {
@@ -1541,48 +1614,69 @@ where
             return Ok(view);
         }
         let mut cursor = block.prev_header_hash();
-        let bound = self.staged_deltas.len() + self.pending.len();
-        let mut steps = 0usize;
-        while let Some(d) = self
-            .staged_deltas
-            .get(&cursor)
-            .or_else(|| self.pending.get(&cursor))
-        {
-            for a in &d.additions {
-                view.additions.insert(a.coin.name(), *a);
-            }
-            view.removals.extend(d.removals.iter().copied());
-            if d.height == 0 {
-                view.fork_height = -1;
-                return Ok(view);
-            }
-            cursor = d.prev_hash;
-            steps += 1;
-            if steps > bound {
-                return Err(NodeError::Invalid(format!(
-                    "fork coin context walk cycles at {cursor}"
-                )));
-            }
-        }
-        match self.store.get_block_record(&cursor).await? {
-            Some(r) => {
-                if !self.is_confirmed(&cursor).await? {
-                    // chia rebuilds fork_info by re-running the branch (advance_fork_info); the
-                    // engine retains branch deltas only within the reorg horizon — beyond it a
-                    // fork cannot be validated (nor reorged to).
-                    return Err(NodeError::Invalid(format!(
-                        "cannot establish the fork coin context: ancestor {cursor} at height {} \
-                         is not on the confirmed chain and its delta is outside the reorg horizon",
-                        r.height
-                    )));
+        let mut last_height = height;
+        loop {
+            // In-memory overlay first: staged window blocks, then pending orphan-branch deltas.
+            // Fold directly from the borrow (no clone on the hot in-window walk); copy out only the
+            // parent hash + height before the borrow ends.
+            if let Some(d) = self
+                .staged_deltas
+                .get(&cursor)
+                .or_else(|| self.pending.get(&cursor))
+            {
+                Self::fold_delta_into_view(&mut view, d);
+                if d.height == 0 {
+                    view.fork_height = -1;
+                    return Ok(view);
                 }
-                view.fork_height = i64::from(r.height);
-                Ok(view)
+                let (prev, d_height) = (d.prev_hash, d.height);
+                cursor = Self::step_parent(cursor, prev, d_height, &mut last_height)?;
+                continue;
             }
-            // Checkpoint-anchor bootstrap: no local parent record. Only reachable with
-            // enforcement forced on an anchored store — the auto gate is off there.
-            None => Ok(view),
+            match self.store.get_block_record(&cursor).await? {
+                // The first CONFIRMED ancestor is the fork point, at any depth.
+                Some(r) if self.is_confirmed(&cursor).await? => {
+                    view.fork_height = i64::from(r.height);
+                    return Ok(view);
+                }
+                // Stored but NON-confirmed: a branch block whose delta is not in the in-memory
+                // caches (a restart, or a fork deeper than the in-memory window). Rebuild its coin
+                // delta from the durable store and keep walking — chia's advance_fork_info, no
+                // horizon.
+                Some(_) => {
+                    let d = self.delta_from_store(&cursor).await?;
+                    Self::fold_delta_into_view(&mut view, &d);
+                    if d.height == 0 {
+                        view.fork_height = -1;
+                        return Ok(view);
+                    }
+                    cursor = Self::step_parent(cursor, d.prev_hash, d.height, &mut last_height)?;
+                }
+                // Checkpoint-anchor bootstrap: no local parent record. Only reachable with
+                // enforcement forced on an anchored store — the auto gate is off there.
+                None => return Ok(view),
+            }
         }
+    }
+
+    // One parent-ward step of a fork walk with cycle/corruption detection: the child at
+    // `child_height` must have a strictly greater height than its parent, so the walk terminates
+    // at the confirmed chain. A non-decreasing height is a corrupt store (a cycle), surfaced as a
+    // store-corruption error — NOT a refusal of a valid fork (there is no reorg-depth cap).
+    fn step_parent(
+        at: Bytes32,
+        prev: Bytes32,
+        child_height: u32,
+        last_height: &mut u32,
+    ) -> Result<Bytes32, NodeError> {
+        if child_height >= *last_height {
+            return Err(NodeError::Invalid(format!(
+                "fork coin context walk does not descend at {at} (height {child_height} \
+                 >= {last_height}): corrupt store"
+            )));
+        }
+        *last_height = child_height;
+        Ok(prev)
     }
 
     // chia rule 15 (`UNKNOWN_UNSPENT` / `DOUBLE_SPEND` / `DOUBLE_SPEND_IN_FORK`): resolve every
@@ -2125,6 +2219,17 @@ where
         delta: &BlockDelta,
         old_peak_height: u32,
     ) -> Result<AddBlockOutcome, NodeError> {
+        // A reorg's rollback (`rollback_to_in`: DELETE WHERE confirmed_index > $1 / UPDATE WHERE
+        // spent_index > $1) and its rolled-back-state read (`rolled_back_coin_states`: per-height
+        // confirmed_index/spent_index lookups) filter coin_record by columns whose indexes the SQL
+        // backends DEFER to the sync->tip build (write-amp on the forward path). But a reorg can land
+        // BELOW tip — a node stuck on a minority equal-weight tie-break branch must reorg to rejoin
+        // the heavier chain, long before that build fires — and without the indexes each query
+        // seq-scans the whole coin table — on a large table each rollback query scans every
+        // row, stalling the reorg indefinitely. Ensure them here,
+        // idempotently, before any rollback query runs — chia carries these indexes from schema
+        // creation, so its rollback works at any sync depth.
+        self.store.ensure_reorg_indexes().await?;
         self.pending.insert(delta.header_hash, delta.clone());
         let branch = self.candidate_branch(delta).await?;
         let fork_height = branch
@@ -2178,17 +2283,31 @@ where
         .await
     }
 
-    // Walk back from the new tip through `pending` to the first confirmed ancestor; return the branch
-    // deltas fork+1..=tip in height order.
+    // Walk back from the new tip to the first confirmed ancestor; return the branch deltas
+    // fork+1..=tip in height order. Each branch delta comes from `pending` when present and is
+    // otherwise REBUILT FROM THE DURABLE STORE (`delta_from_store`) — the reorg-replay analog of
+    // the store-backed fork walk in `fork_view`, so a reorg whose branch ancestors survive only in
+    // the store (a restart, or a fork deeper than the pending horizon) re-applies the FULL branch
+    // (chia rolls the coin store back to the fork height at any depth and re-applies the fork
+    // chain; blockchain.py:509-510, coin_store.py:705-727). The height guard makes the walk
+    // terminate at the confirmed chain and turns a corrupt (cyclic) store into an error, never a
+    // truncated branch.
     async fn candidate_branch(&self, tip: &BlockDelta) -> Result<Vec<BlockDelta>, NodeError> {
         let mut branch = Vec::new();
         let mut cursor = tip.header_hash;
-        while let Some(d) = self.pending.get(&cursor).cloned() {
-            branch.push(d.clone());
-            if self.is_confirmed(&d.prev_hash).await? {
+        let mut last_height = tip.height.saturating_add(1);
+        loop {
+            let d = match self.pending.get(&cursor) {
+                Some(d) => d.clone(),
+                None => self.delta_from_store(&cursor).await?,
+            };
+            let prev = d.prev_hash;
+            let d_height = d.height;
+            branch.push(d);
+            if self.is_confirmed(&prev).await? {
                 break;
             }
-            cursor = d.prev_hash;
+            cursor = Self::step_parent(cursor, prev, d_height, &mut last_height)?;
         }
         branch.reverse();
         Ok(branch)

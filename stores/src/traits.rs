@@ -82,6 +82,32 @@ pub trait CoinStore {
         fork_height: u32,
     ) -> Result<u64, StoreError>;
 
+    /// Ensure the reorg-speed coin indexes (`confirmed_index`, `spent_index`) exist BEFORE a reorg
+    /// runs its rollback / rolled-back-state range queries. These back
+    /// [`CoinStore::rollback_to`]'s `confirmed_index > $1` / `spent_index > $1` predicates and the
+    /// [`CoinStore::rolled_back_coin_states`] per-height `= $1` lookups; without them the reorg
+    /// seq-scans the ENTIRE coin table.
+    ///
+    /// The SQL backends otherwise DEFER these indexes to [`BlockStore::build_indexes`] at the
+    /// sync->tip transition (they are pure write-amplification during forward-only bulk sync, which
+    /// never reads them). But a reorg can land BELOW tip — a node stuck on a minority equal-weight
+    /// tie-break branch MUST reorg to rejoin the heavier chain, and that reorg happens long before
+    /// `build_indexes` would fire — so the reorg path ensures them here, idempotently. chia carries
+    /// these indexes from coin-store schema creation, so its rollback works at any sync depth; this
+    /// restores that guarantee without paying the write-amp on the forward path. Called once at the
+    /// top of the engine's reorg; a cheap catalog check once the index exists.
+    ///
+    /// Default: no-op — a backend with its own by-height structures (the mmap store) needs nothing.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Backend`] on a DDL failure.
+    async fn ensure_reorg_indexes(&self) -> Result<(), StoreError>
+    where
+        Self: Sync,
+    {
+        Ok(())
+    }
+
     #[cfg(feature = "coin-index")]
     /// # Errors
     /// Returns [`StoreError::Backend`] on a query failure.
