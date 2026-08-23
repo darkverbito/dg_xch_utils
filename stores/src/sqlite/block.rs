@@ -1,0 +1,496 @@
+use crate::error::StoreError;
+use crate::sqlite::SqliteStore;
+use crate::traits::BlockStore;
+use crate::types::{BatchHandle, BlockStatus, Savepoint};
+use async_trait::async_trait;
+use dg_xch_core::blockchain::block_record::BlockRecord;
+use dg_xch_core::blockchain::full_block::FullBlock;
+use dg_xch_core::blockchain::sized_bytes::Bytes32;
+use dg_xch_core::clvm::program::SerializedProgram;
+use dg_xch_serialize::{ChiaProtocolVersion, ChiaSerialize};
+use sqlx::{Connection, Row};
+use std::io::Cursor;
+use std::sync::atomic::Ordering;
+
+const VERSION: ChiaProtocolVersion = ChiaProtocolVersion::Chia0_0_37;
+
+const UPSERT_RECORD: &str = "INSERT INTO block_record \
+    (header_hash, prev_hash, height, weight, total_iters, is_transaction_block, sub_epoch_summary, record) \
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+    ON CONFLICT(header_hash) DO UPDATE SET prev_hash = excluded.prev_hash, height = excluded.height, \
+    weight = excluded.weight, total_iters = excluded.total_iters, \
+    is_transaction_block = excluded.is_transaction_block, sub_epoch_summary = excluded.sub_epoch_summary, \
+    record = excluded.record";
+
+fn decode_record(blob: &[u8]) -> Result<BlockRecord, StoreError> {
+    BlockRecord::from_bytes(&mut Cursor::new(blob), VERSION).map_err(StoreError::Io)
+}
+
+// Shared write bodies, parameterized over the connection so the same statements run either in a
+// self-contained transaction (the standalone trait methods) or joined onto an open batch (the `_in`
+// variants — the one-fsync-per-block apply path).
+async fn upsert_records(
+    conn: &mut sqlx::SqliteConnection,
+    records: &[BlockRecord],
+) -> Result<(), StoreError> {
+    for r in records {
+        let ses = r
+            .sub_epoch_summary_included
+            .as_ref()
+            .map(|s| s.to_bytes(VERSION))
+            .transpose()?;
+        sqlx::query(UPSERT_RECORD)
+            .bind(r.header_hash)
+            .bind(r.prev_hash)
+            .bind(i64::from(r.height))
+            .bind(r.weight.to_be_bytes().to_vec())
+            .bind(r.total_iters.to_be_bytes().to_vec())
+            .bind(i64::from(r.is_transaction_block()))
+            .bind(ses)
+            .bind(r.to_bytes(VERSION)?)
+            .execute(&mut *conn)
+            .await?;
+    }
+    Ok(())
+}
+
+async fn set_status_on(
+    conn: &mut sqlx::SqliteConnection,
+    hh: &Bytes32,
+    s: BlockStatus,
+) -> Result<(), StoreError> {
+    sqlx::query("UPDATE block_record SET status = ? WHERE header_hash = ?")
+        .bind(i64::from(s.as_u8()))
+        .bind(*hh)
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
+async fn set_peak_on(
+    conn: &mut sqlx::SqliteConnection,
+    new_peak: &Bytes32,
+) -> Result<u64, StoreError> {
+    let Some(row) = sqlx::query("SELECT height FROM block_record WHERE header_hash = ?")
+        .bind(*new_peak)
+        .fetch_optional(&mut *conn)
+        .await?
+    else {
+        return Err(StoreError::Corrupt(
+            "set_peak: unknown header hash".to_string(),
+        ));
+    };
+    let new_height: i64 = row.try_get("height")?;
+    // Fork point: the deepest ancestor of new_peak already on the main chain. Walk the new branch's
+    // ancestry (all in_main_chain = 0 until the fork) to find it; -1 = no shared ancestor (full replace).
+    let mut fork_height = -1i64;
+    let mut cursor = *new_peak;
+    loop {
+        let Some(r) = sqlx::query(
+            "SELECT prev_hash, height, in_main_chain FROM block_record WHERE header_hash = ?",
+        )
+        .bind(cursor)
+        .fetch_optional(&mut *conn)
+        .await?
+        else {
+            break;
+        };
+        if r.try_get::<i64, _>("in_main_chain")? != 0 {
+            fork_height = r.try_get("height")?;
+            break;
+        }
+        cursor = r.try_get("prev_hash")?;
+    }
+    // Retire the whole old main branch above the fork — not just above the new peak — so a same-height or
+    // shorter-heavier reorg cannot leave an abandoned sibling flagged (T012a).
+    sqlx::query("UPDATE block_record SET in_main_chain = 0 WHERE in_main_chain = 1 AND height > ?")
+        .bind(fork_height)
+        .execute(&mut *conn)
+        .await?;
+    // Link the new ancestry onto the main chain, back to (but not including) the fork ancestor.
+    let mut links = 0u64;
+    let mut cursor = *new_peak;
+    loop {
+        let Some(r) =
+            sqlx::query("SELECT prev_hash, in_main_chain FROM block_record WHERE header_hash = ?")
+                .bind(cursor)
+                .fetch_optional(&mut *conn)
+                .await?
+        else {
+            break;
+        };
+        if r.try_get::<i64, _>("in_main_chain")? != 0 {
+            break;
+        }
+        let prev: Bytes32 = r.try_get("prev_hash")?;
+        sqlx::query("UPDATE block_record SET in_main_chain = 1 WHERE header_hash = ?")
+            .bind(cursor)
+            .execute(&mut *conn)
+            .await?;
+        links += 1;
+        cursor = prev;
+    }
+    sqlx::query(
+        "INSERT INTO current_peak (id, header_hash, height) VALUES (0, ?, ?) \
+         ON CONFLICT(id) DO UPDATE SET header_hash = excluded.header_hash, height = excluded.height",
+    )
+    .bind(*new_peak)
+    .bind(new_height)
+    .execute(&mut *conn)
+    .await?;
+    Ok(links)
+}
+
+#[async_trait]
+impl BlockStore for SqliteStore {
+    async fn get_block_record(&self, hh: &Bytes32) -> Result<Option<BlockRecord>, StoreError> {
+        let row = sqlx::query("SELECT record FROM block_record WHERE header_hash = ?")
+            .bind(*hh)
+            .fetch_optional(&self.read)
+            .await?;
+        match row {
+            Some(r) => Ok(Some(decode_record(&r.try_get::<Vec<u8>, _>("record")?)?)),
+            None => Ok(None),
+        }
+    }
+
+    async fn get_block_record_by_height(&self, h: u32) -> Result<Option<BlockRecord>, StoreError> {
+        let row =
+            sqlx::query("SELECT record FROM block_record WHERE height = ? AND in_main_chain = 1")
+                .bind(i64::from(h))
+                .fetch_optional(&self.read)
+                .await?;
+        match row {
+            Some(r) => Ok(Some(decode_record(&r.try_get::<Vec<u8>, _>("record")?)?)),
+            None => Ok(None),
+        }
+    }
+
+    async fn get_peak(&self) -> Result<Option<(Bytes32, u32)>, StoreError> {
+        let row = sqlx::query("SELECT header_hash, height FROM current_peak WHERE id = 0")
+            .fetch_optional(&self.read)
+            .await?;
+        match row {
+            Some(r) => {
+                let hh: Bytes32 = r.try_get("header_hash")?;
+                let h: i64 = r.try_get("height")?;
+                Ok(Some((hh, h as u32)))
+            }
+            None => Ok(None),
+        }
+    }
+
+    async fn min_record_height(&self) -> Result<Option<u32>, StoreError> {
+        // SQLite's MIN/MAX optimization answers this from the first entry of the partial
+        // `block_record_height_main` index — no scan, cheap enough for every /metrics scrape.
+        let row = sqlx::query("SELECT MIN(height) AS h FROM block_record WHERE in_main_chain = 1")
+            .fetch_one(&self.read)
+            .await?;
+        let h: Option<i64> = row.try_get("h")?;
+        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+        Ok(h.map(|v| v as u32))
+    }
+
+    async fn get_block(&self, hh: &Bytes32) -> Result<Option<FullBlock>, StoreError> {
+        let row = sqlx::query("SELECT body FROM block_body WHERE header_hash = ?")
+            .bind(*hh)
+            .fetch_optional(&self.read)
+            .await?;
+        match row {
+            Some(r) => {
+                let body: Vec<u8> = r.try_get("body")?;
+                let raw = zstd::decode_all(&body[..])?;
+                let block = FullBlock::from_bytes(&mut Cursor::new(&raw[..]), VERSION)?;
+                Ok(Some(block))
+            }
+            None => Ok(None),
+        }
+    }
+
+    async fn get_generator_at_height(
+        &self,
+        h: u32,
+    ) -> Result<Option<SerializedProgram>, StoreError> {
+        // Single confirmed-main-chain join (mirror of chia get_generators_at): the referenced generator lives
+        // in the block occupying `h` on the confirmed chain. No cheap generator-only parser exists, so the
+        // cold body is decompressed and decoded to the FullBlock, then its generator is returned.
+        let row = sqlx::query(
+            "SELECT block_body.body FROM block_body \
+             JOIN block_record ON block_record.header_hash = block_body.header_hash \
+             WHERE block_record.height = ? AND block_record.in_main_chain = 1",
+        )
+        .bind(i64::from(h))
+        .fetch_optional(&self.read)
+        .await?;
+        match row {
+            Some(r) => {
+                let body: Vec<u8> = r.try_get("body")?;
+                let raw = zstd::decode_all(&body[..])?;
+                let block = FullBlock::from_bytes(&mut Cursor::new(&raw[..]), VERSION)?;
+                Ok(block.transactions_generator)
+            }
+            None => Ok(None),
+        }
+    }
+
+    async fn add_block_records(&self, records: &[BlockRecord]) -> Result<(), StoreError> {
+        let mut guard = self.writer.lock().await;
+        let mut tx = guard.begin().await?;
+        upsert_records(&mut tx, records).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn add_block_records_in(
+        &self,
+        batch: &mut BatchHandle,
+        records: &[BlockRecord],
+    ) -> Result<(), StoreError> {
+        upsert_records(batch.sqlite_conn()?, records).await
+    }
+
+    async fn begin(&self) -> Result<BatchHandle, StoreError> {
+        let mut guard = self.writer.clone().lock_owned().await;
+        // A BatchHandle dropped without a commit (e.g. a mid-window per-block confirm error) leaves
+        // its BEGIN open on the single writer connection; without this a later begin would fail with
+        // "cannot start a transaction within a transaction" and wedge the writer forever. Best-effort
+        // clear any such dangling transaction first (the ROLLBACK is a harmless no-op error when the
+        // connection is already clean), so begin can never wedge on a prior failure.
+        let _ = sqlx::query("ROLLBACK").execute(&mut *guard).await;
+        sqlx::query("BEGIN").execute(&mut *guard).await?;
+        Ok(BatchHandle {
+            inner: crate::types::BatchInner::Sqlite(guard),
+        })
+    }
+
+    async fn append_many(
+        &self,
+        batch: &mut BatchHandle,
+        blocks: &[FullBlock],
+    ) -> Result<(), StoreError> {
+        // Irrefutable without the `postgres` feature (BatchInner then has a single variant).
+        #[allow(irrefutable_let_patterns)]
+        let crate::types::BatchInner::Sqlite(conn) = &mut batch.inner else {
+            return Err(StoreError::Corrupt(
+                "batch was opened by a different backend".to_string(),
+            ));
+        };
+        for block in blocks {
+            let hh = block.header_hash()?;
+            let body = zstd::encode_all(&block.to_bytes(VERSION)?[..], 3)?;
+            sqlx::query("INSERT OR REPLACE INTO block_body (header_hash, body) VALUES (?, ?)")
+                .bind(hh)
+                .bind(body)
+                .execute(&mut **conn)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn commit(&self, mut batch: BatchHandle) -> Result<(), StoreError> {
+        // Irrefutable without the `postgres` feature (BatchInner then has a single variant).
+        #[allow(irrefutable_let_patterns)]
+        let crate::types::BatchInner::Sqlite(conn) = &mut batch.inner else {
+            return Err(StoreError::Corrupt(
+                "batch was opened by a different backend".to_string(),
+            ));
+        };
+        // Telemetry hook: time the COMMIT (the fsync-bearing statement) and file it under the
+        // CURRENT phase — the near_tip flag at commit time. A batch begun just before a band flip is
+        // mislabelled by at most that one commit; the trend queries this feeds are unaffected.
+        let started = std::time::Instant::now();
+        sqlx::query("COMMIT").execute(&mut **conn).await?;
+        let phase_near_tip = self.near_tip.load(Ordering::Relaxed);
+        let hist = if phase_near_tip {
+            &self.telemetry.commit_near_tip
+        } else {
+            &self.telemetry.commit_catch_up
+        };
+        hist.record(started.elapsed().as_secs_f64());
+        self.telemetry.last_commit_unix.store(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs()),
+            Ordering::Relaxed,
+        );
+        Ok(())
+    }
+
+    fn near_tip(&self) -> bool {
+        self.near_tip.load(Ordering::Relaxed)
+    }
+
+    fn set_near_tip(&self, near_tip: bool) {
+        self.near_tip.store(near_tip, Ordering::Relaxed);
+    }
+
+    fn telemetry(&self) -> Option<std::sync::Arc<crate::telemetry::StoreTelemetry>> {
+        Some(self.telemetry.clone())
+    }
+
+    fn wal_bytes(&self) -> u64 {
+        self.wal_file_bytes()
+    }
+
+    async fn get_unassociated(&self, limit: usize) -> Result<Vec<u32>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT r.height AS height FROM block_record r \
+             LEFT JOIN block_body b ON r.header_hash = b.header_hash \
+             WHERE b.header_hash IS NULL ORDER BY r.height LIMIT ?",
+        )
+        .bind(limit as i64)
+        .fetch_all(&self.read)
+        .await?;
+        rows.iter()
+            .map(|r| Ok(r.try_get::<i64, _>("height")? as u32))
+            .collect()
+    }
+
+    async fn set_peak(&self, new_peak: &Bytes32) -> Result<u64, StoreError> {
+        let mut guard = self.writer.lock().await;
+        let mut tx = guard.begin().await?;
+        let links = set_peak_on(&mut tx, new_peak).await?;
+        tx.commit().await?;
+        Ok(links)
+    }
+
+    async fn set_peak_in(
+        &self,
+        batch: &mut BatchHandle,
+        new_peak: &Bytes32,
+    ) -> Result<u64, StoreError> {
+        set_peak_on(batch.sqlite_conn()?, new_peak).await
+    }
+
+    async fn get_status(&self, hh: &Bytes32) -> Result<BlockStatus, StoreError> {
+        let row = sqlx::query("SELECT status FROM block_record WHERE header_hash = ?")
+            .bind(*hh)
+            .fetch_optional(&self.read)
+            .await?;
+        match row {
+            Some(r) => Ok(BlockStatus::from_u8(r.try_get::<i64, _>("status")? as u8)),
+            None => Ok(BlockStatus::Unvalidated),
+        }
+    }
+
+    async fn set_status(&self, hh: &Bytes32, s: BlockStatus) -> Result<(), StoreError> {
+        let mut guard = self.writer.lock().await;
+        set_status_on(&mut guard, hh, s).await
+    }
+
+    async fn set_status_in(
+        &self,
+        batch: &mut BatchHandle,
+        hh: &Bytes32,
+        s: BlockStatus,
+    ) -> Result<(), StoreError> {
+        set_status_on(batch.sqlite_conn()?, hh, s).await
+    }
+
+    async fn savepoint(&self) -> Result<Savepoint, StoreError> {
+        Ok(Savepoint {
+            peak: self.get_peak().await?,
+        })
+    }
+
+    async fn rollback(&self, sp: Savepoint) -> Result<u64, StoreError> {
+        let mut guard = self.writer.lock().await;
+        let mut tx = guard.begin().await?;
+        let touched = match sp.peak {
+            Some((_, height)) => sqlx::query(
+                "UPDATE block_record SET in_main_chain = 0 WHERE in_main_chain = 1 AND height > ?",
+            )
+            .bind(i64::from(height))
+            .execute(&mut *tx)
+            .await?
+            .rows_affected(),
+            None => {
+                sqlx::query("UPDATE block_record SET in_main_chain = 0 WHERE in_main_chain = 1")
+                    .execute(&mut *tx)
+                    .await?
+                    .rows_affected()
+            }
+        };
+        match sp.peak {
+            Some((hh, height)) => {
+                sqlx::query(
+                    "INSERT INTO current_peak (id, header_hash, height) VALUES (0, ?, ?) \
+                     ON CONFLICT(id) DO UPDATE SET header_hash = excluded.header_hash, \
+                     height = excluded.height",
+                )
+                .bind(hh)
+                .bind(i64::from(height))
+                .execute(&mut *tx)
+                .await?;
+            }
+            None => {
+                sqlx::query("DELETE FROM current_peak WHERE id = 0")
+                    .execute(&mut *tx)
+                    .await?;
+            }
+        }
+        tx.commit().await?;
+        Ok(touched)
+    }
+
+    async fn get_sub_epoch_segments(
+        &self,
+        ses_hash: &Bytes32,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        // chia BlockStore.get_sub_epoch_challenge_segments (block_store.py:173-192), minus the
+        // decode: the store hands back the opaque SubEpochSegments bytes.
+        let row = sqlx::query(
+            "SELECT challenge_segments FROM sub_epoch_segments_v3 WHERE ses_block_hash = ?",
+        )
+        .bind(*ses_hash)
+        .fetch_optional(&self.read)
+        .await?;
+        match row {
+            Some(r) => Ok(Some(r.try_get::<Vec<u8>, _>("challenge_segments")?)),
+            None => Ok(None),
+        }
+    }
+
+    async fn persist_sub_epoch_segments(
+        &self,
+        ses_hash: &Bytes32,
+        bytes: &[u8],
+    ) -> Result<(), StoreError> {
+        // chia BlockStore.persist_sub_epoch_challenge_segments (block_store.py:164-171):
+        // INSERT OR REPLACE, one row per ses block hash. Fixed-arity statement — the default
+        // persistent prepared statement is correct here (the prepare-cache growth was caused by
+        // variable-arity multi-row SQL churning the cache; see postgres/coin.rs).
+        let mut guard = self.writer.lock().await;
+        sqlx::query(
+            "INSERT OR REPLACE INTO sub_epoch_segments_v3 (ses_block_hash, challenge_segments) \
+             VALUES (?, ?)",
+        )
+        .bind(*ses_hash)
+        .bind(bytes.to_vec())
+        .execute(&mut *guard)
+        .await?;
+        Ok(())
+    }
+
+    async fn build_indexes(&self) -> Result<(), StoreError> {
+        // Deferred index build at the sync->tip transition. One statement per writer-lock
+        // acquisition so confirms interleave between index builds instead of stalling behind
+        // one long guard. The reorg indexes (0006) back rollback_to's range predicates on
+        // every profile; the service tier (0003) only exists on a coin-index build.
+        // Comment lines are stripped BEFORE the ';' split — a ';' inside a comment must not cut
+        // a statement in half.
+        let sql = crate::strip_sql_comments(include_str!(
+            "../../migrations/sqlite/0006_reorg_indexes.sql"
+        ));
+        #[cfg(feature = "coin-index")]
+        let sql = sql
+            + &crate::strip_sql_comments(include_str!(
+                "../../migrations/sqlite/0003_service_indexes.sql"
+            ));
+        for stmt in sql.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+            let mut guard = self.writer.lock().await;
+            sqlx::query(stmt).execute(&mut *guard).await?;
+        }
+        Ok(())
+    }
+}

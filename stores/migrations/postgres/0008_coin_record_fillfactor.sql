@@ -1,0 +1,20 @@
+-- coin_record fillfactor: the Chia coin lifecycle is insert-once (spent_index=0) then
+-- update-once (the spend sets spent_index=height). At the default fillfactor=100 the insert
+-- packs the page to 100%, so the later spend-update has no room on-page and goes off-page —
+-- a non-HOT update that appends a new primary-key leaf entry and leaves a dead heap tuple only
+-- a full index-scanning vacuum can reclaim. A server-class host measured 31.2% HOT / 16GB pkey bloat
+-- (~2x its ~8GB natural size), driving frequent expensive vacuums that starved the confirm
+-- path on both buffer eviction and WAL fsync (the blocks/min sawtooth; locally validated on PG17.11).
+--
+-- Reserving 10% page headroom lets the spend-update stay on-page (HOT): the dead version is
+-- reclaimed by opportunistic HOT-prune during ordinary DML — no autovacuum needed — and the
+-- pkey stops bloating. Local isolation (autovacuum off, all else equal): ff=100 -> 0.1% HOT,
+-- ff=90 -> 12.5% floor; with autovacuum keeping up ff=90 reaches ~99.6% HOT and halves the
+-- vacuum-cycle count. Heap grows ~10% (+~4GB on a ~38GB table) — a good trade for killing the
+-- pkey bloat and the vacuum stalls.
+--
+-- NOTE: fillfactor only governs pages written AFTER this runs. New inserts (still-syncing
+-- legs) benefit immediately; the existing rows are converted by a one-time online `pg_repack
+-- -t coin_record` per leg (needs a CNPG image shipping pg_repack), or gradually as pages turn
+-- over. ALTER TABLE ... SET is idempotent; replayed on every open.
+ALTER TABLE coin_record SET (fillfactor = 90);
