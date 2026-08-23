@@ -2,7 +2,10 @@ use crate::blockchain::sized_bytes::Bytes32;
 use std::fmt::Display;
 use std::str::FromStr;
 
-#[derive(Copy, Clone, Eq, PartialEq)]
+/// Serde uses the same lowercase names as [`FromStr`], so a network reads the same from a config
+/// file as from a command line.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ChiaNetwork {
     Mainnet = 0,
     Simulator = 1,
@@ -98,6 +101,15 @@ pub struct ConsensusConstants {
     pub hard_fork_height: u32,
     pub hard_fork_fix_height: u32,
 
+    // The soft fork staged by the 2.6/2.7 releases (chia_rs get_flags_for_height_and_constants):
+    // DISABLE_OP (modpow disabled until hard fork 2) + LIMITS (division-family operand-size caps).
+    pub soft_fork8_height: u32,
+    // Same release train: SIMPLE_GENERATOR + CANONICAL_INTS + LIMIT_SPENDS.
+    pub soft_fork9_height: u32,
+    // Hard fork 2 ("Chia 3.0", unscheduled): keccak/secp outside the guard, COST_CONDITIONS,
+    // NEW_COST_MODEL, RELAXED_BLS; re-enables modpow under the bounded cost model.
+    pub hard_fork2_height: u32,
+
     // the plot filter adjustment heights
     pub plot_filter_128_height: u32,
     pub plot_filter_64_height: u32,
@@ -176,7 +188,7 @@ pub const MAINNET: ConsensusConstants = ConsensusConstants {
         "3d8765d3a597ec1d99663f6c9816d915b9f68613ac94009884c4addaefcce6af",
     ),
     max_vdf_witness_size: 64,
-    mempool_block_buffer: 50,
+    mempool_block_buffer: 10,
     max_coin_amount: u64::MAX,
     max_block_cost_clvm: 11_000_000_000_u64,
     cost_per_byte: 12000,
@@ -191,6 +203,9 @@ pub const MAINNET: ConsensusConstants = ConsensusConstants {
     soft_fork3_height: 4_510_000,
     hard_fork_height: 5_496_000,
     hard_fork_fix_height: 5_496_000,
+    soft_fork8_height: 8_655_000,
+    soft_fork9_height: 8_655_000,
+    hard_fork2_height: 0xFFFF_FFFA,
     plot_filter_128_height: 10_542_000,
     plot_filter_64_height: 15_592_000,
     plot_filter_32_height: 20_643_000,
@@ -318,7 +333,7 @@ pub const TESTNET_7: ConsensusConstants = ConsensusConstants {
     genesis_pre_farm_pool_puzzle_hash: Bytes32::const_hex(
         "d23da14695a188ae5708dd152263c4db883eb27edeb936178d4d988b8f3ce5fc",
     ),
-    mempool_block_buffer: 50,
+    mempool_block_buffer: 10,
     min_plot_size: 18,
     bech32_prefix: "txch",
     is_testnet: true,
@@ -381,6 +396,8 @@ pub const TESTNET_11: ConsensusConstants = ConsensusConstants {
     //Forks activated from the beginning on this network
     hard_fork_height: 0,
     hard_fork_fix_height: 0,
+    soft_fork8_height: 3_755_000,
+    soft_fork9_height: 3_924_000,
     plot_filter_128_height: 6_029_568,
     plot_filter_64_height: 11_075_328,
     plot_filter_32_height: 16_121_088,

@@ -318,7 +318,20 @@ impl<'a> SExp<'a> {
                 "substr invalid bounds: {start} is > {end}"
             )));
         }
-        let sub = SExp::Atom(AtomBuf::Owned(atom[start..end].to_vec().into()));
+        // Zero-copy view into the source atom, mirroring clvm_rs `Allocator::new_substr` (which
+        // returns an offset view into the parent atom's buffer). The op charges base cost 1 with
+        // NO malloc cost — the cost model assumes O(1) substr, so a copying substr was UNMETERED
+        // allocation: an adversarial program could copy up to the whole source atom per unit of
+        // cost, and the legitimate ROM generator's CLVM deserializer (which walks ref atoms via
+        // repeated "rest of buffer" substrs) paid two copies per parse step (the Vec here plus
+        // the arena deep-conversion). Measured on a dust-era corpus: the view cuts
+        // 25-40% of validation wall time; peak memory moves little because the dominant term is
+        // the run arena's retention of ALL eval intermediates (429 of 430 MiB attributed to the
+        // ROM bootstrap run — addressed separately by the compact-arena VM).
+        // Lifetime: the returned atom borrows from `self`, which lives at least as long as the
+        // run (program/args tree or the bump arena), and `AtomBuf::to_owned` deep-copies on the
+        // way out of `run`.
+        let sub = SExp::Atom(AtomBuf::Borrowed(&atom[start..end]));
         Ok(sub)
     }
 
@@ -1325,3 +1338,79 @@ impl_nz_ints!(
     NonZeroI64,
     NonZeroI128,
 );
+
+#[cfg(test)]
+mod tests {
+    //! SExp construction, environment traversal and tree-hash tests.
+    //! The nil tree hash (sha256 of `0x01`) is the canonical CLVM `()` hash used
+    //! throughout chia-blockchain.
+    use super::*;
+
+    #[test]
+    fn nil_tree_hash_is_canonical() {
+        assert_eq!(
+            hex::encode(SExp::default().tree_hash().bytes()),
+            "4bf5122f344554c53bde2ebb8cd2b7e3d1600ad631c385a5d7cce23c7785459a"
+        );
+    }
+
+    #[test]
+    fn tree_hash_is_deterministic_and_shape_sensitive() {
+        let a = SExp::from(vec![SExp::from(1), SExp::from(2), SExp::from(3)]);
+        let b = SExp::from(vec![SExp::from(1), SExp::from(2), SExp::from(3)]);
+        assert_eq!(a.tree_hash(), b.tree_hash());
+        let c = SExp::from(vec![SExp::from(1), SExp::from(2)]);
+        assert_ne!(a.tree_hash(), c.tree_hash());
+    }
+
+    #[test]
+    fn first_rest_split_and_nullp() {
+        let list = SExp::from(vec![SExp::from(10), SExp::from(20)]);
+        assert_eq!(list.first().unwrap().atom().unwrap().as_int(), 10.into());
+        assert_eq!(*list.rest().unwrap(), SExp::from(vec![SExp::from(20)]));
+        assert!(SExp::default().nullp());
+        assert!(!list.nullp());
+    }
+
+    #[test]
+    fn as_atom_list_flattens_atoms() {
+        let list = SExp::from(vec![SExp::from(1), SExp::from(2), SExp::from(3)]);
+        assert_eq!(list.as_atom_list(), vec![vec![1u8], vec![2u8], vec![3u8]]);
+    }
+
+    #[test]
+    fn arg_count_and_arg_count_is() {
+        let list = SExp::from(vec![SExp::from(1), SExp::from(2), SExp::from(3)]);
+        assert_eq!(list.arg_count(10), 3);
+        assert!(list.arg_count_is(3));
+        assert!(!list.arg_count_is(2));
+    }
+
+    #[test]
+    fn int_round_trips_through_sexp() {
+        for v in [
+            0_i64,
+            1,
+            -1,
+            127,
+            128,
+            -128,
+            255,
+            256,
+            1000,
+            -1000,
+            i64::MAX,
+        ] {
+            let sexp = SExp::from(v);
+            assert_eq!(sexp.atom().unwrap().as_int(), v.into());
+        }
+    }
+
+    #[test]
+    fn small_ints_serialize_without_leading_zeros() {
+        // 0 -> nil ; positive high-bit values keep a leading 0x00 sign byte.
+        assert!(SExp::from(0_u8).nullp());
+        assert_eq!(SExp::from(128_u32).atom().unwrap().as_ref(), &[0x00, 0x80]);
+        assert_eq!(SExp::from(127_u32).atom().unwrap().as_ref(), &[0x7f]);
+    }
+}

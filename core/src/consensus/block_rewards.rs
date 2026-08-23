@@ -1,6 +1,10 @@
 pub const MOJO_PER_CHIA: u64 = 1_000_000_000_000;
 pub const BLOCKS_PER_YEAR: u32 = 1_681_920;
 
+/// chia `consensus/block_rewards.py::calculate_pool_reward`. Integer-exact port of chia's
+/// float expression `uint64((7 / 8) * tier_chia * _mojo_per_chia)`: each tier's mojo value is divisible
+/// by 8, and the genesis tier is computed as `(7_000_000_000_000 / 8) * 21_000_000` (dividing by 8
+/// FIRST keeps the intermediate at `18_375e15 < u64::MAX`, so there is no overflow).
 #[must_use]
 pub const fn calculate_pool_reward(height: u32) -> u64 {
     /*
@@ -25,6 +29,9 @@ pub const fn calculate_pool_reward(height: u32) -> u64 {
     }
 }
 
+/// chia `consensus/block_rewards.py::calculate_base_farmer_reward`. Integer-exact port of
+/// `uint64((1 / 8) * tier_chia * _mojo_per_chia)`; genesis `(1_000_000_000_000 / 8) * 21_000_000`
+/// (divide-by-8-first avoids overflow, matching the pool-reward derivation).
 #[must_use]
 pub const fn calculate_base_farmer_reward(height: u32) -> u64 {
     /*

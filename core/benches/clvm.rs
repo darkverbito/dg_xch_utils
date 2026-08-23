@@ -1,10 +1,20 @@
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use dg_parser_macro::parse_program_hex;
-use dg_xch_core::clvm::program::Program;
+use dg_xch_core::clvm::program::{Program, SerializedProgram};
 use dg_xch_core::clvm::runtime::ClvmRuntime;
 use dg_xch_core::clvm::sexp::SExp;
 use dg_xch_core::clvm::utils::{MEMPOOL_MODE, NO_UNKNOWN_OPS};
+use dg_xch_core::consensus::block_generator::{
+    BlockGeneratorFlags, BlockGeneratorInput, GeneratorReference, execute_block_generator_result,
+};
+use dg_xch_core::consensus::constants::MAINNET;
 use std::hint::black_box;
+
+const BLOCK_834752: &str = include_str!("../tests/fixtures/chia_generator_tests/block-834752.txt");
+const BLOCK_4671894: &str =
+    include_str!("../tests/fixtures/chia_generator_tests/block-4671894.txt");
+const BLOCK_4671894_REF: &str =
+    include_str!("../tests/fixtures/chia_generator_tests/block-4671894.env");
 
 parse_program_hex!(
     SIMPLE_MATH_TEST,
@@ -13,7 +23,7 @@ parse_program_hex!(
 
 fn bench_simple_math(c: &mut Criterion) {
     let mut g = c.benchmark_group("bench_simple_math");
-    g.bench_function(format!("Curried Simple Math"), |b| {
+    g.bench_function("Curried Simple Math".to_string(), |b| {
         let mut runtime = ClvmRuntime::new(u64::MAX, MEMPOOL_MODE | NO_UNKNOWN_OPS);
         let args = Program::to(&[SExp::from(&[
             SExp::from(2),
@@ -38,5 +48,56 @@ fn bench_simple_math(c: &mut Criterion) {
     g.finish();
 }
 
-criterion_group!(benches, bench_simple_math);
+fn generator_input(
+    fixture: &str,
+    height: u32,
+    generator_refs: Vec<GeneratorReference>,
+) -> BlockGeneratorInput {
+    let generator = SerializedProgram::from_hex(fixture.lines().next().unwrap()).unwrap();
+    BlockGeneratorInput {
+        transactions_generator: generator,
+        generator_refs,
+        constants: MAINNET,
+        height,
+        flags: BlockGeneratorFlags::default(),
+    }
+}
+
+// Runs execute_block_generator_result over real mainnet transaction blocks and
+// reports CLVM cost/sec (Throughput::Elements = cost). block-4671894 is a large
+// generator (532 spends, ~4.05e9 cost) carrying a back-reference block.
+fn bench_block_generator(c: &mut Criterion) {
+    let cases = [
+        (
+            "block-834752",
+            generator_input(BLOCK_834752, 834_752, vec![]),
+        ),
+        (
+            "block-4671894",
+            generator_input(
+                BLOCK_4671894,
+                4_671_894,
+                vec![GeneratorReference {
+                    height: 4_671_893,
+                    index: 0,
+                    generator: SerializedProgram::from_hex(BLOCK_4671894_REF).unwrap(),
+                }],
+            ),
+        ),
+    ];
+    let mut g = c.benchmark_group("block_generator_execute");
+    for (name, input) in &cases {
+        let cost = execute_block_generator_result(input).unwrap().cost;
+        g.throughput(Throughput::Elements(cost));
+        g.bench_function(*name, |b| {
+            b.iter(|| {
+                let conds = execute_block_generator_result(black_box(input)).unwrap();
+                black_box(conds.cost);
+            });
+        });
+    }
+    g.finish();
+}
+
+criterion_group!(benches, bench_simple_math, bench_block_generator);
 criterion_main!(benches);

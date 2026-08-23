@@ -1,6 +1,8 @@
 use blst::min_pk::SecretKey;
 use dg_xch_core::blockchain::coin::Coin;
-use dg_xch_core::blockchain::condition_with_args::{ConditionWithArgs, Message};
+use dg_xch_core::blockchain::coin_spend::CoinSpend;
+use dg_xch_core::blockchain::condition_opcode::ConditionOpcode;
+use dg_xch_core::blockchain::condition_with_args::{ConditionWithArgs, Message, MessageArgs};
 use dg_xch_core::blockchain::foliage_transaction_block::FoliageTransactionBlock;
 use dg_xch_core::blockchain::sized_bytes::{Bytes32, Bytes48};
 use dg_xch_core::blockchain::spend_bundle::SpendBundle;
@@ -8,10 +10,11 @@ use dg_xch_core::blockchain::spend_bundle_conditions::SpendBundleConditions;
 use dg_xch_core::blockchain::transactions_info::TransactionsInfo;
 use dg_xch_core::clvm::parser::{sexp_from_bytes, sexp_from_bytes_backrefs};
 use dg_xch_core::clvm::program::{Program, SerializedProgram};
-use dg_xch_core::clvm::sexp::SExp;
+use dg_xch_core::clvm::sexp::{AtomBuf, SExp};
 use dg_xch_core::consensus::block_generator::{
-    BlockGeneratorFlags, BlockGeneratorInput, GeneratorReference, TransactionBlockValidationInput,
-    additions_root, block_fee_amount, execute_block_generator, execute_block_generator_result,
+    BlockGeneratorFlags, BlockGeneratorInput, CoinSpendContext, ConditionValidationContext,
+    GeneratorReference, TransactionBlockValidationInput, additions_root, block_fee_amount,
+    conditions_from_spend_bundle, execute_block_generator, execute_block_generator_result,
     fee_summary, removals_root, transactions_generator_refs_root, transactions_generator_root,
     transactions_info_hash, validate_block_aggregate_signature, validate_block_conditions,
     validate_transaction_block,
@@ -20,6 +23,7 @@ use dg_xch_core::consensus::constants::MAINNET;
 use dg_xch_core::errors::ChiaError;
 use dg_xch_core::traits::SizedBytes;
 use dg_xch_core::utils::hash_256;
+use std::collections::HashMap;
 use std::io::Cursor;
 
 const HISTORICAL_BLOCK_834752: &str =
@@ -67,10 +71,11 @@ fn parse_chia_generator_fixture(fixture: &str) -> ExpectedGeneratorOutput {
     };
     let mut current_spend = None::<ExpectedSpend>;
     for line in lines {
-        if !line.starts_with(' ') && !line.starts_with("- coin id:") {
-            if let Some(spend) = current_spend.take() {
-                expected.spends.push(spend);
-            }
+        if !line.starts_with(' ')
+            && !line.starts_with("- coin id:")
+            && let Some(spend) = current_spend.take()
+        {
+            expected.spends.push(spend);
         }
         if line.starts_with("RESERVE_FEE:") {
             expected.reserve_fee = line
@@ -251,12 +256,7 @@ fn validation_case(
     let conds = execute_block_generator_result(&req).unwrap();
     let summary = fee_summary(&conds).unwrap();
     let tx_info = TransactionsInfo {
-        generator_root: transactions_generator_root(
-            &req.transactions_generator,
-            &MAINNET,
-            req.height,
-        )
-        .unwrap(),
+        generator_root: transactions_generator_root(&req.transactions_generator),
         generator_refs_root: transactions_generator_refs_root(&[]).unwrap(),
         aggregated_signature: SpendBundle::empty().aggregated_signature,
         fees: block_fee_amount(&summary).unwrap(),
@@ -392,6 +392,7 @@ fn transaction_block_validation_checks_metadata_and_roots() {
     let (req, tx_info, foliage, conds) = validation_case(quoted_generator(output), vec![reward]);
 
     let result = validate_transaction_block(&TransactionBlockValidationInput {
+        prev_transaction_block_height: 0,
         generator_input: req,
         transactions_info: &tx_info,
         foliage_transaction_block: Some(&foliage),
@@ -414,6 +415,7 @@ fn transaction_block_validation_rejects_bad_generator_root() {
 
     assert_eq!(
         validate_transaction_block(&TransactionBlockValidationInput {
+            prev_transaction_block_height: 0,
             generator_input: req,
             transactions_info: &tx_info,
             foliage_transaction_block: Some(&foliage),
@@ -437,6 +439,7 @@ fn transaction_block_validation_rejects_bad_fee_cost_and_roots() {
     tx_info.fees += 1;
     assert_eq!(
         validate_transaction_block(&TransactionBlockValidationInput {
+            prev_transaction_block_height: 0,
             generator_input: req.clone(),
             transactions_info: &tx_info,
             foliage_transaction_block: Some(&foliage),
@@ -449,6 +452,7 @@ fn transaction_block_validation_rejects_bad_fee_cost_and_roots() {
     tx_info.cost += 1;
     assert_eq!(
         validate_transaction_block(&TransactionBlockValidationInput {
+            prev_transaction_block_height: 0,
             generator_input: req.clone(),
             transactions_info: &tx_info,
             foliage_transaction_block: Some(&foliage),
@@ -461,6 +465,7 @@ fn transaction_block_validation_rejects_bad_fee_cost_and_roots() {
     foliage.additions_root = Bytes32::new([77; 32]);
     assert_eq!(
         validate_transaction_block(&TransactionBlockValidationInput {
+            prev_transaction_block_height: 0,
             generator_input: req,
             transactions_info: &tx_info,
             foliage_transaction_block: Some(&foliage),
@@ -547,6 +552,20 @@ fn height_flags_select_legacy_before_hardfork() {
     assert!(after.simple_generator);
 }
 
+// Soft fork 9 CANONICAL_INTS activates strictly by height (chia_rs
+// get_flags_for_height_and_constants; on mainnet SF9 shares soft fork 8's height). Below the
+// activation height the clvm flag set is byte-identical to today (bit unset).
+#[test]
+fn height_flags_activate_canonical_ints_at_soft_fork9() {
+    use dg_xch_core::clvm::utils::CANONICAL_INTS;
+
+    let before = BlockGeneratorFlags::for_height(&MAINNET, MAINNET.soft_fork9_height - 1);
+    let at = BlockGeneratorFlags::for_height(&MAINNET, MAINNET.soft_fork9_height);
+
+    assert_eq!(before.clvm_flags & CANONICAL_INTS, 0);
+    assert_eq!(at.clvm_flags & CANONICAL_INTS, CANONICAL_INTS);
+}
+
 #[test]
 fn matching_coin_announcement_assertion_validates() {
     let announcing_parent = Bytes32::new([1; 32]);
@@ -618,4 +637,1075 @@ fn historical_generator_ref_block_4671894_matches_chia_generator_fixture() {
         execute_block_generator_result(&historical_input(&expected, 4_671_894, refs)).unwrap();
 
     assert_matches_chia_fixture(&conds, &expected);
+}
+
+// ---------------------------------------------------------------------------
+// Enforcement of the five previously-dropped consensus opcodes:
+// ASSERT_CONCURRENT_SPEND (64), ASSERT_CONCURRENT_PUZZLE (65),
+// SEND_MESSAGE (66), RECEIVE_MESSAGE (67), ASSERT_EPHEMERAL (76).
+// Each rule is exercised on both its satisfied and violated path, asserting the
+// exact chia error code on violation (chia-consensus 0.37.0 validation_error.rs).
+// ---------------------------------------------------------------------------
+
+fn coin_of(parent: Bytes32, amount: u64, puzzle: &Program<'static>) -> Coin {
+    Coin {
+        parent_coin_info: parent,
+        puzzle_hash: puzzle.tree_hash(),
+        amount,
+    }
+}
+
+fn conds_for(spends: Vec<SExp<'static>>) -> SpendBundleConditions {
+    let output = SExp::from(vec![SExp::from(spends)]);
+    execute_block_generator_result(&input(quoted_generator(output))).unwrap()
+}
+
+#[test]
+fn assert_concurrent_spend_satisfied_validates() {
+    let other_parent = Bytes32::new([2; 32]);
+    let other_puzzle = puzzle_for_conditions(vec![ConditionWithArgs::ReserveFee(0)]);
+    let other_coin = coin_of(other_parent, 100, &other_puzzle);
+    let asserting_puzzle = puzzle_for_conditions(vec![ConditionWithArgs::AssertConcurrentSpend(
+        other_coin.name(),
+    )]);
+    let conds = conds_for(vec![
+        spend_output(Bytes32::new([1; 32]), 100, &asserting_puzzle),
+        spend_output(other_parent, 100, &other_puzzle),
+    ]);
+    assert!(validate_block_conditions(&conds, &Default::default()).is_ok());
+}
+
+#[test]
+fn assert_concurrent_spend_missing_coin_fails_132() {
+    let asserting_puzzle = puzzle_for_conditions(vec![ConditionWithArgs::AssertConcurrentSpend(
+        Bytes32::new([0xAB; 32]),
+    )]);
+    let conds = conds_for(vec![spend_output(
+        Bytes32::new([1; 32]),
+        100,
+        &asserting_puzzle,
+    )]);
+    let err = validate_block_conditions(&conds, &Default::default()).unwrap_err();
+    assert_eq!(err, ChiaError::AssertConcurrentSpendFailed);
+    assert_eq!(err as i64, 132);
+}
+
+#[test]
+fn assert_concurrent_puzzle_satisfied_validates() {
+    let other_puzzle = puzzle_for_conditions(vec![ConditionWithArgs::ReserveFee(0)]);
+    let asserting_puzzle = puzzle_for_conditions(vec![ConditionWithArgs::AssertConcurrentPuzzle(
+        other_puzzle.tree_hash(),
+    )]);
+    let conds = conds_for(vec![
+        spend_output(Bytes32::new([1; 32]), 100, &asserting_puzzle),
+        spend_output(Bytes32::new([2; 32]), 100, &other_puzzle),
+    ]);
+    assert!(validate_block_conditions(&conds, &Default::default()).is_ok());
+}
+
+#[test]
+fn assert_concurrent_puzzle_missing_puzzle_fails_133() {
+    let asserting_puzzle = puzzle_for_conditions(vec![ConditionWithArgs::AssertConcurrentPuzzle(
+        Bytes32::new([0xCD; 32]),
+    )]);
+    let conds = conds_for(vec![spend_output(
+        Bytes32::new([1; 32]),
+        100,
+        &asserting_puzzle,
+    )]);
+    let err = validate_block_conditions(&conds, &Default::default()).unwrap_err();
+    assert_eq!(err, ChiaError::AssertConcurrentPuzzleFailed);
+    assert_eq!(err as i64, 133);
+}
+
+#[test]
+fn assert_ephemeral_created_in_block_validates() {
+    let child_puzzle = puzzle_for_conditions(vec![ConditionWithArgs::AssertEphemeral]);
+    let child_amount = 42;
+    let parent_parent = Bytes32::new([3; 32]);
+    let parent_puzzle = puzzle_for_conditions(vec![ConditionWithArgs::CreateCoin(
+        child_puzzle.tree_hash(),
+        child_amount,
+        vec![],
+    )]);
+    let parent_coin = coin_of(parent_parent, 42, &parent_puzzle);
+    let conds = conds_for(vec![
+        spend_output(parent_parent, 42, &parent_puzzle),
+        spend_output(parent_coin.name(), child_amount, &child_puzzle),
+    ]);
+    assert!(validate_block_conditions(&conds, &Default::default()).is_ok());
+}
+
+#[test]
+fn assert_ephemeral_without_parent_in_block_fails_140() {
+    let child_puzzle = puzzle_for_conditions(vec![ConditionWithArgs::AssertEphemeral]);
+    // The parent coin is not spent in this block, so the coin is not ephemeral.
+    let conds = conds_for(vec![spend_output(Bytes32::new([9; 32]), 42, &child_puzzle)]);
+    let err = validate_block_conditions(&conds, &Default::default()).unwrap_err();
+    assert_eq!(err, ChiaError::AssertEphemeralFailed);
+    assert_eq!(err as i64, 140);
+}
+
+// mode 0b111_000 = 56: sender commits its own coin id, receiver commits nothing.
+const SENDER_COMMITS_COIN_ID: u8 = 0b111_000;
+
+#[test]
+fn paired_send_and_receive_message_validates() {
+    let sender_parent = Bytes32::new([4; 32]);
+    let message = Message::new(b"hello".to_vec()).unwrap();
+    let sender_puzzle = puzzle_for_conditions(vec![ConditionWithArgs::SendMessage(
+        SENDER_COMMITS_COIN_ID,
+        message,
+        MessageArgs::None,
+    )]);
+    let sender_coin = coin_of(sender_parent, 100, &sender_puzzle);
+    // Receiver names the sender's coin id as the message source; both commit
+    // nothing on the receiver side, so the pair nets to zero.
+    let receiver_puzzle = puzzle_for_conditions(vec![ConditionWithArgs::ReceiveMessage(
+        SENDER_COMMITS_COIN_ID,
+        message,
+        MessageArgs::CoinId(sender_coin.name()),
+    )]);
+    let conds = conds_for(vec![
+        spend_output(sender_parent, 100, &sender_puzzle),
+        spend_output(Bytes32::new([5; 32]), 100, &receiver_puzzle),
+    ]);
+    assert!(validate_block_conditions(&conds, &Default::default()).is_ok());
+}
+
+#[test]
+fn unpaired_send_message_fails_147() {
+    let sender_puzzle = puzzle_for_conditions(vec![ConditionWithArgs::SendMessage(
+        SENDER_COMMITS_COIN_ID,
+        Message::new(b"orphan".to_vec()).unwrap(),
+        MessageArgs::None,
+    )]);
+    let conds = conds_for(vec![spend_output(
+        Bytes32::new([4; 32]),
+        100,
+        &sender_puzzle,
+    )]);
+    let err = validate_block_conditions(&conds, &Default::default()).unwrap_err();
+    assert_eq!(err, ChiaError::MessageNotSentOrReceived);
+    assert_eq!(err as i64, 147);
+}
+
+#[test]
+fn send_and_receive_with_mismatched_message_fails_147() {
+    let sender_parent = Bytes32::new([4; 32]);
+    let sender_puzzle = puzzle_for_conditions(vec![ConditionWithArgs::SendMessage(
+        SENDER_COMMITS_COIN_ID,
+        Message::new(b"ping".to_vec()).unwrap(),
+        MessageArgs::None,
+    )]);
+    let sender_coin = coin_of(sender_parent, 100, &sender_puzzle);
+    let receiver_puzzle = puzzle_for_conditions(vec![ConditionWithArgs::ReceiveMessage(
+        SENDER_COMMITS_COIN_ID,
+        Message::new(b"pong".to_vec()).unwrap(),
+        MessageArgs::CoinId(sender_coin.name()),
+    )]);
+    let conds = conds_for(vec![
+        spend_output(sender_parent, 100, &sender_puzzle),
+        spend_output(Bytes32::new([5; 32]), 100, &receiver_puzzle),
+    ]);
+    let err = validate_block_conditions(&conds, &Default::default()).unwrap_err();
+    assert_eq!(err, ChiaError::MessageNotSentOrReceived);
+    assert_eq!(err as i64, 147);
+}
+
+// ===========================================================================
+// Batch 2 — condition parsing + validation harvested from
+// chia/_tests/core/full_node/test_conditions.py.
+//
+// chia drives every case through a full block containing an EASY_PUZZLE
+// (SerializedProgram `0x01`, which returns its solution as the condition list)
+// and asserts the block is accepted (Err == None) or rejected with a specific
+// `Err.*`. dg_xch has no block-building simulator, so we reproduce the *soul*:
+// the identical condition list flows through `execute_block_generator_result`
+// (parse + aggregate) and `validate_block_conditions` / `validate_spend_context`
+// (the consensus checker), with the timing context supplied directly.
+//
+// chia's chain model for the parametrized `test_condition` (used to pin the
+// boundaries below): 4 prior blocks, spend in the 5th (height 4); the spent coin
+// was created at height 2; genesis ts 10000, 10s/block. Absolute conditions are
+// checked against the previous-transaction-block (height 3, ts 10030); relative
+// conditions against the coin's creation (height 2, ts 10020). We encode those
+// same boundaries directly.
+// ===========================================================================
+
+// EASY_PUZZLE: CLVM path `1` returns the solution verbatim, so conditions live in
+// the solution and the coin id does NOT depend on them (needed for MY_COIN_ID).
+fn easy_puzzle() -> Program<'static> {
+    Program::to(1_u8)
+}
+
+fn easy_spend(parent: Bytes32, amount: u64, solution: SExp<'static>) -> SExp<'static> {
+    SExp::from(vec![
+        SExp::from(parent),
+        easy_puzzle().sexp().to_owned(),
+        SExp::from(amount),
+        solution,
+    ])
+}
+
+fn conditions_solution(conditions: Vec<ConditionWithArgs>) -> SExp<'static> {
+    SExp::from(
+        conditions
+            .iter()
+            .map(|condition| SExp::from(condition).to_owned())
+            .collect::<Vec<_>>(),
+    )
+}
+
+// Execute a single EASY_PUZZLE spend whose solution is the given condition list.
+fn conds_for_solution(
+    parent: Bytes32,
+    amount: u64,
+    conditions: Vec<ConditionWithArgs>,
+) -> SpendBundleConditions {
+    let output = SExp::from(vec![SExp::from(vec![easy_spend(
+        parent,
+        amount,
+        conditions_solution(conditions),
+    )])]);
+    execute_block_generator_result(&input(quoted_generator(output))).unwrap()
+}
+
+// Execute an EASY_PUZZLE spend whose solution carries a raw (untyped) condition,
+// used for negative/edge arguments that the typed `ConditionWithArgs` can't hold.
+fn conds_for_raw(
+    parent: Bytes32,
+    amount: u64,
+    raw_conditions: Vec<SExp<'static>>,
+) -> Result<SpendBundleConditions, ChiaError> {
+    let solution = SExp::from(raw_conditions);
+    let output = SExp::from(vec![SExp::from(vec![easy_spend(parent, amount, solution)])]);
+    execute_block_generator_result(&input(quoted_generator(output)))
+}
+
+fn raw_condition(opcode: u8, arg: Vec<u8>) -> SExp<'static> {
+    SExp::from(vec![SExp::from(opcode), SExp::Atom(AtomBuf::new(arg))])
+}
+
+fn height_ctx(block_height: u32) -> ConditionValidationContext {
+    ConditionValidationContext {
+        block_height,
+        previous_transaction_block_timestamp: None,
+        coin_context: HashMap::new(),
+    }
+}
+
+fn seconds_ctx(timestamp: u64) -> ConditionValidationContext {
+    ConditionValidationContext {
+        block_height: 0,
+        previous_transaction_block_timestamp: Some(timestamp),
+        coin_context: HashMap::new(),
+    }
+}
+
+// -------- ASSERT_HEIGHT_ABSOLUTE (83) --------------------------------------
+// chia: assert current height >= N. Boundary at N: pass when block_height >= N.
+#[test]
+fn assert_height_absolute_boundary_matches_chia() {
+    let conds = conds_for_solution(
+        Bytes32::new([1; 32]),
+        100,
+        vec![ConditionWithArgs::AssertHeightAbsolute(100)],
+    );
+    assert!(validate_block_conditions(&conds, &height_ctx(100)).is_ok());
+    assert_eq!(
+        validate_block_conditions(&conds, &height_ctx(99)),
+        Err(ChiaError::AssertHeightAbsoluteFailed)
+    );
+}
+
+// -------- ASSERT_BEFORE_HEIGHT_ABSOLUTE (85) -------------------------------
+// chia: assert current height < N. Boundary at N: pass when block_height < N.
+#[test]
+fn assert_before_height_absolute_boundary_matches_chia() {
+    let conds = conds_for_solution(
+        Bytes32::new([1; 32]),
+        100,
+        vec![ConditionWithArgs::AssertBeforeHeightAbsolute(100)],
+    );
+    assert!(validate_block_conditions(&conds, &height_ctx(99)).is_ok());
+    assert_eq!(
+        validate_block_conditions(&conds, &height_ctx(100)),
+        Err(ChiaError::AssertHeightAbsoluteFailed)
+    );
+}
+
+// -------- ASSERT_SECONDS_ABSOLUTE (81) -------------------------------------
+// chia: assert prev-tx-block timestamp >= N. Boundary at N=10030 (chia's ts).
+#[test]
+fn assert_seconds_absolute_boundary_matches_chia() {
+    let conds = conds_for_solution(
+        Bytes32::new([1; 32]),
+        100,
+        vec![ConditionWithArgs::AssertSecondsAbsolute(10030)],
+    );
+    assert!(validate_block_conditions(&conds, &seconds_ctx(10030)).is_ok());
+    assert_eq!(
+        validate_block_conditions(&conds, &seconds_ctx(10029)),
+        Err(ChiaError::AssertSecondsAbsoluteFailed)
+    );
+}
+
+// -------- ASSERT_BEFORE_SECONDS_ABSOLUTE (84) ------------------------------
+// chia: assert prev-tx-block timestamp < N. Boundary at N=10031.
+#[test]
+fn assert_before_seconds_absolute_boundary_matches_chia() {
+    let conds = conds_for_solution(
+        Bytes32::new([1; 32]),
+        100,
+        vec![ConditionWithArgs::AssertBeforeSecondsAbsolute(10031)],
+    );
+    assert!(validate_block_conditions(&conds, &seconds_ctx(10030)).is_ok());
+    assert_eq!(
+        validate_block_conditions(&conds, &seconds_ctx(10031)),
+        Err(ChiaError::AssertSecondsAbsoluteFailed)
+    );
+}
+
+// -------- ASSERT_HEIGHT_RELATIVE (82) --------------------------------------
+// chia: assert current height >= created_height + N. Coin created at height 2.
+// Boundary N=2: pass at block_height 4, fail at 3.
+#[test]
+fn assert_height_relative_boundary_matches_chia() {
+    let parent = Bytes32::new([1; 32]);
+    let amount = 100;
+    let coin = coin_of(parent, amount, &easy_puzzle());
+    let conds = conds_for_solution(
+        parent,
+        amount,
+        vec![ConditionWithArgs::AssertHeightRelative(2)],
+    );
+    let context = CoinSpendContext {
+        birth_height: None,
+        birth_seconds: None,
+        spent_height: Some(2),
+        spent_seconds: None,
+    };
+
+    let mut pass = height_ctx(4);
+    pass.coin_context.insert(coin.name(), context);
+    assert!(validate_block_conditions(&conds, &pass).is_ok());
+
+    let mut fail = height_ctx(3);
+    fail.coin_context.insert(coin.name(), context);
+    assert_eq!(
+        validate_block_conditions(&conds, &fail),
+        Err(ChiaError::AssertHeightRelativeFailed)
+    );
+}
+
+// -------- ASSERT_BEFORE_HEIGHT_RELATIVE (86) -------------------------------
+// chia: assert current height < created_height + N. Boundary N=2, created 2:
+// pass at block_height 3, fail at 4.
+#[test]
+fn assert_before_height_relative_boundary_matches_chia() {
+    let parent = Bytes32::new([1; 32]);
+    let amount = 100;
+    let coin = coin_of(parent, amount, &easy_puzzle());
+    let conds = conds_for_solution(
+        parent,
+        amount,
+        vec![ConditionWithArgs::AssertBeforeHeightRelative(2)],
+    );
+    let context = CoinSpendContext {
+        birth_height: None,
+        birth_seconds: None,
+        spent_height: Some(2),
+        spent_seconds: None,
+    };
+
+    let mut pass = height_ctx(3);
+    pass.coin_context.insert(coin.name(), context);
+    assert!(validate_block_conditions(&conds, &pass).is_ok());
+
+    let mut fail = height_ctx(4);
+    fail.coin_context.insert(coin.name(), context);
+    assert_eq!(
+        validate_block_conditions(&conds, &fail),
+        Err(ChiaError::AssertHeightRelativeFailed)
+    );
+}
+
+// -------- ASSERT_SECONDS_RELATIVE (80) -------------------------------------
+// chia: assert prev-tx-block ts >= created_ts + N. Created ts 10020, N=10:
+// pass at ts 10030, fail at 10029.
+#[test]
+fn assert_seconds_relative_boundary_matches_chia() {
+    let parent = Bytes32::new([1; 32]);
+    let amount = 100;
+    let coin = coin_of(parent, amount, &easy_puzzle());
+    let conds = conds_for_solution(
+        parent,
+        amount,
+        vec![ConditionWithArgs::AssertSecondsRelative(10)],
+    );
+    let context = CoinSpendContext {
+        birth_height: None,
+        birth_seconds: None,
+        spent_height: None,
+        spent_seconds: Some(10020),
+    };
+
+    let mut pass = seconds_ctx(10030);
+    pass.coin_context.insert(coin.name(), context);
+    assert!(validate_block_conditions(&conds, &pass).is_ok());
+
+    let mut fail = seconds_ctx(10029);
+    fail.coin_context.insert(coin.name(), context);
+    assert_eq!(
+        validate_block_conditions(&conds, &fail),
+        Err(ChiaError::AssertSecondsRelativeFailed)
+    );
+}
+
+// -------- ASSERT_MY_BIRTH_HEIGHT (75) --------------------------------------
+// chia: the spend's asserted birth height must equal the coin's real birth
+// height. dg_xch flags a mismatch as InvalidCondition (chia uses the specific
+// ASSERT_MY_BIRTH_HEIGHT_FAILED; both reject).
+#[test]
+fn assert_my_birth_height_matches_and_mismatches() {
+    let parent = Bytes32::new([1; 32]);
+    let amount = 100;
+    let coin = coin_of(parent, amount, &easy_puzzle());
+    let context = CoinSpendContext {
+        birth_height: Some(2),
+        birth_seconds: None,
+        spent_height: Some(2),
+        spent_seconds: None,
+    };
+
+    let good = conds_for_solution(
+        parent,
+        amount,
+        vec![ConditionWithArgs::AssertMyBirthHeight(2)],
+    );
+    let mut ok = height_ctx(4);
+    ok.coin_context.insert(coin.name(), context);
+    assert!(validate_block_conditions(&good, &ok).is_ok());
+
+    let bad = conds_for_solution(
+        parent,
+        amount,
+        vec![ConditionWithArgs::AssertMyBirthHeight(3)],
+    );
+    let mut mismatch = height_ctx(4);
+    mismatch.coin_context.insert(coin.name(), context);
+    assert_eq!(
+        validate_block_conditions(&bad, &mismatch),
+        Err(ChiaError::InvalidCondition)
+    );
+}
+
+// -------- ASSERT_MY_COIN_ID (70) -------------------------------------------
+// chia test_valid_my_id / test_invalid_my_id. dg_xch enforces this inside the
+// generator: a wrong coin id aborts execution (InvalidBlockSolution); chia uses
+// the specific ASSERT_MY_COIN_ID_FAILED. Both reject the spend.
+#[test]
+fn assert_my_coin_id_valid_and_invalid() {
+    let parent = Bytes32::new([1; 32]);
+    let amount = 100;
+    let coin = coin_of(parent, amount, &easy_puzzle());
+
+    // Valid: the real coin id is accepted.
+    let _ = conds_for_solution(
+        parent,
+        amount,
+        vec![ConditionWithArgs::AssertMyCoinId(coin.name())],
+    );
+
+    // Invalid: flip one bit of the coin id.
+    let mut wrong = coin.name().bytes();
+    wrong[31] ^= 1;
+    let output = SExp::from(vec![SExp::from(vec![easy_spend(
+        parent,
+        amount,
+        conditions_solution(vec![ConditionWithArgs::AssertMyCoinId(Bytes32::new(wrong))]),
+    )])]);
+    assert_eq!(
+        execute_block_generator_result(&input(quoted_generator(output))),
+        Err(ChiaError::InvalidBlockSolution)
+    );
+}
+
+// -------- announcement limit (chia test_announce_conditions_limit) ---------
+// dg_xch enforces a hard cap of 1024 announcements per block. chia removed this
+// limit in HARD_FORK_3_0; below that fork dg_xch matches the 1024/1025 boundary.
+#[test]
+fn announcement_limit_is_mempool_only_consensus_accepts_1025() {
+    // The 1024-announcement cap is chia's MEMPOOL rule; consensus accepts
+    // announcement-heavy blocks (mainnet 4,693,324 is an 830-spend dust sweep past the cap).
+    for count in [1024usize, 1025] {
+        let conds = conds_for_solution(
+            Bytes32::new([1; 32]),
+            100,
+            (0..count)
+                .map(|_| {
+                    ConditionWithArgs::CreateCoinAnnouncement(Message::new(b"x".to_vec()).unwrap())
+                })
+                .collect(),
+        );
+        assert!(
+            validate_block_conditions(&conds, &Default::default()).is_ok(),
+            "block validation must accept {count} announcements"
+        );
+    }
+}
+
+// ===========================================================================
+// Negative / out-of-range height/seconds condition arguments.
+// FIXED: condition-arg decode now saturates a signed CLVM integer into the u32/
+// u64 slot (`formatting::saturating_u32_from_bigint` / `saturating_u64_from_bigint`),
+// and the assertion direction (>= for ASSERT_*, < for ASSERT_BEFORE_*) resolves
+// which end is a no-op and which is a failure — matching chia exactly.
+//
+// Per-opcode rule confirmed against
+// chia/_tests/core/full_node/test_conditions.py::TestConditions::test_condition
+// (block_height 3, prev-tx ts 10030, spent coin born height 2 / ts 10020):
+//
+//   family                       | negative arg  | arg > type max
+//   -----------------------------|---------------|----------------
+//   ASSERT_HEIGHT/SECONDS_*       | no-op, PASS   | FAIL (unreachable future)
+//   ASSERT_BEFORE_HEIGHT/SECONDS_*| FAIL          | no-op, PASS (bound never hit)
+//
+// The two families move in OPPOSITE directions for an impossible bound. dg_xch
+// collapses the specific chia error codes (ASSERT_BEFORE_*_FAILED /
+// IMPOSSIBLE_*_CONSTRAINTS) into AssertHeightAbsoluteFailed / AssertSecondsAbsoluteFailed
+// for absolute and AssertHeight/SecondsRelativeFailed for relative — the
+// accept/reject direction is what these tests pin.
+//
+// The negative ASSERT_BEFORE_* direction was the dangerous one: it previously
+// decoded UNSIGNED (`-1` -> 255), admitting a spend the network rejects.
+// ===========================================================================
+
+// Two big-endian bytes that decode (signed) to +2^32, one past u32::MAX.
+fn u32_overflow_arg() -> Vec<u8> {
+    vec![0x01, 0x00, 0x00, 0x00, 0x00]
+}
+
+// Nine big-endian bytes that decode (signed) to +2^64, one past u64::MAX.
+fn u64_overflow_arg() -> Vec<u8> {
+    vec![0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+}
+
+#[test]
+fn negative_height_absolute_is_noop_like_chia() {
+    // chia: (83 -1) => None (pass). Coin spent at block_height 0.
+    let conds = conds_for_raw(
+        Bytes32::new([1; 32]),
+        100,
+        vec![raw_condition(
+            ConditionOpcode::AssertHeightAbsolute as u8,
+            vec![0xff],
+        )],
+    )
+    .expect("parsing 0xff (-1) as a height must not error");
+    // -1 clamps to 0; height_absolute 0 <= block_height 0 => satisfied.
+    assert!(validate_block_conditions(&conds, &height_ctx(0)).is_ok());
+}
+
+#[test]
+fn negative_seconds_absolute_is_noop_like_chia() {
+    // chia: (81 -1) => None (pass). -1 clamps to 0; 0 <= ts 0 => satisfied.
+    let conds = conds_for_raw(
+        Bytes32::new([1; 32]),
+        100,
+        vec![raw_condition(
+            ConditionOpcode::AssertSecondsAbsolute as u8,
+            vec![0xff],
+        )],
+    )
+    .expect("chia accepts a negative seconds assertion as a no-op");
+    assert!(validate_block_conditions(&conds, &seconds_ctx(0)).is_ok());
+}
+
+// ---- both-direction coverage: ASSERT_BEFORE_* negative must REJECT ----------
+// This was the dangerous under-rejection: `-1` decoded UNSIGNED to 255 admitted
+// a spend chia rejects. A before-bound in the past is unsatisfiable => FAIL.
+
+#[test]
+fn negative_before_height_absolute_rejects_like_chia() {
+    // chia: (87 -1) => ASSERT_BEFORE_HEIGHT_ABSOLUTE_FAILED. -1 clamps to 0;
+    // block_height 0 >= before-bound 0 => rejected at every height.
+    let conds = conds_for_raw(
+        Bytes32::new([1; 32]),
+        100,
+        vec![raw_condition(
+            ConditionOpcode::AssertBeforeHeightAbsolute as u8,
+            vec![0xff],
+        )],
+    )
+    .expect("parsing 0xff (-1) as a before-height must not error");
+    assert_eq!(
+        validate_block_conditions(&conds, &height_ctx(0)),
+        Err(ChiaError::AssertHeightAbsoluteFailed)
+    );
+}
+
+#[test]
+fn negative_before_seconds_absolute_rejects_like_chia() {
+    // chia: (85 -1) => ASSERT_BEFORE_SECONDS_ABSOLUTE_FAILED.
+    let conds = conds_for_raw(
+        Bytes32::new([1; 32]),
+        100,
+        vec![raw_condition(
+            ConditionOpcode::AssertBeforeSecondsAbsolute as u8,
+            vec![0xff],
+        )],
+    )
+    .expect("parsing 0xff (-1) as a before-seconds must not error");
+    assert_eq!(
+        validate_block_conditions(&conds, &seconds_ctx(0)),
+        Err(ChiaError::AssertSecondsAbsoluteFailed)
+    );
+}
+
+#[test]
+fn negative_before_height_relative_rejects_like_chia() {
+    // chia: (86 -1) => ASSERT_BEFORE_HEIGHT_RELATIVE_FAILED. -1 clamps to 0;
+    // block_height >= spent_height + 0 is always true once spent => FAIL.
+    let parent = Bytes32::new([1; 32]);
+    let amount = 100;
+    let coin = coin_of(parent, amount, &easy_puzzle());
+    let conds = conds_for_raw(
+        parent,
+        amount,
+        vec![raw_condition(
+            ConditionOpcode::AssertBeforeHeightRelative as u8,
+            vec![0xff],
+        )],
+    )
+    .expect("parsing 0xff (-1) as a before-height-relative must not error");
+    let context = CoinSpendContext {
+        birth_height: None,
+        birth_seconds: None,
+        spent_height: Some(2),
+        spent_seconds: None,
+    };
+    let mut ctx = height_ctx(4);
+    ctx.coin_context.insert(coin.name(), context);
+    assert_eq!(
+        validate_block_conditions(&conds, &ctx),
+        Err(ChiaError::AssertHeightRelativeFailed)
+    );
+}
+
+#[test]
+fn negative_before_seconds_relative_rejects_like_chia() {
+    // chia: (84 -1) => ASSERT_BEFORE_SECONDS_RELATIVE_FAILED.
+    let parent = Bytes32::new([1; 32]);
+    let amount = 100;
+    let coin = coin_of(parent, amount, &easy_puzzle());
+    let conds = conds_for_raw(
+        parent,
+        amount,
+        vec![raw_condition(
+            ConditionOpcode::AssertBeforeSecondsRelative as u8,
+            vec![0xff],
+        )],
+    )
+    .expect("parsing 0xff (-1) as a before-seconds-relative must not error");
+    let context = CoinSpendContext {
+        birth_height: None,
+        birth_seconds: None,
+        spent_height: None,
+        spent_seconds: Some(10020),
+    };
+    let mut ctx = seconds_ctx(10030);
+    ctx.coin_context.insert(coin.name(), context);
+    assert_eq!(
+        validate_block_conditions(&conds, &ctx),
+        Err(ChiaError::AssertSecondsRelativeFailed)
+    );
+}
+
+// ---- both-direction coverage: one out-of-range (> type max) case per family -
+// ASSERT_* (past) family: an unreachable future bound => FAIL.
+// ASSERT_BEFORE_* family: a bound past the type max => no-op, PASS.
+
+#[test]
+fn overflow_height_absolute_rejects_like_chia() {
+    // chia: (83 0x100000000) => ASSERT_HEIGHT_ABSOLUTE_FAILED. +2^32 saturates
+    // to u32::MAX, which exceeds any real block height => FAIL.
+    let conds = conds_for_raw(
+        Bytes32::new([1; 32]),
+        100,
+        vec![raw_condition(
+            ConditionOpcode::AssertHeightAbsolute as u8,
+            u32_overflow_arg(),
+        )],
+    )
+    .expect("parsing an out-of-range height must not error");
+    assert_eq!(
+        validate_block_conditions(&conds, &height_ctx(3)),
+        Err(ChiaError::AssertHeightAbsoluteFailed)
+    );
+}
+
+#[test]
+fn overflow_seconds_absolute_rejects_like_chia() {
+    // chia: (81 0x10000000000000000) => ASSERT_SECONDS_ABSOLUTE_FAILED.
+    let conds = conds_for_raw(
+        Bytes32::new([1; 32]),
+        100,
+        vec![raw_condition(
+            ConditionOpcode::AssertSecondsAbsolute as u8,
+            u64_overflow_arg(),
+        )],
+    )
+    .expect("parsing an out-of-range seconds must not error");
+    assert_eq!(
+        validate_block_conditions(&conds, &seconds_ctx(10030)),
+        Err(ChiaError::AssertSecondsAbsoluteFailed)
+    );
+}
+
+#[test]
+fn overflow_before_height_absolute_is_noop_like_chia() {
+    // chia: (87 0x100000000) => None (pass). +2^32 saturates to u32::MAX; a real
+    // block height is always < u32::MAX => the before-bound is never hit.
+    let conds = conds_for_raw(
+        Bytes32::new([1; 32]),
+        100,
+        vec![raw_condition(
+            ConditionOpcode::AssertBeforeHeightAbsolute as u8,
+            u32_overflow_arg(),
+        )],
+    )
+    .expect("parsing an out-of-range before-height must not error");
+    assert!(validate_block_conditions(&conds, &height_ctx(3)).is_ok());
+}
+
+#[test]
+fn overflow_before_seconds_absolute_is_noop_like_chia() {
+    // chia: (85 0x10000000000000000) => None (pass). +2^64 saturates to u64::MAX;
+    // a real timestamp is always < u64::MAX => the before-bound is never hit.
+    let conds = conds_for_raw(
+        Bytes32::new([1; 32]),
+        100,
+        vec![raw_condition(
+            ConditionOpcode::AssertBeforeSecondsAbsolute as u8,
+            u64_overflow_arg(),
+        )],
+    )
+    .expect("parsing an out-of-range before-seconds must not error");
+    assert!(validate_block_conditions(&conds, &seconds_ctx(10030)).is_ok());
+}
+
+// ===========================================================================
+// BLS G1 infinity public key rejected in AGG_SIG conditions.
+//
+// chia rejects the identity/infinity element (0xc0 followed by 47 zero bytes) as
+// an AGG_SIG_* public key with Err.INVALID_CONDITION under the soft-fork-5 rule,
+// now enforced at every current mainnet height. dg_xch previously parsed it as an
+// ordinary Bytes48 and deferred any failure to signature verification. The fix
+// (ConditionWithArgs::agg_sig_infinity_pubkey + spend_from_conditions) refuses the
+// key during condition aggregation, before signature verification, surfacing the
+// same INVALID_CONDITION (Err code 10).
+// chia oracle: test_conditions.py::test_agg_sig_infinity.
+//
+// Note on the expected error: the original evidence stub asserted only that the
+// infinity key produced no agg_sig entry. The faithful chia behavior is an
+// outright block rejection with INVALID_CONDITION, so this re-derived test now
+// asserts execution returns Err(ChiaError::InvalidCondition) (Err code 10).
+// ===========================================================================
+
+// The disallowed G1 identity element in compressed form: 0xc0 then 47 zero bytes.
+fn g1_infinity_pubkey() -> Bytes48 {
+    let mut infinity = [0_u8; 48];
+    infinity[0] = 0xc0;
+    Bytes48::new(infinity)
+}
+
+// Drive a single raw AGG_SIG_* condition through condition aggregation and return
+// the block-generator result, so the negative path can inspect the error.
+fn conds_for_condition(condition: &ConditionWithArgs) -> Result<SpendBundleConditions, ChiaError> {
+    conds_for_raw(
+        Bytes32::new([1; 32]),
+        100,
+        vec![SExp::from(condition).to_owned()],
+    )
+}
+
+#[test]
+fn agg_sig_infinity_pubkey_is_rejected_like_chia() {
+    let condition = ConditionWithArgs::AggSigUnsafe(
+        g1_infinity_pubkey(),
+        Message::new(b"foobar".to_vec()).unwrap(),
+    );
+    let err = conds_for_condition(&condition).unwrap_err();
+    assert_eq!(err, ChiaError::InvalidCondition);
+    assert_eq!(err as i64, 10);
+}
+
+#[test]
+fn agg_sig_infinity_pubkey_rejected_for_every_agg_sig_opcode() {
+    let pk = g1_infinity_pubkey();
+    let msg = Message::new(b"foobar".to_vec()).unwrap();
+    // The full AGG_SIG_* family: AGG_SIG_UNSAFE / AGG_SIG_ME plus the six
+    // soft-fork-5 additions. Every opcode must reject the infinity pubkey.
+    let conditions = [
+        ConditionWithArgs::AggSigParent(pk, msg),
+        ConditionWithArgs::AggSigPuzzle(pk, msg),
+        ConditionWithArgs::AggSigAmount(pk, msg),
+        ConditionWithArgs::AggSigPuzzleAmount(pk, msg),
+        ConditionWithArgs::AggSigParentAmount(pk, msg),
+        ConditionWithArgs::AggSigParentPuzzle(pk, msg),
+        ConditionWithArgs::AggSigUnsafe(pk, msg),
+        ConditionWithArgs::AggSigMe(pk, msg),
+    ];
+    for condition in &conditions {
+        let opcode = condition.op_code();
+        let err = conds_for_condition(condition).unwrap_err();
+        assert_eq!(
+            err,
+            ChiaError::InvalidCondition,
+            "opcode {opcode:?} must reject the G1 infinity pubkey"
+        );
+    }
+}
+
+#[test]
+fn agg_sig_non_infinity_pubkey_is_still_accepted() {
+    // The fix must not over-reject. A wholly different key, and a near-miss that
+    // shares the 0xc0 infinity prefix but carries a non-zero trailing byte, must
+    // both pass condition aggregation and land in agg_sig_unsafe.
+    let ordinary = Bytes48::new([1; 48]);
+    let mut near_miss_bytes = [0_u8; 48];
+    near_miss_bytes[0] = 0xc0;
+    near_miss_bytes[47] = 0x01;
+    let near_miss = Bytes48::new(near_miss_bytes);
+    for pk in [ordinary, near_miss] {
+        let conds = conds_for_solution(
+            Bytes32::new([1; 32]),
+            100,
+            vec![ConditionWithArgs::AggSigUnsafe(
+                pk,
+                Message::new(b"foobar".to_vec()).unwrap(),
+            )],
+        );
+        assert_eq!(
+            conds.agg_sig_unsafe.len(),
+            1,
+            "non-infinity pubkey {pk} must be accepted"
+        );
+    }
+}
+
+// ===========================================================================
+// conditions_from_spend_bundle — the mempool-admission analog of the generator
+// run (chia_rs run_spendbundle). The EASY_PUZZLE (`1`) echoes its solution as
+// the condition list, so a hand-built CoinSpend exercises the whole path:
+// byte-cost charging, puzzle-hash binding, per-spend parse, dup detection.
+// ===========================================================================
+
+fn easy_coin_spend(parent: Bytes32, amount: u64, conditions: Vec<ConditionWithArgs>) -> CoinSpend {
+    let puzzle = easy_puzzle();
+    let solution = Program::to(
+        conditions
+            .iter()
+            .map(|condition| SExp::from(condition).to_owned())
+            .collect::<Vec<_>>(),
+    );
+    CoinSpend {
+        coin: Coin {
+            parent_coin_info: parent,
+            puzzle_hash: puzzle.tree_hash(),
+            amount,
+        },
+        puzzle_reveal: puzzle.serialized().expect("puzzle serializes"),
+        solution: solution.serialized().expect("solution serializes"),
+    }
+}
+
+#[test]
+fn spend_bundle_conditions_parse_and_charge_byte_cost() {
+    let target = Bytes32::new([9; 32]);
+    let bundle = SpendBundle {
+        coin_spends: vec![easy_coin_spend(
+            Bytes32::new([1; 32]),
+            1000,
+            vec![ConditionWithArgs::CreateCoin(target, 900, vec![])],
+        )],
+        aggregated_signature: dg_xch_core::blockchain::sized_bytes::Bytes96::default(),
+    };
+    let conds = conditions_from_spend_bundle(&bundle, 1_000_000, &MAINNET).expect("bundle runs");
+    assert_eq!(conds.spends.len(), 1);
+    assert_eq!(conds.spends[0].create_coin.len(), 1);
+    assert_eq!(conds.addition_amount, 900);
+    // Cost = generator-equivalent byte cost + execution + condition cost; the byte term alone
+    // exceeds the CREATE_COIN condition cost, so just pin the floor and monotonicity.
+    assert!(conds.cost > MAINNET.cost_per_byte * 40, "byte cost charged");
+}
+
+#[test]
+fn spend_bundle_rejects_wrong_puzzle_reveal() {
+    let mut spend = easy_coin_spend(Bytes32::new([1; 32]), 1000, vec![]);
+    spend.coin.puzzle_hash = Bytes32::new([0xEE; 32]);
+    let bundle = SpendBundle {
+        coin_spends: vec![spend],
+        aggregated_signature: dg_xch_core::blockchain::sized_bytes::Bytes96::default(),
+    };
+    assert_eq!(
+        conditions_from_spend_bundle(&bundle, 1_000_000, &MAINNET),
+        Err(ChiaError::WrongPuzzleHash)
+    );
+}
+
+#[test]
+fn spend_bundle_rejects_double_spend() {
+    let spend = easy_coin_spend(Bytes32::new([1; 32]), 1000, vec![]);
+    let bundle = SpendBundle {
+        coin_spends: vec![spend.clone(), spend],
+        aggregated_signature: dg_xch_core::blockchain::sized_bytes::Bytes96::default(),
+    };
+    assert!(conditions_from_spend_bundle(&bundle, 1_000_000, &MAINNET).is_err());
+}
+
+// ---------------------------------------------------------------------------
+// Aggregate-signature verifier equivalence guards (public-API only, so this
+// file runs identically against the per-occurrence verifier and the
+// deduped-key verifier — the two must be indistinguishable from outside).
+// ---------------------------------------------------------------------------
+mod agg_sig_verifier_equivalence {
+    use blst::min_pk::AggregateSignature;
+    use dg_xch_core::blockchain::sized_bytes::Bytes96;
+    use dg_xch_core::blockchain::spend_bundle_conditions::SpendBundleConditions;
+    use dg_xch_core::blockchain::unsized_bytes::UnsizedBytes;
+    use dg_xch_core::clvm::bls_bindings::sign;
+    use dg_xch_core::consensus::block_generator::validate_block_aggregate_signature;
+    use dg_xch_core::consensus::constants::MAINNET;
+    use dg_xch_core::errors::ChiaError;
+    use dg_xch_core::traits::SizedBytes;
+
+    use blst::min_pk::SecretKey;
+
+    // The deduped verifier validates each distinct key once (on a post-hard-fork mainnet
+    // corpus, 76.5% of pair
+    // occurrences repeat a key already seen in the block). Repeated-key pair sets are the common
+    // case and must verify exactly as the per-occurrence path did — and a tampered message must
+    // still reject, proving the dedup map wiring didn't detach any pair from the pairing product.
+    #[test]
+    fn repeated_pk_pairs_verify_and_tamper_rejects() {
+        let sk_a = SecretKey::key_gen_v3(&[11u8; 32], &[]).expect("sk a");
+        let sk_b = SecretKey::key_gen_v3(&[13u8; 32], &[]).expect("sk b");
+        let mut conds = SpendBundleConditions::default();
+        let mut sigs = Vec::new();
+        for (sk, msg) in [
+            (&sk_a, b"repeated key message 1".to_vec()),
+            (&sk_a, b"repeated key message 2".to_vec()),
+            (&sk_a, b"repeated key message 3".to_vec()),
+            (&sk_b, b"second key message".to_vec()),
+        ] {
+            sigs.push(sign(sk, &msg));
+            conds.agg_sig_unsafe.push((
+                UnsizedBytes::new(sk.sk_to_pk().to_bytes().to_vec()),
+                UnsizedBytes::new(msg),
+            ));
+        }
+        let aggregate = AggregateSignature::aggregate(&sigs.iter().collect::<Vec<_>>(), true)
+            .expect("aggregate")
+            .to_signature();
+        let aggregate = Bytes96::parse(&aggregate.to_bytes()).expect("sig bytes");
+        validate_block_aggregate_signature(&conds, &aggregate, &MAINNET)
+            .expect("repeated-key pair set verifies");
+
+        // Tamper with one repeated-key message: the aggregate must now reject.
+        conds.agg_sig_unsafe[1].1 = UnsizedBytes::new(b"tampered message 2".to_vec());
+        assert_eq!(
+            validate_block_aggregate_signature(&conds, &aggregate, &MAINNET),
+            Err(ChiaError::BadAggregateSignature),
+            "a tampered pair under a repeated key still rejects"
+        );
+    }
+
+    // Reject a bad key in BOTH verifier branches. The verifier picks its branch from the pair
+    // shape: a single occurrence of the key stays on the legacy per-occurrence path (blst
+    // validates inside the pairing), while duplicated occurrences (distinct*2 <= pairs) take the
+    // deduped path (validate once per distinct key, pairing skips per-occurrence checks). The
+    // two must be indistinguishable: same reject, no panic, either shape.
+    fn assert_bad_pk_rejects_in_both_branches(bad_pk: Vec<u8>, label: &str) {
+        let sk = SecretKey::key_gen_v3(&[17u8; 32], &[]).expect("sk");
+        let msg = b"bad pk message".to_vec();
+        let sig = sign(&sk, &msg);
+        let aggregate = Bytes96::parse(&sig.to_bytes()).expect("sig bytes");
+        for occurrences in [1usize, 2] {
+            let mut conds = SpendBundleConditions::default();
+            for i in 0..occurrences {
+                conds.agg_sig_unsafe.push((
+                    UnsizedBytes::new(bad_pk.clone()),
+                    UnsizedBytes::new(format!("bad pk message {i}").into_bytes()),
+                ));
+            }
+            assert_eq!(
+                validate_block_aggregate_signature(&conds, &aggregate, &MAINNET),
+                Err(ChiaError::BadAggregateSignature),
+                "{label} with {occurrences} occurrence(s) must reject"
+            );
+        }
+    }
+
+    // A 48-byte key that is not a valid compressed G1 point must reject (never panic). The
+    // per-occurrence path decays it to the default/infinity point (`unwrap_or_default` in
+    // `From<Bytes48> for PublicKey`) and blst rejects it as BLST_PK_IS_INFINITY; the deduped
+    // path rejects at deserialize — the same verdict.
+    #[test]
+    fn malformed_pk_bytes_reject() {
+        assert_bad_pk_rejects_in_both_branches(vec![0x01u8; 48], "malformed pk");
+    }
+
+    // A block of all-distinct signer keys (the shape that keeps the legacy branch) must verify —
+    // pinning that the branch heuristic never rejects a valid distinct-key set.
+    #[test]
+    fn distinct_pk_pairs_verify_on_legacy_branch() {
+        let mut conds = SpendBundleConditions::default();
+        let mut sigs = Vec::new();
+        for seed in [31u8, 37, 41] {
+            let sk = SecretKey::key_gen_v3(&[seed; 32], &[]).expect("sk");
+            let msg = format!("distinct key message {seed}").into_bytes();
+            sigs.push(sign(&sk, &msg));
+            conds.agg_sig_unsafe.push((
+                UnsizedBytes::new(sk.sk_to_pk().to_bytes().to_vec()),
+                UnsizedBytes::new(msg),
+            ));
+        }
+        let aggregate = AggregateSignature::aggregate(&sigs.iter().collect::<Vec<_>>(), true)
+            .expect("aggregate")
+            .to_signature();
+        let aggregate = Bytes96::parse(&aggregate.to_bytes()).expect("sig bytes");
+        validate_block_aggregate_signature(&conds, &aggregate, &MAINNET)
+            .expect("distinct-key pair set verifies");
+    }
+
+    // A key that deserializes (on-curve E1 point) but is NOT in the G1 subgroup must reject.
+    // This pins the reject VERDICT on both branches (blst catches it per occurrence under
+    // `pks_validate`; the deduped branch catches it once per distinct key via
+    // `PublicKey::validate()`). Note the verdict alone cannot prove WHICH check rejected: with
+    // an honest aggregate the pairing equation fails for a torsion-bearing key anyway, and the
+    // AUG scheme's pk-prefixed messages make a cross-pair torsion-cancellation forgery
+    // infeasible — so branch-equivalence of the subgroup check rests on the cited blst
+    // semantics (aggregate.c PAIRING_Aggregate_PK_in_G1), with this test pinning the reachable
+    // behavior. Vector: x = 4 on E1 (found by scanning small x with blst: deserializes,
+    // `PublicKey::validate()` = BLST_POINT_NOT_IN_GROUP; E1's cofactor is ~7.6e37 so a random
+    // on-curve point is essentially never in G1).
+    #[test]
+    fn non_subgroup_pk_rejects() {
+        let mut non_subgroup_pk = vec![0u8; 48];
+        non_subgroup_pk[0] = 0x80; // compressed, not infinity
+        non_subgroup_pk[47] = 0x04; // x = 4: on-curve, outside the r-torsion subgroup
+        assert_bad_pk_rejects_in_both_branches(non_subgroup_pk, "non-subgroup pk");
+    }
+
+    // The infinity public key must reject, matching blst's unconditional PK_IS_INFINITY
+    // rejection in PAIRING_Aggregate_PK_in_G1 (and chia's infinity-G1 hardening).
+    #[test]
+    fn infinity_pk_rejects() {
+        let mut infinity_pk = vec![0u8; 48];
+        infinity_pk[0] = 0xc0;
+        assert_bad_pk_rejects_in_both_branches(infinity_pk, "infinity pk");
+    }
 }

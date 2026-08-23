@@ -1,6 +1,6 @@
 use crate::errors::ClvmError;
 use hex::{FromHexError, decode};
-use num_bigint::{BigInt, Sign};
+use num_bigint::BigInt;
 use num_traits::{FromPrimitive, Signed, ToPrimitive, Zero, pow};
 use once_cell::sync::Lazy;
 use serde::Deserializer;
@@ -64,77 +64,22 @@ pub fn u64_to_bytes(v: u64) -> Vec<u8> {
 
 #[allow(clippy::cast_possible_truncation)]
 pub fn bigint_to_bytes(v: &BigInt, signed: bool) -> Vec<u8> {
-    if v.is_zero() || v.sign() == Sign::NoSign {
+    // Minimal big-endian two's-complement, chia's int_to_bytes. The previous word-juggling
+    // port corrupted the sign-pad byte whenever the magnitude filled its u32 words exactly
+    // (e.g. +0xCECD48C0 -> C0CECD48C0; -2^31 likewise). num-bigint's to_signed_bytes_be
+    // is the canonical encoding; strip redundant sign bytes to minimal form.
+    if v.is_zero() {
         return vec![];
     }
-    let mut byte_count = 1;
-    let mut dec = 0;
-    let div = if signed {
-        BIG_ONE.clone()
-    } else {
-        BIG_ZERO.clone()
-    };
-    let b_pow = BigInt::from(1_u64 << 32);
-    if v.is_negative() {
-        let mut right_hand = (-(v.clone()) + BIG_ONE.clone()) * (div + BIG_ONE.clone());
-        while pow(b_pow.clone(), (byte_count - 1) / 4 + 1) < right_hand {
-            byte_count += 4;
-        }
-        right_hand = -(v.clone()) * BIG_TWO.clone();
-        while pow(BIG_TWO.clone(), 8 * byte_count) < right_hand {
-            byte_count += 1;
-        }
-    } else {
-        let mut right_hand = (v.clone() + BIG_ONE.clone()) * (div.clone() + BIG_ONE.clone());
-        while pow(b_pow.clone(), (byte_count - 1) / 4 + 1) < right_hand {
-            byte_count += 4;
-        }
-        right_hand = (v.clone() + BIG_ONE.clone()) * (div + BIG_ONE.clone());
-        while pow(BigInt::from(2_u32), 8 * byte_count) < right_hand {
-            byte_count += 1;
-        }
+    if !signed {
+        return v.magnitude().to_bytes_be();
     }
-    let extra_byte = usize::from(
-        signed
-            && *v > *BIG_ZERO
-            && ((v.clone() >> ((byte_count - 1) * 8)) & BigInt::from(0x80_u32)) > *BIG_ZERO,
-    );
-    let total_bytes = byte_count + extra_byte;
-    let mut dv = Vec::<u8>::with_capacity(total_bytes);
-    let byte4_remain = byte_count % 4;
-    let byte4_length = (byte_count - byte4_remain) / 4;
-    dv.resize(total_bytes, 0);
-    let (_sign, u32_digits) = v.to_u32_digits();
-    for (i, n) in u32_digits.iter().take(byte4_length).enumerate() {
-        let word_idx = byte4_length - i - 1;
-        let num = u64::from(*n);
-        let pointer = extra_byte + byte4_remain + word_idx * 4;
-        let setval = if v.is_negative() {
-            (1_u64 << 32) - num - u64::from(dec)
-        } else {
-            num
-        };
-        dec = 1;
-        dv[pointer] = ((setval >> 24) & 0xff) as u8;
-        dv[pointer + 1] = ((setval >> 16) & 0xff) as u8;
-        dv[pointer + 2] = ((setval >> 8) & 0xff) as u8;
-        dv[pointer + 3] = (setval & 0xff) as u8;
+    let mut b = v.to_signed_bytes_be();
+    while b.len() > 1 && ((b[0] == 0x00 && b[1] & 0x80 == 0) || (b[0] == 0xFF && b[1] & 0x80 != 0))
+    {
+        b.remove(0);
     }
-
-    let last_bytes = u32_digits[u32_digits.len() - 1];
-    let transform = |idx| {
-        if v.is_negative() {
-            (((1 << (8 * byte4_remain)) - last_bytes - dec) >> (8 * idx)) as u8
-        } else {
-            (last_bytes >> (8 * idx)) as u8
-        }
-    };
-
-    for i in 0..byte4_remain {
-        dv[extra_byte + i] = transform(byte4_remain - i - 1);
-    }
-
-    dv
+    b
 }
 
 #[allow(clippy::cast_possible_truncation)]
@@ -227,6 +172,45 @@ pub fn u64_from_bigint(item: &BigInt) -> Result<u64, Error> {
     }
     item.to_u64()
         .ok_or(Error::new(ErrorKind::InvalidData, "u64::MAX overflow"))
+}
+
+/// Saturating decode of a signed CLVM time-lock argument into the `u32` slot chia
+/// stores `ASSERT_HEIGHT_*` / `ASSERT_BEFORE_HEIGHT_*` bounds in.
+///
+/// CLVM integers are signed two's-complement, but the height fields are `u32`.
+/// A negative bound clamps to `0` and an out-of-range positive bound (`> u32::MAX`)
+/// clamps to `u32::MAX`. Which of those is a no-op and which is a hard failure
+/// then follows from the assertion's direction:
+/// - `ASSERT_HEIGHT_*` (satisfied when `block_height >= bound`): a negative bound
+///   is trivially satisfied (a constraint about the past), an overflow bound is
+///   unreachable and fails.
+/// - `ASSERT_BEFORE_HEIGHT_*` (satisfied when `block_height < bound`): a negative
+///   bound is unsatisfiable and fails, an overflow bound is trivially satisfied.
+///
+/// This mirrors chia's canonical behavior exactly (see
+/// `chia/_tests/core/full_node/test_conditions.py::test_condition`).
+#[must_use]
+pub fn saturating_u32_from_bigint(item: &BigInt) -> u32 {
+    if item.is_negative() {
+        0
+    } else {
+        item.to_u32().unwrap_or(u32::MAX)
+    }
+}
+
+/// Saturating decode of a signed CLVM time-lock argument into the `u64` slot chia
+/// stores `ASSERT_SECONDS_*` / `ASSERT_BEFORE_SECONDS_*` bounds in.
+///
+/// The seconds analogue of [`saturating_u32_from_bigint`]: a negative bound clamps
+/// to `0`, an out-of-range positive bound (`> u64::MAX`) clamps to `u64::MAX`, and
+/// the assertion direction decides which end is a no-op and which is a failure.
+#[must_use]
+pub fn saturating_u64_from_bigint(item: &BigInt) -> u64 {
+    if item.is_negative() {
+        0
+    } else {
+        item.to_u64().unwrap_or(u64::MAX)
+    }
 }
 
 fn u32_from_slice_impl(buf: &[u8], signed: bool) -> Option<u32> {

@@ -370,6 +370,60 @@ pub fn get_next_sub_slot_iters_and_difficulty(
     Ok((sub_slot_iters, difficulty))
 }
 
+// How many ancestor records (inclusive of the anchor itself) the get_next_sub_slot_iters_and_
+// difficulty walks can touch below a block at `prev_height`. chia never sizes this per call:
+// full_node.py hands these functions its Blockchain, whose in-memory record cache spans
+// BLOCKS_CACHE_SIZE = EPOCH_BLOCKS + 4 * MAX_SUB_SLOT_BLOCKS below the peak (chia
+// default_constants.py BLOCKS_CACHE_SIZE = 4608 + 128 * 4), so every walk lands in cache. A caller
+// that materializes a bounded ancestor window instead must size it to the deepest walk for THIS
+// anchor:
+//   - can_finish_sub_and_full_epoch scans from the anchor down to the last sub-epoch boundary
+//     (height % SUB_EPOCH_BLOCKS == 0) — up to SUB_EPOCH_BLOCKS - 1 records back;
+//   - at an epoch turn (height_can_be_first_in_epoch(height + 1)) the retarget additionally reaches
+//     _get_second_to_last_transaction_block_in_previous_epoch's fetch floor just below
+//     height_prev_epoch_surpass (chia difficulty_adjustment.py fetches from
+//     height_prev_epoch_surpass - MAX_SUB_SLOT_BLOCKS - 1) — and clear down to genesis while
+//     height_prev_epoch_surpass == 0;
+//   - the residual scans (prev_prev, last_block_curr, the two-transaction-block walk) stay within
+//     chia's cache slack of 4 * MAX_SUB_SLOT_BLOCKS, mirrored here below the deepest anchor.
+// The bounded record-window capacity that serves EVERY consensus walk without a miss — the chia
+// BLOCKS_CACHE_SIZE analog, sized from the constants instead of a flat literal:
+//   - deepest per-anchor `difficulty_record_depth` (epoch-turn regime, anchor offset
+//     SUB_EPOCH_BLOCKS - 2 mod EPOCH_BLOCKS): EPOCH_BLOCKS + (SUB_EPOCH_BLOCKS - 2)
+//     + 4 * MAX_SUB_SLOT_BLOCKS + 1 = 5,503 on mainnet;
+//   - plus 2 * MAX_SUB_SLOT_BLOCKS slack for walk anchors that trail the newest cached head
+//     (an unfinished block's parent; a stage window's base after a restart warm).
+// Mainnet: 4608 + 384 + 6*128 = 5,760 records ≈ 6 MiB. chia's own figure is EPOCH_BLOCKS +
+// 4 * MAX_SUB_SLOT_BLOCKS = 5,120 (default_constants.py BLOCKS_CACHE_SIZE) — but chia's walks
+// also fall back to the DB on a cache miss (blockchain.py block_record / get_block_record_from_db),
+// so its cache is a hint; a caller whose walks read ONLY the window must size it to the worst
+// depth WITH margin, or the first-sub-epoch retarget walk falls off the edge (a
+// restart-resume stall: worst-case lookback 5,503 > a flat 5,120 window).
+#[must_use]
+pub fn consensus_walk_window(constants: &ConsensusConstants) -> usize {
+    (constants.epoch_blocks + constants.sub_epoch_blocks + 6 * constants.max_sub_slot_blocks)
+        as usize
+}
+
+#[must_use]
+pub fn difficulty_record_depth(constants: &ConsensusConstants, prev_height: u32) -> u32 {
+    // The can_finish_sub_and_full_epoch walk floor: the last sub-epoch boundary at or below prev.
+    let mut lowest = prev_height - (prev_height % constants.sub_epoch_blocks);
+    // The epoch retarget only runs when the NEXT height can start an epoch — the same gate
+    // can_finish_sub_and_full_epoch applies before get_next_difficulty takes the deep walk.
+    if height_can_be_first_in_epoch(constants, prev_height.saturating_add(1)) {
+        let height_in_next_epoch = prev_height
+            + 2 * constants.max_sub_slot_blocks
+            + u32::from(constants.min_blocks_per_challenge_block)
+            + 5;
+        let height_epoch_surpass =
+            height_in_next_epoch - (height_in_next_epoch % constants.epoch_blocks);
+        lowest = lowest.min(height_epoch_surpass.saturating_sub(constants.epoch_blocks));
+    }
+    let lowest = lowest.saturating_sub(4 * constants.max_sub_slot_blocks);
+    (prev_height - lowest).saturating_add(1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -607,5 +661,180 @@ mod tests {
         )
         .unwrap();
         assert_eq!(next_ssi, ssi_start);
+    }
+
+    // Chain slice holding exactly `depth` records: heights [top-depth+1 ..= top]. Every record is a
+    // transaction block (timestamps set), no SES included — the can_finish walk's worst case, since
+    // a SES between the sub-epoch boundary and the anchor would exit the walk early.
+    fn chain_window(top: u32, depth: u32, ssi: u64) -> HashMap<Bytes32, BlockRecord> {
+        let bottom = top.saturating_sub(depth.saturating_sub(1));
+        let mut blocks = HashMap::new();
+        for h in bottom..=top {
+            let b = block(
+                h,
+                7 * u128::from(h),
+                10_000_000 * u128::from(h),
+                Some(1_000 + u64::from(h)),
+                ssi,
+                None,
+            );
+            blocks.insert(b.header_hash, b);
+        }
+        blocks
+    }
+
+    // The walk-window capacity is proven against the real depth function across every anchor
+    // offset of two full epochs — with the trailing-anchor slack to spare. This is the engine
+    // walk cache's no-miss guarantee (a flat 5,120 window loses to the 5,503-deep first-sub-epoch
+    // retarget anchors).
+    #[test]
+    fn consensus_walk_window_covers_every_walk_depth_with_slack() {
+        let cap = consensus_walk_window(&MAINNET);
+        let slack = (2 * MAINNET.max_sub_slot_blocks) as usize;
+        let base = 2000 * MAINNET.epoch_blocks;
+        let mut max_depth = 0usize;
+        for h in base..base + 2 * MAINNET.epoch_blocks {
+            let depth = difficulty_record_depth(&MAINNET, h) as usize;
+            max_depth = max_depth.max(depth);
+            assert!(
+                depth + slack <= cap,
+                "offset {}: depth {depth} + slack {slack} exceeds capacity {cap}",
+                h % MAINNET.epoch_blocks
+            );
+        }
+        assert_eq!(
+            max_depth, 5_503,
+            "the epoch-turn regime is the deepest walk"
+        );
+    }
+
+    #[test]
+    fn difficulty_record_depth_matches_walk_floors() {
+        // Mid-epoch: floor = last sub-epoch boundary minus chia's 4*MAX_SUB_SLOT_BLOCKS cache slack.
+        assert_eq!(difficulty_record_depth(&MAINNET, 9_161_852), 380 + 512 + 1);
+        // Exactly on a (non-epoch) sub-epoch boundary: minimal window.
+        assert_eq!(difficulty_record_depth(&MAINNET, 9_161_472), 513);
+        // Epoch turn: reaches the previous epoch surpass — chia's whole BLOCKS_CACHE_SIZE deep.
+        assert_eq!(difficulty_record_depth(&MAINNET, 9_215), 5_120);
+        // First epoch turn: height_prev_epoch_surpass == 0 walks clear to genesis.
+        assert_eq!(difficulty_record_depth(&MAINNET, 4_607), 4_608);
+    }
+
+    // Regression for node-0's at-tip unfinished-block drops (event=producer.ub.dropped,
+    // reason=ub_ssi_difficulty_fail): every one of the 113 observed drops sat at
+    // peak % 384 in [259, 383] — the can_finish_sub_and_full_epoch walk to the sub-epoch boundary
+    // overran the daemon's old fixed 256-record window. chia cannot fail here: full_node.py's
+    // add_unfinished_block passes the Blockchain and its BLOCKS_CACHE_SIZE record cache.
+    #[test]
+    fn old_256_window_drops_late_sub_epoch_blocks_and_computed_depth_does_not() {
+        let ssi = MAINNET.sub_slot_iters_starting;
+        let prev_height = 9_161_852; // % 384 == 380, inside the observed failure band
+        let depth = difficulty_record_depth(&MAINNET, prev_height);
+        let blocks = chain_window(prev_height, depth, ssi);
+        let prev = blocks.get(&h32(prev_height)).unwrap().clone();
+        get_next_sub_slot_iters_and_difficulty(&MAINNET, true, Some(&prev), &blocks)
+            .expect("computed depth must cover the sub-epoch walk");
+
+        let shallow = chain_window(prev_height, 256, ssi);
+        assert!(
+            get_next_sub_slot_iters_and_difficulty(&MAINNET, true, Some(&prev), &shallow).is_err(),
+            "the old fixed 256 window must reproduce the at-tip failure"
+        );
+    }
+
+    // The at-tip guarantee: for EVERY offset within a sub-epoch, a window of exactly
+    // difficulty_record_depth records suffices — the computation cannot miss a record whenever the
+    // parent and its window ancestors are in the store. Also pins the failure band of the old fixed
+    // window: offsets 256..=382 are precisely the ones the 256 window could not serve (observed
+    // min 259 on mainnet because the live chain's SES a few blocks past the boundary exits the
+    // walk early; this worst-case chain has none).
+    #[test]
+    fn computed_depth_suffices_for_every_sub_epoch_offset() {
+        let ssi = MAINNET.sub_slot_iters_starting;
+        let sub_epoch_start = 9_161_472; // % 384 == 0, % 4608 != 0: no epoch turn in range
+        for offset in 0..MAINNET.sub_epoch_blocks {
+            let prev_height = sub_epoch_start + offset;
+            let depth = difficulty_record_depth(&MAINNET, prev_height);
+            let blocks = chain_window(prev_height, depth, ssi);
+            let prev = blocks.get(&h32(prev_height)).unwrap().clone();
+            let ok =
+                get_next_sub_slot_iters_and_difficulty(&MAINNET, true, Some(&prev), &blocks);
+            assert!(ok.is_ok(), "offset {offset}: computed depth insufficient");
+
+            let shallow = chain_window(prev_height, 256, ssi);
+            let shallow_result =
+                get_next_sub_slot_iters_and_difficulty(&MAINNET, true, Some(&prev), &shallow);
+            if (256..=382).contains(&offset) {
+                assert!(shallow_result.is_err(), "offset {offset}: expected old failure");
+            } else {
+                assert!(shallow_result.is_ok(), "offset {offset}: old window regressed");
+            }
+        }
+    }
+
+    // First epoch turn: the retarget walks to genesis (height_prev_epoch_surpass == 0), so the
+    // computed depth spans the full chain and reproduces the established boundary values; the
+    // 512-record window the NewPeakTimelord path used must fail here.
+    #[test]
+    fn computed_depth_covers_the_genesis_epoch_turn() {
+        let ssi_start = MAINNET.sub_slot_iters_starting;
+        let prev_height = 4_607;
+        let depth = difficulty_record_depth(&MAINNET, prev_height);
+        assert_eq!(depth, 4_608);
+        let blocks = chain_window(prev_height, depth, ssi_start);
+        let prev = blocks.get(&h32(prev_height)).unwrap().clone();
+        let (out_ssi, out_diff) =
+            get_next_sub_slot_iters_and_difficulty(&MAINNET, true, Some(&prev), &blocks).unwrap();
+        assert_eq!(out_diff, 21);
+        assert_eq!(out_ssi, 402_653_184);
+
+        let shallow = chain_window(prev_height, 512, ssi_start);
+        assert!(
+            get_next_sub_slot_iters_and_difficulty(&MAINNET, true, Some(&prev), &shallow).is_err()
+        );
+    }
+
+    // Steady-state epoch turn (second epoch): the retarget reaches the previous epoch surpass at
+    // 4608 and the two-transaction-block scan below it; depth == chia's BLOCKS_CACHE_SIZE (5120)
+    // and the window computes cleanly where both the old 256 and 512 windows fail.
+    #[test]
+    fn computed_depth_covers_a_steady_state_epoch_turn() {
+        let ssi = MAINNET.sub_slot_iters_starting;
+        let prev_height = 9_215;
+        let depth = difficulty_record_depth(&MAINNET, prev_height);
+        assert_eq!(depth, 5_120);
+        let mut blocks = chain_window(prev_height, depth, ssi);
+        // The previous epoch's sub-epoch summary, a few blocks past the surpass point — the
+        // upward scan in get_second_to_last_transaction_block_in_previous_epoch anchors on it.
+        let ses = crate::blockchain::sub_epoch_summary::SubEpochSummary {
+            prev_subepoch_summary_hash: Bytes32::default(),
+            reward_chain_hash: Bytes32::default(),
+            num_blocks_overflow: 0,
+            new_difficulty: None,
+            new_sub_slot_iters: None,
+        };
+        let ses_block = block(
+            4_610,
+            7 * 4_610,
+            10_000_000 * 4_610,
+            Some(1_000 + 4_610),
+            ssi,
+            Some(ses),
+        );
+        blocks.insert(ses_block.header_hash, ses_block);
+        let prev = blocks.get(&h32(prev_height)).unwrap().clone();
+        let (out_ssi, out_diff) =
+            get_next_sub_slot_iters_and_difficulty(&MAINNET, true, Some(&prev), &blocks).unwrap();
+        assert!(out_diff > 0);
+        assert!(out_ssi >= u64::from(MAINNET.num_sps_sub_slot));
+
+        for shallow_depth in [256u32, 512] {
+            let shallow = chain_window(prev_height, shallow_depth, ssi);
+            assert!(
+                get_next_sub_slot_iters_and_difficulty(&MAINNET, true, Some(&prev), &shallow)
+                    .is_err(),
+                "window of {shallow_depth} must not cover an epoch turn"
+            );
+        }
     }
 }

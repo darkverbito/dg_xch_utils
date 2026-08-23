@@ -32,6 +32,9 @@ pub enum ClvmError {
     ReservedOperator(String),
     SerializationError(String),
     TooManyAnnouncements,
+    TooManyAtoms,
+    TooManyPairs,
+    OutOfMemory,
     UnexpectedEndOfValues(String),
     Unimplemented(u8),
     Unsupported(String),
@@ -199,5 +202,12 @@ pub enum ChiaError {
     InternalProtocolError = 125,
     InvalidSpendBundle = 126,
     FailedGettingGeneratorMultiprocessing = 127,
+    AssertConcurrentSpendFailed = 132,
+    AssertConcurrentPuzzleFailed = 133,
+    AssertEphemeralFailed = 140,
+    MessageNotSentOrReceived = 147,
+    // chia INVALID_TRANSACTIONS_GENERATOR_ENCODING: the SF9 canonical-serialization rule.
     ComplexGeneratorReceived = 148,
+    // chia TOO_MANY_SPENDS: the SF9 6,000-spend block limit.
+    TooManySpends = 149,
 }

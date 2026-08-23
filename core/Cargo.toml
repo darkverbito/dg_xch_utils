@@ -10,9 +10,7 @@ repository.workspace = true
 
 [dependencies]
 async-trait = "0.1.89"
-bls12_381 = "0.8.0"
-blst = { version = "0.3.16", features = ["portable"] }
-bumpalo = "3.20.2"
+blst = { version = "0.3.16", features = ["portable"], optional = true }
 bytes = "1.11.1"
 const-hex = "1.16.0"
 der = "0.7.9"
@@ -50,13 +48,35 @@ x509-cert = { version = "0.2.5", features = ["std", "pem", "builder"] }
 [dev-dependencies]
 dg_logger = { path = "../logging" }
 criterion = "0.7.0"
+# Differential oracle for the CLVM BLS operator port (`pubkey_for_exp`/`point_add`): the previous
+# implementation was bls12_381-backed; tests/bls_ops_differential.rs and benches/bls_ops.rs replay
+# it against the blst-backed operators. Tests/benches only — not part of the shipped library.
+bls12_381 = "0.8.0"
 
 [[bench]]
 name = "clvm"
 harness = false
 
+[[bench]]
+name = "bls"
+harness = false
+required-features = ["bls"]
+
+[[bench]]
+name = "bls_ops"
+harness = false
+required-features = ["bls"]
+
 [features]
+# BLS12-381 cryptography via blst (C + assembly). Default-on: every consensus/farming consumer
+# needs it. Disabling it leaves the pure-data surface (wire/chain types, serialization, RPC
+# structs) compiling without a C toolchain dependency on blst; the CLVM VM stays available but
+# opcodes 29/30 (`point_add`/`pubkey_for_exp`) error, and the consensus validation/producer
+# modules, signing helpers and key conversions are compiled out — a `bls`-less build is NOT
+# consensus-capable.
+bls = ["dep:blst"]
 mysql = ["sqlx/mysql"]
 postgres = ["sqlx/postgres"]
+sqlite = ["sqlx/sqlite"]
 metrics = ["dep:prometheus"]
-default = ["sqlx", "postgres"]
+default = ["sqlx", "postgres", "bls"]

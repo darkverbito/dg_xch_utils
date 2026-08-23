@@ -1,14 +1,5 @@
-use crate::blockchain::challenge_chain_subslot::ChallengeChainSubSlot;
-use crate::blockchain::infused_challenge_chain_subslot::InfusedChallengeChainSubSlot;
-use crate::blockchain::reward_chain_subslot::RewardChainSubSlot;
-use crate::blockchain::subslot_proofs::SubSlotProofs;
-use dg_xch_macros::ChiaSerial;
-use serde::{Deserialize, Serialize};
-
-#[derive(ChiaSerial, Clone, PartialEq, Eq, Serialize, Deserialize, Debug)]
-pub struct SubSlotBundle {
-    pub challenge_chain: ChallengeChainSubSlot,
-    pub infused_challenge_chain: Option<InfusedChallengeChainSubSlot>,
-    pub reward_chain: RewardChainSubSlot,
-    pub proofs: SubSlotProofs,
-}
+// `SubSlotBundle` and `EndOfSubSlotBundle` were field-identical, wire-identical duplicates
+// (FullBlock grew up with one name, the gossip protocol with chia's). One struct, two names —
+// so the slot state machine, the header validators, and the wire messages all speak the same
+// type with no conversion shims.
+pub use crate::blockchain::end_of_subslot_bundle::EndOfSubSlotBundle as SubSlotBundle;

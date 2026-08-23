@@ -3,7 +3,9 @@ use crate::clvm::sexp::SExp;
 use crate::consensus::constants::ConsensusConstants;
 use crate::formatting::prep_hex_str;
 use crate::traits::SizedBytes;
+#[cfg(feature = "bls")]
 use crate::utils::hash_256;
+#[cfg(feature = "bls")]
 use blst::min_pk::{AggregatePublicKey, PublicKey, SecretKey};
 use dg_xch_macros::ChiaSerial;
 use dg_xch_serialize::{ChiaProtocolVersion, ChiaSerialize};
@@ -14,7 +16,9 @@ use sha2::{Digest, Sha256};
 use std::cmp::max;
 use std::fmt;
 use std::fmt::{Debug, Display, Formatter};
-use std::io::{Cursor, Error, ErrorKind};
+#[cfg(feature = "bls")]
+use std::io::ErrorKind;
+use std::io::{Cursor, Error};
 
 pub const NUMBER_ZERO_BITS_PLOT_FILTER: i32 = 9;
 
@@ -255,6 +259,7 @@ pub fn calculate_pos_challenge(
     buf.into()
 }
 
+#[cfg(feature = "bls")]
 pub fn generate_taproot_sk(
     local_pk: &PublicKey,
     farmer_pk: &PublicKey,
@@ -271,6 +276,7 @@ pub fn generate_taproot_sk(
         .map_err(|e| Error::new(ErrorKind::InvalidInput, format!("{e:?}")))
 }
 
+#[cfg(feature = "bls")]
 pub fn generate_plot_public_key(
     local_pk: &PublicKey,
     farmer_pk: &PublicKey,

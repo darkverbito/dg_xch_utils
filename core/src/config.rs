@@ -1559,7 +1559,7 @@ impl Default for ConstantsOverrides {
                 genesis_pre_farm_farmer_puzzle_hash: Some(Bytes32::const_hex(
                     "3d8765d3a597ec1d99663f6c9816d915b9f68613ac94009884c4addaefcce6af",
                 )),
-                mempool_block_buffer: Some(BigInt::from(50)),
+                mempool_block_buffer: Some(BigInt::from(10)),
                 min_plot_size: Some(18),
                 ..Default::default()
             }),

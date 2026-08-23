@@ -1,5 +1,8 @@
+pub mod arena;
 pub mod assemble;
+#[cfg(feature = "bls")]
 pub mod bls_bindings;
+pub mod bls_ops;
 pub mod compile;
 pub mod condition_utils;
 pub mod core_ops;
@@ -10,6 +13,8 @@ pub mod more_ops;
 pub mod parser;
 pub mod program;
 pub mod runtime;
+pub mod serialize_backrefs;
 pub mod sexp;
 pub mod sexp_ext;
+pub mod tree_hash_cache;
 pub mod utils;

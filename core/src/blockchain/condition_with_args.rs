@@ -5,7 +5,10 @@ use crate::clvm::program::Program;
 use crate::clvm::sexp::{AtomBuf, SExp};
 use crate::constants::NULL_SEXP;
 use crate::errors::ClvmError;
-use crate::formatting::{number_from_slice, u32_from_slice, u64_from_bigint};
+use crate::formatting::{
+    number_from_slice, saturating_u32_from_bigint, saturating_u64_from_bigint, u32_from_slice,
+    u64_from_bigint,
+};
 use dg_xch_serialize::{ChiaProtocolVersion, ChiaSerialize};
 use log::warn;
 use serde::de::Error as SerialError;
@@ -383,6 +386,41 @@ impl ConditionWithArgs {
             }
             ConditionWithArgs::SoftFork(_) => ConditionOpcode::SoftFork,
         }
+    }
+
+    /// The BLS12-381 G1 identity (point at infinity) in its canonical
+    /// compressed encoding: the compression bit (`0x80`) and the infinity bit
+    /// (`0x40`) set in the leading byte, every remaining bit zero — i.e. `0xc0`
+    /// followed by 47 zero bytes.
+    const BLS_G1_INFINITY: [u8; 48] = {
+        let mut bytes = [0u8; 48];
+        bytes[0] = 0xc0;
+        bytes
+    };
+
+    /// If this condition belongs to the `AGG_SIG_*` family and its public-key
+    /// argument is the disallowed G1 infinity element, returns that key.
+    ///
+    /// chia rejects the infinity/identity public key for every `AGG_SIG_*`
+    /// opcode with `Err.INVALID_CONDITION` under the soft-fork-5 rule (activated
+    /// on mainnet, so it is enforced at every current height). Returns `None`
+    /// for any other condition and for any non-infinity `AGG_SIG_*` key, so
+    /// ordinary public keys are unaffected. See
+    /// `chia/_tests/core/full_node/test_conditions.py::TestConditions::test_agg_sig_infinity`.
+    pub fn agg_sig_infinity_pubkey(&self) -> Option<Bytes48> {
+        let public_key = match self {
+            ConditionWithArgs::AggSigParent(public_key, _)
+            | ConditionWithArgs::AggSigPuzzle(public_key, _)
+            | ConditionWithArgs::AggSigAmount(public_key, _)
+            | ConditionWithArgs::AggSigPuzzleAmount(public_key, _)
+            | ConditionWithArgs::AggSigParentAmount(public_key, _)
+            | ConditionWithArgs::AggSigParentPuzzle(public_key, _)
+            | ConditionWithArgs::AggSigUnsafe(public_key, _)
+            | ConditionWithArgs::AggSigMe(public_key, _) => public_key,
+            _ => return None,
+        };
+        let bytes: &[u8] = public_key;
+        (bytes == Self::BLS_G1_INFINITY.as_slice()).then_some(*public_key)
     }
 }
 
@@ -802,15 +840,12 @@ fn from_opcode_with_args(
     Ok(match op_code {
         ConditionOpcode::Unknown => ConditionWithArgs::Unknown,
         ConditionOpcode::Remark => {
-            if args.len() != 1 {
-                return Err(Error::new(
-                    ErrorKind::InvalidData,
-                    "Invalid Vars for Remark",
-                ));
-            } else {
-                let message = Message::new(args.pop().unwrap_or_default())?;
-                ConditionWithArgs::Remark(message)
-            }
+            // chia's REMARK is `Ok(Condition::Skip)`: always true, all arguments
+            // ignored regardless of count (including zero). The stored message is
+            // never consumed downstream (`spend_from_conditions` has no REMARK
+            // arm), so we discard the arguments entirely rather than enforce a
+            // count or risk the 1024-byte Message bound on ignored data.
+            ConditionWithArgs::Remark(Message::new(Vec::new())?)
         }
         ConditionOpcode::AggSigParent => {
             if args.len() != 2 {
@@ -1163,7 +1198,7 @@ fn from_opcode_with_args(
                 ));
             } else {
                 let seconds_bytes = args.pop().unwrap_or_default();
-                let seconds = u64_from_bigint(&number_from_slice(&seconds_bytes))?;
+                let seconds = saturating_u64_from_bigint(&number_from_slice(&seconds_bytes));
                 ConditionWithArgs::AssertSecondsRelative(seconds)
             }
         }
@@ -1175,7 +1210,7 @@ fn from_opcode_with_args(
                 ));
             } else {
                 let seconds_bytes = args.pop().unwrap_or_default();
-                let seconds = u64_from_bigint(&number_from_slice(&seconds_bytes))?;
+                let seconds = saturating_u64_from_bigint(&number_from_slice(&seconds_bytes));
                 ConditionWithArgs::AssertSecondsAbsolute(seconds)
             }
         }
@@ -1187,10 +1222,7 @@ fn from_opcode_with_args(
                 ));
             } else {
                 let height_bytes = args.pop().unwrap_or_default();
-                let height = u32_from_slice(&height_bytes).ok_or(Error::new(
-                    ErrorKind::InvalidData,
-                    "Invalid Height for AssertMyBirthHeight",
-                ))?;
+                let height = saturating_u32_from_bigint(&number_from_slice(&height_bytes));
                 ConditionWithArgs::AssertHeightRelative(height)
             }
         }
@@ -1202,10 +1234,7 @@ fn from_opcode_with_args(
                 ));
             } else {
                 let height_bytes = args.pop().unwrap_or_default();
-                let height = u32_from_slice(&height_bytes).ok_or(Error::new(
-                    ErrorKind::InvalidData,
-                    "Invalid Height for AssertMyBirthHeight",
-                ))?;
+                let height = saturating_u32_from_bigint(&number_from_slice(&height_bytes));
                 ConditionWithArgs::AssertHeightAbsolute(height)
             }
         }
@@ -1217,7 +1246,7 @@ fn from_opcode_with_args(
                 ));
             } else {
                 let seconds_bytes = args.pop().unwrap_or_default();
-                let seconds = u64_from_bigint(&number_from_slice(&seconds_bytes))?;
+                let seconds = saturating_u64_from_bigint(&number_from_slice(&seconds_bytes));
                 ConditionWithArgs::AssertBeforeSecondsRelative(seconds)
             }
         }
@@ -1229,7 +1258,7 @@ fn from_opcode_with_args(
                 ));
             } else {
                 let seconds_bytes = args.pop().unwrap_or_default();
-                let seconds = u64_from_bigint(&number_from_slice(&seconds_bytes))?;
+                let seconds = saturating_u64_from_bigint(&number_from_slice(&seconds_bytes));
                 ConditionWithArgs::AssertBeforeSecondsAbsolute(seconds)
             }
         }
@@ -1241,10 +1270,7 @@ fn from_opcode_with_args(
                 ));
             } else {
                 let height_bytes = args.pop().unwrap_or_default();
-                let height = u32_from_slice(&height_bytes).ok_or(Error::new(
-                    ErrorKind::InvalidData,
-                    "Invalid Height for AssertMyBirthHeight",
-                ))?;
+                let height = saturating_u32_from_bigint(&number_from_slice(&height_bytes));
                 ConditionWithArgs::AssertBeforeHeightRelative(height)
             }
         }
@@ -1256,10 +1282,7 @@ fn from_opcode_with_args(
                 ));
             } else {
                 let height_bytes = args.pop().unwrap_or_default();
-                let height = u32_from_slice(&height_bytes).ok_or(Error::new(
-                    ErrorKind::InvalidData,
-                    "Invalid Height for AssertMyBirthHeight",
-                ))?;
+                let height = saturating_u32_from_bigint(&number_from_slice(&height_bytes));
                 ConditionWithArgs::AssertBeforeHeightAbsolute(height)
             }
         }
@@ -1497,7 +1520,19 @@ pub fn op_code_with_args_from_sexp(sexp: &SExp) -> Result<(ConditionOpcode, Vec<
             }
         }
     }
-    if vars.is_empty() {
+    // Three opcodes are valid with zero arguments, matching chia's condition
+    // parser (chia_rs `parse_args`): ASSERT_EPHEMERAL (76) takes no parameters;
+    // REMARK (1) is an always-true no-op that ignores ALL of its arguments
+    // (`REMARK => Ok(Condition::Skip)`); and an UNKNOWN opcode is likewise a
+    // no-op in consensus (non-strict) mode (`parse_opcode` -> None -> the
+    // condition is ignored). Every other condition requires at least its
+    // leading argument(s), which `from_opcode_with_args` enforces per-opcode.
+    if vars.is_empty()
+        && !matches!(
+            opcode,
+            ConditionOpcode::AssertEphemeral | ConditionOpcode::Remark | ConditionOpcode::Unknown
+        )
+    {
         Err(Error::new(
             ErrorKind::InvalidData,
             format!("Invalid Condition {opcode} No Vars: - {sexp:#?}"),

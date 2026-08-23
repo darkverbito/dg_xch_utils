@@ -58,16 +58,18 @@ impl SExpNumber {
 }
 impl<'a> From<&AtomBuf<'a>> for SExpNumber {
     fn from(buf: &AtomBuf) -> Self {
+        // CLVM integers are big-endian signed two's-complement: an empty atom is
+        // `0` and, otherwise, if the high bit of the first byte is set the value
+        // is negative (mirrors chia's `int_from_bytes` /
+        // `int.from_bytes(blob, "big", signed=True)` and `number_from_slice`'s
+        // `BigInt::from_signed_bytes_be`). Atoms up to 16 bytes are sign-extended
+        // into an `i128`; longer atoms defer to the signed `BigInt` decode.
         let buf = buf.as_ref();
         match buf.len() {
             0 => Self::I128(0),
-            1 => Self::I128(buf[0] as i128),
-            2 => Self::I128(u16::from_be_bytes(buf[0..2].try_into().unwrap()) as i128),
-            4 => Self::I128(u32::from_be_bytes(buf[0..4].try_into().unwrap()) as i128),
-            8 => Self::I128(u64::from_be_bytes(buf[0..8].try_into().unwrap()) as i128),
-            16 => Self::I128(u128::from_be_bytes(buf[0..16].try_into().unwrap()) as i128),
             x if x <= 16 => {
-                let mut int_buf = [0u8; 16];
+                let fill = if buf[0] & 0x80 != 0 { 0xff } else { 0x00 };
+                let mut int_buf = [fill; 16];
                 int_buf[(16 - x)..].copy_from_slice(buf);
                 Self::I128(i128::from_be_bytes(int_buf))
             }
