@@ -90,7 +90,13 @@ impl BitReader {
             let mut bit_offset = bit_offset;
             let mut big_endian_bytes = big_endian_bytes;
             let start_field = bit_offset >> 6; // div 64
-            let end_field = (start_field * 64 + bit_size) >> 6; // div 64
+            // field index of the LAST bit, from the ABSOLUTE bit_offset. The old form
+            // `start_field * 64 + bit_size` dropped the intra-field offset, so a value whose
+            // (bit_offset % 64) + (bit_size % 64) crosses a 64-bit word boundary under-counted
+            // field_count by one and drove last_field_bits > 64 (shift overflow at line ~128).
+            // k32 metadata (start_bit 6, 32-multiple widths) never crosses; k>32 (e.g. k41,
+            // start_bit 7, 41-multiple widths) does.
+            let end_field = (bit_offset + bit_size - 1) >> 6; // div 64
             let field_count = (end_field - start_field) + 1;
             let mut u64_buf = [0u8; size_of::<u64>()];
             big_endian_bytes = &big_endian_bytes[start_field * size_of::<u64>()..];

@@ -1,4 +1,4 @@
-use crate::finite_state_entropy::compress::CTable;
+use crate::finite_state_entropy::compress::{CTable, build_ctable, compress_using_ctable};
 use crate::finite_state_entropy::decompress::{DTable, build_dtable, decompress_using_dtable};
 use crate::utils::span::Span;
 use lazy_static::lazy_static;
@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 #[derive(Default)]
 pub struct TMemoCache {
-    ct_memo: FxHashMap<[u8; 8], Vec<CTable>>,
+    ct_memo: FxHashMap<[u8; 8], Arc<CTable>>,
     dt_memo: FxHashMap<[u8; 8], Arc<DTable>>,
 }
 impl TMemoCache {
@@ -30,8 +30,8 @@ impl TMemoCache {
         self.dt_memo.contains_key(&r.to_be_bytes())
     }
 
-    pub fn ct_assign(&mut self, r: f64, ct: Vec<CTable>) {
-        self.ct_memo.insert(r.to_be_bytes(), ct);
+    pub fn ct_assign(&mut self, r: f64, ct: CTable) {
+        self.ct_memo.insert(r.to_be_bytes(), Arc::new(ct));
     }
 
     pub fn dt_assign(&mut self, r: f64, dt: DTable) {
@@ -39,8 +39,8 @@ impl TMemoCache {
     }
 
     #[must_use]
-    pub fn ct_get(&self, r: f64) -> Option<&Vec<CTable>> {
-        self.ct_memo.get(&r.to_be_bytes())
+    pub fn ct_get(&self, r: f64) -> Option<Arc<CTable>> {
+        self.ct_memo.get(&r.to_be_bytes()).cloned()
     }
 
     #[must_use]
@@ -201,4 +201,24 @@ pub fn ans_decode_deltas(
         }
         Err(e) => Err(e),
     }
+}
+
+#[allow(clippy::cast_possible_truncation)]
+pub fn get_c_table(r: f64) -> Result<Arc<CTable>, Error> {
+    let mut cache = MEMO_CACHE.as_ref().lock();
+    if !cache.ct_exists(r) {
+        let normalized_count = create_normalized_count(r)?;
+        let max_symbol_value = normalized_count.len() - 1;
+        let table_log = 14;
+        cache.ct_assign(
+            r,
+            build_ctable(&normalized_count, max_symbol_value as u32, table_log)?,
+        );
+    }
+    Ok(cache.ct_get(r).expect("Cache miss on expected value"))
+}
+
+/// Encode a run of deltas for the given `r`. The inverse of [`ans_decode_deltas`].
+pub fn ans_encode_deltas(deltas: &[u8], r: f64) -> Result<Vec<u8>, Error> {
+    compress_using_ctable(deltas, get_c_table(r)?.as_ref())
 }

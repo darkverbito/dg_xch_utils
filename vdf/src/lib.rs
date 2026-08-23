@@ -1,15 +1,18 @@
 pub mod discriminant;
 pub mod error;
 pub mod form;
+pub mod gmp_form;
+mod limbs;
 pub mod proof;
 pub mod validation;
 
 pub use crate::discriminant::{create_discriminant, create_discriminant_bytes};
 pub use crate::error::{Error, Result};
-pub use crate::proof::{prove, verify_n_wesolowski, verify_vdf};
+pub use crate::proof::{prove, verify_n_wesolowski, verify_vdf, verify_vdf_serial};
 pub use crate::validation::{
     default_classgroup_element, validate_vdf_info, validate_vdf_info_result,
-    validate_vdf_with_normalization, validate_vdf_with_normalization_result,
+    validate_vdf_info_serial, validate_vdf_with_normalization,
+    validate_vdf_with_normalization_result,
 };
 
 fn _version() -> &'static str {

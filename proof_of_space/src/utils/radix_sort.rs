@@ -238,7 +238,7 @@ pub fn sort_test() -> Result<(), std::io::Error> {
         for i in 1..count {
             if input[i] < input[i - 1] {
                 let err = format!("Error Not Sorted of {} > {}", input[i - 1], input[i]);
-                println!("{}", &err);
+                println!("{err}");
                 return Err(std::io::Error::other(err));
             }
         }

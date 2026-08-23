@@ -13,7 +13,20 @@ dg_xch_core = { path = "../core", version = "3.0.0", default-features = false }
 num-bigint = "0.4.6"
 num-integer = "0.1.46"
 num-traits = "0.2.19"
+rug = { version = "1.28", default-features = false, features = ["integer", "std"] }
+# rug -> gmp-mpfr-sys compiles GMP from source, and its build script refuses host != target
+# builds unless `force-cross` is set — required for the aarch64-unknown-linux-gnu Pi builds
+# (CC=aarch64-linux-gnu-gcc; the linker comes from CARGO_TARGET_*_LINKER). Feature-only,
+# inert natively: when host == target the allowed-check passes anyway and GMP's `make check`
+# still runs; under cross the build script skips the C test suite itself (make_and_check).
+gmp-mpfr-sys = { version = "1.7.1", default-features = false, features = ["force-cross"] }
 sha2 = "0.10.9"
 
 [dev-dependencies]
 hex = "0.4.3"
+
+[features]
+# Wall-time phase accumulators inside square_with — assembly-targeting measurement.
+phase-profile = []
+# Per-call stderr trace of hash_prime (bits, seed hash, candidate count) — the redundancy probe.
+hashprime-probe = []
