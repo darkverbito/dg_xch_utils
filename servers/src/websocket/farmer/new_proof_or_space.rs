@@ -481,7 +481,8 @@ impl<T: PoolClient + Sized + Sync + Send + 'static> NewProofOfSpaceHandle<T> {
                             if let Some(r) = self.metrics.write().await.as_mut() {
                                 use std::time::Duration;
                                 let now = Instant::now();
-                                if let Some(c) = &mut r.points_acknowledged_24h {
+                                {
+                                    let c = &r.points_acknowledged_24h;
                                     if let Some(v) = self
                                         .pool_state
                                         .write()
@@ -517,7 +518,8 @@ impl<T: PoolClient + Sized + Sync + Send + 'static> NewProofOfSpaceHandle<T> {
                             }
                             #[cfg(feature = "metrics")]
                             if let Some(r) = self.metrics.write().await.as_mut() {
-                                if let Some(c) = &mut r.current_difficulty {
+                                {
+                                    let c = &r.current_difficulty;
                                     c.with_label_values(&[&p2_singleton_puzzle_hash.to_string()])
                                         .set(resp.new_difficulty);
                                 }

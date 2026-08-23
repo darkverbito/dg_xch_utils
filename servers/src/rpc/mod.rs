@@ -113,9 +113,8 @@ impl EndpointMetrics {
                     Opts::new("total_requests", "Total requests server has handled"),
                     labels,
                 )
-                .map(|g: GenericCounterVec<AtomicU64>| {
+                .inspect(|g: &GenericCounterVec<AtomicU64>| {
                     registry.register(Box::new(g.clone())).unwrap_or(());
-                    g
                 })?,
             ),
             successful_requests: Arc::new(
@@ -126,9 +125,8 @@ impl EndpointMetrics {
                     ),
                     labels,
                 )
-                .map(|g: GenericCounterVec<AtomicU64>| {
+                .inspect(|g: &GenericCounterVec<AtomicU64>| {
                     registry.register(Box::new(g.clone())).unwrap_or(());
-                    g
                 })?,
             ),
             failed_requests: Arc::new(
@@ -139,9 +137,8 @@ impl EndpointMetrics {
                     ),
                     labels,
                 )
-                .map(|g: GenericCounterVec<AtomicU64>| {
+                .inspect(|g: &GenericCounterVec<AtomicU64>| {
                     registry.register(Box::new(g.clone())).unwrap_or(());
-                    g
                 })?,
             ),
             blocked_requests: Arc::new(
@@ -152,16 +149,14 @@ impl EndpointMetrics {
                     ),
                     labels,
                 )
-                .map(|g: GenericCounterVec<AtomicU64>| {
+                .inspect(|g: &GenericCounterVec<AtomicU64>| {
                     registry.register(Box::new(g.clone())).unwrap_or(());
-                    g
                 })?,
             ),
             average_request_time: Arc::new({
                 let opts = HistogramOpts::new("average_request_time", "Average Request Time");
-                HistogramVec::new(opts, labels).map(|h: HistogramVec| {
+                HistogramVec::new(opts, labels).inspect(|h: &HistogramVec| {
                     registry.register(Box::new(h.clone())).unwrap_or(());
-                    h
                 })?
             }),
         })
@@ -250,6 +245,31 @@ impl RpcServer {
             server_config,
             handler,
             middleware,
+            #[cfg(feature = "metrics")]
+            metrics,
+        })
+    }
+
+    /// Build a server on an ALREADY-CONSTRUCTED rustls [`ServerConfig`] — for callers that need
+    /// a non-default TLS posture (e.g. the full node's chia-parity client-certificate
+    /// enforcement on 8555) while keeping the accept loop and handler plumbing here. The
+    /// `config.ssl_info` field is ignored; only host/port are read.
+    ///
+    /// # Errors
+    /// Returns an I/O error if the host address fails to parse.
+    pub fn new_with_server_config(
+        config: &RpcServerConfig,
+        server_config: Arc<ServerConfig>,
+        handler: Arc<dyn RpcHandler + Send + Sync + 'static>,
+        #[cfg(feature = "metrics")] metrics: Arc<RpcMetrics>,
+    ) -> Result<Self, Error> {
+        let middleware: Vec<Box<dyn MiddleWare + Send + Sync + 'static>> = vec![];
+        let socket_address = Self::init_socket(config)?;
+        Ok(RpcServer {
+            socket_address,
+            server_config,
+            handler,
+            middleware: Arc::new(middleware),
             #[cfg(feature = "metrics")]
             metrics,
         })

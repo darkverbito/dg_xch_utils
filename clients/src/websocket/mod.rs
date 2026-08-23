@@ -13,6 +13,8 @@ use dg_xch_core::protocols::{
     ChiaMessage, ChiaMessageFilter, ChiaMessageHandler, MessageHandler, NodeType, SocketPeer,
     WebsocketConnection,
 };
+use dg_xch_core::protocols::outbound_limiter::{OutboundLimiter, ThrottleOutcome};
+use dg_xch_core::protocols::rate_limits::RateLimiter;
 use dg_xch_core::protocols::{PeerMap, ProtocolMessageTypes, WebsocketMsgStream};
 use dg_xch_core::ssl::{
     generate_ca_signed_cert_data, load_certs, load_certs_from_bytes, load_private_key,
@@ -39,7 +41,17 @@ use tokio::sync::mpsc::Sender;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::{Connector, connect_async_tls_with_config};
+
+// Chia block responses (a batch of full blocks, or a weight proof) routinely exceed tungstenite's default
+// 16 MiB per-frame cap — an 18 MB `RespondBlocks` is rejected as `MessageTooLong`, stalling body-fill. Match
+// chia's 50 MB message ceiling (`chia/server/server.py`) with headroom on both the message and frame limits.
+fn large_message_ws_config() -> WebSocketConfig {
+    WebSocketConfig::default()
+        .max_message_size(Some(64 << 20))
+        .max_frame_size(Some(64 << 20))
+}
 use urlencoding::encode;
 use uuid::Uuid;
 
@@ -64,6 +76,10 @@ pub struct WsClient {
     pub connection: Arc<RwLock<WebsocketConnection>>,
     pub client_config: Arc<WsClientConfig>,
     pub handshake: Option<Handshake>,
+    /// Per-connection OUTBOUND self-throttle for messages WE send to this dialed peer (chia's
+    /// `outbound_rate_limiter`). `Some` on full-node dials (`WsClientConfig::rate_limited`), `None`
+    /// otherwise; see [`WsClient::send`].
+    outbound_limiter: Option<Arc<OutboundLimiter>>,
     handle: JoinHandle<()>,
     run: Arc<AtomicBool>,
 }
@@ -196,7 +212,7 @@ impl WsClient {
             Duration::from_secs(timeout_secs),
             connect_async_tls_with_config(
                 request,
-                None,
+                Some(large_message_ws_config()),
                 false,
                 Some(Connector::Rustls(Arc::new(
                     ClientConfig::builder()
@@ -211,19 +227,44 @@ impl WsClient {
         .map_err(|_| Error::other("Timeout Connecting Client"))?
         .map_err(|e| Error::other(format!("Error Connecting Client: {e:?}")))?;
         let peers = Arc::new(RwLock::new(HashMap::new()));
+        // A full-node link (the p2p dialer sets `rate_limited`) installs the per-connection inbound
+        // limiter so peers we dial cannot flood us; other client roles (harvester/farmer/wallet) leave
+        // it off, matching chia which only polices full-node connections.
+        let limiter = if client_config.rate_limited {
+            Some(Arc::new(RateLimiter::new(true)))
+        } else {
+            None
+        };
+        // The send-side companion (chia's `outbound_rate_limiter`): paces frequency-capped messages WE
+        // send to this peer against ITS budget so a re-gossip burst cannot get us banned. Same gate as
+        // the inbound limiter — installed only on full-node links.
+        let outbound_limiter = if client_config.rate_limited {
+            Some(Arc::new(OutboundLimiter::new()))
+        } else {
+            None
+        };
         let (ws_con, mut stream) = WebsocketConnection::new(
             WebsocketMsgStream::Tls(Box::new(stream)),
             message_handlers,
             peer_id.clone(),
             peers.clone(),
+            limiter,
         );
         let connection = Arc::new(RwLock::new(ws_con));
+        let peer_capabilities = Arc::new(RwLock::new(Vec::new()));
         peers.write().await.insert(
             *peer_id.as_ref(),
             Arc::new(SocketPeer {
                 node_type: Arc::new(RwLock::new(NodeType::Harvester)),
                 protocol_version: Arc::new(RwLock::new(ChiaProtocolVersion::default())),
+                capabilities: peer_capabilities.clone(),
                 websocket: connection.clone(),
+                // The dialed host, when it is a literal IP (chia keys the ban list on host). A
+                // hostname we did not resolve stays `None` — an outbound link keeps no ban list
+                // (`bans: None`) anyway, so this peer is simply never host-banned from our side.
+                host: client_config.host.parse::<std::net::IpAddr>().ok(),
+                bans: None,
+                outbound_limiter: outbound_limiter.clone(),
             }),
         );
         let handle_run = run.clone();
@@ -232,12 +273,19 @@ impl WsClient {
             connection,
             client_config,
             handshake: None,
+            outbound_limiter,
             handle: tokio::spawn(async move { stream.run(handle_run).await }),
             run,
         };
         ws_client
             .perform_handshake(node_type, protocol_version)
             .await?;
+        // The server's handshake reply is consumed by the oneshot correlation path, not the handler,
+        // so record its advertised capabilities on our own peer entry here — this is what the read
+        // loop's rate limiter reads to pick the v1/v2 numbers for the peer we dialed.
+        if let Some(hs) = ws_client.handshake.as_ref() {
+            *peer_capabilities.write().await = hs.capabilities.clone();
+        }
         Ok(ws_client)
     }
 
@@ -255,6 +303,34 @@ impl WsClient {
     #[must_use]
     pub fn is_closed(&self) -> bool {
         self.handle.is_finished()
+    }
+
+    /// Send `msg` to this dialed peer, self-throttling first when the outbound limiter is installed
+    /// (chia's `outbound_rate_limiter`). The peer's negotiated capabilities (from its handshake reply)
+    /// select the v1/v2 numbers; a frequency-capped over-budget message is paced (`_wait_and_retry`)
+    /// WITHOUT holding the connection write lock, so an `Unlimited` serve reply is never stalled behind
+    /// it. A dropped message (exempt over budget, or the bounded attempt cap) is logged and swallowed,
+    /// exactly as chia returns without sending. With no limiter this writes directly.
+    pub async fn send(&self, msg: ChiaMessage) -> Result<(), Error> {
+        if let Some(limiter) = &self.outbound_limiter {
+            let caps = self
+                .handshake
+                .as_ref()
+                .map(|hs| hs.capabilities.clone())
+                .unwrap_or_default();
+            let size = msg.data.as_slice().len();
+            match limiter.admit(msg.msg_type, size, &caps).await {
+                ThrottleOutcome::Admit => {}
+                ThrottleOutcome::Drop(reason) => {
+                    debug!(
+                        "Self-rate-limiting outbound {:?} to dialed peer: {reason:?}",
+                        msg.msg_type
+                    );
+                    return Ok(());
+                }
+            }
+        }
+        self.connection.write().await.send(msg.into()).await
     }
 
     async fn perform_handshake(
@@ -300,6 +376,9 @@ pub struct WsClientConfig {
     pub software_version: Option<String>,
     pub protocol_version: ChiaProtocolVersion,
     pub additional_headers: Option<HashMap<String, String>>,
+    /// Install the per-connection inbound rate limiter on this link (chia's `inbound_rate_limiter`).
+    /// Set by the p2p full-node dialer; false for harvester/farmer/wallet client roles.
+    pub rate_limited: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -326,14 +405,86 @@ impl MessageHandler for OneShotHandler {
     }
 }
 
+/// Send `msg` and wait for the reply the connection routes back by correlation id, returning the whole
+/// [`ChiaMessage`] so the caller can dispatch on its `msg_type`. This is the multi-response-type analog
+/// of [`oneshot`]: a request whose reply is EITHER a success or a reject (e.g. `RespondBlocks` /
+/// `RejectBlocks`) resolves the instant either arrives, because both echo the request's id.
+///
+/// The correlation id is minted by the *connection* ([`WebsocketConnection::register_request`]) — unique
+/// across the connection and never reset — so two concurrent in-flight requests on one socket can no
+/// longer alias, and the reply is delivered to exactly this waiter (the demux fix). `custom_fn` and
+/// `msg_id` are retained for source compatibility and are no longer used for correlation.
+///
+/// # Errors
+/// Returns an error if the send fails, the connection drops the waiter, or `timeout` ms elapse first.
+pub async fn oneshot_message(
+    connection: Arc<RwLock<WebsocketConnection>>,
+    mut msg: ChiaMessage,
+    _custom_fn: Option<dg_xch_core::protocols::FilterFunction>,
+    _msg_id: Option<u16>,
+    timeout: Option<u64>,
+) -> Result<Arc<ChiaMessage>, Error> {
+    let (id, rx) = connection.read().await.register_request();
+    msg.id = Some(id);
+    if let Err(e) = connection.write().await.send(msg.into()).await {
+        connection.read().await.cancel_request(id);
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            format!("Failed to send data: {e:?}"),
+        ));
+    }
+    match tokio::time::timeout(Duration::from_millis(timeout.unwrap_or(15000)), rx).await {
+        Ok(Ok(reply)) => Ok(reply),
+        Ok(Err(_)) => {
+            connection.read().await.cancel_request(id);
+            Err(Error::other("Channel Closed before response received"))
+        }
+        Err(_) => {
+            connection.read().await.cancel_request(id);
+            Err(Error::other("Timeout before oneshot_message completed"))
+        }
+    }
+}
+
 pub async fn oneshot<R: ChiaSerialize>(
     connection: Arc<RwLock<WebsocketConnection>>,
-    msg: ChiaMessage,
+    mut msg: ChiaMessage,
     resp_type: Option<ProtocolMessageTypes>,
     protocol_version: ChiaProtocolVersion,
     msg_id: Option<u16>,
     timeout: Option<u64>,
 ) -> Result<R, Error> {
+    // Request/reply that carries a correlation id → connection-unique id + O(1) routing (the demux
+    // fix). The id-less case (the Handshake verack, which correlates by type and happens once, before
+    // any concurrent traffic exists) keeps the legacy type-filtered handler path below.
+    if msg_id.is_some() || msg.id.is_some() {
+        let (id, rx) = connection.read().await.register_request();
+        msg.id = Some(id);
+        if let Err(e) = connection.write().await.send(msg.into()).await {
+            connection.read().await.cancel_request(id);
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                format!("Failed to parse send data: {e:?}"),
+            ));
+        }
+        return match tokio::time::timeout(Duration::from_millis(timeout.unwrap_or(15000)), rx).await
+        {
+            Ok(Ok(reply)) => {
+                let mut cursor = Cursor::new(reply.data.bytes.as_slice());
+                R::from_bytes(&mut cursor, protocol_version).map_err(|e| {
+                    Error::new(ErrorKind::InvalidData, format!("Failed to parse msg: {e:?}"))
+                })
+            }
+            Ok(Err(_)) => {
+                connection.read().await.cancel_request(id);
+                Err(Error::other("Channel Closed before response received"))
+            }
+            Err(_) => {
+                connection.read().await.cancel_request(id);
+                Err(Error::other("Timeout before oneshot completed"))
+            }
+        };
+    }
     let handle_uuid = Uuid::new_v4();
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1);
     let handle = OneShotHandler {

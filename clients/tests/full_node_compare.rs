@@ -253,10 +253,10 @@ mod tests {
             let end = h0;
             if let Ok(recs) = cli.get_block_records(start, end).await {
                 for br in recs.into_iter().rev() {
-                    if let Ok(b) = cli.get_block(&br.header_hash).await {
-                        if b.transactions_info.is_some() {
-                            return Some((br.height, b));
-                        }
+                    if let Ok(b) = cli.get_block(&br.header_hash).await
+                        && b.transactions_info.is_some()
+                    {
+                        return Some((br.height, b));
                     }
                 }
             }

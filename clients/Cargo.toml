@@ -11,7 +11,7 @@ repository.workspace = true
 [dependencies]
 async-trait = "0.1.89"
 blst = { version = "0.3.16", features = ["portable"] }
-dg_xch_core = {path = "../core", version = "3.0.0", default-features = false}
+dg_xch_core = {path = "../core", version = "3.0.0", default-features = false, features = ["bls"]}
 dg_xch_keys = {path = "../keys", version="3.0.0"}
 dg_xch_pos = {path = "../proof_of_space", version="3.0.0"}
 dg_xch_serialize = {path = "../serialize", version="3.0.0"}
