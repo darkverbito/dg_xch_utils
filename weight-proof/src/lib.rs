@@ -18,6 +18,10 @@ use dg_xch_core::utils::hash_256;
 use dg_xch_pos::verify_and_get_quality_string;
 use dg_xch_serialize::{ChiaProtocolVersion, ChiaSerialize};
 use dg_xch_vdf::{default_classgroup_element, validate_vdf_info};
+use rayon::prelude::*;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Instant;
+use tracing::info;
 
 /// Limits validation work for untrusted proofs.
 pub const MAX_SUB_EPOCHS: usize = 300_000;
@@ -101,32 +105,108 @@ where
     // --- The six phases, in order. Each is fail-closed until ported + verified. ---
     // Phase 2 also yields the total accumulated weight and the per-sub-epoch cumulative weight list,
     // consumed by phase 3 (total) and phase 1 (list).
+    // Every phase is bracketed with an elapsed-ms timing at INFO so the logs alone localize the multi-minute
+    // grind (the measurement discipline: the log is the proof of where the time goes, no profiler required).
+    let started = Instant::now();
     progress("phase 2: validating sub-epoch summaries");
+    let t = Instant::now();
     let (summaries, total_weight, sub_epoch_weight_list) =
         validate_sub_epoch_summaries(wp, constants)?;
+    info!(
+        phase = "2:sub_epoch_summaries",
+        sub_epochs = wp.sub_epochs.len(),
+        summaries = summaries.len(),
+        elapsed_ms = elapsed_ms(t),
+        "weight-proof phase complete"
+    );
     progress("phase 2: complete");
 
     progress("phase 1: validating sub-epoch sampling");
+    let t = Instant::now();
     validate_sub_epoch_sampling(wp, &summaries, &sub_epoch_weight_list, constants)?;
+    info!(
+        phase = "1:sampling",
+        elapsed_ms = elapsed_ms(t),
+        "weight-proof phase complete"
+    );
     progress("phase 1: complete");
 
     progress("phase 3: validating summaries weight");
+    let t = Instant::now();
     validate_summaries_weight(wp, &summaries, total_weight, constants)?;
+    info!(
+        phase = "3:summaries_weight",
+        elapsed_ms = elapsed_ms(t),
+        "weight-proof phase complete"
+    );
     progress("phase 3: complete");
 
     progress("phase 4: validating sampled segments");
+    let t = Instant::now();
     validate_sub_epoch_segments(wp, &summaries, constants)?;
+    info!(
+        phase = "4:sampled_segments",
+        segments = wp.sub_epoch_segments.len(),
+        elapsed_ms = elapsed_ms(t),
+        "weight-proof phase complete"
+    );
     progress("phase 4: complete");
 
     progress("phase 5: validating recent blocks");
+    let t = Instant::now();
     validate_recent_blocks(wp, &summaries, constants)?;
+    info!(
+        phase = "5:recent_blocks",
+        recent = wp.recent_chain_data.len(),
+        elapsed_ms = elapsed_ms(t),
+        "weight-proof phase complete"
+    );
     progress("phase 5: complete");
 
     progress("phase 6: validating total weight");
+    let t = Instant::now();
     validate_total_weight(wp, &summaries, constants)?;
+    info!(
+        phase = "6:total_weight",
+        elapsed_ms = elapsed_ms(t),
+        "weight-proof phase complete"
+    );
     progress("phase 6: complete");
 
+    info!(
+        elapsed_ms = elapsed_ms(started),
+        "weight-proof validation complete"
+    );
     Ok((true, summaries))
+}
+
+// Milliseconds since `t`, saturating into u64 for the tracing field (elapsed never realistically overflows).
+fn elapsed_ms(t: Instant) -> u64 {
+    u64::try_from(t.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+/// The proof's hash-anchored sub-epoch summaries WITHOUT the sampled-segment / recent-chain VDF grind —
+/// phase 2 only (`_validate_sub_epoch_summaries`, which reconstructs the genesis-rooted summary chain and
+/// pins it to the recent-chain anchor by hash). For consumers that need the attested epoch schedule of a
+/// proof that has ALREADY passed [`validate_weight_proof`] — the headers-first sub-epoch-summary
+/// attachment, offline tests. NOT a substitute for full validation when accepting a proof from a peer.
+///
+/// # Errors
+/// Returns [`WeightProofError`] on structural bounds violations or a summary-chain/anchor mismatch.
+pub fn sub_epoch_summaries_of(
+    wp: &WeightProof,
+    constants: &ConsensusConstants,
+) -> Result<Vec<SubEpochSummary>, WeightProofError> {
+    if wp.sub_epochs.is_empty() {
+        return Err(WeightProofError::Malformed("no sub-epochs"));
+    }
+    if wp.sub_epochs.len() > MAX_SUB_EPOCHS {
+        return Err(WeightProofError::TooLarge("sub_epochs"));
+    }
+    if wp.recent_chain_data.is_empty() {
+        return Err(WeightProofError::Malformed("no recent chain data"));
+    }
+    validate_sub_epoch_summaries(wp, constants).map(|(summaries, _, _)| summaries)
 }
 
 /// The consensus hash of a summary: `std_hash(bytes(ses))` in the reference. `SubEpochSummary` is a
@@ -274,6 +354,10 @@ fn validate_sub_epoch_summaries(
 /// `init_by_array` over that integer's little-endian 32-bit words; `random()` is the 53-bit double the
 /// C `random_random` produces. Verified against CPython reference vectors in the tests below.
 mod recent_blocks;
+
+/// The serving (construction) half: build a `WeightProof` from a node's `BlockStore` — the mirror image
+/// of the validator above, ported from the construction side of `chia/full_node/weight_proof.py`.
+pub mod serve;
 
 mod py_random {
     use sha2::{Digest, Sha512};
@@ -634,10 +718,13 @@ fn check_vdf(
     input: &ClassgroupElement,
     info: &VdfInfo,
     proof: &dg_xch_core::blockchain::vdf_proof::VdfProof,
-    count: &mut usize,
+    count: &AtomicUsize,
 ) -> Result<(), WeightProofError> {
-    *count += 1;
-    if *count > MAX_VDFS_TO_VERIFY {
+    // Shared across the parallel segment workers (phase 4): one atomic increment per VDF keeps the GLOBAL
+    // `MAX_VDFS_TO_VERIFY` DoS bound exact regardless of thread interleaving — the accept/reject decision is
+    // identical to the serial version (the atomic is negligible against a class-group VDF verify).
+    let n = count.fetch_add(1, Ordering::Relaxed) + 1;
+    if n > MAX_VDFS_TO_VERIFY {
         return Err(WeightProofError::TooLarge("vdf count"));
     }
     if validate_vdf_info(c, input, info, proof, None) {
@@ -1066,7 +1153,7 @@ fn validate_challenge_block_vdfs(
     sub_slot_idx: usize,
     sub_slots: &[SubSlotData],
     ssi: u64,
-    count: &mut usize,
+    count: &AtomicUsize,
 ) -> Result<(), WeightProofError> {
     let ssd = &sub_slots[sub_slot_idx];
     if let (Some(cc_sp), Some(cc_sp_info)) = (&ssd.cc_signage_point, &ssd.cc_sp_vdf_info) {
@@ -1138,7 +1225,7 @@ fn validate_sub_slot_data(
     sub_slot_idx: usize,
     sub_slots: &[SubSlotData],
     ssi: u64,
-    count: &mut usize,
+    count: &AtomicUsize,
 ) -> Result<(), WeightProofError> {
     if sub_slot_idx == 0 {
         return Err(WeightProofError::Rejected("sub_slot_data at index 0"));
@@ -1276,7 +1363,7 @@ fn validate_segment(
     first_segment_in_se: bool,
     sampled: bool,
     height: u32,
-    count: &mut usize,
+    count: &AtomicUsize,
 ) -> Result<bool, WeightProofError> {
     if segment.sub_slots.len() > MAX_SUB_SLOTS_PER_SEGMENT {
         return Err(WeightProofError::TooLarge("sub_slots per segment"));
@@ -1346,9 +1433,14 @@ fn validate_sub_epoch_segments(
     let segments_by_sub_epoch = map_segments_by_sub_epoch(&wp.sub_epoch_segments);
     let max_seg = max_sub_epoch_segments(c);
     let mut rc_sub_slot_hash = c.genesis_challenge;
-    let mut prev_ses: Option<&SubEpochSummary> = None;
-    let mut vdf_count: usize = 0;
 
+    // --- Sequential pass (cheap: RNG draws + genesis-anchored hash-chain reconstruction) ---
+    // The RNG stream (segment choice) and the reward-chain hash chain BOTH carry state across sub-epochs, so
+    // this walk must stay in order. It does only hashing/integer work; it collects the ONE heavy sampled
+    // segment per sub-epoch into `tasks`. (In the serial reference, only the `sampled` segment does any VDF /
+    // PoSpace work — every non-sampled segment's `validate_segment` is a no-op past its size-bound check,
+    // which is preserved below for all segments.)
+    let mut tasks: Vec<SampledSegment> = Vec::with_capacity(segments_by_sub_epoch.len());
     for (sub_epoch_n, segments) in &segments_by_sub_epoch {
         let sub_epoch_n = *sub_epoch_n;
         if segments.len() > max_seg {
@@ -1363,9 +1455,12 @@ fn validate_sub_epoch_segments(
         // passed to segment validation but never used there, so we omit it).
         let (curr_difficulty, curr_ssi) = get_curr_diff_ssi(c, sub_epoch_n as usize, summaries);
 
-        // Which segment gets cryptographically checked — chia's `rng.choice(range(len(segments)))`.
+        // Which segment gets cryptographically checked — chia's `rng.choice(range(len(segments)))`. The draw
+        // advances the shared RNG exactly once per sub-epoch, in order, so it CANNOT move into the parallel
+        // pass (that determinism is the anti-grinding property).
         let sampled_seg_index = rng.randbelow(segments.len() as u64) as usize;
 
+        let mut prev_ses: Option<&SubEpochSummary> = None;
         if sub_epoch_n > 0 {
             let rc_sub_slot = get_rc_sub_slot(c, segments[0], summaries, curr_ssi)?.ok_or(
                 WeightProofError::Rejected("could not reconstruct rc sub slot"),
@@ -1377,25 +1472,75 @@ fn validate_sub_epoch_segments(
             return Err(WeightProofError::Rejected("reward_chain_hash mismatch"));
         }
 
-        for (idx, segment) in segments.iter().enumerate() {
+        // Preserve the serial per-segment size bound for EVERY segment (the reference checks it inside each
+        // `validate_segment`, sampled or not) so a hostile oversized non-sampled segment is still rejected.
+        for segment in segments {
+            if segment.sub_slots.len() > MAX_SUB_SLOTS_PER_SEGMENT {
+                return Err(WeightProofError::TooLarge("sub_slots per segment"));
+            }
+        }
+
+        // Only the sampled segment carries VDF/PoSpace work. `ses`/`first_in_se` apply solely to segment
+        // index 0 in the serial loop (it reset `prev_ses` to None after idx 0), so they hold here iff the
+        // sampled index is 0.
+        tasks.push(SampledSegment {
+            segment: segments[sampled_seg_index],
+            curr_ssi,
+            curr_difficulty,
+            ses: if sampled_seg_index == 0 {
+                prev_ses
+            } else {
+                None
+            },
+            first_in_se: sampled_seg_index == 0,
+            height,
+        });
+    }
+
+    // --- Parallel pass (the measured hotspot: thousands of independent class-group VDFs) ---
+    // Each task's sampled-segment verification is independent; rayon's global pool is core-count bounded, so
+    // this saturates the machine width (the 1/8-cores measurement is exactly this loop run serially). The
+    // shared `vdf_count` keeps the global DoS bound exact under interleaving; `try_for_each` short-circuits on
+    // the first failure with the identical error variant the serial version would return.
+    let vdf_count = AtomicUsize::new(0);
+    tasks
+        .par_iter()
+        .try_for_each(|task| -> Result<(), WeightProofError> {
             let valid = validate_segment(
                 c,
-                segment,
-                curr_ssi,
-                curr_difficulty,
-                prev_ses,
-                idx == 0,
-                sampled_seg_index == idx,
-                height,
-                &mut vdf_count,
+                task.segment,
+                task.curr_ssi,
+                task.curr_difficulty,
+                task.ses,
+                task.first_in_se,
+                true,
+                task.height,
+                &vdf_count,
             )?;
-            if !valid {
-                return Err(WeightProofError::Rejected("segment validation failed"));
+            if valid {
+                Ok(())
+            } else {
+                Err(WeightProofError::Rejected("segment validation failed"))
             }
-            prev_ses = None;
-        }
-    }
+        })?;
+    info!(
+        sampled_sub_epochs = tasks.len(),
+        vdfs = vdf_count.load(Ordering::Relaxed),
+        threads = rayon::current_num_threads(),
+        "weight-proof phase 4: sampled segments verified in parallel"
+    );
     Ok(())
+}
+
+// One sub-epoch's rng-chosen segment plus the context the parallel verify needs. Holds only shared
+// references into the proof/summaries (Sync plain data) and Copy scalars, so it is `Sync` for `par_iter`.
+struct SampledSegment<'a> {
+    segment: &'a SubEpochChallengeSegment,
+    curr_ssi: u64,
+    curr_difficulty: u64,
+    ses: Option<&'a SubEpochSummary>,
+    first_in_se: bool,
+    height: u32,
 }
 
 /// Phase 5 — fully validate the recent-chain tail (PoSpace + VDFs + summary inclusion) so the proof

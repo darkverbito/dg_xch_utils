@@ -299,7 +299,7 @@ mod tests {
     // Pure deficit state-machine parity spot-checks against the reference (deficit.py). These are
     // value-level, no fixtures — a fast guard on the trickiest branch (overflow × new-sub-slot).
     fn c() -> ConsensusConstants {
-        dg_xch_core::consensus::constants::MAINNET.clone()
+        dg_xch_core::consensus::constants::MAINNET
     }
 
     #[test]

@@ -29,8 +29,16 @@ fn get_block_challenge_matches_mainnet_committed_challenges() {
         let sp_index = block.reward_chain_block.signage_point_index;
         let overflow = is_overflow_block(&MAINNET, sp_index).expect("overflow determination");
         // All recent-chain blocks are non-genesis (tip ~9.05M).
-        let challenge = get_block_challenge(&MAINNET, block, &empty, false, overflow, false)
-            .expect("get_block_challenge on a finished-sub-slot block");
+        let challenge = get_block_challenge(
+            &MAINNET,
+            &block.finished_sub_slots,
+            block.prev_header_hash(),
+            &empty,
+            false,
+            overflow,
+            false,
+        )
+        .expect("get_block_challenge on a finished-sub-slot block");
         assert_eq!(
             challenge,
             block.reward_chain_block.pos_ss_cc_challenge_hash,
@@ -77,8 +85,16 @@ fn get_block_challenge_rejects_tampered_challenge_sub_slot() {
         // Flip a committed field of the challenge-chain sub-slot; its hash — hence the challenge — changes.
         last.challenge_chain.new_difficulty =
             Some(last.challenge_chain.new_difficulty.unwrap_or(0) ^ 0xDEAD_BEEF);
-        let challenge = get_block_challenge(&MAINNET, &bad, &empty, false, false, false)
-            .expect("get_block_challenge on tampered block");
+        let challenge = get_block_challenge(
+            &MAINNET,
+            &bad.finished_sub_slots,
+            bad.prev_header_hash(),
+            &empty,
+            false,
+            false,
+            false,
+        )
+        .expect("get_block_challenge on tampered block");
         assert_ne!(
             challenge, block.reward_chain_block.pos_ss_cc_challenge_hash,
             "tampering the last challenge-chain sub-slot must change the derived challenge"
