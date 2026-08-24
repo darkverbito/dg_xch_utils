@@ -16,11 +16,14 @@
 // lands.
 //
 // Written RED against the per-block staging: a fresh catch-up window of N blocks paid N staging
-// commits + 1 confirm commit; the batched form pays exactly 2 (one staging, one confirm). The
-// commit counts are read from the store's own phase-labelled commit histograms
-// (`StoreTelemetry::commit_catch_up` / `commit_near_tip` — every COMMIT on the writer connection
-// is recorded there at the fsync-bearing statement, stores/src/sqlite/block.rs `commit`), so the
-// assertion counts real writer round-trips, not code-path guesses.
+// commits + 1 confirm commit; the batched form paid 2 (one staging, one confirm); the merged form
+// pays exactly 1 — the staging batch is CARRIED into the confirm transaction (archive + coins +
+// peak, a single fsync; the ordering constraint that archive rows must be durable before the peak
+// references them is satisfied inside the one transaction). The commit counts are read from the
+// store's own phase-labelled commit histograms (`StoreTelemetry::commit_catch_up` /
+// `commit_near_tip` — every COMMIT on the writer connection is recorded there at the fsync-bearing
+// statement, stores/src/sqlite/block.rs `commit`), so the assertion counts real writer
+// round-trips, not code-path guesses.
 
 mod common;
 
@@ -92,10 +95,11 @@ async fn catch_up_window_stages_in_one_commit() {
     );
     let commits = telemetry.commit_catch_up.count.load(Ordering::Relaxed) - before;
     assert_eq!(
-        commits, 2,
-        "catch-up window persistence must be ONE staging commit + ONE confirm commit; \
-         {N} blocks paying {commits} writer round-trips is the per-block staging serialization \
-         (~100 ms fsync each on the iSCSI band = the ~12 s/window dead time)"
+        commits, 1,
+        "catch-up window persistence must be ONE writer transaction for the WHOLE window — the \
+         staging archive rows carried into the confirm transaction (archive + coins + peak, one \
+         fsync); {N} blocks paying {commits} writer round-trips leaves a separate staging commit \
+         serialized ahead of the confirm on the single writer connection"
     );
 }
 
