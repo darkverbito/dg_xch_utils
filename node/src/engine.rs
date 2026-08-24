@@ -622,8 +622,32 @@ where
         &mut self,
         deltas: Vec<BlockDelta>,
     ) -> Result<Vec<AddBlockOutcome>, NodeError> {
+        self.confirm_staged_batch_in(deltas, None).await
+    }
+
+    /// [`Engine::confirm_staged_batch`] continuing in a CARRIED open batch — the window staging
+    /// transaction (`stage_block_pre_in`'s archive rows), handed over uncommitted so the whole
+    /// catch-up window costs ONE writer transaction and ONE fsync: archive + coins + peak commit
+    /// together (the archive-before-peak ordering constraint is satisfied inside the single
+    /// transaction; previously the staging commit was a second serialized writer round-trip per
+    /// window). When nothing confirms (an empty `deltas` — e.g. the whole window failed its VDF
+    /// drain) the carried batch is DROPPED, rolling the staged archive rows back — the window
+    /// retries and re-stages wholesale (`begin()`'s rollback guard clears the dangling
+    /// transaction). A carried batch whose FIRST delta does not extend the peak is committed
+    /// archive-only (no `set_peak`) before the sequential fork-choice path runs, which needs those
+    /// rows durable exactly as the old separate staging commit provided.
+    ///
+    /// # Errors
+    /// Returns [`NodeError::Store`] on a persistence failure.
+    pub async fn confirm_staged_batch_in(
+        &mut self,
+        deltas: Vec<BlockDelta>,
+        carry: Option<BatchHandle>,
+    ) -> Result<Vec<AddBlockOutcome>, NodeError> {
         let mut outcomes = Vec::with_capacity(deltas.len());
         if deltas.is_empty() {
+            // Nothing to confirm: roll the carried staging rows back (see the doc note).
+            drop(carry);
             return Ok(outcomes);
         }
         // Running peak: one store read for the window, then tracked in memory.
@@ -641,8 +665,10 @@ where
         // quiet. The store carries the phase (near-tip band), set by the follow driver. This mirrors chia:
         // batch during long/bulk sync, one db transaction per block near the tip.
         let per_block = self.store.near_tip();
-        // Catch-up mode reuses ONE batch across the window; near-tip mode commits each block inline.
-        let mut batch: Option<BatchHandle> = None;
+        // Catch-up mode reuses ONE batch across the window — seeded with the CARRIED staging
+        // transaction when the window loop handed one over; near-tip mode commits each block
+        // inline (the first near-tip block folds any carried rows into its own commit).
+        let mut batch: Option<BatchHandle> = carry;
         let mut last_applied: Option<Bytes32> = None;
         let mut idx = 0usize;
         while idx < deltas.len() {
@@ -704,8 +730,12 @@ where
         // CATCH-UP tail: one set_peak (to the window tip) + one commit for the accumulated batch. On a
         // mid-window failure the batch is dropped (whole window rolled back, peak unchanged) and re-fetched;
         // on a break at a non-extension the committed prefix stands with peak = the last extending block.
-        if let (Some(mut b), Some(tip)) = (batch, last_applied) {
-            self.store.set_peak_in(&mut b, &tip).await?;
+        // A batch with NO applied delta (a carried staging transaction whose first delta did not
+        // extend) commits archive-only — the sequential path below reads those rows.
+        if let Some(mut b) = batch {
+            if let Some(tip) = last_applied {
+                self.store.set_peak_in(&mut b, &tip).await?;
+            }
             self.store.commit(b).await?;
         }
         if let Some(last) = deltas.get(idx.saturating_sub(1)) {

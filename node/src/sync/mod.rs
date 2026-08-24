@@ -342,10 +342,11 @@ pub struct SyncMetrics {
     // Header-signature all-core drain wall time (the third precompute phase; the header-sig batch).
     pub window_sig_micros: AtomicU64,
     pub window_body_micros: AtomicU64,
-    // Sequential staging-loop wall time (per-block prepare_delta store reads + record derivation +
-    // the window staging commit) — the phase between the parallel body precompute and the VDF
-    // drain that was previously UNMEASURED: live windows showed vdf+body+confirm ≈ 0.78 s against
-    // a ~2.7 s window wall, and this gauge is what attributes that residue.
+    // Sequential staging-loop wall time (per-block prepare_delta store reads + record
+    // derivation; the staged archive rows commit inside the confirm transaction) — the phase
+    // between the parallel body precompute and the VDF drain that was previously UNMEASURED:
+    // live windows showed vdf+body+confirm ≈ 0.78 s against a ~2.7 s window wall, and this gauge
+    // is what attributes that residue.
     pub window_stage_micros: AtomicU64,
     pub window_confirm_micros: AtomicU64,
     // Last-window composition: total blocks and how many carried a transactions generator.
@@ -1421,21 +1422,17 @@ where
                 }
             }
         }
-        // The window staging commit: one writer transaction for every staged archive row. It must
-        // land HERE — before the drain and before confirm's own `begin()` (the open batch holds
-        // the single sqlite writer connection), and even when a mid-window stage error broke the
-        // loop, because the staged prefix still confirms below and its confirm (`set_peak`) walks
-        // these archive rows. A commit failure fails the window; the unconfirmed blocks re-stage
-        // next tick, so the overlay entries must not linger (same posture as the drain failure).
-        if let Some(b) = window_batch.take()
-            && let Err(e) = self.engine.store().commit(b).await
-        {
-            self.engine.clear_staged_overlay();
-            return Err(crate::error::NodeError::from(e).into());
-        }
+        // The window staging transaction is NOT committed here: it is CARRIED (still open) into
+        // `confirm_staged_batch_in`, which folds coins + set_peak into the SAME transaction — one
+        // writer round-trip and one fsync for the whole window, with the archive-before-peak
+        // ordering satisfied inside the transaction. On any error path between here and the
+        // confirm (the drain failure below, a VDF-failed whole window) the batch is dropped and
+        // `begin()`'s rollback guard clears it — the window re-stages wholesale next tick. Note
+        // the writer connection stays held across the drains; the checkpointer is quiet in the
+        // catch-up band, so nothing contends.
+        //
         // The staging loop is the read context's ONLY consumer: drop it here so no later path
         // (drain/confirm error, the next per-block follow) can consult this window's snapshot.
-        // The error return above clears it through clear_staged_overlay.
         self.engine.clear_stage_preload();
         self.metrics.window_stage_micros.store(
             stage_started.elapsed().as_micros() as u64,
@@ -1577,7 +1574,7 @@ where
         let confirm_started = std::time::Instant::now();
         let outcomes = self
             .engine
-            .confirm_staged_batch(to_confirm)
+            .confirm_staged_batch_in(to_confirm, window_batch.take())
             .instrument(span)
             .await?;
         self.metrics.window_confirm_micros.store(

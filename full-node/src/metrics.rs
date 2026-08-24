@@ -360,8 +360,8 @@ pub struct MetricsSnapshot {
     pub inbound_connections: u64,
     pub window_vdf_micros: u64,
     pub window_body_micros: u64,
-    // The sequential staging-loop wall (per-block store reads + record derivation + the window
-    // staging commit) — the previously unmeasured phase between body precompute and VDF drain.
+    // The sequential staging-loop wall (per-block store reads + record derivation) — the
+    // previously unmeasured phase between body precompute and VDF drain.
     pub window_stage_micros: u64,
     pub window_confirm_micros: u64,
     pub window_blocks: u64,
@@ -759,7 +759,7 @@ pub fn render_metrics(s: &MetricsSnapshot) -> String {
     g(
         &mut out,
         "fullnode_window_stage_micros",
-        "Last sync window sequential staging-loop wall time in microseconds (per-block store reads + record derivation + the window staging commit) — the residue phase between body precompute and VDF drain.",
+        "Last sync window sequential staging-loop wall time in microseconds (per-block store reads + record derivation) — the residue phase between body precompute and VDF drain.",
         "gauge",
         s.window_stage_micros,
     );
