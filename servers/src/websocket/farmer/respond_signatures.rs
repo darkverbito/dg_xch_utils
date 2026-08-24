@@ -293,7 +293,7 @@ impl<T: Sync + Send + 'static> MessageHandler for RespondSignaturesHandle<T> {
                                         #[cfg(feature = "metrics")]
                                         if let Some(r) = self.metrics.write().await.as_mut() {
                                             {
-                                            let c = &r.proofs_declared;
+                                                let c = &r.proofs_declared;
                                                 c.inc();
                                             }
                                         }

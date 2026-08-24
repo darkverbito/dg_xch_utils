@@ -52,11 +52,7 @@ impl ClvmRuntime {
         self.arena.counters()
     }
 
-    pub fn run(
-        &mut self,
-        program: &SExp,
-        args: &SExp,
-    ) -> Result<(u64, SExp<'static>), ClvmError> {
+    pub fn run(&mut self, program: &SExp, args: &SExp) -> Result<(u64, SExp<'static>), ClvmError> {
         self.reset();
         let program = self.arena.import(program)?;
         let args = self.arena.import(args)?;
@@ -182,10 +178,7 @@ impl ClvmRuntime {
         let (op_node, op_list) = match self.arena.node_kind(program) {
             NodeKind::Atom => {
                 let r = {
-                    let path = self
-                        .arena
-                        .atom(program)
-                        .expect("node_kind atom has bytes");
+                    let path = self.arena.atom(program).expect("node_kind atom has bytes");
                     Self::traverse_path(&self.arena, path.as_ref(), args)?
                 };
                 self.value_stack.push(r.1);
@@ -239,10 +232,9 @@ impl ClvmRuntime {
         };
         if is_apply {
             if self.arena.arg_count_is(operand_list, 2) {
-                let (new_program, arg_wrap) = self
-                    .arena
-                    .next(operand_list)
-                    .ok_or_else(|| ClvmError::ExpectedPairGotAtom(self.arena.display(operand_list)))?;
+                let (new_program, arg_wrap) = self.arena.next(operand_list).ok_or_else(|| {
+                    ClvmError::ExpectedPairGotAtom(self.arena.display(operand_list))
+                })?;
                 let (new_args, _) = self
                     .arena
                     .next(arg_wrap)
@@ -250,7 +242,9 @@ impl ClvmRuntime {
                 self.eval_pair(new_program, new_args)
                     .map(|c| c + APPLY_COST)
             } else {
-                Err(ClvmError::InvalidApplyArgs(self.arena.display(operand_list)))
+                Err(ClvmError::InvalidApplyArgs(
+                    self.arena.display(operand_list),
+                ))
             }
         } else {
             let (cost, result) =

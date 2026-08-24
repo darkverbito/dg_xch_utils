@@ -242,7 +242,12 @@ impl PeerManager {
         x
     }
 
-    fn grant(inner: &mut Inner, peer_id: u64, priority: LeasePriority, preempted: Option<u64>) -> PeerLease {
+    fn grant(
+        inner: &mut Inner,
+        peer_id: u64,
+        priority: LeasePriority,
+        preempted: Option<u64>,
+    ) -> PeerLease {
         let lease_id = inner.next_lease;
         inner.next_lease = inner.next_lease.wrapping_add(1);
         if let Some(h) = inner.peers.get_mut(&peer_id) {
@@ -298,7 +303,12 @@ impl PeerManager {
                         .position(|(_, p)| *p == LeasePriority::Fetch)?;
                     h.inflight.remove(pos).0
                 };
-                Some(Self::grant(&mut inner, victim, priority, Some(preempted_lease)))
+                Some(Self::grant(
+                    &mut inner,
+                    victim,
+                    priority,
+                    Some(preempted_lease),
+                ))
             }
         }
     }
@@ -378,9 +388,17 @@ mod tests {
     fn observe_live_introduces_fresh_and_evicts_departed() {
         let pm = PeerManager::new();
         pm.observe_live(&[1, 2, 3]);
-        assert_eq!(pm.selectable_count(), 3, "new peers enter as selectable Fresh");
+        assert_eq!(
+            pm.selectable_count(),
+            3,
+            "new peers enter as selectable Fresh"
+        );
         pm.observe_live(&[1, 2]); // peer 3 gone
-        assert_eq!(pm.selectable_count(), 2, "a departed peer with no leases is dropped");
+        assert_eq!(
+            pm.selectable_count(),
+            2,
+            "a departed peer with no leases is dropped"
+        );
     }
 
     #[test]
@@ -391,12 +409,21 @@ mod tests {
             let l = pm.lease(LeasePriority::Fetch).unwrap();
             pm.release(l, FetchOutcome::Timeout);
         }
-        assert_eq!(availability(&pm, 1), Availability::Suspect, "3 strikes → Suspect");
+        assert_eq!(
+            availability(&pm, 1),
+            Availability::Suspect,
+            "3 strikes → Suspect"
+        );
         // Suspect is still eligible (hysteresis) — one more lease is grantable.
-        let l = pm.lease(LeasePriority::Fetch).expect("suspect still leasable");
+        let l = pm
+            .lease(LeasePriority::Fetch)
+            .expect("suspect still leasable");
         pm.release(l, FetchOutcome::Timeout);
         // Further failure evicts and, with no in-flight, drops the peer entirely.
-        assert!(pm.lease(LeasePriority::Fetch).is_none(), "dead peer not selectable");
+        assert!(
+            pm.lease(LeasePriority::Fetch).is_none(),
+            "dead peer not selectable"
+        );
         assert_eq!(pm.selectable_count(), 0);
     }
 
@@ -411,7 +438,11 @@ mod tests {
         assert_eq!(availability(&pm, 1), Availability::Suspect);
         let l = pm.lease(LeasePriority::Fetch).unwrap();
         pm.release(l, ok(50));
-        assert_eq!(availability(&pm, 1), Availability::Live, "a success recovers the peer");
+        assert_eq!(
+            availability(&pm, 1),
+            Availability::Live,
+            "a success recovers the peer"
+        );
     }
 
     #[test]
@@ -436,9 +467,19 @@ mod tests {
             pm.release(l, if l.peer_id == 1 { ok(20) } else { ok(400) });
         }
         // Prime both with their characteristic latencies.
-        let l1 = PeerLease { peer_id: 1, lease_id: 0, priority: LeasePriority::Fetch, preempted: None };
+        let l1 = PeerLease {
+            peer_id: 1,
+            lease_id: 0,
+            priority: LeasePriority::Fetch,
+            preempted: None,
+        };
         pm.release(l1, ok(20));
-        let l2 = PeerLease { peer_id: 2, lease_id: 0, priority: LeasePriority::Fetch, preempted: None };
+        let l2 = PeerLease {
+            peer_id: 2,
+            lease_id: 0,
+            priority: LeasePriority::Fetch,
+            preempted: None,
+        };
         pm.release(l2, ok(400));
         // Bind each score to a local first: `pm.lock()` twice in one expression would re-lock the
         // non-reentrant std mutex on the same thread and self-deadlock.
@@ -446,7 +487,10 @@ mod tests {
         let score_2 = pm.lock().peers.get(&2).unwrap().score();
         assert!(score_1 > score_2, "the fast peer scores higher");
         let leased = pm.lease(LeasePriority::Fetch).unwrap();
-        assert_eq!(leased.peer_id, 1, "P2C over two candidates picks the higher score");
+        assert_eq!(
+            leased.peer_id, 1,
+            "P2C over two candidates picks the higher score"
+        );
     }
 
     #[test]
@@ -457,7 +501,10 @@ mod tests {
         for _ in 0..MAX_IN_TRANSIT_PER_PEER {
             leases.push(pm.lease(LeasePriority::Fetch).expect("under cap"));
         }
-        assert!(pm.lease(LeasePriority::Fetch).is_none(), "at the per-peer cap, no fetch lease");
+        assert!(
+            pm.lease(LeasePriority::Fetch).is_none(),
+            "at the per-peer cap, no fetch lease"
+        );
     }
 
     #[test]
@@ -465,13 +512,26 @@ mod tests {
         let pm = PeerManager::new();
         pm.observe_live(&[1, 2]);
         // Make peer 1 the fast one.
-        let l1 = PeerLease { peer_id: 1, lease_id: 0, priority: LeasePriority::Fetch, preempted: None };
+        let l1 = PeerLease {
+            peer_id: 1,
+            lease_id: 0,
+            priority: LeasePriority::Fetch,
+            preempted: None,
+        };
         pm.release(l1, ok(10));
-        let l2 = PeerLease { peer_id: 2, lease_id: 0, priority: LeasePriority::Fetch, preempted: None };
+        let l2 = PeerLease {
+            peer_id: 2,
+            lease_id: 0,
+            priority: LeasePriority::Fetch,
+            preempted: None,
+        };
         pm.release(l2, ok(500));
         let rec = pm.lease(LeasePriority::Recovery).unwrap();
         assert_eq!(rec.peer_id, 1, "recovery takes the highest-score free peer");
-        assert!(rec.preempted.is_none(), "a free peer was available — no preemption");
+        assert!(
+            rec.preempted.is_none(),
+            "a free peer was available — no preemption"
+        );
     }
 
     #[test]
@@ -480,11 +540,21 @@ mod tests {
         pm.observe_live(&[1, 2]);
         // Score peer 1 fast, peer 2 slow.
         pm.release(
-            PeerLease { peer_id: 1, lease_id: 0, priority: LeasePriority::Fetch, preempted: None },
+            PeerLease {
+                peer_id: 1,
+                lease_id: 0,
+                priority: LeasePriority::Fetch,
+                preempted: None,
+            },
             ok(10),
         );
         pm.release(
-            PeerLease { peer_id: 2, lease_id: 0, priority: LeasePriority::Fetch, preempted: None },
+            PeerLease {
+                peer_id: 2,
+                lease_id: 0,
+                priority: LeasePriority::Fetch,
+                preempted: None,
+            },
             ok(500),
         );
         // Producer saturates BOTH peers to the cap with FETCH leases.
@@ -492,11 +562,22 @@ mod tests {
         for _ in 0..(MAX_IN_TRANSIT_PER_PEER * 2) {
             fetch_leases.push(pm.lease(LeasePriority::Fetch).expect("fill to saturation"));
         }
-        assert!(pm.lease(LeasePriority::Fetch).is_none(), "producer-saturated");
+        assert!(
+            pm.lease(LeasePriority::Fetch).is_none(),
+            "producer-saturated"
+        );
         // A reorg needs a recovery peer NOW — it must still obtain one by preemption (the exit gate).
-        let rec = pm.lease(LeasePriority::Recovery).expect("recovery never starves");
-        assert_eq!(rec.peer_id, 2, "preempts the LOWEST-score peer (the slow one)");
-        assert!(rec.preempted.is_some(), "a FETCH lease was preempted for the recovery range");
+        let rec = pm
+            .lease(LeasePriority::Recovery)
+            .expect("recovery never starves");
+        assert_eq!(
+            rec.peer_id, 2,
+            "preempts the LOWEST-score peer (the slow one)"
+        );
+        assert!(
+            rec.preempted.is_some(),
+            "a FETCH lease was preempted for the recovery range"
+        );
     }
 
     #[test]

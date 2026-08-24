@@ -9,7 +9,7 @@ use dg_xch_core::blockchain::spend::{NewCoin, Spend};
 use dg_xch_core::blockchain::spend_bundle::SpendBundle;
 use dg_xch_core::blockchain::spend_bundle_conditions::SpendBundleConditions;
 use dg_xch_core::consensus::block_generator::{
-    validate_block_conditions, CoinSpendContext, ConditionValidationContext,
+    CoinSpendContext, ConditionValidationContext, validate_block_conditions,
 };
 use dg_xch_core::consensus::constants::MAINNET;
 use dg_xch_node::mempool::{Mempool, MempoolError};
@@ -601,7 +601,10 @@ async fn unmet_assert_height_relative_parks_and_drains_at_effective_height() {
     assert_pool_valid_at_peak(&mp, &store, 100, 0).await;
 
     let below = mp.new_peak(&store, 104, 0, &[]).await.expect("peak 104");
-    assert!(below.admitted.is_empty(), "104 < effective 105: still parked");
+    assert!(
+        below.admitted.is_empty(),
+        "104 < effective 105: still parked"
+    );
     let at = mp.new_peak(&store, 105, 0, &[]).await.expect("peak 105");
     assert_eq!(at.admitted.len(), 1, "drains at the effective height");
     assert_eq!(at.admitted[0].0, name);
@@ -659,7 +662,10 @@ async fn impossible_height_constraints_reject_outright_not_park() {
     );
     // Nothing parked: a future peak must not revive it.
     let later = mp.new_peak(&store, 300, 0, &[]).await.expect("peak 300");
-    assert!(later.admitted.is_empty(), "impossible bundle must not revive");
+    assert!(
+        later.admitted.is_empty(),
+        "impossible bundle must not revive"
+    );
     assert_eq!(mp.len(), 0);
 }
 
@@ -751,7 +757,10 @@ async fn impossible_seconds_constraints_reject_outright() {
         .admit(&store, bundle(0xfb), locked)
         .await
         .expect_err("impossible seconds constraints must reject");
-    assert!(matches!(err, MempoolError::ImpossibleTimelock(..)), "got {err:?}");
+    assert!(
+        matches!(err, MempoolError::ImpossibleTimelock(..)),
+        "got {err:?}"
+    );
     assert_eq!(mp.len(), 0);
 }
 
@@ -785,9 +794,13 @@ async fn ephemeral_removal_uses_synthesized_peak_record() {
     });
     let mut spend_e = mk_spend(&e);
     spend_e.seconds_relative = Some(0);
-    mp.admit(&store, bundle(0xfc), conds(vec![spend_a, spend_e], 1_000, 1_000))
-        .await
-        .expect("ephemeral spend with ASSERT_SECONDS_RELATIVE 0 admits");
+    mp.admit(
+        &store,
+        bundle(0xfc),
+        conds(vec![spend_a, spend_e], 1_000, 1_000),
+    )
+    .await
+    .expect("ephemeral spend with ASSERT_SECONDS_RELATIVE 0 admits");
     assert_eq!(mp.len(), 1);
 
     // Same shape but height_relative 1 on the ephemeral spend: the synthesized record ALWAYS
@@ -813,7 +826,10 @@ async fn ephemeral_removal_uses_synthesized_peak_record() {
         .expect_err("ephemeral height_relative 1 must park");
     assert!(matches!(err, MempoolError::Pending(..)), "got {err:?}");
     let drain1 = mp2.new_peak(&store, 102, 500_000, &[]).await.expect("102");
-    assert!(drain1.admitted.is_empty(), "recomputed at peak 102: re-parked");
+    assert!(
+        drain1.admitted.is_empty(),
+        "recomputed at peak 102: re-parked"
+    );
     let drain2 = mp2.new_peak(&store, 200, 500_000, &[]).await.expect("200");
     assert!(drain2.admitted.is_empty(), "still never admissible");
     assert_eq!(mp2.len(), 0);
@@ -940,13 +956,7 @@ async fn capacity_ceiling_is_ten_blocks() {
 // ---- Pool-full fee policy (mempool) ---------------------------------------------
 
 // One resident item spending its own confirmed coin: (cost, fee) with everything else defaulted.
-async fn seed_item(
-    mp: &mut Mempool,
-    store: &SqliteStore,
-    tag: u8,
-    fee: u64,
-    cost: u64,
-) -> Bytes32 {
+async fn seed_item(mp: &mut Mempool, store: &SqliteStore, tag: u8, fee: u64, cost: u64) -> Bytes32 {
     let c = coin(tag, u64::MAX / 2);
     store
         .apply_block(100, 1_000, &[record(c, 100)], &[])

@@ -164,12 +164,7 @@ mod tests {
         }
     }
 
-    fn record(
-        height: u32,
-        hash: Bytes32,
-        prev: Bytes32,
-        with_ses: bool,
-    ) -> BlockRecord {
+    fn record(height: u32, hash: Bytes32, prev: Bytes32, with_ses: bool) -> BlockRecord {
         BlockRecord {
             header_hash: hash,
             prev_hash: prev,
@@ -284,10 +279,12 @@ mod tests {
         let anchor_cold = rec_at(store.as_ref(), h32(B + 10)).await;
         let depth_cold = difficulty_record_depth(&MAINNET, B + 10);
         assert_eq!(depth_cold, 5_131, "epoch-turn regime depth at offset 10");
-        let map = windowed_records_map(&window, store.as_ref(), &metrics, &MAINNET, &anchor_cold)
-            .await;
+        let map =
+            windowed_records_map(&window, store.as_ref(), &metrics, &MAINNET, &anchor_cold).await;
         assert_eq!(map.len(), depth_cold as usize);
-        let cold_reads = metrics.difficulty_window_store_reads.load(Ordering::Relaxed);
+        let cold_reads = metrics
+            .difficulty_window_store_reads
+            .load(Ordering::Relaxed);
         assert_eq!(
             cold_reads,
             u64::from(depth_cold),
@@ -296,18 +293,29 @@ mod tests {
 
         // One follow window later: only the 32 new head records are fetched.
         let anchor_warm = rec_at(store.as_ref(), h32(B + 42)).await;
-        let map = windowed_records_map(&window, store.as_ref(), &metrics, &MAINNET, &anchor_warm)
-            .await;
-        assert_eq!(map.len(), difficulty_record_depth(&MAINNET, B + 42) as usize);
-        let after_delta = metrics.difficulty_window_store_reads.load(Ordering::Relaxed);
-        assert_eq!(after_delta - cold_reads, 32, "warm call fetches only the head delta");
+        let map =
+            windowed_records_map(&window, store.as_ref(), &metrics, &MAINNET, &anchor_warm).await;
+        assert_eq!(
+            map.len(),
+            difficulty_record_depth(&MAINNET, B + 42) as usize
+        );
+        let after_delta = metrics
+            .difficulty_window_store_reads
+            .load(Ordering::Relaxed);
+        assert_eq!(
+            after_delta - cold_reads,
+            32,
+            "warm call fetches only the head delta"
+        );
 
         // Same-peak re-serve (the sp-inbox tick between peaks): zero store reads.
-        let map2 = windowed_records_map(&window, store.as_ref(), &metrics, &MAINNET, &anchor_warm)
-            .await;
+        let map2 =
+            windowed_records_map(&window, store.as_ref(), &metrics, &MAINNET, &anchor_warm).await;
         assert_eq!(map2, map);
         assert_eq!(
-            metrics.difficulty_window_store_reads.load(Ordering::Relaxed),
+            metrics
+                .difficulty_window_store_reads
+                .load(Ordering::Relaxed),
             after_delta,
             "re-serving the same anchor touches the store zero times"
         );
@@ -331,11 +339,17 @@ mod tests {
             let cold = fresh_window();
             let cold_map =
                 windowed_records_map(&cold, store.as_ref(), &metrics, &MAINNET, &anchor).await;
-            assert_eq!(cold_map, oracle, "cold map diverged at anchor {offset_anchor}");
+            assert_eq!(
+                cold_map, oracle,
+                "cold map diverged at anchor {offset_anchor}"
+            );
 
             let warm_map =
                 windowed_records_map(&warmed, store.as_ref(), &metrics, &MAINNET, &anchor).await;
-            assert_eq!(warm_map, oracle, "warm map diverged at anchor {offset_anchor}");
+            assert_eq!(
+                warm_map, oracle,
+                "warm map diverged at anchor {offset_anchor}"
+            );
 
             let want =
                 get_next_sub_slot_iters_and_difficulty(&MAINNET, true, Some(&anchor), &oracle)
@@ -343,7 +357,10 @@ mod tests {
             let got =
                 get_next_sub_slot_iters_and_difficulty(&MAINNET, true, Some(&anchor), &warm_map)
                     .expect("windowed map computes");
-            assert_eq!(got, want, "SSI/difficulty diverged at anchor {offset_anchor}");
+            assert_eq!(
+                got, want,
+                "SSI/difficulty diverged at anchor {offset_anchor}"
+            );
         }
     }
 
@@ -373,8 +390,7 @@ mod tests {
 
         let fork_anchor = rec_at(store.as_ref(), h32f(B + 60)).await;
         let depth = difficulty_record_depth(&MAINNET, fork_anchor.height);
-        let oracle =
-            store_walk_records_map(store.as_ref(), fork_anchor.header_hash, depth).await;
+        let oracle = store_walk_records_map(store.as_ref(), fork_anchor.header_hash, depth).await;
         let map =
             windowed_records_map(&window, store.as_ref(), &metrics, &MAINNET, &fork_anchor).await;
         assert_eq!(map, oracle, "post-reorg map diverged from the store walk");

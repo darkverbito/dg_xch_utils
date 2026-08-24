@@ -83,21 +83,21 @@ pub fn is_clvm_canonical(clvm: &[u8]) -> bool {
         } else {
             // The length-prefix classes of chia's `is_atom_canonical`: (extra prefix bytes,
             // value mask of the first byte, smallest length REQUIRING this class).
-            let (prefix_len, mask, min_value): (usize, u8, u64) =
-                if b & 0b1100_0000 == 0b1000_0000 {
-                    (0, 0b0011_1111, 1)
-                } else if b & 0b1110_0000 == 0b1100_0000 {
-                    (1, 0b0001_1111, 1 << 6)
-                } else if b & 0b1111_0000 == 0b1110_0000 {
-                    (2, 0b0000_1111, 1 << 13)
-                } else if b & 0b1111_1000 == 0b1111_0000 {
-                    (3, 0b0000_0111, 1 << 20)
-                } else if b & 0b1111_1100 == 0b1111_1000 {
-                    (4, 0b0000_0011, 1 << 27)
-                } else {
-                    // 0b1111110x — 0xFE/0xFF were handled above
-                    (5, 0b0000_0001, 1 << 34)
-                };
+            let (prefix_len, mask, min_value): (usize, u8, u64) = if b & 0b1100_0000 == 0b1000_0000
+            {
+                (0, 0b0011_1111, 1)
+            } else if b & 0b1110_0000 == 0b1100_0000 {
+                (1, 0b0001_1111, 1 << 6)
+            } else if b & 0b1111_0000 == 0b1110_0000 {
+                (2, 0b0000_1111, 1 << 13)
+            } else if b & 0b1111_1000 == 0b1111_0000 {
+                (3, 0b0000_0111, 1 << 20)
+            } else if b & 0b1111_1100 == 0b1111_1000 {
+                (4, 0b0000_0011, 1 << 27)
+            } else {
+                // 0b1111110x — 0xFE/0xFF were handled above
+                (5, 0b0000_0001, 1 << 34)
+            };
             let mut atom_len = u64::from(b & mask);
             for i in 0..prefix_len {
                 let Some(&next) = clvm.get(offset + 1 + i) else {

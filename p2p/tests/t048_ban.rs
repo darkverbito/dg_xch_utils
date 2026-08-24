@@ -12,9 +12,7 @@ mod common;
 // localhost/trusted/exempt ban exemptions (a separate feature we have not implemented), which is what lets
 // the loopback client observe the refusal.
 
-use common::{
-    connect, contiguous_api, spawn_full_node_rate_limited, try_connect, wait_until,
-};
+use common::{connect, contiguous_api, spawn_full_node_rate_limited, try_connect, wait_until};
 use dg_xch_core::blockchain::unsized_bytes::UnsizedBytes;
 use dg_xch_core::protocols::{ChiaMessage, ProtocolMessageTypes};
 use std::net::{IpAddr, Ipv4Addr};
@@ -56,7 +54,11 @@ async fn trip_rate_limit(server: &common::RunningServer) {
     );
     // Six request_proof_of_weight: the 6th trips the 5/min cap (chia rate_limit_numbers.py:95).
     for _ in 0..6 {
-        raw_send(&client, sized_msg(ProtocolMessageTypes::RequestProofOfWeight, 10)).await;
+        raw_send(
+            &client,
+            sized_msg(ProtocolMessageTypes::RequestProofOfWeight, 10),
+        )
+        .await;
     }
     assert!(
         wait_until(
@@ -113,7 +115,10 @@ async fn host_reconnects_after_the_ban_is_lifted() {
         .await,
         "host banned"
     );
-    assert!(try_connect(server.port).await.is_err(), "refused while banned");
+    assert!(
+        try_connect(server.port).await.is_err(),
+        "refused while banned"
+    );
 
     // Ban lifts (expiry / operator reset).
     server.bans.clear();
@@ -188,7 +193,9 @@ async fn ban_keys_on_remote_host() {
     );
     // A different host is not swept up by one peer's violation.
     assert!(
-        !server.bans.is_banned(&IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1))),
+        !server
+            .bans
+            .is_banned(&IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1))),
         "an unrelated host is unaffected"
     );
 

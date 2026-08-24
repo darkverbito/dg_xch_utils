@@ -273,7 +273,10 @@ async fn second_registration_returns_no_new_receiver() {
 // default.
 #[tokio::test]
 async fn subscription_cap_matches_chia_untrusted_max_subscribe_items() {
-    assert_eq!(WalletNotifier::new().max_subscriptions(&h(0x01), None), 200_000);
+    assert_eq!(
+        WalletNotifier::new().max_subscriptions(&h(0x01), None),
+        200_000
+    );
 }
 
 // Subscription-cap gate (chia parity): a peer whose cert-hash node id is in the trusted
@@ -284,8 +287,7 @@ async fn subscription_cap_matches_chia_untrusted_max_subscribe_items() {
 async fn subscription_cap_is_trusted_for_configured_node_id() {
     let trusted = h(0xaa);
     let untrusted = h(0xbb);
-    let notifier =
-        WalletNotifier::with_trust(Arc::new(TrustPolicy::new(HashSet::from([trusted]))));
+    let notifier = WalletNotifier::with_trust(Arc::new(TrustPolicy::new(HashSet::from([trusted]))));
     assert_eq!(notifier.max_subscriptions(&trusted, None), 2_000_000);
     assert_eq!(notifier.max_subscriptions(&untrusted, None), 200_000);
 }
@@ -306,13 +308,21 @@ async fn trusted_peer_registers_past_the_untrusted_cap() {
         .register_for_ph_updates(untrusted, None, &hashes)
         .await
         .expect("register untrusted");
-    assert_eq!(added_untrusted.len(), 2, "untrusted truncates at the 200k-tier cap (2 here)");
+    assert_eq!(
+        added_untrusted.len(),
+        2,
+        "untrusted truncates at the 200k-tier cap (2 here)"
+    );
 
     let (_rx, added_trusted) = notifier
         .register_for_ph_updates(trusted, None, &hashes)
         .await
         .expect("register trusted");
-    assert_eq!(added_trusted.len(), 4, "trusted truncates at the 2M-tier cap (4 here)");
+    assert_eq!(
+        added_trusted.len(),
+        4,
+        "trusted truncates at the 2M-tier cap (4 here)"
+    );
 }
 
 // chia `add_puzzle_subscriptions` returns ONLY the newly-added subscriptions — in-request duplicates,

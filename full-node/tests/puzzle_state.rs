@@ -243,17 +243,34 @@ async fn request_puzzle_state_is_answered() {
     )
     .await
     .expect("a RespondPuzzleState reply (chia never silently drops request_puzzle_state)");
-    let resp: RespondPuzzleState =
-        decode_reply(&reply, ProtocolMessageTypes::RespondPuzzleState);
+    let resp: RespondPuzzleState = decode_reply(&reply, ProtocolMessageTypes::RespondPuzzleState);
 
-    assert_eq!(resp.puzzle_hashes, vec![watched], "echoes the deduped request list");
-    assert!(resp.is_finished, "one page: everything fits the response budget");
-    assert_eq!(resp.height, common::PEAK_HEIGHT, "finished page reports the peak height");
-    assert_eq!(resp.header_hash, peak_header_hash(), "and the peak header hash");
+    assert_eq!(
+        resp.puzzle_hashes,
+        vec![watched],
+        "echoes the deduped request list"
+    );
+    assert!(
+        resp.is_finished,
+        "one page: everything fits the response budget"
+    );
+    assert_eq!(
+        resp.height,
+        common::PEAK_HEIGHT,
+        "finished page reports the peak height"
+    );
+    assert_eq!(
+        resp.header_hash,
+        peak_header_hash(),
+        "and the peak header hash"
+    );
     let got: std::collections::HashSet<Bytes32> =
         resp.coin_states.iter().map(|cs| cs.coin.name()).collect();
     for name in &expected {
-        assert!(got.contains(name), "every coin of the puzzle hash is served");
+        assert!(
+            got.contains(name),
+            "every coin of the puzzle hash is served"
+        );
     }
     assert_eq!(got.len(), expected.len(), "and nothing else");
     assert!(
@@ -297,7 +314,10 @@ async fn request_coin_state_is_answered() {
     );
     assert_eq!(resp.coin_states.len(), 1, "only the known coin has a state");
     assert_eq!(resp.coin_states[0].coin.name(), coin.name());
-    assert_eq!(resp.coin_states[0].created_height, Some(common::PEAK_HEIGHT));
+    assert_eq!(
+        resp.coin_states[0].created_height,
+        Some(common::PEAK_HEIGHT)
+    );
     drop(node);
 }
 
@@ -411,7 +431,10 @@ async fn mismatched_previous_header_hash_rejects_reorg() {
     .expect("a RespondPuzzleState reply");
     let resp: RespondPuzzleState = decode_reply(&reply, ProtocolMessageTypes::RespondPuzzleState);
     assert!(resp.is_finished);
-    assert!(resp.coin_states.is_empty(), "nothing above the previous peak");
+    assert!(
+        resp.coin_states.is_empty(),
+        "nothing above the previous peak"
+    );
     assert_eq!(resp.height, common::PEAK_HEIGHT);
     drop(node);
 }
@@ -646,7 +669,9 @@ async fn sage_sync_sequence_end_to_end() {
         synced.iter().map(|cs| cs.coin.name()).collect();
     assert_eq!(
         names,
-        [unspent.name(), spent.name(), cat.name()].into_iter().collect(),
+        [unspent.name(), spent.name(), cat.name()]
+            .into_iter()
+            .collect(),
         "the sync converges to the seeded state: plain coins AND the hinted CAT"
     );
     let spent_state = synced
@@ -670,7 +695,12 @@ async fn sage_sync_sequence_end_to_end() {
         spent: false,
     };
     node.store
-        .apply_block(common::PEAK_HEIGHT + 1, 0, std::slice::from_ref(&fresh_rec), &[])
+        .apply_block(
+            common::PEAK_HEIGHT + 1,
+            0,
+            std::slice::from_ref(&fresh_rec),
+            &[],
+        )
         .await
         .expect("fresh block");
     node.wallet

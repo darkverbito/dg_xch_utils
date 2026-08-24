@@ -8,7 +8,9 @@ mod common;
 // is NEVER delayed by the outbound limiter. It mirrors the inbound self-safety proof in
 // `t045_rate_limits.rs::solicited_respond_blocks_burst_does_not_self_trip_the_client_limiter`.
 
-use common::{connect, contiguous_api, rate_limited_client, spawn_full_node_rate_limited, wait_until};
+use common::{
+    connect, contiguous_api, rate_limited_client, spawn_full_node_rate_limited, wait_until,
+};
 use dg_xch_core::protocols::full_node::RequestBlocks;
 use dg_xch_core::protocols::{ChiaMessage, ProtocolMessageTypes};
 use dg_xch_serialize::ChiaProtocolVersion;
@@ -47,7 +49,11 @@ async fn outbound_throttle_does_not_delay_under_budget_requests() {
         )
         .expect("encode RequestBlocks");
         // Route through the throttle-equipped send path.
-        client.client.send(msg).await.expect("throttled send succeeds");
+        client
+            .client
+            .send(msg)
+            .await
+            .expect("throttled send succeeds");
     }
     let elapsed = start.elapsed();
 
@@ -60,7 +66,9 @@ async fn outbound_throttle_does_not_delay_under_budget_requests() {
         "the client stays connected after its own under-budget burst"
     );
 
-    server.run.store(false, std::sync::atomic::Ordering::Relaxed);
+    server
+        .run
+        .store(false, std::sync::atomic::Ordering::Relaxed);
 }
 
 // A non-rate-limited client (harvester/farmer/wallet role) has NO outbound limiter, so its send path
@@ -101,5 +109,7 @@ async fn non_rate_limited_client_send_path_is_unthrottled() {
         "an unpoliced link writes directly, never paced"
     );
 
-    server.run.store(false, std::sync::atomic::Ordering::Relaxed);
+    server
+        .run
+        .store(false, std::sync::atomic::Ordering::Relaxed);
 }

@@ -265,7 +265,12 @@ fn rebind_foliage(block: &mut FullBlock) {
     let ti_hash = transactions_info_hash(block.transactions_info.as_ref().unwrap()).unwrap();
     let ftb = block.foliage_transaction_block.as_mut().unwrap();
     ftb.transactions_info_hash = ti_hash;
-    let ftb_hash = block.foliage_transaction_block.as_ref().unwrap().hash().unwrap();
+    let ftb_hash = block
+        .foliage_transaction_block
+        .as_ref()
+        .unwrap()
+        .hash()
+        .unwrap();
     block.foliage.foliage_transaction_block_hash = Some(ftb_hash);
 }
 
@@ -314,7 +319,11 @@ async fn tampered_addition_and_removal_roots_are_rejected() {
     let mut engine = engine_at_5000003(store).await.with_enforced_coin_rules();
 
     let mut bad_add = common::load_full_block(H);
-    bad_add.foliage_transaction_block.as_mut().unwrap().additions_root = Bytes32::new([0x5a; 32]);
+    bad_add
+        .foliage_transaction_block
+        .as_mut()
+        .unwrap()
+        .additions_root = Bytes32::new([0x5a; 32]);
     let err = engine
         .add_block(&bad_add)
         .await
@@ -322,7 +331,11 @@ async fn tampered_addition_and_removal_roots_are_rejected() {
     assert_eq!(consensus_err(err), ChiaError::BadAdditionRoot);
 
     let mut bad_rem = common::load_full_block(H);
-    bad_rem.foliage_transaction_block.as_mut().unwrap().removals_root = Bytes32::new([0x5b; 32]);
+    bad_rem
+        .foliage_transaction_block
+        .as_mut()
+        .unwrap()
+        .removals_root = Bytes32::new([0x5b; 32]);
     let err = engine
         .add_block(&bad_rem)
         .await
@@ -337,7 +350,11 @@ async fn tampered_filter_hash_is_rejected() {
     let store = seeded_store(None, None).await;
     let mut engine = engine_at_5000003(store).await.with_enforced_coin_rules();
     let mut block4 = common::load_full_block(H);
-    block4.foliage_transaction_block.as_mut().unwrap().filter_hash = Bytes32::new([0x5d; 32]);
+    block4
+        .foliage_transaction_block
+        .as_mut()
+        .unwrap()
+        .filter_hash = Bytes32::new([0x5d; 32]);
     let err = engine
         .add_block(&block4)
         .await

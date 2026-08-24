@@ -757,17 +757,22 @@ mod tests {
             let depth = difficulty_record_depth(&MAINNET, prev_height);
             let blocks = chain_window(prev_height, depth, ssi);
             let prev = blocks.get(&h32(prev_height)).unwrap().clone();
-            let ok =
-                get_next_sub_slot_iters_and_difficulty(&MAINNET, true, Some(&prev), &blocks);
+            let ok = get_next_sub_slot_iters_and_difficulty(&MAINNET, true, Some(&prev), &blocks);
             assert!(ok.is_ok(), "offset {offset}: computed depth insufficient");
 
             let shallow = chain_window(prev_height, 256, ssi);
             let shallow_result =
                 get_next_sub_slot_iters_and_difficulty(&MAINNET, true, Some(&prev), &shallow);
             if (256..=382).contains(&offset) {
-                assert!(shallow_result.is_err(), "offset {offset}: expected old failure");
+                assert!(
+                    shallow_result.is_err(),
+                    "offset {offset}: expected old failure"
+                );
             } else {
-                assert!(shallow_result.is_ok(), "offset {offset}: old window regressed");
+                assert!(
+                    shallow_result.is_ok(),
+                    "offset {offset}: old window regressed"
+                );
             }
         }
     }

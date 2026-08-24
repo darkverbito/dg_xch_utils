@@ -285,7 +285,12 @@ fn fee_estimates_wire_roundtrips() {
         .expect("decode response");
     assert_eq!(back.estimates.estimates.len(), 1);
     assert_eq!(back.estimates.estimates[0].time_target, 300);
-    assert_eq!(back.estimates.estimates[0].estimated_fee_rate.mojos_per_clvm_cost, 7);
+    assert_eq!(
+        back.estimates.estimates[0]
+            .estimated_fee_rate
+            .mojos_per_clvm_cost,
+        7
+    );
 }
 
 // The wallet p2p round-trip end to end: RequestFeeEstimates(89) dispatched over the real WS link
@@ -322,7 +327,11 @@ async fn fee_estimates_request_is_served_over_the_wire() {
     .expect("served RespondFeeEstimates");
 
     assert_eq!(resp.estimates.error, None);
-    assert_eq!(resp.estimates.estimates.len(), 2, "one estimate per requested time");
+    assert_eq!(
+        resp.estimates.estimates.len(),
+        2,
+        "one estimate per requested time"
+    );
     assert_eq!(resp.estimates.estimates[0].time_target, 60);
     assert_eq!(resp.estimates.estimates[1].time_target, 120);
     assert!(
@@ -367,9 +376,15 @@ async fn request_blocks_raw(
         None,
     )
     .expect("encode RequestBlocks");
-    oneshot_message(client.client.connection.clone(), msg, None, None, Some(15000))
-        .await
-        .expect("a correlated reply (RespondBlocks or RejectBlocks)")
+    oneshot_message(
+        client.client.connection.clone(),
+        msg,
+        None,
+        None,
+        Some(15000),
+    )
+    .await
+    .expect("a correlated reply (RespondBlocks or RejectBlocks)")
 }
 
 // chia full_node_api.py:425-431: a range wider than MAX_BLOCK_COUNT_PER_REQUESTS (=32,
@@ -535,7 +550,10 @@ async fn headers_only_pull_strips_only_the_generator() {
     )
     .await
     .expect("served RespondBlock");
-    assert_eq!(resp.block.transactions_generator, fixture.transactions_generator);
+    assert_eq!(
+        resp.block.transactions_generator,
+        fixture.transactions_generator
+    );
 
     // Range, headers-only: the same per-block strip.
     let reply = request_blocks_raw(&client, 5_000_000, 5_000_000, false).await;
@@ -550,7 +568,10 @@ async fn headers_only_pull_strips_only_the_generator() {
     let reply = request_blocks_raw(&client, 5_000_000, 5_000_000, true).await;
     let resp = RespondBlocks::from_bytes(&mut Cursor::new(reply.data.as_slice()), version)
         .expect("decode RespondBlocks");
-    assert_eq!(resp.blocks[0].transactions_generator, fixture.transactions_generator);
+    assert_eq!(
+        resp.blocks[0].transactions_generator,
+        fixture.transactions_generator
+    );
 
     server
         .run

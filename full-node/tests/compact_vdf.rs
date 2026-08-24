@@ -272,7 +272,13 @@ fn two_ticks_over_the_same_bulky_block_solicit_only_once() {
     assert_eq!(first.len(), 1, "first tick solicits the bulky field");
 
     // Second tick a minute later (still within ttl): suppressed.
-    let second = plan_block_solicitations(&b, hh, b.height(), &mut ledger, t0 + Duration::from_secs(60));
+    let second = plan_block_solicitations(
+        &b,
+        hh,
+        b.height(),
+        &mut ledger,
+        t0 + Duration::from_secs(60),
+    );
     assert!(
         second.is_empty(),
         "the same field within ttl is not re-solicited"
@@ -281,8 +287,18 @@ fn two_ticks_over_the_same_bulky_block_solicit_only_once() {
 
     // After the ttl elapses the field — still bulky, never compacted (no bluebox answered) — is
     // retried, not abandoned forever.
-    let later = plan_block_solicitations(&b, hh, b.height(), &mut ledger, t0 + ttl + Duration::from_secs(1));
-    assert_eq!(later.len(), 1, "past ttl the still-bulky field is re-solicited");
+    let later = plan_block_solicitations(
+        &b,
+        hh,
+        b.height(),
+        &mut ledger,
+        t0 + ttl + Duration::from_secs(1),
+    );
+    assert_eq!(
+        later.len(),
+        1,
+        "past ttl the still-bulky field is re-solicited"
+    );
 }
 
 #[test]

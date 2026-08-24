@@ -264,8 +264,16 @@ mod tests {
     #[test]
     fn heaviest_is_by_weight_not_height() {
         let (b, published) = book();
-        b.record(Bytes32::const_new([1; 32]), true, claim([0xAA; 32], 100, 1_000));
-        b.record(Bytes32::const_new([2; 32]), true, claim([0xBB; 32], 120, 900));
+        b.record(
+            Bytes32::const_new([1; 32]),
+            true,
+            claim([0xAA; 32], 100, 1_000),
+        );
+        b.record(
+            Bytes32::const_new([2; 32]),
+            true,
+            claim([0xBB; 32], 120, 900),
+        );
         assert_eq!(b.heaviest(), Some(claim([0xAA; 32], 100, 1_000)));
         assert_eq!(published.load(Ordering::Relaxed), 100);
     }
@@ -289,7 +297,11 @@ mod tests {
         let (b, published) = book();
         let bogus = Bytes32::const_new([9; 32]);
         b.record(bogus, true, claim([0xEE; 32], 9_999_999, u128::MAX));
-        b.record(Bytes32::const_new([1; 32]), true, claim([0xAA; 32], 100, 1_000));
+        b.record(
+            Bytes32::const_new([1; 32]),
+            true,
+            claim([0xAA; 32], 100, 1_000),
+        );
         assert_eq!(published.load(Ordering::Relaxed), 9_999_999);
         b.retract(&bogus);
         assert_eq!(b.heaviest(), Some(claim([0xAA; 32], 100, 1_000)));
@@ -326,14 +338,26 @@ mod tests {
     #[test]
     fn quarantined_peak_is_not_reselected() {
         let (b, published) = book();
-        b.record(Bytes32::const_new([1; 32]), true, claim([0xEE; 32], 9_000_000, 9_000));
-        b.record(Bytes32::const_new([2; 32]), true, claim([0xAA; 32], 100, 1_000));
+        b.record(
+            Bytes32::const_new([1; 32]),
+            true,
+            claim([0xEE; 32], 9_000_000, 9_000),
+        );
+        b.record(
+            Bytes32::const_new([2; 32]),
+            true,
+            claim([0xAA; 32], 100, 1_000),
+        );
         b.quarantine(Bytes32::const_new([0xEE; 32]), 9_000_000);
         assert!(b.is_quarantined(&Bytes32::const_new([0xEE; 32])));
         assert_eq!(b.heaviest(), Some(claim([0xAA; 32], 100, 1_000)));
         assert_eq!(published.load(Ordering::Relaxed), 100);
         // A RE-announcement of the quarantined hash stays unselectable.
-        b.record(Bytes32::const_new([3; 32]), true, claim([0xEE; 32], 9_000_000, 9_000));
+        b.record(
+            Bytes32::const_new([3; 32]),
+            true,
+            claim([0xEE; 32], 9_000_000, 9_000),
+        );
         assert_eq!(b.heaviest(), Some(claim([0xAA; 32], 100, 1_000)));
     }
 
@@ -364,9 +388,21 @@ mod tests {
     #[test]
     fn retract_hash_drops_all_claimants_of_that_tip() {
         let (b, published) = book();
-        b.record(Bytes32::const_new([1; 32]), true, claim([0xEE; 32], 9_000_000, 9_000));
-        b.record(Bytes32::const_new([2; 32]), true, claim([0xEE; 32], 9_000_000, 9_000));
-        b.record(Bytes32::const_new([3; 32]), true, claim([0xAA; 32], 100, 1_000));
+        b.record(
+            Bytes32::const_new([1; 32]),
+            true,
+            claim([0xEE; 32], 9_000_000, 9_000),
+        );
+        b.record(
+            Bytes32::const_new([2; 32]),
+            true,
+            claim([0xEE; 32], 9_000_000, 9_000),
+        );
+        b.record(
+            Bytes32::const_new([3; 32]),
+            true,
+            claim([0xAA; 32], 100, 1_000),
+        );
         b.retract_hash(&Bytes32::const_new([0xEE; 32]));
         assert_eq!(b.heaviest(), Some(claim([0xAA; 32], 100, 1_000)));
         assert_eq!(published.load(Ordering::Relaxed), 100);

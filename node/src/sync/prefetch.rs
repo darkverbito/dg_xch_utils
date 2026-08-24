@@ -123,10 +123,13 @@ impl PrefetchConfig {
         let byte_budget = memory_mb.saturating_mul(1024 * 1024);
         let peers = peers.max(1);
         let per_peer_ceiling = peers.saturating_mul(READAHEAD_MAX_PER_PEER);
-        let max_inflight = max_inflight
-            .unwrap_or(READAHEAD_ABS_MAX_DEPTH)
-            .clamp(READAHEAD_MIN_DEPTH, READAHEAD_ABS_MAX_DEPTH.min(per_peer_ceiling));
-        let per_peer = max_inflight.div_ceil(peers).clamp(1, READAHEAD_MAX_PER_PEER);
+        let max_inflight = max_inflight.unwrap_or(READAHEAD_ABS_MAX_DEPTH).clamp(
+            READAHEAD_MIN_DEPTH,
+            READAHEAD_ABS_MAX_DEPTH.min(per_peer_ceiling),
+        );
+        let per_peer = max_inflight
+            .div_ceil(peers)
+            .clamp(1, READAHEAD_MAX_PER_PEER);
         // Resident-depth ceiling coincides with the aggregate in-flight cap (a resolved-but-not-taken
         // window still occupies a deque slot counted against `max_inflight`), and is never below the
         // shipped default so aggressive can only ever raise, never lower, the ceiling.
@@ -260,7 +263,10 @@ impl WindowReadahead {
 
     // Windows currently in flight on `peer_id`'s connection.
     fn peer_window_count(&self, peer_id: u64) -> usize {
-        self.inflight.iter().filter(|w| w.peer_id == peer_id).count()
+        self.inflight
+            .iter()
+            .filter(|w| w.peer_id == peer_id)
+            .count()
     }
 
     /// Top the pipeline up: dispatch adjacent windows of `batch` heights (the last one capped at
@@ -286,9 +292,10 @@ impl WindowReadahead {
         // Admissible depth: the adaptive K, clamped by the config ceiling AND — the OOM bound — by
         // the measured-size resident-bytes budget. `max_inflight` additionally caps the AGGREGATE
         // windows in flight, the concurrency ceiling the aggressive knob raises past the shipped 8.
-        let admissible = depth_within_budget(self.depth, self.window_bytes_ewma, self.cfg.byte_budget)
-            .min(self.cfg.max_depth)
-            .min(self.cfg.max_inflight);
+        let admissible =
+            depth_within_budget(self.depth, self.window_bytes_ewma, self.cfg.byte_budget)
+                .min(self.cfg.max_depth)
+                .min(self.cfg.max_inflight);
         let mut from = self
             .inflight
             .back()
@@ -503,8 +510,14 @@ mod tests {
         assert_eq!(a.byte_budget, 8192 * 1024 * 1024);
         // Aggregate in-flight defaults to the anti-flood ceiling: peers × per-peer cap = 8 × 16.
         assert_eq!(a.max_inflight, 8 * READAHEAD_MAX_PER_PEER);
-        assert!(a.max_inflight > READAHEAD_MAX_DEPTH, "concurrency exceeds the shipped 8");
-        assert_eq!(a.max_depth, a.max_inflight, "resident depth ceiling tracks the aggregate");
+        assert!(
+            a.max_inflight > READAHEAD_MAX_DEPTH,
+            "concurrency exceeds the shipped 8"
+        );
+        assert_eq!(
+            a.max_depth, a.max_inflight,
+            "resident depth ceiling tracks the aggregate"
+        );
         // Spread ACROSS peers, not flooded onto one: ceil(128 / 8) = 16 per peer.
         assert_eq!(a.per_peer, a.max_inflight.div_ceil(8));
         assert!(a.per_peer <= READAHEAD_MAX_PER_PEER);
@@ -569,6 +582,9 @@ mod tests {
         let floored = depth_within_budget(tight.max_depth, dust_window_bytes, tight.byte_budget)
             .min(tight.max_depth)
             .min(tight.max_inflight);
-        assert_eq!(floored, READAHEAD_MIN_DEPTH, "sub-window budget floors at one window");
+        assert_eq!(
+            floored, READAHEAD_MIN_DEPTH,
+            "sub-window budget floors at one window"
+        );
     }
 }

@@ -233,11 +233,7 @@ mod tests {
     #[test]
     fn repeated_peer_flags_all_parse_in_order() {
         // A DNS service name and a bare IP must both parse; order is preserved.
-        let c = cfg(&[
-            "chia-node-0.peers.example:8444",
-            "10.101.159.8:8444",
-        ])
-        .unwrap();
+        let c = cfg(&["chia-node-0.peers.example:8444", "10.101.159.8:8444"]).unwrap();
         assert_eq!(
             c.manual_peers,
             vec![

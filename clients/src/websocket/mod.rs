@@ -8,13 +8,13 @@ use crate::ClientSSLConfig;
 use async_trait::async_trait;
 use dg_xch_core::blockchain::sized_bytes::Bytes32;
 use dg_xch_core::constants::{CHIA_CA_CRT, CHIA_CA_KEY};
+use dg_xch_core::protocols::outbound_limiter::{OutboundLimiter, ThrottleOutcome};
+use dg_xch_core::protocols::rate_limits::RateLimiter;
 use dg_xch_core::protocols::shared::{CAPABILITIES, Handshake, NoCertificateVerification};
 use dg_xch_core::protocols::{
     ChiaMessage, ChiaMessageFilter, ChiaMessageHandler, MessageHandler, NodeType, SocketPeer,
     WebsocketConnection,
 };
-use dg_xch_core::protocols::outbound_limiter::{OutboundLimiter, ThrottleOutcome};
-use dg_xch_core::protocols::rate_limits::RateLimiter;
 use dg_xch_core::protocols::{PeerMap, ProtocolMessageTypes, WebsocketMsgStream};
 use dg_xch_core::ssl::{
     generate_ca_signed_cert_data, load_certs, load_certs_from_bytes, load_private_key,
@@ -472,7 +472,10 @@ pub async fn oneshot<R: ChiaSerialize>(
             Ok(Ok(reply)) => {
                 let mut cursor = Cursor::new(reply.data.bytes.as_slice());
                 R::from_bytes(&mut cursor, protocol_version).map_err(|e| {
-                    Error::new(ErrorKind::InvalidData, format!("Failed to parse msg: {e:?}"))
+                    Error::new(
+                        ErrorKind::InvalidData,
+                        format!("Failed to parse msg: {e:?}"),
+                    )
                 })
             }
             Ok(Err(_)) => {

@@ -95,7 +95,10 @@ async fn clean_sync_moves_work_signals_and_keeps_fault_signals_silent() {
     let downloaded = m.blocks_downloaded.load(Ordering::Relaxed);
     assert!(downloaded >= u64::from(N), "every body counted");
     let window = m.peak_window.load(Ordering::Relaxed);
-    assert!(window > 0 && window <= cfg().window, "window peaked in (0, cap]");
+    assert!(
+        window > 0 && window <= cfg().window,
+        "window peaked in (0, cap]"
+    );
     let inflight = m.peak_inflight_blocks.load(Ordering::Relaxed);
     let inflight_cap = cfg().peers * cfg().batch as usize;
     assert!(
@@ -127,7 +130,10 @@ async fn stalled_peer_moves_the_reclaim_signal() {
             base: base_block,
         }),
     ];
-    chaser.sync_bodies(&sources).await.expect("sync beside stall");
+    chaser
+        .sync_bodies(&sources)
+        .await
+        .expect("sync beside stall");
     assert!(
         chaser.metrics().reclaimed.load(Ordering::Relaxed) >= 1,
         "a stalled reservation must be reported as reclaimed"

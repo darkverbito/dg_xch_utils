@@ -73,11 +73,7 @@ const NO_TIMELORD_SERIES: &str =
 )]
 struct Args {
     /// Node p2p WebSocket host (service: dg-xch-node).
-    #[arg(
-        long,
-        env = "DGXCH_VALIDATE_NODE_WS",
-        default_value = "dg-xch-node"
-    )]
+    #[arg(long, env = "DGXCH_VALIDATE_NODE_WS", default_value = "dg-xch-node")]
     ws_host: String,
     /// Node p2p WebSocket port (node arg: --listen=0.0.0.0:8444).
     #[arg(long, default_value_t = 8444)]

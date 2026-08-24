@@ -255,7 +255,10 @@ fn generation_guard_drops_a_stale_gen_completion_after_rebase() {
     // The late old-branch completion arrives — dropped by the guard.
     q.complete(block_at(&b, 100), stale_gen);
     assert!(q.is_empty(), "stale-gen completion dropped");
-    assert!(!q.head_ready(), "head still absent — must be re-fetched on the new branch");
+    assert!(
+        !q.head_ready(),
+        "head still absent — must be re-fetched on the new branch"
+    );
     // A fresh completion at the CURRENT generation is accepted normally.
     q.complete(block_at(&b, 100), q.current_gen());
     assert!(q.head_ready(), "fresh-gen completion admitted");
@@ -276,13 +279,19 @@ fn rebase_clears_stale_slots_and_resets_low_water() {
         q.drain_next().unwrap(); // consumer confirmed 100..=104
     }
     assert_eq!(q.low_water(), 105);
-    assert!(q.resident_bytes() > 0, "105..=108 resident on the old branch");
+    assert!(
+        q.resident_bytes() > 0,
+        "105..=108 resident on the old branch"
+    );
     // Reorg discovered: fork at height 102 → new low_water = 103. Every queued slot ≥103 is stale.
     q.rebase(103);
     assert_eq!(q.low_water(), 103, "head rewound to fork+1");
     assert_eq!(q.resident_bytes(), 0, "old-branch byte charge fully freed");
     assert!(q.is_empty(), "every stale slot dropped");
-    assert!(!q.head_ready(), "new head absent → consumer parks, no false ready");
+    assert!(
+        !q.head_ready(),
+        "new head absent → consumer parks, no false ready"
+    );
 }
 
 // rebase forward (a driver-side bulk/anchor/infusion peak jump) also fully reclaims the below-head
@@ -343,7 +352,10 @@ async fn consumer_drains_to_completion_while_the_producer_is_blocked() {
         .expect("producer released after the consumer freed budget")
         .expect("producer task ok");
     let tail = q.drain_ready_window(32);
-    assert_eq!(tail.iter().map(FullBlock::height).collect::<Vec<_>>(), vec![3]);
+    assert_eq!(
+        tail.iter().map(FullBlock::height).collect::<Vec<_>>(),
+        vec![3]
+    );
     assert_eq!(q.resident_bytes(), 0, "byte accounting balanced to zero");
 }
 
@@ -364,9 +376,15 @@ fn producer_fills_to_budget_then_stops() {
     while q.can_admit() {
         put(&q, block_at(&b, admitted));
         admitted += 1;
-        assert!(admitted < 100, "fill must terminate at the budget, never run away");
+        assert!(
+            admitted < 100,
+            "fill must terminate at the budget, never run away"
+        );
     }
-    assert_eq!(admitted, 5, "four blocks under budget + one over-fill block, then stop");
+    assert_eq!(
+        admitted, 5,
+        "four blocks under budget + one over-fill block, then stop"
+    );
     assert!(
         q.resident_bytes() >= budget,
         "the producer fills to at least the budget (over-fill bias, never under)"
@@ -404,7 +422,10 @@ async fn rebase_wakes_a_parked_producer() {
         .await
         .expect("the watchdog's rebase released the parked producer within the deadline")
         .expect("waiter task ok");
-    assert!(q.can_admit(), "rebase cleared the byte charge → the producer can admit again");
+    assert!(
+        q.can_admit(),
+        "rebase cleared the byte charge → the producer can admit again"
+    );
 }
 
 // Why wait_space/wait_ready create the `Notified` BEFORE the condition check (the lost-wakeup
@@ -469,7 +490,10 @@ async fn concurrent_wait_notify_makes_progress_under_load() {
     let consumer = tokio::spawn(async move {
         for _ in 0..ROUNDS {
             qc.wait_ready().await; // park until the producer completes the head
-            assert!(qc.drain_next().is_some(), "head must be present after wait_ready");
+            assert!(
+                qc.drain_next().is_some(),
+                "head must be present after wait_ready"
+            );
         }
     });
 

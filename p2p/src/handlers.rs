@@ -1,25 +1,25 @@
 use async_trait::async_trait;
+use dg_xch_core::blockchain::header_block::HeaderBlock;
 use dg_xch_core::blockchain::peer_info::TimestampedPeerInfo;
 use dg_xch_core::blockchain::sized_bytes::Bytes32;
 use dg_xch_core::blockchain::spend_bundle::SpendBundle;
+use dg_xch_core::blockchain::tx_status::TXStatus;
 use dg_xch_core::blockchain::unfinished_block::UnfinishedBlock;
+use dg_xch_core::protocols::ban::BanCause;
 use dg_xch_core::protocols::farmer::{DeclareProofOfSpace, RequestSignedValues, SignedValues};
 use dg_xch_core::protocols::full_node::{
     NewCompactVDF, NewPeak, NewSignagePointOrEndOfSubSlot, NewTransaction, NewUnfinishedBlock,
     NewUnfinishedBlock2, RejectBlock, RejectBlocks, RequestBlock, RequestBlocks, RequestCompactVDF,
     RequestMempoolTransactions, RequestPeers, RequestProofOfWeight,
-    RequestSignagePointOrEndOfSubSlot, RequestTransaction,
-    RequestUnfinishedBlock, RequestUnfinishedBlock2, RespondBlock, RespondBlocks,
-    RespondCompactVDF, RespondEndOfSubSlot, RespondPeers, RespondSignagePoint, RespondTransaction,
-    RespondUnfinishedBlock,
+    RequestSignagePointOrEndOfSubSlot, RequestTransaction, RequestUnfinishedBlock,
+    RequestUnfinishedBlock2, RespondBlock, RespondBlocks, RespondCompactVDF, RespondEndOfSubSlot,
+    RespondPeers, RespondSignagePoint, RespondTransaction, RespondUnfinishedBlock,
 };
-use dg_xch_core::blockchain::header_block::HeaderBlock;
 use dg_xch_core::protocols::shared::{CAPABILITIES, Handshake};
 use dg_xch_core::protocols::timelord::{
     NewEndOfSubSlotVDF, NewInfusionPointVDF, NewPeakTimelord, NewSignagePointVDF,
     RespondCompactProofOfTime,
 };
-use dg_xch_core::blockchain::tx_status::TXStatus;
 use dg_xch_core::protocols::wallet::{
     CoinState, CoinStateUpdate, FeeEstimate, FeeEstimateGroup, FeeRate, NewPeakWallet,
     PuzzleSolutionResponse, RegisterForCoinUpdates, RegisterForPhUpdates, RejectAdditionsRequest,
@@ -33,7 +33,6 @@ use dg_xch_core::protocols::wallet::{
     RespondRemovals, RespondRemoveCoinSubscriptions, RespondRemovePuzzleSubscriptions,
     RespondToCoinUpdates, RespondToPhUpdates, SendTransaction, TransactionAck,
 };
-use dg_xch_core::protocols::ban::BanCause;
 use dg_xch_core::protocols::{
     ChiaMessage, ChiaMessageFilter, ChiaMessageHandler, MessageHandler, NodeType, PeerMap,
     ProtocolMessageTypes,
@@ -97,7 +96,13 @@ pub trait FullNodeApi: Send + Sync {
     }
     // `host` is the peer's remote IP (`SocketPeer.host`); the node impl resolves the trusted tx-queue
     // tier from it (localhost / trusted-CIDR / trusted node-id), chia `is_trusted_peer`.
-    async fn on_respond_transaction(&self, _peer: Bytes32, _host: Option<IpAddr>, _tx: SpendBundle) {}
+    async fn on_respond_transaction(
+        &self,
+        _peer: Bytes32,
+        _host: Option<IpAddr>,
+        _tx: SpendBundle,
+    ) {
+    }
     // A signage-point / end-of-sub-slot announcement; return the request to pull it when the
     // node's slot state does not hold it yet, or None to ignore it.
     async fn on_new_signage_point_or_eos(
@@ -758,7 +763,11 @@ fn decode<T: ChiaSerialize>(msg: &ChiaMessage, version: ChiaProtocolVersion) -> 
 /// Removing the map entry first means the very next handler dispatch for this peer finds nothing to
 /// serve. A missing peer (already gone) is a no-op success. `cause == None` closes without banning
 /// (a graceful, non-punitive teardown).
-async fn close_peer(peers: &PeerMap, peer_id: &Bytes32, cause: Option<BanCause>) -> Result<(), Error> {
+async fn close_peer(
+    peers: &PeerMap,
+    peer_id: &Bytes32,
+    cause: Option<BanCause>,
+) -> Result<(), Error> {
     let peer = peers.write().await.remove(peer_id);
     if let Some(peer) = peer {
         if let (Some(cause), Some(bans), Some(host)) = (cause, peer.bans.as_ref(), peer.host) {
@@ -1476,7 +1485,11 @@ impl FullNodeHandler {
             }
             ProtocolMessageTypes::RequestHeaderBlocks => {
                 let req = decode::<RequestHeaderBlocks>(msg, version)?;
-                match self.api.header_blocks(req.start_height, req.end_height).await {
+                match self
+                    .api
+                    .header_blocks(req.start_height, req.end_height)
+                    .await
+                {
                     HeaderBlocksReply::Respond(resp) => {
                         send(
                             &self.counters,

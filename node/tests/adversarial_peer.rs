@@ -10,7 +10,7 @@
 mod common;
 
 use common::{
-    FixtureSource, MemSource, Misbehavior, MisbehavingSource, candidate_record, seed_record_for,
+    FixtureSource, MemSource, MisbehavingSource, Misbehavior, candidate_record, seed_record_for,
 };
 use dg_xch_core::blockchain::full_block::FullBlock;
 use dg_xch_core::consensus::constants::MAINNET;
@@ -61,7 +61,10 @@ async fn seed_candidates(store: &SqliteStore, base_block: &FullBlock, n: u32) {
     let records: Vec<_> = (BASE..BASE + n)
         .map(|h| candidate_record(&template, base_block, h))
         .collect();
-    store.add_block_records(&records).await.expect("seed records");
+    store
+        .add_block_records(&records)
+        .await
+        .expect("seed records");
 }
 
 // Body-pipeline forward progress: the 48-body range drains within a hard wall bound beside every

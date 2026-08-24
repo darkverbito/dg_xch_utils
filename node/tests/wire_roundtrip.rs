@@ -95,7 +95,11 @@ fn real_corpus_round_trips_byte_identical() {
     for record in blocks.values() {
         let e1 = record.to_bytes(version()).expect("encode");
         let back = BlockRecord::from_bytes_full(&e1, version()).expect("decode");
-        assert_eq!(&back, record, "synthetic record round-trip @{}", record.height);
+        assert_eq!(
+            &back, record,
+            "synthetic record round-trip @{}",
+            record.height
+        );
     }
 }
 
@@ -152,15 +156,14 @@ fn random_garbage_always_errors_never_panics() {
         let buf: Vec<u8> = (0..len).map(|_| (rng.next() & 0xff) as u8).collect();
         macro_rules! must_err {
             ($ty:ty) => {
-                let out = catch_unwind(AssertUnwindSafe(|| {
-                    <$ty>::from_bytes_full(&buf, version())
-                }))
-                .unwrap_or_else(|_| {
-                    panic!(
-                        "{} PANICKED on garbage case {case} (len {len})",
-                        stringify!($ty)
-                    )
-                });
+                let out =
+                    catch_unwind(AssertUnwindSafe(|| <$ty>::from_bytes_full(&buf, version())))
+                        .unwrap_or_else(|_| {
+                            panic!(
+                                "{} PANICKED on garbage case {case} (len {len})",
+                                stringify!($ty)
+                            )
+                        });
                 assert!(
                     out.is_err(),
                     "{} decoded garbage case {case} (len {len}) as Ok",

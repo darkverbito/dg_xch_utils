@@ -122,7 +122,10 @@ mod tests {
         // Just under the timeout with a frozen frontier: no fire yet.
         assert!(!wd.poll(100, t0 + TO - Duration::from_millis(1), true, true, false));
         // At/after the timeout, still frozen, work remains, peers live, no confirm in flight → FIRE.
-        assert!(wd.poll(100, t0 + TO, true, true, false), "bounded stall must be reclaimed");
+        assert!(
+            wd.poll(100, t0 + TO, true, true, false),
+            "bounded stall must be reclaimed"
+        );
     }
 
     #[test]
@@ -165,8 +168,17 @@ mod tests {
         assert!(wd.poll(100, t0 + TO, true, true, false), "first reclaim");
         // The clock reset on the fire; still wedged → it must fire AGAIN after another full timeout,
         // not give up after one shot.
-        assert!(!wd.poll(100, t0 + TO + TO - Duration::from_millis(1), true, true, false));
-        assert!(wd.poll(100, t0 + TO + TO, true, true, false), "second reclaim after another timeout");
+        assert!(!wd.poll(
+            100,
+            t0 + TO + TO - Duration::from_millis(1),
+            true,
+            true,
+            false
+        ));
+        assert!(
+            wd.poll(100, t0 + TO + TO, true, true, false),
+            "second reclaim after another timeout"
+        );
     }
 
     // The live action against a real BlockQueue: a wedged frontier (frozen low_water, work far ahead)
@@ -186,14 +198,30 @@ mod tests {
         let fired = wd.tick(&q, &metrics, Instant::now(), 10_000, true, false);
 
         assert!(fired, "a bounded stall with work + peers must reclaim");
-        assert_eq!(metrics.reclaimed.load(Ordering::Relaxed), 1, "reservations_reclaimed increments");
-        assert_ne!(q.current_gen(), gen0, "rebase bumped the generation (producer replan signal)");
-        assert_eq!(q.low_water(), 100, "rebase held the frontier at the confirmed peak");
+        assert_eq!(
+            metrics.reclaimed.load(Ordering::Relaxed),
+            1,
+            "reservations_reclaimed increments"
+        );
+        assert_ne!(
+            q.current_gen(),
+            gen0,
+            "rebase bumped the generation (producer replan signal)"
+        );
+        assert_eq!(
+            q.low_water(),
+            100,
+            "rebase held the frontier at the confirmed peak"
+        );
 
         // Caught up (target == low_water) must NOT keep reclaiming: no work → no fire.
         let mut wd2 = StallWatchdog::new(q.low_water(), Instant::now(), Duration::from_millis(1));
         std::thread::sleep(Duration::from_millis(3));
         assert!(!wd2.tick(&q, &metrics, Instant::now(), q.low_water(), true, false));
-        assert_eq!(metrics.reclaimed.load(Ordering::Relaxed), 1, "no extra reclaim when caught up");
+        assert_eq!(
+            metrics.reclaimed.load(Ordering::Relaxed),
+            1,
+            "no extra reclaim when caught up"
+        );
     }
 }

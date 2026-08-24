@@ -18,7 +18,11 @@ async fn commit_latency_is_filed_under_the_current_phase() {
     let t = store.telemetry().expect("sqlite records telemetry");
     assert_eq!(t.commit_catch_up.count.load(Ordering::Relaxed), 0);
     assert_eq!(t.commit_near_tip.count.load(Ordering::Relaxed), 0);
-    assert_eq!(t.last_commit_unix.load(Ordering::Relaxed), 0, "no commit yet");
+    assert_eq!(
+        t.last_commit_unix.load(Ordering::Relaxed),
+        0,
+        "no commit yet"
+    );
 
     // Catch-up band (the default): one batch commit.
     let records = common::load_records();

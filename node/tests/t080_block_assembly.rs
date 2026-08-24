@@ -648,7 +648,10 @@ async fn cost_accounting_matches_rerun_and_block_overhead() {
         flags: BlockGeneratorFlags::for_height(&MAINNET, BUILD_HEIGHT),
     })
     .expect("emitted generator re-runs");
-    assert_eq!(tx.cost, conds.cost, "declared cost == independent re-run cost");
+    assert_eq!(
+        tx.cost, conds.cost,
+        "declared cost == independent re-run cost"
+    );
 
     // Multi-item: the selection accounting is conservative — the true block cost never exceeds the
     // sum of admission costs + BLOCK_OVERHEAD (each item over-pays the shared wrapper bytes).
@@ -738,7 +741,11 @@ async fn backref_compression_packs_extra_spend_over_plain_limit() {
             "every spend — including the one a plain generator would drop — is packed via compression"
         );
     }
-    assert_eq!(removal_ids.len(), 4, "exactly the four spends, all included");
+    assert_eq!(
+        removal_ids.len(),
+        4,
+        "exactly the four spends, all included"
+    );
     // The emitted (compressed) block is valid: its re-run cost is under the limit and strictly below
     // the plain sum — the bytes the shared solution would have cost, saved.
     assert!(
@@ -767,7 +774,10 @@ async fn backref_compression_packs_extra_spend_over_plain_limit() {
     })
     .expect("compressed generator re-runs clean");
     assert_eq!(conds.spends.len(), 4, "validator recovers all four spends");
-    assert_eq!(tx.cost, conds.cost, "declared cost == independent re-run cost");
+    assert_eq!(
+        tx.cost, conds.cost,
+        "declared cost == independent re-run cost"
+    );
 }
 
 // ── Test 5: the aggregate signature of the included bundles verifies ──────────────────────────────
@@ -800,7 +810,12 @@ async fn aggregate_signature_of_included_bundles_verifies() {
     };
 
     let mut mp = mempool_at_peak();
-    admit_real(&mut mp, &store, signed_bundle(&coin1, 7, b"t080 first message")).await;
+    admit_real(
+        &mut mp,
+        &store,
+        signed_bundle(&coin1, 7, b"t080 first message"),
+    )
+    .await;
     admit_real(
         &mut mp,
         &store,

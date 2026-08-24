@@ -143,15 +143,18 @@ async fn dial_as(port: u16, node_type: NodeType, handlers: HandlerMap) -> WsClie
         additional_headers: None,
         rate_limited: false,
     });
-    WsClient::new(cfg, node_type, handlers, Arc::new(AtomicBool::new(true)), 15)
-        .await
-        .expect("dial + handshake")
+    WsClient::new(
+        cfg,
+        node_type,
+        handlers,
+        Arc::new(AtomicBool::new(true)),
+        15,
+    )
+    .await
+    .expect("dial + handshake")
 }
 
-async fn recv_within(
-    rx: &mut mpsc::Receiver<Arc<ChiaMessage>>,
-    what: &str,
-) -> Arc<ChiaMessage> {
+async fn recv_within(rx: &mut mpsc::Receiver<Arc<ChiaMessage>>, what: &str) -> Arc<ChiaMessage> {
     tokio::time::timeout(Duration::from_secs(5), rx.recv())
         .await
         .unwrap_or_else(|_| panic!("{what} must arrive within 5s of the handshake"))
@@ -183,7 +186,9 @@ async fn full_node_peer_is_greeted_with_new_peak_on_connect() {
     .expect("NewPeak decodes");
     assert_eq!(got, canned_peak(), "the greeting carries the current peak");
 
-    server.run.store(false, std::sync::atomic::Ordering::Relaxed);
+    server
+        .run
+        .store(false, std::sync::atomic::Ordering::Relaxed);
 }
 
 // chia full_node.py:967-982 — a synced node asks the new FULL_NODE peer for the mempool items
@@ -198,8 +203,7 @@ async fn synced_node_requests_mempool_sync_on_full_node_connect() {
         filter: Some(filter.clone()),
     })
     .await;
-    let (handlers, mut rx) =
-        capture_handlers(&[ProtocolMessageTypes::RequestMempoolTransactions]);
+    let (handlers, mut rx) = capture_handlers(&[ProtocolMessageTypes::RequestMempoolTransactions]);
     let _client = dial_as(server.port, NodeType::FullNode, handlers).await;
 
     let msg = recv_within(&mut rx, "the RequestMempoolTransactions greeting").await;
@@ -210,7 +214,9 @@ async fn synced_node_requests_mempool_sync_on_full_node_connect() {
     .expect("RequestMempoolTransactions decodes");
     assert_eq!(got.filter, filter, "the request carries OUR mempool filter");
 
-    server.run.store(false, std::sync::atomic::Ordering::Relaxed);
+    server
+        .run
+        .store(false, std::sync::atomic::Ordering::Relaxed);
 }
 
 // The not-synced posture: chia's `if synced and peak_height is not None` gate — no mempool
@@ -240,7 +246,9 @@ async fn unsynced_node_does_not_request_mempool_sync_on_connect() {
         "an unsynced node must not send RequestMempoolTransactions on connect"
     );
 
-    server.run.store(false, std::sync::atomic::Ordering::Relaxed);
+    server
+        .run
+        .store(false, std::sync::atomic::Ordering::Relaxed);
 }
 
 // chia full_node.py:1009-1010 — a TIMELORD peer is greeted via send_peak_to_timelords.
@@ -265,7 +273,9 @@ async fn timelord_peer_is_greeted_with_new_peak_timelord() {
     .expect("NewPeakTimelord decodes");
     assert_eq!(got, *want, "the greeting carries the timelord peak");
 
-    server.run.store(false, std::sync::atomic::Ordering::Relaxed);
+    server
+        .run
+        .store(false, std::sync::atomic::Ordering::Relaxed);
 }
 
 // A FULL_NODE peer of a peak-less node (fresh boot, empty store) gets no NewPeak greeting —
@@ -293,5 +303,7 @@ async fn peakless_node_sends_no_greeting() {
         "no peak → no greeting"
     );
 
-    server.run.store(false, std::sync::atomic::Ordering::Relaxed);
+    server
+        .run
+        .store(false, std::sync::atomic::Ordering::Relaxed);
 }

@@ -399,7 +399,12 @@ impl FeeTracker {
     pub fn new() -> Self {
         let buckets = init_buckets();
         FeeTracker {
-            short_horizon: FeeStat::new(buckets.clone(), SHORT_BLOCK_PERIOD, SHORT_DECAY, SHORT_SCALE),
+            short_horizon: FeeStat::new(
+                buckets.clone(),
+                SHORT_BLOCK_PERIOD,
+                SHORT_DECAY,
+                SHORT_SCALE,
+            ),
             med_horizon: FeeStat::new(buckets.clone(), MED_BLOCK_PERIOD, MED_DECAY, MED_SCALE),
             long_horizon: FeeStat::new(buckets.clone(), LONG_BLOCK_PERIOD, LONG_DECAY, LONG_SCALE),
             latest_seen_height: 0,
@@ -442,18 +447,24 @@ impl FeeTracker {
     // buckets the fee-rate itself (chia `new_mempool_tx` re-derives the bucket from its argument).
     fn add_tx(&mut self, item: ItemInfo) {
         let fee_rate = item.fee_per_cost() * 1000.0;
-        self.short_horizon.new_mempool_tx(self.latest_seen_height, fee_rate);
-        self.med_horizon.new_mempool_tx(self.latest_seen_height, fee_rate);
-        self.long_horizon.new_mempool_tx(self.latest_seen_height, fee_rate);
+        self.short_horizon
+            .new_mempool_tx(self.latest_seen_height, fee_rate);
+        self.med_horizon
+            .new_mempool_tx(self.latest_seen_height, fee_rate);
+        self.long_horizon
+            .new_mempool_tx(self.latest_seen_height, fee_rate);
     }
 
     // chia FeeTracker.remove_tx: a mempool item left without confirming.
     fn remove_tx(&mut self, item: ItemInfo) {
         let fee_rate = item.fee_per_cost() * 1000.0;
         let bucket_index = get_bucket_index(&self.buckets, fee_rate);
-        self.short_horizon.remove_tx(self.latest_seen_height, item, bucket_index);
-        self.med_horizon.remove_tx(self.latest_seen_height, item, bucket_index);
-        self.long_horizon.remove_tx(self.latest_seen_height, item, bucket_index);
+        self.short_horizon
+            .remove_tx(self.latest_seen_height, item, bucket_index);
+        self.med_horizon
+            .remove_tx(self.latest_seen_height, item, bucket_index);
+        self.long_horizon
+            .remove_tx(self.latest_seen_height, item, bucket_index);
     }
 
     fn estimate_fee_for_block(&self, target_block: u32) -> EstimateResult {
@@ -511,9 +522,19 @@ impl FeeEstimator {
     }
 
     // chia BitcoinFeeEstimator.add_mempool_item.
-    pub(crate) fn add_mempool_item(&mut self, cost: u64, fee: u64, height_added: u32, mempool_cost: u64) {
+    pub(crate) fn add_mempool_item(
+        &mut self,
+        cost: u64,
+        fee: u64,
+        height_added: u32,
+        mempool_cost: u64,
+    ) {
         self.last_mempool_cost = mempool_cost;
-        self.tracker.add_tx(ItemInfo { cost, fee, height_added });
+        self.tracker.add_tx(ItemInfo {
+            cost,
+            fee,
+            height_added,
+        });
     }
 
     // chia BitcoinFeeEstimator.remove_mempool_item.
@@ -525,15 +546,28 @@ impl FeeEstimator {
         mempool_cost: u64,
     ) {
         self.last_mempool_cost = mempool_cost;
-        self.tracker.remove_tx(ItemInfo { cost, fee, height_added });
+        self.tracker.remove_tx(ItemInfo {
+            cost,
+            fee,
+            height_added,
+        });
     }
 
     // chia BitcoinFeeEstimator.new_block: a transaction block confirmed these items.
-    pub(crate) fn new_block(&mut self, block_height: u32, included: &[(u64, u64, u32)], mempool_cost: u64) {
+    pub(crate) fn new_block(
+        &mut self,
+        block_height: u32,
+        included: &[(u64, u64, u32)],
+        mempool_cost: u64,
+    ) {
         self.last_mempool_cost = mempool_cost;
         let items: Vec<ItemInfo> = included
             .iter()
-            .map(|&(cost, fee, height_added)| ItemInfo { cost, fee, height_added })
+            .map(|&(cost, fee, height_added)| ItemInfo {
+                cost,
+                fee,
+                height_added,
+            })
             .collect();
         self.tracker.process_block(block_height, &items);
     }
@@ -548,11 +582,7 @@ impl FeeEstimator {
     pub fn estimate_fee_rate(&self, time_offset_seconds: u64) -> f64 {
         let r = self.tracker.estimate_fee(time_offset_seconds);
         let parsed = self.parse(&r);
-        if parsed < 0.0 {
-            0.0
-        } else {
-            parsed / 1000.0
-        }
+        if parsed < 0.0 { 0.0 } else { parsed / 1000.0 }
     }
 
     // chia SmartFeeEstimator.parse: median → fee-per-cost, with the one-bucket-above-the-lowest-
@@ -591,7 +621,12 @@ impl FeeEstimator {
     /// Feed a confirmed-block signal directly (chia `new_block`). Public so integration tests and
     /// the block-inclusion path can drive the positive signal; the mempool wires this from
     /// [`crate::mempool::Mempool::new_peak`].
-    pub fn ingest_block(&mut self, block_height: u32, included: &[(u64, u64, u32)], mempool_cost: u64) {
+    pub fn ingest_block(
+        &mut self,
+        block_height: u32,
+        included: &[(u64, u64, u32)],
+        mempool_cost: u64,
+    ) {
         self.new_block(block_height, included, mempool_cost);
     }
 }
@@ -644,15 +679,24 @@ mod tests {
     fn steady_pressure_converges_positive() {
         let est = drive_steady(10_000_000, 5_000_000); // fee_per_cost = 2.0
         let rate = est.estimate_fee_rate(0);
-        assert!(rate > 0.0, "sustained pressure must produce a positive estimate, got {rate}");
+        assert!(
+            rate > 0.0,
+            "sustained pressure must produce a positive estimate, got {rate}"
+        );
     }
 
     #[test]
     fn higher_pressure_higher_estimate() {
         let low = drive_steady(10_000_000, 5_000_000).estimate_fee_rate(0); // fpc 2
         let high = drive_steady(100_000_000, 5_000_000).estimate_fee_rate(0); // fpc 20
-        assert!(low > 0.0 && high > 0.0, "both estimates positive: low={low} high={high}");
-        assert!(high > low, "higher fee-per-cost → higher estimate: low={low} high={high}");
+        assert!(
+            low > 0.0 && high > 0.0,
+            "both estimates positive: low={low} high={high}"
+        );
+        assert!(
+            high > low,
+            "higher fee-per-cost → higher estimate: low={low} high={high}"
+        );
     }
 
     #[test]

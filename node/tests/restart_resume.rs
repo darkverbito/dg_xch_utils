@@ -51,7 +51,9 @@ async fn uncommitted_batch_vanishes_wholly_and_committed_batch_survives_reopen()
     let base_block = common::load_full_block(5_000_000);
     let template = common::load_records()[0].clone();
     let path = common::unique_db_path();
-    let blocks: Vec<_> = (BASE..BASE + 8).map(|h| common::restamp_block(&base_block, h)).collect();
+    let blocks: Vec<_> = (BASE..BASE + 8)
+        .map(|h| common::restamp_block(&base_block, h))
+        .collect();
     let hashes: Vec<_> = blocks
         .iter()
         .map(|b| b.header_hash().expect("hash"))
@@ -165,7 +167,8 @@ async fn confirmed_peak_survives_reopen_and_the_rewarmed_engine_resumes() {
         .expect("get_block")
         .expect("the confirmed body survives the restart");
     assert_eq!(
-        body.to_bytes(ChiaProtocolVersion::default()).expect("bytes"),
+        body.to_bytes(ChiaProtocolVersion::default())
+            .expect("bytes"),
         block
             .to_bytes(ChiaProtocolVersion::default())
             .expect("bytes"),
@@ -209,9 +212,11 @@ async fn mid_range_kill_resumes_with_exactly_the_missing_heights() {
         store.add_block_records(&records).await.expect("seed");
         let engine = Engine::new(Arc::new(store), NativePrimitives, MAINNET);
         let mut chaser = Chaser::new(engine, cfg());
-        let sources: Vec<Arc<dyn BlockRangeSource>> = vec![Arc::new(
-            MisbehavingSource::new(9, Misbehavior::StalePeak { tip: stale_tip }, base_block.clone()),
-        )];
+        let sources: Vec<Arc<dyn BlockRangeSource>> = vec![Arc::new(MisbehavingSource::new(
+            9,
+            Misbehavior::StalePeak { tip: stale_tip },
+            base_block.clone(),
+        ))];
         let err = chaser
             .sync_bodies(&sources)
             .await
@@ -359,10 +364,7 @@ async fn restart_warm_covers_the_deepest_retarget_walk() {
         })
         .collect();
     store.add_block_records(&chain).await.expect("seed chain");
-    store
-        .set_peak(&plain_hash(ANCHOR))
-        .await
-        .expect("set peak");
+    store.set_peak(&plain_hash(ANCHOR)).await.expect("set peak");
 
     let mut engine = Engine::new(store.clone(), NativePrimitives, MAINNET);
     let warmed = engine.warm_cache_from_store().await.expect("warm");

@@ -149,7 +149,8 @@ where
             return Err(TxAdmissionError::Validation(e));
         }
     };
-    if let Err(e) = validate_block_aggregate_signature(&conds, &bundle.aggregated_signature, constants)
+    if let Err(e) =
+        validate_block_aggregate_signature(&conds, &bundle.aggregated_signature, constants)
     {
         mempool.lock().await.add_seen(name);
         return Err(TxAdmissionError::Validation(e));

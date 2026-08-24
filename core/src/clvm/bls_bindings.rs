@@ -54,7 +54,10 @@ pub fn aggregate_verify_signature(
 ///
 /// # Errors
 /// Returns `Err` with the malformed signature's index if any input fails to deserialize.
-pub fn aggregate_signatures<'a, I: IntoIterator<Item = &'a crate::blockchain::sized_bytes::Bytes96>>(
+pub fn aggregate_signatures<
+    'a,
+    I: IntoIterator<Item = &'a crate::blockchain::sized_bytes::Bytes96>,
+>(
     signatures: I,
 ) -> Result<crate::blockchain::sized_bytes::Bytes96, String> {
     use blst::min_pk::AggregateSignature;

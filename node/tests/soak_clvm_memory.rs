@@ -17,7 +17,7 @@
 mod common;
 
 use dg_xch_core::consensus::block_generator::{
-    execute_block_generator_result, BlockGeneratorFlags, BlockGeneratorInput,
+    BlockGeneratorFlags, BlockGeneratorInput, execute_block_generator_result,
 };
 use dg_xch_core::consensus::constants::MAINNET;
 use std::alloc::{GlobalAlloc, Layout, System};

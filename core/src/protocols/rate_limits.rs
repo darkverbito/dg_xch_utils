@@ -67,7 +67,12 @@ const fn rl(aggregate_limit: bool, frequency: u32, max_size: u64) -> Limit {
     })
 }
 
-const fn rl_total(aggregate_limit: bool, frequency: u32, max_size: u64, max_total_size: u64) -> Limit {
+const fn rl_total(
+    aggregate_limit: bool,
+    frequency: u32,
+    max_size: u64,
+    max_total_size: u64,
+) -> Limit {
     Limit::Rl(RlSettings {
         aggregate_limit,
         frequency,
@@ -252,9 +257,7 @@ fn v1_limit(t: ProtocolMessageTypes) -> Limit {
 /// `get_rate_limits_to_use` + the `{**v1, **v2}` overlay, evaluated per type.
 #[must_use]
 pub fn composed_limit(t: ProtocolMessageTypes, both_v2: bool) -> Limit {
-    if both_v2
-        && let Some(l) = v2_override(t)
-    {
+    if both_v2 && let Some(l) = v2_override(t) {
         return l;
     }
     v1_limit(t)
@@ -313,7 +316,10 @@ impl RateLimiter {
         let proportion = f64::from(self.percentage_of_limit) / 100.0;
         let size = size as u64;
 
-        let mut w = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut w = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         let slot = self.start.elapsed().as_secs() / self.reset_seconds;
         if slot != w.slot {
@@ -396,7 +402,10 @@ mod tests {
     use crate::protocols::shared::CAPABILITIES;
 
     fn v2_caps() -> Capabilities {
-        CAPABILITIES.iter().map(|(v, s)| (*v, (*s).to_string())).collect()
+        CAPABILITIES
+            .iter()
+            .map(|(v, s)| (*v, (*s).to_string()))
+            .collect()
     }
 
     // v1-only peer: advertises Base + BlockHeaders but NOT RateLimitsV2.
@@ -522,8 +531,12 @@ mod tests {
         // Many large-but-legal RespondBlocks pass (no frequency limit).
         for _ in 0..100 {
             assert!(
-                rl.process_and_check(ProtocolMessageTypes::RespondBlocks, 10 * MIB as usize, &caps)
-                    .is_none()
+                rl.process_and_check(
+                    ProtocolMessageTypes::RespondBlocks,
+                    10 * MIB as usize,
+                    &caps
+                )
+                .is_none()
             );
         }
         // One over the 50 MiB per-message cap is a violation.

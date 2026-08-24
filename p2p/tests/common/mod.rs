@@ -112,9 +112,14 @@ fn client_config(port: u16, rate_limited: bool) -> Arc<WsClientConfig> {
 
 // Dial a loopback full node and complete the handshake (no inbound limiter on this client).
 pub async fn connect(port: u16) -> FullnodeClient {
-    FullnodeClient::new(client_config(port, false), Arc::new(AtomicBool::new(true)), None, 30)
-        .await
-        .expect("client connects + handshakes")
+    FullnodeClient::new(
+        client_config(port, false),
+        Arc::new(AtomicBool::new(true)),
+        None,
+        30,
+    )
+    .await
+    .expect("client connects + handshakes")
 }
 
 // Dial without panicking: returns the handshake error instead of `.expect`-ing it, so a test can
@@ -132,9 +137,14 @@ pub async fn try_connect(port: u16) -> Result<FullnodeClient, Error> {
 // Same, but with the client-side inbound limiter active — the p2p dialer's posture, so the client's
 // own read loop accounts the solicited replies it pulls (the item-5 self-safety path).
 pub async fn rate_limited_client(port: u16) -> FullnodeClient {
-    FullnodeClient::new(client_config(port, true), Arc::new(AtomicBool::new(true)), None, 30)
-        .await
-        .expect("rate-limited client connects + handshakes")
+    FullnodeClient::new(
+        client_config(port, true),
+        Arc::new(AtomicBool::new(true)),
+        None,
+        30,
+    )
+    .await
+    .expect("rate-limited client connects + handshakes")
 }
 
 // Close every server-side peer connection and clear the map — simulates a peer drop

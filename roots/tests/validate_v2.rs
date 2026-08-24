@@ -47,8 +47,14 @@ struct Scenario {
 
 fn scenario() -> Scenario {
     let (c1, c2, c3, c4) = (coin(1), coin(2), coin(3), coin(4));
-    let meta10 = CoinMeta { created_height: 10, created_timestamp: 1000 };
-    let meta11 = CoinMeta { created_height: 11, created_timestamp: 1100 };
+    let meta10 = CoinMeta {
+        created_height: 10,
+        created_timestamp: 1000,
+    };
+    let meta11 = CoinMeta {
+        created_height: 11,
+        created_timestamp: 1100,
+    };
 
     let b10 = BlockObservation {
         height: 10,
@@ -56,9 +62,18 @@ fn scenario() -> Scenario {
         now_timestamp: 1000,
         self_valid: true,
         creations: vec![
-            Creation { coin_id: c1, meta: meta10 },
-            Creation { coin_id: c2, meta: meta10 },
-            Creation { coin_id: c3, meta: meta10 },
+            Creation {
+                coin_id: c1,
+                meta: meta10,
+            },
+            Creation {
+                coin_id: c2,
+                meta: meta10,
+            },
+            Creation {
+                coin_id: c3,
+                meta: meta10,
+            },
         ],
         spends: vec![],
     };
@@ -67,7 +82,10 @@ fn scenario() -> Scenario {
         now_height: 11,
         now_timestamp: 1100,
         self_valid: true,
-        creations: vec![Creation { coin_id: c4, meta: meta11 }],
+        creations: vec![Creation {
+            coin_id: c4,
+            meta: meta11,
+        }],
         spends: vec![
             // c1 spent with ASSERT_HEIGHT_RELATIVE 1: 11 >= 10 + 1 -> ok.
             SpendRef {
@@ -154,11 +172,18 @@ fn order_independence_xor_and_root() {
         let perm = permutation(s.blocks.len(), seed);
         let shuffled: Vec<&BlockObservation> = perm.iter().map(|&i| &s.blocks[i]).collect();
         let v = run(&shuffled);
-        assert_eq!(v.xor_digest(), base_xor, "XOR residual must be order-independent (seed {seed})");
+        assert_eq!(
+            v.xor_digest(),
+            base_xor,
+            "XOR residual must be order-independent (seed {seed})"
+        );
         let root = v
             .reconcile(&s.survivors, s.boundary, s.header, expected_root(&s))
             .expect("shuffled order reconciles");
-        assert_eq!(root.root_v1, base_root.root_v1, "phase-1 root must be order-independent (seed {seed})");
+        assert_eq!(
+            root.root_v1, base_root.root_v1,
+            "phase-1 root must be order-independent (seed {seed})"
+        );
     }
 }
 
@@ -187,7 +212,10 @@ fn corrupted_metadata_breaks_cancellation() {
     // XOR no longer cancels the coin, so either the XOR check or the root check fires — both are
     // fail-closed. (Assert it is not an accepted reconcile.)
     assert!(
-        matches!(err, ValidateError::XorResidualMismatch | ValidateError::RootMismatch { .. }),
+        matches!(
+            err,
+            ValidateError::XorResidualMismatch | ValidateError::RootMismatch { .. }
+        ),
         "expected fail-closed XOR/root mismatch, got {err:?}"
     );
 }
@@ -204,7 +232,10 @@ fn timelock_uses_metadata() {
     let err = v
         .reconcile(&s.survivors, s.boundary, s.header, expected_clean_root())
         .expect_err("relative timelock must fail");
-    assert!(matches!(err, ValidateError::TimeLock { .. }), "expected TimeLock, got {err:?}");
+    assert!(
+        matches!(err, ValidateError::TimeLock { .. }),
+        "expected TimeLock, got {err:?}"
+    );
 }
 
 /// Ephemeral coin (created and spent in the same block) with ASSERT_HEIGHT_RELATIVE 1 must fail:
@@ -212,7 +243,10 @@ fn timelock_uses_metadata() {
 #[test]
 fn ephemeral_relative_timelock_fails() {
     let e = coin(99);
-    let meta = CoinMeta { created_height: 20, created_timestamp: 2000 };
+    let meta = CoinMeta {
+        created_height: 20,
+        created_timestamp: 2000,
+    };
     let block = BlockObservation {
         height: 20,
         now_height: 20,
@@ -223,14 +257,20 @@ fn ephemeral_relative_timelock_fails() {
             coin_id: e,
             spent_height: 20,
             meta,
-            time_locks: TimeLockConditions { height_relative: Some(1), ..Default::default() },
+            time_locks: TimeLockConditions {
+                height_relative: Some(1),
+                ..Default::default()
+            },
         }],
     };
     let v = run(&[&block]);
     let err = v
         .reconcile(&[], 20, coin(0xbeef), Bytes32::from([0u8; 32]))
         .expect_err("ephemeral age-0 relative-1 must fail");
-    assert!(matches!(err, ValidateError::TimeLock { .. }), "expected TimeLock, got {err:?}");
+    assert!(
+        matches!(err, ValidateError::TimeLock { .. }),
+        "expected TimeLock, got {err:?}"
+    );
 }
 
 /// (d) A dropped creation breaks cancellation (a spend with no matching ADD).
@@ -264,7 +304,10 @@ fn extra_spend_breaks_cancellation() {
     s.blocks[2].spends.push(SpendRef {
         coin_id: ghost,
         spent_height: 12,
-        meta: CoinMeta { created_height: 5, created_timestamp: 500 },
+        meta: CoinMeta {
+            created_height: 5,
+            created_timestamp: 500,
+        },
         time_locks: TimeLockConditions::default(),
     });
     let forward: Vec<&BlockObservation> = s.blocks.iter().collect();

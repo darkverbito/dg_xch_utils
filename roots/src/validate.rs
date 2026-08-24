@@ -113,12 +113,18 @@ impl TimeLockConditions {
         if let Some(v) = self.birth_height
             && meta.created_height != v
         {
-            return Err(TimeLockError::BirthHeight { got: meta.created_height, want: v });
+            return Err(TimeLockError::BirthHeight {
+                got: meta.created_height,
+                want: v,
+            });
         }
         if let Some(v) = self.birth_seconds
             && meta.created_timestamp != v
         {
-            return Err(TimeLockError::BirthSeconds { got: meta.created_timestamp, want: v });
+            return Err(TimeLockError::BirthSeconds {
+                got: meta.created_timestamp,
+                want: v,
+            });
         }
         if let Some(v) = self.height_relative
             && now_height < meta.created_height.saturating_add(v)
@@ -175,24 +181,46 @@ impl std::fmt::Display for TimeLockError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::BirthHeight { got, want } => {
-                write!(f, "ASSERT_MY_BIRTH_HEIGHT: created {got} != asserted {want}")
+                write!(
+                    f,
+                    "ASSERT_MY_BIRTH_HEIGHT: created {got} != asserted {want}"
+                )
             }
             Self::BirthSeconds { got, want } => {
-                write!(f, "ASSERT_MY_BIRTH_SECONDS: created {got} != asserted {want}")
+                write!(
+                    f,
+                    "ASSERT_MY_BIRTH_SECONDS: created {got} != asserted {want}"
+                )
             }
-            Self::HeightRelative { now, created, delta } => write!(
+            Self::HeightRelative {
+                now,
+                created,
+                delta,
+            } => write!(
                 f,
                 "ASSERT_HEIGHT_RELATIVE: now {now} < created {created} + {delta}"
             ),
-            Self::SecondsRelative { now, created, delta } => write!(
+            Self::SecondsRelative {
+                now,
+                created,
+                delta,
+            } => write!(
                 f,
                 "ASSERT_SECONDS_RELATIVE: now {now} < created {created} + {delta}"
             ),
-            Self::BeforeHeightRelative { now, created, delta } => write!(
+            Self::BeforeHeightRelative {
+                now,
+                created,
+                delta,
+            } => write!(
                 f,
                 "ASSERT_BEFORE_HEIGHT_RELATIVE: now {now} >= created {created} + {delta}"
             ),
-            Self::BeforeSecondsRelative { now, created, delta } => write!(
+            Self::BeforeSecondsRelative {
+                now,
+                created,
+                delta,
+            } => write!(
                 f,
                 "ASSERT_BEFORE_SECONDS_RELATIVE: now {now} >= created {created} + {delta}"
             ),
@@ -254,7 +282,10 @@ pub enum ValidateError {
     /// A spend references a coin that was never created and never seeded — an unmatched REMOVE.
     SpendOfMissingCoin { coin_id: Bytes32 },
     /// A bucket-C condition failed against the supplied metadata.
-    TimeLock { coin_id: Bytes32, source: TimeLockError },
+    TimeLock {
+        coin_id: Bytes32,
+        source: TimeLockError,
+    },
     /// The MSet-XOR residual did not equal the XOR of the hinted survivors — wrong hints, wrong
     /// metadata, or a missing/extra coin. The core fail-closed check.
     XorResidualMismatch,
@@ -273,9 +304,14 @@ impl std::fmt::Display for ValidateError {
             Self::DuplicateCreation { coin_id } => write!(f, "duplicate creation {coin_id}"),
             Self::SpendOfMissingCoin { coin_id } => write!(f, "spend of missing coin {coin_id}"),
             Self::TimeLock { coin_id, source } => write!(f, "coin {coin_id}: {source}"),
-            Self::XorResidualMismatch => write!(f, "MSet-XOR residual != survivor hints (fail-closed)"),
+            Self::XorResidualMismatch => {
+                write!(f, "MSet-XOR residual != survivor hints (fail-closed)")
+            }
             Self::SurvivorHintMismatch { hinted, actual } => {
-                write!(f, "survivor hint count {hinted} != created-minus-spent {actual}")
+                write!(
+                    f,
+                    "survivor hint count {hinted} != created-minus-spent {actual}"
+                )
             }
             Self::RootMismatch { got, want } => write!(f, "phase-1 root {got} != expected {want}"),
             Self::Roots(msg) => write!(f, "phase-1 accumulator: {msg}"),
@@ -320,7 +356,8 @@ impl RangeValidator {
     /// range there are none.
     pub fn seed(&mut self, coin_id: Bytes32, meta: CoinMeta) {
         if self.created.insert(coin_id, meta).is_some() {
-            self.errors.push(ValidateError::DuplicateCreation { coin_id });
+            self.errors
+                .push(ValidateError::DuplicateCreation { coin_id });
             return;
         }
         xor_in(&mut self.xor, fold_leaf(&coin_id, meta));
@@ -329,19 +366,27 @@ impl RangeValidator {
     /// Fold one block's observations into the running state. Order-independent across blocks.
     pub fn observe(&mut self, block: &BlockObservation) {
         if !block.self_valid {
-            self.errors.push(ValidateError::BlockSelfInvalid { height: block.height });
+            self.errors.push(ValidateError::BlockSelfInvalid {
+                height: block.height,
+            });
         }
         for c in &block.creations {
             if self.created.insert(c.coin_id, c.meta).is_some() {
-                self.errors.push(ValidateError::DuplicateCreation { coin_id: c.coin_id });
+                self.errors
+                    .push(ValidateError::DuplicateCreation { coin_id: c.coin_id });
                 continue;
             }
             xor_in(&mut self.xor, fold_leaf(&c.coin_id, c.meta));
         }
         for s in &block.spends {
-            if let Err(source) = s.time_locks.check(s.meta, block.now_height, block.now_timestamp) {
-                self.errors
-                    .push(ValidateError::TimeLock { coin_id: s.coin_id, source });
+            if let Err(source) = s
+                .time_locks
+                .check(s.meta, block.now_height, block.now_timestamp)
+            {
+                self.errors.push(ValidateError::TimeLock {
+                    coin_id: s.coin_id,
+                    source,
+                });
             }
             self.spent.insert(s.coin_id, s.spent_height);
             // REMOVE uses the hint-supplied meta; if it differs from the creation meta the XOR
@@ -430,7 +475,12 @@ impl RangeValidator {
             .iter()
             .map(|(id, meta)| {
                 let spent_index = self.spent.get(id).copied().unwrap_or(0);
-                (meta.created_height, *id, meta.created_timestamp, spent_index)
+                (
+                    meta.created_height,
+                    *id,
+                    meta.created_timestamp,
+                    spent_index,
+                )
             })
             .collect();
         // Canonical v1 order: ascending (confirmed_height, coin_id bytewise). Compare the coin

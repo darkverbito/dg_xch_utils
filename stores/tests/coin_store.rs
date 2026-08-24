@@ -499,7 +499,10 @@ mod batch_puzzle_state {
                     c
                 })
                 .collect();
-            store.apply_block(*h, 1_700_000_000, &recs, &[]).await.unwrap();
+            store
+                .apply_block(*h, 1_700_000_000, &recs, &[])
+                .await
+                .unwrap();
             all.extend(recs);
         }
         all
@@ -571,7 +574,11 @@ mod batch_puzzle_state {
         got.sort_unstable();
         got.dedup();
         assert_eq!(got.len(), before, "no duplicates across pages");
-        assert_eq!(got.len(), seeded.len(), "the loop recovers every seeded state");
+        assert_eq!(
+            got.len(),
+            seeded.len(),
+            "the loop recovers every seeded state"
+        );
     }
 
     // The spent/unspent filter legs (chia's require_spent/require_unspent predicates,
@@ -582,7 +589,10 @@ mod batch_puzzle_state {
         let seeded = seed(&store, &[10, 11], 2).await;
         // spend one coin at height 12.
         let victim = seeded[0].coin.name();
-        store.apply_block(12, 1_700_000_100, &[], &[victim]).await.unwrap();
+        store
+            .apply_block(12, 1_700_000_100, &[], &[victim])
+            .await
+            .unwrap();
 
         let (both, _) = store
             .batch_coin_states_by_puzzle_hashes(&[PH()], 0, &filters(true, true, true, 0), 50_000)
@@ -632,7 +642,10 @@ mod batch_puzzle_state {
         let mut big = synth_coin(0x70, 1 << 40);
         big.coin.puzzle_hash = PH();
         big.confirmed_block_index = 11;
-        store.apply_block(11, 1_700_000_000, &[big], &[]).await.unwrap();
+        store
+            .apply_block(11, 1_700_000_000, &[big], &[])
+            .await
+            .unwrap();
 
         let (all, _) = store
             .batch_coin_states_by_puzzle_hashes(&[PH()], 0, &filters(true, true, true, 0), 50_000)
@@ -640,7 +653,12 @@ mod batch_puzzle_state {
             .unwrap();
         assert_eq!(all.len(), 3);
         let (rich, _) = store
-            .batch_coin_states_by_puzzle_hashes(&[PH()], 0, &filters(true, true, true, 1_001), 50_000)
+            .batch_coin_states_by_puzzle_hashes(
+                &[PH()],
+                0,
+                &filters(true, true, true, 1_001),
+                50_000,
+            )
             .await
             .unwrap();
         assert_eq!(rich.len(), 2, "the 1_000 coin is below the floor");
@@ -668,7 +686,10 @@ mod batch_puzzle_state {
         // A CAT-shaped coin: foreign puzzle hash, hinted at PH.
         let mut cat = synth_coin(0x71, 5_000);
         cat.confirmed_block_index = 11;
-        store.apply_block(11, 1_700_000_000, &[cat], &[]).await.unwrap();
+        store
+            .apply_block(11, 1_700_000_000, &[cat], &[])
+            .await
+            .unwrap();
         store.apply_hints(&[(PH(), cat.coin.name())]).await.unwrap();
         // A plain coin ALSO hinted at PH (the overlap that must dedup).
         let (plain, _) = store
@@ -688,6 +709,10 @@ mod batch_puzzle_state {
             2,
             "the CAT joins; the plain+hinted overlap dedups by coin id"
         );
-        assert!(with_hints.iter().any(|cs| cs.coin.name() == cat.coin.name()));
+        assert!(
+            with_hints
+                .iter()
+                .any(|cs| cs.coin.name() == cat.coin.name())
+        );
     }
 }

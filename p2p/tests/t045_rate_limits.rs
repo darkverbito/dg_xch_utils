@@ -63,7 +63,11 @@ async fn flooding_a_frequency_capped_type_closes_and_evicts_the_peer() {
 
     // Five request_proof_of_weight are within budget; the sixth trips the 5/min cap.
     for _ in 0..6 {
-        raw_send(&client, sized_msg(ProtocolMessageTypes::RequestProofOfWeight, 10)).await;
+        raw_send(
+            &client,
+            sized_msg(ProtocolMessageTypes::RequestProofOfWeight, 10),
+        )
+        .await;
     }
 
     assert!(
@@ -131,7 +135,11 @@ async fn a_compliant_peer_stays_connected() {
     );
 
     for _ in 0..5 {
-        raw_send(&client, sized_msg(ProtocolMessageTypes::RequestProofOfWeight, 10)).await;
+        raw_send(
+            &client,
+            sized_msg(ProtocolMessageTypes::RequestProofOfWeight, 10),
+        )
+        .await;
     }
     // Give the read loop time to process all five; the peer must remain.
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -174,9 +182,15 @@ async fn solicited_respond_blocks_burst_does_not_self_trip_the_client_limiter() 
             None,
         )
         .expect("encode RequestBlocks");
-        let reply = oneshot_message(client.client.connection.clone(), msg, None, None, Some(15000))
-            .await
-            .expect("a correlated reply within budget (client not self-closed)");
+        let reply = oneshot_message(
+            client.client.connection.clone(),
+            msg,
+            None,
+            None,
+            Some(15000),
+        )
+        .await
+        .expect("a correlated reply within budget (client not self-closed)");
         assert_eq!(
             reply.msg_type,
             ProtocolMessageTypes::RespondBlocks,
@@ -185,7 +199,10 @@ async fn solicited_respond_blocks_burst_does_not_self_trip_the_client_limiter() 
     }
 
     // The client is still alive after the burst.
-    assert!(!client.client.is_closed(), "client survived its own fetch burst");
+    assert!(
+        !client.client.is_closed(),
+        "client survived its own fetch burst"
+    );
 
     server
         .run
@@ -213,9 +230,15 @@ async fn oversized_reply_from_a_peer_closes_our_client() {
         None,
     )
     .unwrap();
-    let reply = oneshot_message(client.client.connection.clone(), msg, None, None, Some(15000))
-        .await
-        .expect("normal pull works");
+    let reply = oneshot_message(
+        client.client.connection.clone(),
+        msg,
+        None,
+        None,
+        Some(15000),
+    )
+    .await
+    .expect("normal pull works");
     let _ = RejectBlocks::from_bytes(&mut Cursor::new(reply.data.as_slice()), version);
 
     // Now have the SERVER push an oversized unsolicited reject_blocks (200 bytes > the 100-byte

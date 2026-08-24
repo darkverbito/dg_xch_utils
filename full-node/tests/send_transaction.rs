@@ -185,9 +185,13 @@ async fn duplicate_send_transaction_is_idempotent_success() {
     let bundle = common::easy_bundle(&coin, 100);
     let name = bundle.name().expect("bundle name");
 
-    let first = submit(&client.connection, &bundle, 10_000).await.expect("first ack");
+    let first = submit(&client.connection, &bundle, 10_000)
+        .await
+        .expect("first ack");
     assert_eq!(first.status, TXStatus::SUCCESS, "error: {:?}", first.error);
-    let second = submit(&client.connection, &bundle, 10_000).await.expect("second ack");
+    let second = submit(&client.connection, &bundle, 10_000)
+        .await
+        .expect("second ack");
     assert_eq!(
         second.status,
         TXStatus::SUCCESS,
@@ -213,7 +217,9 @@ async fn invalid_bundles_ack_failed_with_chia_err_names() {
     // Bad aggregate signature: a non-infinity signature over a bundle with no AGG_SIG conditions.
     let mut bad_sig = common::easy_bundle(&coin, 100);
     bad_sig.aggregated_signature = Bytes96::from([0x42; 96]);
-    let ack = submit(&client.connection, &bad_sig, 10_000).await.expect("ack");
+    let ack = submit(&client.connection, &bad_sig, 10_000)
+        .await
+        .expect("ack");
     assert_eq!(ack.status, TXStatus::FAILED);
     assert_eq!(ack.error.as_deref(), Some("BAD_AGGREGATE_SIGNATURE"));
 
@@ -238,7 +244,9 @@ async fn invalid_bundles_ack_failed_with_chia_err_names() {
             ConditionWithArgs::AssertSecondsAbsolute(4_000_000_000),
         ],
     );
-    let ack = submit(&client.connection, &locked, 10_000).await.expect("ack");
+    let ack = submit(&client.connection, &locked, 10_000)
+        .await
+        .expect("ack");
     assert_eq!(ack.status, TXStatus::FAILED);
     assert_eq!(ack.error.as_deref(), Some("ASSERT_SECONDS_ABSOLUTE_FAILED"));
     assert!(
@@ -262,7 +270,9 @@ async fn height_locked_bundle_acks_pending() {
     );
     let name = parked.name().expect("bundle name");
 
-    let ack = submit(&client.connection, &parked, 10_000).await.expect("ack");
+    let ack = submit(&client.connection, &parked, 10_000)
+        .await
+        .expect("ack");
     assert_eq!(ack.txid, name);
     assert_eq!(
         ack.status,
@@ -289,7 +299,9 @@ async fn not_synced_node_acks_failed_no_transactions_while_syncing() {
     let bundle = common::easy_bundle(&coin, 100);
     let name = bundle.name().expect("bundle name");
 
-    let ack = submit(&client.connection, &bundle, 10_000).await.expect("ack");
+    let ack = submit(&client.connection, &bundle, 10_000)
+        .await
+        .expect("ack");
     assert_eq!(ack.txid, name);
     assert_eq!(ack.status, TXStatus::FAILED);
     assert_eq!(ack.error.as_deref(), Some("NO_TRANSACTIONS_WHILE_SYNCING"));
@@ -304,7 +316,9 @@ async fn not_synced_node_acks_failed_no_transactions_while_syncing() {
 async fn admitted_transaction_flows_to_block_generator() {
     let (node, coin, client) = rig(true).await;
     let bundle = common::easy_bundle(&coin, 100);
-    let ack = submit(&client.connection, &bundle, 10_000).await.expect("ack");
+    let ack = submit(&client.connection, &bundle, 10_000)
+        .await
+        .expect("ack");
     assert_eq!(ack.status, TXStatus::SUCCESS, "error: {:?}", ack.error);
 
     let tx = node
@@ -330,12 +344,16 @@ async fn known_invalid_bundle_is_not_revalidated() {
     let mut bad_sig = common::easy_bundle(&coin, 100);
     bad_sig.aggregated_signature = Bytes96::from([0x42; 96]);
 
-    let ack = submit(&client.connection, &bad_sig, 10_000).await.expect("ack");
+    let ack = submit(&client.connection, &bad_sig, 10_000)
+        .await
+        .expect("ack");
     assert_eq!(ack.status, TXStatus::FAILED);
     assert_eq!(ack.error.as_deref(), Some("BAD_AGGREGATE_SIGNATURE"));
 
     // Second submission of the SAME invalid bundle: the seen cache answers.
-    let ack = submit(&client.connection, &bad_sig, 10_000).await.expect("ack");
+    let ack = submit(&client.connection, &bad_sig, 10_000)
+        .await
+        .expect("ack");
     assert_eq!(ack.status, TXStatus::FAILED);
     assert_eq!(
         ack.error.as_deref(),

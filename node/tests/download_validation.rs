@@ -93,9 +93,7 @@ impl BlockRangeSource for DeceitfulSource {
                     .map(|h| restamp_block(&self.base, h))
                     .collect()
             }
-            Deceit::ForeignBodies => {
-                (start..=end).map(|h| foreign_body(&self.base, h)).collect()
-            }
+            Deceit::ForeignBodies => (start..=end).map(|h| foreign_body(&self.base, h)).collect(),
             Deceit::RelabelNeighbour(k) => (start..=end)
                 .map(|h| {
                     let mut b = restamp_block(&self.base, h + k);
@@ -112,7 +110,10 @@ async fn seed_candidates(store: &SqliteStore, template: &BlockRecord, base: &Ful
     let records: Vec<BlockRecord> = (BASE..BASE + n)
         .map(|h| candidate_record(template, base, h))
         .collect();
-    store.add_block_records(&records).await.expect("seed records");
+    store
+        .add_block_records(&records)
+        .await
+        .expect("seed records");
 }
 
 fn chaser_with(store: SqliteStore) -> Chaser<Arc<SqliteStore>, NativePrimitives> {
@@ -142,7 +143,9 @@ async fn wrong_range_batch_is_rejected_fast() {
 
     let result = tokio::time::timeout(Duration::from_secs(8), chaser.sync_bodies(&sources))
         .await
-        .expect("a wrong-range peer must fail the sync FAST, never wedge on re-accepted bad batches");
+        .expect(
+            "a wrong-range peer must fail the sync FAST, never wedge on re-accepted bad batches",
+        );
     assert!(
         matches!(result, Err(SyncError::Exhausted(_))),
         "a wrong-range-only peer must drain nothing and surface Exhausted, got {result:?}"
@@ -151,7 +154,13 @@ async fn wrong_range_batch_is_rejected_fast() {
     for h in BASE..BASE + 8 {
         let off = restamp_block(&base, h + 1000).header_hash().unwrap();
         assert!(
-            chaser.engine().store().get_block(&off).await.unwrap().is_none(),
+            chaser
+                .engine()
+                .store()
+                .get_block(&off)
+                .await
+                .unwrap()
+                .is_none(),
             "an off-range body (height {}) must not be written to the store",
             h + 1000
         );

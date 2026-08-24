@@ -42,9 +42,7 @@ impl BlockRangeSource for FileRangeSource {
 }
 
 fn corpus_dir() -> PathBuf {
-    PathBuf::from(
-        std::env::var("DGXCH_CORPUS").expect("set DGXCH_CORPUS to the corpus dir"),
-    )
+    PathBuf::from(std::env::var("DGXCH_CORPUS").expect("set DGXCH_CORPUS to the corpus dir"))
 }
 
 fn load_wp(dir: &Path) -> WeightProof {

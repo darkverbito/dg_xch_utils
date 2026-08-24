@@ -1,3 +1,4 @@
+use crate::fee_estimator::FeeEstimator;
 use dg_xch_core::blockchain::coin::Coin;
 use dg_xch_core::blockchain::coin_record::UnspentLineageInfo;
 use dg_xch_core::blockchain::coin_spend::CoinSpend;
@@ -16,14 +17,13 @@ use dg_xch_core::consensus::block_generator::{
 use dg_xch_core::consensus::constants::ConsensusConstants;
 use dg_xch_core::consensus::fast_forward::{fast_forward_singleton, supports_fast_forward};
 use dg_xch_core::consensus::producer::BlockTransactions;
-use crate::fee_estimator::FeeEstimator;
 use dg_xch_stores::{CoinStore, StoreError};
-use tracing::{info, warn};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt;
 use std::time::{Duration, Instant};
+use tracing::{info, warn};
 
 // The minimum absolute fee bump a replacement must pay over the items it evicts — chia's
 // MEMPOOL_MIN_FEE_INCREASE (mempool_manager.py), 0.00001 XCH, an anti-churn floor from PR #1971.
@@ -176,17 +176,17 @@ fn effective_timelocks(
 // (full_node_api.py:1560 `error.name`) — report the same name chia reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimelockFailure {
-    AssertHeightAbsolute,        // Err.ASSERT_HEIGHT_ABSOLUTE_FAILED (14)
-    AssertHeightRelative,        // Err.ASSERT_HEIGHT_RELATIVE_FAILED (13)
-    AssertSecondsAbsolute,       // Err.ASSERT_SECONDS_ABSOLUTE_FAILED (15)
-    AssertSecondsRelative,       // Err.ASSERT_SECONDS_RELATIVE_FAILED (105)
-    AssertMyBirthHeight,         // Err.ASSERT_MY_BIRTH_HEIGHT_FAILED (139)
-    AssertMyBirthSeconds,        // Err.ASSERT_MY_BIRTH_SECONDS_FAILED (138)
-    AssertBeforeHeightAbsolute,  // Err.ASSERT_BEFORE_HEIGHT_ABSOLUTE_FAILED (130)
-    AssertBeforeHeightRelative,  // Err.ASSERT_BEFORE_HEIGHT_RELATIVE_FAILED (131)
-    AssertBeforeSecondsAbsolute, // Err.ASSERT_BEFORE_SECONDS_ABSOLUTE_FAILED (128)
-    AssertBeforeSecondsRelative, // Err.ASSERT_BEFORE_SECONDS_RELATIVE_FAILED (129)
-    ImpossibleHeightConstraints, // Err.IMPOSSIBLE_HEIGHT_ABSOLUTE_CONSTRAINTS (137)
+    AssertHeightAbsolute,         // Err.ASSERT_HEIGHT_ABSOLUTE_FAILED (14)
+    AssertHeightRelative,         // Err.ASSERT_HEIGHT_RELATIVE_FAILED (13)
+    AssertSecondsAbsolute,        // Err.ASSERT_SECONDS_ABSOLUTE_FAILED (15)
+    AssertSecondsRelative,        // Err.ASSERT_SECONDS_RELATIVE_FAILED (105)
+    AssertMyBirthHeight,          // Err.ASSERT_MY_BIRTH_HEIGHT_FAILED (139)
+    AssertMyBirthSeconds,         // Err.ASSERT_MY_BIRTH_SECONDS_FAILED (138)
+    AssertBeforeHeightAbsolute,   // Err.ASSERT_BEFORE_HEIGHT_ABSOLUTE_FAILED (130)
+    AssertBeforeHeightRelative,   // Err.ASSERT_BEFORE_HEIGHT_RELATIVE_FAILED (131)
+    AssertBeforeSecondsAbsolute,  // Err.ASSERT_BEFORE_SECONDS_ABSOLUTE_FAILED (128)
+    AssertBeforeSecondsRelative,  // Err.ASSERT_BEFORE_SECONDS_RELATIVE_FAILED (129)
+    ImpossibleHeightConstraints,  // Err.IMPOSSIBLE_HEIGHT_ABSOLUTE_CONSTRAINTS (137)
     ImpossibleSecondsConstraints, // Err.IMPOSSIBLE_SECONDS_ABSOLUTE_CONSTRAINTS (135)
 }
 
@@ -245,7 +245,9 @@ fn check_time_locks(
         return Some(TimelockCheck::Park(TimelockFailure::AssertHeightAbsolute));
     }
     if prev_timestamp < conds.seconds_absolute {
-        return Some(TimelockCheck::NotMet(TimelockFailure::AssertSecondsAbsolute));
+        return Some(TimelockCheck::NotMet(
+            TimelockFailure::AssertSecondsAbsolute,
+        ));
     }
     if let Some(bound) = conds.before_height_absolute
         && prev_height >= bound
@@ -283,7 +285,9 @@ fn check_time_locks(
         if let Some(rel) = spend.seconds_relative
             && prev_timestamp < timestamp.saturating_add(rel)
         {
-            return Some(TimelockCheck::NotMet(TimelockFailure::AssertSecondsRelative));
+            return Some(TimelockCheck::NotMet(
+                TimelockFailure::AssertSecondsRelative,
+            ));
         }
         if let Some(rel) = spend.before_height_relative
             && prev_height >= confirmed.saturating_add(rel)
@@ -569,10 +573,8 @@ fn process_item_spends(
                 "fast forward lineage does not reproduce its coin ids".to_string(),
             ));
         }
-        let new_solution =
-            fast_forward_singleton(&bcs.coin_spend, &new_coin, &new_parent).map_err(|e| {
-                ProcessError::Failed(format!("fast forward rebase failed: {e:?}"))
-            })?;
+        let new_solution = fast_forward_singleton(&bcs.coin_spend, &new_coin, &new_parent)
+            .map_err(|e| ProcessError::Failed(format!("fast forward rebase failed: {e:?}")))?;
         let mut singleton_child = None;
         let patched_additions: Vec<Coin> = bcs
             .additions
@@ -1059,7 +1061,9 @@ impl Mempool {
         //    lineage for FF-eligible spends, and reject all-fast-forward bundles (an FF spend can
         //    only be evicted alongside a normal spend). A bundle with no coin spends
         //    (test-synthesized conditions) yields an empty vec and plain-spend behavior.
-        let bundle_coin_spends = self.build_bundle_coin_spends(store, &bundle, &conds).await?;
+        let bundle_coin_spends = self
+            .build_bundle_coin_spends(store, &bundle, &conds)
+            .await?;
 
         // 1. Removals against the confirmed set at peak: a spent record is a double-spend; a removal
         //    that is neither on-chain nor created in-bundle (ephemeral) is unknown-unspent. The
@@ -1497,11 +1501,11 @@ impl Mempool {
                 }
             }
             assert_height = assert_height.max(item.timelocks.assert_height);
-            assert_before_height =
-                match (assert_before_height, item.timelocks.assert_before_height) {
-                    (Some(a), Some(b)) => Some(a.min(b)),
-                    (a, b) => a.or(b),
-                };
+            assert_before_height = match (assert_before_height, item.timelocks.assert_before_height)
+            {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
             assert_before_seconds =
                 match (assert_before_seconds, item.timelocks.assert_before_seconds) {
                     (Some(a), Some(b)) => Some(a.min(b)),
@@ -1862,8 +1866,8 @@ impl Mempool {
                 tentative.extend(processed.unique_spends.iter().cloned());
                 match compressed_solution_generator_from_coin_spends(&tentative) {
                     Ok(program) => {
-                        let byte_cost = (program.as_ref().len() as u64)
-                            .saturating_mul(constants.cost_per_byte);
+                        let byte_cost =
+                            (program.as_ref().len() as u64).saturating_mul(constants.cost_per_byte);
                         // block_cost = compressed byte cost + quote-execution + Σ exec/cond costs
                         // (chia BlockBuilder cost() = byte_cost + block_cost; block_cost seeds at the
                         // quote execution cost). Compared to the FULL block budget.

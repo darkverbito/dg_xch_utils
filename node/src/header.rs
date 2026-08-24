@@ -675,7 +675,10 @@ mod tests {
     // consensus-visible error-string change and must be a deliberate edit, not a silent drift.
     #[test]
     fn tag_rejection_strings_are_exact() {
-        assert_eq!(HeaderSigTag::RewardChainSp.rejection(), "INVALID_RC_SIGNATURE");
+        assert_eq!(
+            HeaderSigTag::RewardChainSp.rejection(),
+            "INVALID_RC_SIGNATURE"
+        );
         assert_eq!(
             HeaderSigTag::ChallengeChainSp.rejection(),
             "INVALID_CC_SIGNATURE"

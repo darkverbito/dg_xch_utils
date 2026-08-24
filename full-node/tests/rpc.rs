@@ -695,8 +695,11 @@ async fn get_fee_estimate_loaded_is_positive_and_monotonic() {
         let mut m = mp.lock().await;
         // wait = 1: confirmed the next block, so short targets also have data.
         for height in 100u32..300 {
-            m.fee_estimator_mut()
-                .ingest_block(height, &[(5_000_000, 100_000_000, height - 1)], 5_000_000);
+            m.fee_estimator_mut().ingest_block(
+                height,
+                &[(5_000_000, 100_000_000, height - 1)],
+                5_000_000,
+            );
         }
     }
     let resp = node

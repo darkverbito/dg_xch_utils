@@ -11,10 +11,12 @@
 // Run against a real store (never the live node):
 //   leak-probe "postgres://user:PASS@host:5432/dgxch" 850000
 
-use dg_xch_core::consensus::block_generator::{execute_block_generator_result, BlockGeneratorInput};
+use dg_xch_core::consensus::block_generator::{
+    BlockGeneratorInput, execute_block_generator_result,
+};
 use dg_xch_core::consensus::constants::MAINNET;
-use dg_xch_stores::traits::BlockStore;
 use dg_xch_stores::PostgresStore;
+use dg_xch_stores::traits::BlockStore;
 
 #[global_allocator]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
@@ -27,7 +29,9 @@ fn allocated() -> u64 {
 #[tokio::main]
 async fn main() {
     let mut args = std::env::args().skip(1);
-    let url = args.next().expect("usage: leak-probe <db-url> <start-height>");
+    let url = args
+        .next()
+        .expect("usage: leak-probe <db-url> <start-height>");
     let start: u32 = args
         .next()
         .and_then(|s| s.parse().ok())
@@ -39,7 +43,10 @@ async fn main() {
     let mut found = None;
     for h in (start.saturating_sub(400)..=start).rev() {
         if let Ok(Some(g)) = store.get_generator_at_height(h).await {
-            println!("using generator at height {h}: {} raw bytes", g.as_ref().len());
+            println!(
+                "using generator at height {h}: {} raw bytes",
+                g.as_ref().len()
+            );
             found = Some((h, g));
             break;
         }

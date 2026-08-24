@@ -59,8 +59,8 @@ use dg_xch_core::blockchain::full_block::FullBlock;
 use dg_xch_core::blockchain::header_block::HeaderBlock;
 use dg_xch_core::blockchain::pool_target::PoolTarget;
 use dg_xch_core::blockchain::reward_chain_block::RewardChainBlock;
-use dg_xch_core::blockchain::sized_bytes::Bytes32;
 use dg_xch_core::blockchain::signage_point::SignagePoint;
+use dg_xch_core::blockchain::sized_bytes::Bytes32;
 use dg_xch_core::blockchain::vdf_proof::VdfProof;
 use dg_xch_core::blockchain::weight_proof::RecentChainData;
 use dg_xch_core::consensus::constants::MAINNET;
@@ -420,4 +420,3 @@ fn declare_from_recent_chain_slice_validates_every_real_proof() {
         "every real proof in the slice must validate + emit"
     );
 }
-

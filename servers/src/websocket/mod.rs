@@ -3,9 +3,9 @@ pub mod harvester;
 
 use dg_xch_core::blockchain::sized_bytes::Bytes32;
 use dg_xch_core::constants::{CHIA_CA_CRT, CHIA_CA_KEY};
+use dg_xch_core::protocols::ban::BanRegistry;
 use dg_xch_core::protocols::outbound_limiter::OutboundLimiter;
 use dg_xch_core::protocols::rate_limits::RateLimiter;
-use dg_xch_core::protocols::ban::BanRegistry;
 use dg_xch_core::protocols::{
     ChiaMessageHandler, NodeType, PeerMap, SocketPeer, WebsocketConnection, WebsocketMsgStream,
 };
@@ -318,7 +318,10 @@ fn connection_handler(
         if let Some(addr) = data.addr
             && data.bans.is_banned(&addr.ip())
         {
-            warn!("Refusing banned host {}: still within ban window", addr.ip());
+            warn!(
+                "Refusing banned host {}: still within ban window",
+                addr.ip()
+            );
             return Ok(Response::builder()
                 .status(403)
                 .body(Full::new(Bytes::from("Peer is banned")))

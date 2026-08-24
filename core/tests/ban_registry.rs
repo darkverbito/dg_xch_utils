@@ -26,7 +26,10 @@ fn ban_cause_durations_match_chia() {
 fn bans_key_on_host_not_globally() {
     let reg = BanRegistry::default();
     reg.ban(ip(203, 0, 113, 7), BanCause::RateLimit);
-    assert!(reg.is_banned(&ip(203, 0, 113, 7)), "the banned host is refused");
+    assert!(
+        reg.is_banned(&ip(203, 0, 113, 7)),
+        "the banned host is refused"
+    );
     assert!(
         !reg.is_banned(&ip(203, 0, 113, 8)),
         "a different host is NOT banned — the ban is host-scoped, not a global switch"

@@ -14,6 +14,7 @@ use dg_xch_core::blockchain::signage_point::SignagePoint;
 use dg_xch_core::blockchain::sized_bytes::Bytes32;
 use dg_xch_core::blockchain::spend_bundle::SpendBundle;
 use dg_xch_core::blockchain::sub_epoch_summary::SubEpochSummary;
+use dg_xch_core::blockchain::tx_status::TXStatus;
 use dg_xch_core::blockchain::unfinished_block::UnfinishedBlock;
 use dg_xch_core::blockchain::unfinished_header_block::UnfinishedHeaderBlock;
 use dg_xch_core::blockchain::weight_proof::WeightProof;
@@ -44,7 +45,6 @@ use dg_xch_core::protocols::timelord::{
     NewEndOfSubSlotVDF, NewInfusionPointVDF, NewPeakTimelord, NewSignagePointVDF,
     NewUnfinishedBlockTimelord, RequestCompactProofOfTime, RespondCompactProofOfTime,
 };
-use dg_xch_core::blockchain::tx_status::TXStatus;
 use dg_xch_core::protocols::wallet::{
     CoinState, FeeEstimate, FeeEstimateGroup, FeeRate, NewPeakWallet, PuzzleSolutionResponse,
     RegisterForCoinUpdates, RegisterForPhUpdates, RejectBlockHeaders, RejectHeaderBlocks,
@@ -80,10 +80,10 @@ use dg_xch_node::farmer::{
 };
 use dg_xch_node::slots::{PeakSlotContext, SlotState};
 use dg_xch_node::sync::queue::BlockQueue;
-use dg_xch_node::sync::{WpForkPoint, wp_fork_point};
 use dg_xch_node::sync::source::{
     BlockRangeSource, CapturingSource, OutboundPeerSource, request_weight_proof,
 };
+use dg_xch_node::sync::{WpForkPoint, wp_fork_point};
 use dg_xch_node::unfinished::UnfinishedCache;
 use dg_xch_node::{
     BlockRecordCache, Chaser, ConfirmedDelta, Engine, Mempool, NativePrimitives, NodeError,
@@ -451,12 +451,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
         // gated on the ADVERTISED fee being able to get in. With room in the pool anything
         // passes; at capacity the fee must clear the nonzero floor (5 fpc) and strictly beat the
         // pool's min fee rate — otherwise the bundle is never fetched (spam CLVM protection).
-        if !self
-            .mempool
-            .lock()
-            .await
-            .is_fee_enough(tx.fees, tx.cost)
-        {
+        if !self.mempool.lock().await.is_fee_enough(tx.fees, tx.cost) {
             return TransactionAnnounceAction::Ignore;
         }
         // New to us. A live (non-expired) entry means a fetch for this id is already in flight
@@ -717,8 +712,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
         // filter and serve up to `limit` (100) highest-fee items NOT in it, scanning at most
         // `max_checked` (5000). A malformed filter decodes to None and we serve unfiltered —
         // over-announcing is the safe superset (the peer's own dedup absorbs it).
-        let decoded =
-            dg_xch_core::consensus::block_filter::decode_chia_block_filter(&filter);
+        let decoded = dg_xch_core::consensus::block_filter::decode_chia_block_filter(&filter);
         let mp = self.mempool.lock().await;
         let mut out = Vec::new();
         for (checked, item) in mp.items_by_fee().into_iter().enumerate() {
@@ -1523,7 +1517,8 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
                 let mut coins_map: Vec<NamedCoin> = Vec::with_capacity(coin_names.len());
                 let mut proofs_map: Vec<(Bytes32, Vec<u8>)> = Vec::with_capacity(coin_names.len());
                 for coin_name in coin_names {
-                    let Ok((included, proof)) = removal_merkle_set.generate_proof(&coin_name.bytes())
+                    let Ok((included, proof)) =
+                        removal_merkle_set.generate_proof(&coin_name.bytes())
                     else {
                         return reject();
                     };
@@ -1770,8 +1765,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
         // chia :2106-2121 — the pre-read cap check (trust-resolved).
         let max_subscriptions = self.wallet.max_subscriptions(&peer, host);
         if req.subscribe
-            && coin_ids.len() + self.wallet.peer_subscription_count(&peer).await
-                > max_subscriptions
+            && coin_ids.len() + self.wallet.peer_subscription_count(&peer).await > max_subscriptions
         {
             return CoinStateReply::Reject(RejectStateReason::ExceededSubscriptionLimit);
         }
@@ -1786,8 +1780,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
         };
         // chia :2129-2133 — the await-race re-check.
         if req.subscribe
-            && coin_ids.len() + self.wallet.peer_subscription_count(&peer).await
-                > max_subscriptions
+            && coin_ids.len() + self.wallet.peer_subscription_count(&peer).await > max_subscriptions
         {
             return CoinStateReply::Reject(RejectStateReason::ExceededSubscriptionLimit);
         }
@@ -2077,10 +2070,9 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> StoreApi<S> {
             for cr in &removed {
                 items.push(cr.coin.name().bytes().to_vec());
             }
-            hb.transactions_filter =
-                dg_xch_core::blockchain::unsized_bytes::UnsizedBytes::new(chia_block_filter(
-                    &items,
-                ));
+            hb.transactions_filter = dg_xch_core::blockchain::unsized_bytes::UnsizedBytes::new(
+                chia_block_filter(&items),
+            );
         }
         Some(hb)
     }
@@ -4149,14 +4141,22 @@ where
             };
             broadcast_new_peak_wallet(&self.net, &wallets, &announce).await;
         }
-        info!(height, "sync-end transition fired (chia _finish_sync parity)");
+        info!(
+            height,
+            "sync-end transition fired (chia _finish_sync parity)"
+        );
     }
 
     // The transaction block framing a peak: walk from the peak to the nearest record carrying a
     // timestamp (chia `get_tx_peak`). Bounded like `chain_is_current`; `None` if none within the
     // window (a from-genesis peak with no transaction block yet).
     async fn tx_peak_frame(&self, peak_hash: Bytes32) -> Option<(u32, u64)> {
-        let mut curr = self.store.get_block_record(&peak_hash).await.ok().flatten()?;
+        let mut curr = self
+            .store
+            .get_block_record(&peak_hash)
+            .await
+            .ok()
+            .flatten()?;
         for _ in 0..512 {
             if let Some(ts) = curr.timestamp {
                 return Some((curr.height, ts));
@@ -5894,8 +5894,7 @@ async fn solicit_uncompact_from_timelords<T: SolicitTarget>(
     if timelords.is_empty() {
         return 0;
     }
-    let chunks: Vec<&[RequestCompactProofOfTime]> =
-        reqs.chunks(UNCOMPACT_TARGET_PROOFS).collect();
+    let chunks: Vec<&[RequestCompactProofOfTime]> = reqs.chunks(UNCOMPACT_TARGET_PROOFS).collect();
     let mut sent = 0usize;
     for (i, peer) in timelords.into_iter().enumerate() {
         let chunk = chunks[i % chunks.len()];
@@ -5936,8 +5935,10 @@ fn spawn_uncompact_scanner<S: BlockStore + Send + Sync + 'static>(
     run: Arc<AtomicBool>,
 ) {
     tokio::spawn(async move {
-        let mut ledger =
-            dg_xch_node::compact_vdf::SolicitLedger::new(UNCOMPACT_LEDGER_CAP, UNCOMPACT_RESOLICIT_TTL);
+        let mut ledger = dg_xch_node::compact_vdf::SolicitLedger::new(
+            UNCOMPACT_LEDGER_CAP,
+            UNCOMPACT_RESOLICIT_TTL,
+        );
         while run.load(Ordering::Relaxed) {
             tokio::time::sleep(UNCOMPACT_INTERVAL).await;
             let Ok(Some((_, peak_height))) = store.get_peak().await else {
@@ -7343,7 +7344,11 @@ mod tx_origin_exclusion_tests {
     // No recorded origin (e.g. a locally-pushed tx, chia's current_peer=None) → nobody excluded.
     #[test]
     fn no_origin_excludes_nobody() {
-        assert!(!is_tx_rebroadcast_origin(None, None, Some(ip("203.0.113.7"))));
+        assert!(!is_tx_rebroadcast_origin(
+            None,
+            None,
+            Some(ip("203.0.113.7"))
+        ));
         assert!(!is_tx_rebroadcast_origin(
             None,
             Some(&Bytes32::from([0x33; 32])),
@@ -7741,7 +7746,10 @@ mod tests {
         let update = rx.try_recv().expect(
             "the subscriber must hear the rolled-back coin states (pre-threading it heard nothing)",
         );
-        assert_eq!(update.fork_height, 100, "the TRUE fork height, not height-1");
+        assert_eq!(
+            update.fork_height, 100,
+            "the TRUE fork height, not height-1"
+        );
         assert_eq!(update.height, 101);
         let x_state = update
             .items
@@ -7829,7 +7837,10 @@ mod tests {
         let local = 2_000_000u32;
         // Deep in the gap — long sync, and the target advancing mid-sync keeps the SAME band.
         assert!(wants_long_sync(local, 2_050_000));
-        assert!(wants_long_sync(local, 2_050_500), "advanced target: still long sync");
+        assert!(
+            wants_long_sync(local, 2_050_500),
+            "advanced target: still long sync"
+        );
         // Caught up to within the threshold: FOLLOW owns it (neither long-sync nor near-tip).
         let near = 2_050_500u32 - 200;
         assert!(!wants_long_sync(near, 2_050_500));
@@ -9093,7 +9104,10 @@ mod tests {
             min_height: u32,
             filters: &dg_xch_core::protocols::wallet::CoinStateFilters,
             max_items: usize,
-        ) -> Result<(Vec<dg_xch_core::protocols::wallet::CoinState>, Option<u32>), dg_xch_stores::StoreError> {
+        ) -> Result<
+            (Vec<dg_xch_core::protocols::wallet::CoinState>, Option<u32>),
+            dg_xch_stores::StoreError,
+        > {
             self.inner
                 .batch_coin_states_by_puzzle_hashes(puzzle_hashes, min_height, filters, max_items)
                 .await
@@ -9961,12 +9975,17 @@ mod tests {
                 .find(|(p, _)| *p == included_ph)
                 .expect("served entry")
                 .1;
-            assert!(!served_coins.is_empty(), "the present hash serves its coins");
+            assert!(
+                !served_coins.is_empty(),
+                "the present hash serves its coins"
+            );
             let names: Vec<[u8; 32]> = served_coins.iter().map(|c| c.name().bytes()).collect();
             let coin_ids_hash = hash_coin_ids(&names);
             assert_eq!(
                 validate_merkle_proof(
-                    coin_proof.as_ref().expect("inclusion carries the coin-ids proof"),
+                    coin_proof
+                        .as_ref()
+                        .expect("inclusion carries the coin-ids proof"),
                     &coin_ids_hash,
                     &root
                 ),
@@ -10081,7 +10100,10 @@ mod tests {
             match api.removals(req_empty).await {
                 RemovalsReply::Respond(r) => {
                     assert_eq!(r.coins.len(), rems.len(), "Some-empty serves ALL removals");
-                    assert!(r.proofs.is_none(), "Some-empty carries proofs=None like None");
+                    assert!(
+                        r.proofs.is_none(),
+                        "Some-empty carries proofs=None like None"
+                    );
                 }
                 RemovalsReply::Reject(_) => panic!("Some-empty must serve"),
             }
@@ -10115,10 +10137,9 @@ mod tests {
             fn b32(s: &str) -> Bytes32 {
                 Bytes32::from_str(s).expect("hex")
             }
-            let fixture: Fixture = serde_json::from_str(include_str!(
-                "../tests/fixtures/merkle_proofs_5000000.json"
-            ))
-            .expect("proof fixture");
+            let fixture: Fixture =
+                serde_json::from_str(include_str!("../tests/fixtures/merkle_proofs_5000000.json"))
+                    .expect("proof fixture");
 
             let store = store_at_peak().await;
             let header_hash = fixture_peak_record().header_hash;
@@ -10127,7 +10148,13 @@ mod tests {
             let req = RequestAdditions {
                 height: PEAK,
                 header_hash: None,
-                puzzle_hashes: Some(fixture.additions.iter().map(|c| b32(&c.puzzle_hash)).collect()),
+                puzzle_hashes: Some(
+                    fixture
+                        .additions
+                        .iter()
+                        .map(|c| b32(&c.puzzle_hash))
+                        .collect(),
+                ),
             };
             let r = match api.additions(req).await {
                 AdditionsReply::Respond(r) => r,
@@ -10862,10 +10889,8 @@ mod tests {
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos();
-            let path = std::env::temp_dir().join(format!(
-                "fn_puzstate_{}_{nanos}.sqlite",
-                std::process::id()
-            ));
+            let path = std::env::temp_dir()
+                .join(format!("fn_puzstate_{}_{nanos}.sqlite", std::process::id()));
             let store = open_backend(&Backend::Sqlite(path)).await.expect("store");
             let records: Vec<BlockRecord> = (0..=tip).map(chain_rec).collect();
             store.add_block_records(&records).await.expect("records");
@@ -10917,12 +10942,7 @@ mod tests {
             // 4 heights x 3 coins, budget 4: boundaries fall inside heights, forcing the
             // whole-height trim to shrink pages.
             let store = paging_store(ph, &[10, 11, 12, 13], 3, 20).await;
-            let api = api_tuned(
-                store,
-                Arc::new(WalletNotifier::new()),
-                4,
-                default_sem(),
-            );
+            let api = api_tuned(store, Arc::new(WalletNotifier::new()), 4, default_sem());
             let peer = Bytes32::from([0xB1; 32]);
 
             let mut previous_height: Option<u32> = None;
@@ -10991,7 +11011,12 @@ mod tests {
             let store = paging_store(ph, &[10], 1, 12).await;
             // cap: 4 combined items per peer.
             let wallet = Arc::new(WalletNotifier::with_limits(8, 4));
-            let api = api_tuned(store, wallet.clone(), MAX_SUBSCRIBE_RESPONSE_ITEMS, default_sem());
+            let api = api_tuned(
+                store,
+                wallet.clone(),
+                MAX_SUBSCRIBE_RESPONSE_ITEMS,
+                default_sem(),
+            );
             let peer = Bytes32::from([0xB2; 32]);
             let phs = |tags: std::ops::Range<u8>| -> Vec<Bytes32> {
                 tags.map(|t| Bytes32::from([t; 32])).collect()
@@ -11029,7 +11054,10 @@ mod tests {
             else {
                 panic!("3 subscriptions fit the cap");
             };
-            assert!(rx.is_some(), "first registration yields the delivery receiver");
+            assert!(
+                rx.is_some(),
+                "first registration yields the delivery receiver"
+            );
             assert_eq!(wallet.peer_subscription_count(&peer).await, 3);
             assert!(matches!(
                 api.puzzle_state(peer, None, req(phs(4..6), true)).await,
@@ -11045,11 +11073,13 @@ mod tests {
                 subscribe,
             };
             assert!(matches!(
-                api.coin_state(peer, None, coin_req(phs(0x10..0x12), true)).await,
+                api.coin_state(peer, None, coin_req(phs(0x10..0x12), true))
+                    .await,
                 CoinStateReply::Reject(RejectStateReason::ExceededSubscriptionLimit)
             ));
-            let CoinStateReply::Respond(_, rx) =
-                api.coin_state(peer, None, coin_req(phs(0x10..0x11), true)).await
+            let CoinStateReply::Respond(_, rx) = api
+                .coin_state(peer, None, coin_req(phs(0x10..0x11), true))
+                .await
             else {
                 panic!("1 more subscription fits the cap exactly");
             };
@@ -11180,17 +11210,35 @@ mod tests {
             // Pre-solicit both ids (chia pending_tx_request) so on_transaction accepts the bodies.
             {
                 let mut req = api.tx_requested.lock().await;
-                req.insert(untrusted_name, PendingTx { at: Instant::now(), advertised_fee: 0, advertised_cost: 1 });
-                req.insert(trusted_name, PendingTx { at: Instant::now(), advertised_fee: 0, advertised_cost: 1 });
+                req.insert(
+                    untrusted_name,
+                    PendingTx {
+                        at: Instant::now(),
+                        advertised_fee: 0,
+                        advertised_cost: 1,
+                    },
+                );
+                req.insert(
+                    trusted_name,
+                    PendingTx {
+                        at: Instant::now(),
+                        advertised_fee: 0,
+                        advertised_cost: 1,
+                    },
+                );
             }
 
             // Untrusted arrives FIRST, trusted SECOND.
-            api.on_respond_transaction(untrusted, None, untrusted_tx).await;
+            api.on_respond_transaction(untrusted, None, untrusted_tx)
+                .await;
             api.on_respond_transaction(trusted, None, trusted_tx).await;
 
             let batch = api.tx_inbox.lock().await.drain_batch();
             assert_eq!(batch.len(), 2);
-            assert_eq!(batch[0].0, trusted, "trusted bundle drains first (high-priority lane)");
+            assert_eq!(
+                batch[0].0, trusted,
+                "trusted bundle drains first (high-priority lane)"
+            );
             assert_eq!(batch[1].0, untrusted, "untrusted bundle follows");
         }
 
@@ -11270,13 +11318,31 @@ mod tests {
             let local_name = local_tx.name().expect("name");
             {
                 let mut req = api.tx_requested.lock().await;
-                req.insert(remote_name, PendingTx { at: Instant::now(), advertised_fee: 0, advertised_cost: 1 });
-                req.insert(local_name, PendingTx { at: Instant::now(), advertised_fee: 0, advertised_cost: 1 });
+                req.insert(
+                    remote_name,
+                    PendingTx {
+                        at: Instant::now(),
+                        advertised_fee: 0,
+                        advertised_cost: 1,
+                    },
+                );
+                req.insert(
+                    local_name,
+                    PendingTx {
+                        at: Instant::now(),
+                        advertised_fee: 0,
+                        advertised_cost: 1,
+                    },
+                );
             }
 
             // Remote (untrusted) arrives FIRST, localhost SECOND.
-            api.on_respond_transaction(remote_peer, Some("198.51.100.9".parse().unwrap()), remote_tx)
-                .await;
+            api.on_respond_transaction(
+                remote_peer,
+                Some("198.51.100.9".parse().unwrap()),
+                remote_tx,
+            )
+            .await;
             api.on_respond_transaction(local_peer, Some("127.0.0.1".parse().unwrap()), local_tx)
                 .await;
 
@@ -11319,10 +11385,7 @@ mod uncompact_solicit_tests {
         async fn negotiated_version(&self) -> ChiaProtocolVersion {
             ChiaProtocolVersion::default()
         }
-        async fn deliver(
-            &self,
-            msg: dg_xch_core::protocols::ChiaMessage,
-        ) -> Result<(), Error> {
+        async fn deliver(&self, msg: dg_xch_core::protocols::ChiaMessage) -> Result<(), Error> {
             self.sent.lock().await.push(msg);
             Ok(())
         }
@@ -11358,7 +11421,10 @@ mod uncompact_solicit_tests {
         let net = NetCounters::default();
 
         let sent = solicit_uncompact_from_timelords(&reqs, &peers, &net).await;
-        assert_eq!(sent, 1, "the one bulky field is solicited from the timelord");
+        assert_eq!(
+            sent, 1,
+            "the one bulky field is solicited from the timelord"
+        );
 
         let recorded = peers[0].sent.lock().await;
         assert_eq!(recorded.len(), 1, "exactly one request message delivered");
@@ -11403,10 +11469,7 @@ mod uncompact_solicit_tests {
     async fn an_empty_solicitation_list_sends_nothing() {
         let peers = vec![target(NodeType::Timelord)];
         let net = NetCounters::default();
-        assert_eq!(
-            solicit_uncompact_from_timelords(&[], &peers, &net).await,
-            0,
-        );
+        assert_eq!(solicit_uncompact_from_timelords(&[], &peers, &net).await, 0,);
         assert!(peers[0].sent.lock().await.is_empty());
     }
 }

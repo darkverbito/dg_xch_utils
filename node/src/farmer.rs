@@ -1059,8 +1059,9 @@ mod tests {
     fn normal_signage_point_carries_vdf_source_data() {
         use dg_xch_serialize::{ChiaProtocolVersion, ChiaSerialize};
         let point = sp(5);
-        let out = new_signage_point_for_farmers(&point, Bytes32::from([5u8; 32]), 100, 200, 7, 9, 8)
-            .expect("cc/rc VDFs present");
+        let out =
+            new_signage_point_for_farmers(&point, Bytes32::from([5u8; 32]), 100, 200, 7, 9, 8)
+                .expect("cc/rc VDFs present");
         assert_eq!(out.signage_point_index, 7);
         let src = out
             .sp_source_data

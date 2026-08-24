@@ -355,11 +355,7 @@ impl Arena {
 
     /// Concatenation into a single fresh atom, clvm_rs 0.17.7 `new_concat` (including the
     /// zero- and one-term ghost shortcuts, which keep allocation counters consensus-exact).
-    pub fn new_concat(
-        &mut self,
-        new_size: usize,
-        nodes: &[NodePtr],
-    ) -> Result<NodePtr, ClvmError> {
+    pub fn new_concat(&mut self, new_size: usize, nodes: &[NodePtr]) -> Result<NodePtr, ClvmError> {
         self.check_atom_limit()?;
         let start = self.u8_vec.len();
         if start + self.ghost_heap + new_size > HEAP_LIMIT {
@@ -645,7 +641,10 @@ impl Arena {
                 Job::Build => {
                     let rest = out.pop().expect("build has rest");
                     let first = out.pop().expect("build has first");
-                    out.push(SExp::Pair(PairBuf::Owned((Arc::new(first), Arc::new(rest)))));
+                    out.push(SExp::Pair(PairBuf::Owned((
+                        Arc::new(first),
+                        Arc::new(rest),
+                    ))));
                 }
             }
         }
@@ -764,7 +763,15 @@ mod tests {
     #[test]
     fn len_for_value_matches_canonical_encoding() {
         for v in [
-            0u32, 1, 0x7f, 0x80, 0x7fff, 0x8000, 0x7f_ffff, 0x80_0000, 0x03ff_ffff,
+            0u32,
+            1,
+            0x7f,
+            0x80,
+            0x7fff,
+            0x8000,
+            0x7f_ffff,
+            0x80_0000,
+            0x03ff_ffff,
         ] {
             let mut a = Arena::new();
             let ptr = a.new_i128(i128::from(v)).unwrap();

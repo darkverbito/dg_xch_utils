@@ -173,7 +173,10 @@ mod tests {
     const MIB: usize = 1024 * 1024;
 
     fn v2_caps() -> Capabilities {
-        CAPABILITIES.iter().map(|(v, s)| (*v, (*s).to_string())).collect()
+        CAPABILITIES
+            .iter()
+            .map(|(v, s)| (*v, (*s).to_string()))
+            .collect()
     }
 
     // TEST (1): a burst of a frequency-capped gossip type over the peer's per-minute budget is PACED,
@@ -247,7 +250,9 @@ mod tests {
         for _ in 0..100 {
             let _ = ol.decide(ProtocolMessageTypes::NewCompactVdf, 64, &caps);
         }
-        let outcome = ol.admit(ProtocolMessageTypes::NewCompactVdf, 64, &caps).await;
+        let outcome = ol
+            .admit(ProtocolMessageTypes::NewCompactVdf, 64, &caps)
+            .await;
         assert_eq!(
             outcome,
             ThrottleOutcome::Drop(DropReason::BackpressureCap),
@@ -269,7 +274,9 @@ mod tests {
             );
         }
         let start = Instant::now();
-        let outcome = ol.admit(ProtocolMessageTypes::NewCompactVdf, 64, &caps).await;
+        let outcome = ol
+            .admit(ProtocolMessageTypes::NewCompactVdf, 64, &caps)
+            .await;
         assert_eq!(
             outcome,
             ThrottleOutcome::Admit,

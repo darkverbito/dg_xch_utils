@@ -18,10 +18,10 @@ use dg_xch_core::blockchain::spend_bundle::SpendBundle;
 use dg_xch_core::clvm::program::{Program, SerializedProgram};
 use dg_xch_core::clvm::sexp::SExp;
 use dg_xch_core::clvm::utils::is_clvm_canonical;
-use dg_xch_core::traits::SizedBytes;
 use dg_xch_core::consensus::block_generator::conditions_from_spend_bundle;
 use dg_xch_core::consensus::constants::MAINNET;
 use dg_xch_core::consensus::fast_forward::supports_fast_forward;
+use dg_xch_core::traits::SizedBytes;
 use dg_xch_node::mempool::{Mempool, MempoolError};
 use dg_xch_puzzles::clvm_puzzles::puzzle_for_singleton_v1_1;
 use dg_xch_stores::{CoinStore, SqliteStore};
@@ -36,8 +36,7 @@ const SINGLETON_AMOUNT: u64 = 1023; // odd — singletons require it
 
 async fn store() -> SqliteStore {
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let path =
-        std::env::temp_dir().join(format!("dg_xch_t062_{}_{n}.sqlite", std::process::id()));
+    let path = std::env::temp_dir().join(format!("dg_xch_t062_{}_{n}.sqlite", std::process::id()));
     SqliteStore::open(&path).await.expect("open store")
 }
 
@@ -128,7 +127,9 @@ impl SingletonFixture {
         CoinSpend {
             coin: self.coin,
             puzzle_reveal: self.puzzle.serialized().expect("puzzle serializes"),
-            solution: Program::to(solution).serialized().expect("solution serializes"),
+            solution: Program::to(solution)
+                .serialized()
+                .expect("solution serializes"),
         }
     }
 }
@@ -152,7 +153,9 @@ fn fee_spend(parent_tag: u8, amount: u64) -> (Coin, CoinSpend) {
     let spend = CoinSpend {
         coin,
         puzzle_reveal: puzzle.serialized().expect("puzzle serializes"),
-        solution: Program::to(conditions).serialized().expect("solution serializes"),
+        solution: Program::to(conditions)
+            .serialized()
+            .expect("solution serializes"),
     };
     (coin, spend)
 }
@@ -175,7 +178,9 @@ fn dedup_spend(parent_tag: u8, amount: u64) -> (Coin, CoinSpend) {
     let spend = CoinSpend {
         coin,
         puzzle_reveal: puzzle.serialized().expect("puzzle serializes"),
-        solution: Program::to(conditions).serialized().expect("solution serializes"),
+        solution: Program::to(conditions)
+            .serialized()
+            .expect("solution serializes"),
     };
     (coin, spend)
 }
@@ -324,7 +329,11 @@ async fn identical_dedup_spends_coexist_and_assemble_once() {
         .apply_block(
             100,
             PEAK_TIME,
-            &[record(d_coin, 100), record(f1_coin, 100), record(f2_coin, 100)],
+            &[
+                record(d_coin, 100),
+                record(f1_coin, 100),
+                record(f2_coin, 100),
+            ],
             &[],
         )
         .await
@@ -381,7 +390,11 @@ async fn dedup_spend_with_different_solution_conflicts() {
         .apply_block(
             100,
             PEAK_TIME,
-            &[record(d_coin, 100), record(f1_coin, 100), record(f2_coin, 100)],
+            &[
+                record(d_coin, 100),
+                record(f1_coin, 100),
+                record(f2_coin, 100),
+            ],
             &[],
         )
         .await
@@ -395,12 +408,8 @@ async fn dedup_spend_with_different_solution_conflicts() {
 
     // Same coin, different (still dedup-eligible) solution: pays to a different puzzle hash.
     let puzzle = Program::to(1_u64);
-    let create: SExp<'static> = vec![
-        SExp::from(51_u64),
-        SExp::from(h(0x77)),
-        SExp::from(500_u64),
-    ]
-    .into();
+    let create: SExp<'static> =
+        vec![SExp::from(51_u64), SExp::from(h(0x77)), SExp::from(500_u64)].into();
     let conditions: SExp<'static> = vec![create].into();
     let different = CoinSpend {
         coin: d_coin,
@@ -493,12 +502,8 @@ async fn replacement_must_preserve_dedup_eligibility() {
     // Higher-fee replacement spending the same coins, but spending D with EXCESS (not dedup):
     // output only 100 of D's 500 — flags drop ELIGIBLE_FOR_DEDUP.
     let puzzle = Program::to(1_u64);
-    let create: SExp<'static> = vec![
-        SExp::from(51_u64),
-        SExp::from(h(0x63)),
-        SExp::from(100_u64),
-    ]
-    .into();
+    let create: SExp<'static> =
+        vec![SExp::from(51_u64), SExp::from(h(0x63)), SExp::from(100_u64)].into();
     let conditions: SExp<'static> = vec![create].into();
     let stripped = CoinSpend {
         coin: d_coin,
@@ -506,12 +511,8 @@ async fn replacement_must_preserve_dedup_eligibility() {
         solution: Program::to(conditions).serialized().unwrap(),
     };
     // Fee spend outputs almost nothing: a huge fee bump that would satisfy every fee rule.
-    let bump_create: SExp<'static> = vec![
-        SExp::from(51_u64),
-        SExp::from(h(0x64)),
-        SExp::from(1_u64),
-    ]
-    .into();
+    let bump_create: SExp<'static> =
+        vec![SExp::from(51_u64), SExp::from(h(0x64)), SExp::from(1_u64)].into();
     let bump_conditions: SExp<'static> = vec![bump_create].into();
     let f1_replacement = CoinSpend {
         coin: f1_coin,

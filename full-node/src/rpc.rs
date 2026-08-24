@@ -403,7 +403,11 @@ where
         // chia sorts target_times ascending, then makes the products monotonically decreasing.
         target_times.sort_unstable();
 
-        #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        #[allow(
+            clippy::cast_precision_loss,
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss
+        )]
         let (estimates, current_fee_rate, mempool_size, mempool_fees, num_spends, mempool_max_size) = {
             let mp = self.mempool.lock().await;
             let est = mp.fee_estimator();
@@ -468,7 +472,8 @@ where
                         let fees = tx.fees.unwrap_or(0);
                         // last_block_cost + fee_rate need the full block's transactions_info.
                         #[allow(clippy::cast_precision_loss)]
-                        let (block_cost, rate) = match self.store.get_block(&tx.header_hash).await? {
+                        let (block_cost, rate) = match self.store.get_block(&tx.header_hash).await?
+                        {
                             Some(fb) => match fb.transactions_info {
                                 Some(ti) if ti.cost > 0 => {
                                     (ti.cost, ti.fees as f64 / ti.cost as f64)

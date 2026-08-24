@@ -116,7 +116,10 @@ fn reconstruct_reward_claims(
         }
         let base = calculate_base_farmer_reward(height);
         let fees = farmer.amount.checked_sub(base).ok_or_else(|| {
-            format!("farmer coin amount {} < base reward {base} at height {height}", farmer.amount)
+            format!(
+                "farmer coin amount {} < base reward {base} at height {height}",
+                farmer.amount
+            )
         })?;
         claims.push(RewardBlockClaim {
             height,
@@ -157,8 +160,11 @@ fn block_transactions_from(
 ) -> Option<BlockTransactions> {
     let program = full.transactions_generator.clone()?;
     let ti = full.transactions_info.as_ref()?;
-    let spend_additions: Vec<Coin> =
-        additions.iter().filter(|c| !c.coinbase).map(|c| c.coin).collect();
+    let spend_additions: Vec<Coin> = additions
+        .iter()
+        .filter(|c| !c.coinbase)
+        .map(|c| c.coin)
+        .collect();
     let spend_removals: Vec<Coin> = removals.iter().map(|c| c.coin).collect();
     Some(BlockTransactions {
         program,
@@ -335,7 +341,11 @@ fn first_real_divergence(produced: &UnfinishedBlock, full: &FullBlock) -> Option
         produced.reward_chain_block,
         full.reward_chain_block.get_unfinished()
     );
-    cmp!("finished_sub_slots", produced.finished_sub_slots, full.finished_sub_slots);
+    cmp!(
+        "finished_sub_slots",
+        produced.finished_sub_slots,
+        full.finished_sub_slots
+    );
     cmp!(
         "challenge_chain_sp_proof",
         produced.challenge_chain_sp_proof,
@@ -349,7 +359,11 @@ fn first_real_divergence(produced: &UnfinishedBlock, full: &FullBlock) -> Option
 
     // Foliage, field by field — extension_data deliberately excluded (checked by the caller).
     let (pf, ef) = (&produced.foliage, &full.foliage);
-    cmp!("foliage.prev_block_hash", pf.prev_block_hash, ef.prev_block_hash);
+    cmp!(
+        "foliage.prev_block_hash",
+        pf.prev_block_hash,
+        ef.prev_block_hash
+    );
     // reward_block_hash is infusion-rewritten (see unfinished_reward_block_hash): compare our unfinished
     // value against the reconstructed unfinished hash, NOT the FullBlock's finished value.
     cmp!(
@@ -398,7 +412,11 @@ fn first_real_divergence(produced: &UnfinishedBlock, full: &FullBlock) -> Option
         produced.foliage_transaction_block,
         full.foliage_transaction_block
     );
-    cmp!("transactions_info", produced.transactions_info, full.transactions_info);
+    cmp!(
+        "transactions_info",
+        produced.transactions_info,
+        full.transactions_info
+    );
     cmp!(
         "transactions_generator",
         produced.transactions_generator,
@@ -478,7 +496,9 @@ fn producer_matches_real_mainnet_fixture_blocks() {
         match differential_check(&MAINNET, &full, Some((&adds, &rems))) {
             Outcome::Pass => {
                 passed += 1;
-                eprintln!("[PASS] height {h}: produced UnfinishedBlock is byte-identical to mainnet");
+                eprintln!(
+                    "[PASS] height {h}: produced UnfinishedBlock is byte-identical to mainnet"
+                );
             }
             Outcome::Fail(diff) => {
                 eprintln!("[FAIL] height {h}: {diff}");
@@ -493,7 +513,9 @@ fn producer_matches_real_mainnet_fixture_blocks() {
         heights.len(),
         first_failure
             .as_ref()
-            .map_or(String::new(), |(h, d)| format!("; first failure @ {h}: {d}"))
+            .map_or(String::new(), |(h, d)| format!(
+                "; first failure @ {h}: {d}"
+            ))
     );
     assert!(
         first_failure.is_none(),
@@ -511,7 +533,11 @@ fn reward_claim_reconstruction_round_trips_fixture() {
     let ti = full.transactions_info.as_ref().expect("tx info");
     let claims =
         reconstruct_reward_claims(&MAINNET, &ti.reward_claims_incorporated).expect("decode claims");
-    assert_eq!(claims.len() * 2, ti.reward_claims_incorporated.len(), "pair count");
+    assert_eq!(
+        claims.len() * 2,
+        ti.reward_claims_incorporated.len(),
+        "pair count"
+    );
 
     // Re-mint and compare to the real reward coins (order preserved: [pool, farmer] per claim).
     use dg_xch_core::consensus::block_rewards::calculate_pool_reward;

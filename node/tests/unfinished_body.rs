@@ -50,7 +50,10 @@ fn unfinished_5000004() -> UnfinishedBlock {
 // then the foliage transaction block's transactions_info_hash) — the shape an attacker who
 // FARMED the block (and so holds the plot key) can sign for real, per the live ban vector.
 fn with_forged_generator(mut ub: UnfinishedBlock, generator: SerializedProgram) -> UnfinishedBlock {
-    let mut ti = ub.transactions_info.take().expect("tx block has transactions_info");
+    let mut ti = ub
+        .transactions_info
+        .take()
+        .expect("tx block has transactions_info");
     ti.generator_root = transactions_generator_root(&generator);
     rebind(&mut ub, ti);
     ub.transactions_generator = Some(generator);
@@ -58,14 +61,24 @@ fn with_forged_generator(mut ub: UnfinishedBlock, generator: SerializedProgram) 
 }
 
 // Rebind a (tampered) transactions_info into the foliage transaction block's commitment.
-fn rebind(ub: &mut UnfinishedBlock, ti: dg_xch_core::blockchain::transactions_info::TransactionsInfo) {
-    let mut ftb = ub.foliage_transaction_block.expect("tx block has foliage_transaction_block");
+fn rebind(
+    ub: &mut UnfinishedBlock,
+    ti: dg_xch_core::blockchain::transactions_info::TransactionsInfo,
+) {
+    let mut ftb = ub
+        .foliage_transaction_block
+        .expect("tx block has foliage_transaction_block");
     ftb.transactions_info_hash = transactions_info_hash(&ti).expect("ti hashes");
     ub.foliage_transaction_block = Some(ftb);
     ub.transactions_info = Some(ti);
 }
 
-fn validate(ub: &UnfinishedBlock) -> Result<Option<dg_xch_core::blockchain::spend_bundle_conditions::SpendBundleConditions>, NodeError> {
+fn validate(
+    ub: &UnfinishedBlock,
+) -> Result<
+    Option<dg_xch_core::blockchain::spend_bundle_conditions::SpendBundleConditions>,
+    NodeError,
+> {
     validate_unfinished_block_body(&NativePrimitives, &MAINNET, ub, &[], HEIGHT, PREV_TX)
 }
 
@@ -139,7 +152,10 @@ fn honest_mainnet_5000004_validates_with_exact_cost() {
     let conds = validate(&ub)
         .expect("honest block validates")
         .expect("generator-bearing block yields conditions");
-    assert_eq!(conds.cost, claimed, "executed cost equals the mainnet claim");
+    assert_eq!(
+        conds.cost, claimed,
+        "executed cost equals the mainnet claim"
+    );
     assert!(!conds.spends.is_empty(), "real block spends parsed");
 }
 

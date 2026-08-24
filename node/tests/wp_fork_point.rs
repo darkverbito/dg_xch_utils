@@ -131,7 +131,10 @@ async fn agreement_up_to_sub_epoch_k_starts_the_long_sync_near_k_not_zero() {
     );
     match fork {
         WpForkPoint::NoForkDetected { conservative } => {
-            assert_ne!(conservative, 0, "a deep mid-chain agreement never restarts from zero");
+            assert_ne!(
+                conservative, 0,
+                "a deep mid-chain agreement never restarts from zero"
+            );
         }
         other => panic!("expected NoForkDetected, got {other:?}"),
     }

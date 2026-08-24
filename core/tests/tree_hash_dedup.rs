@@ -36,7 +36,11 @@ impl Rng {
 // Build a random tree, drawing from (and feeding) a pool of shared subtrees the way
 // `sexp_from_bytes_backrefs` does: a back-reference reuses child `Arc`s, so repeated
 // subtrees are pointer-shared.
-fn random_tree(rng: &mut Rng, pool: &mut Vec<Arc<SExp<'static>>>, depth: u32) -> Arc<SExp<'static>> {
+fn random_tree(
+    rng: &mut Rng,
+    pool: &mut Vec<Arc<SExp<'static>>>,
+    depth: u32,
+) -> Arc<SExp<'static>> {
     let roll = rng.below(100);
     if !pool.is_empty() && roll < 30 {
         // shared reuse — the backref case
@@ -83,7 +87,10 @@ fn cached_tree_hash_matches_naive_on_randomized_shared_trees() {
             checked += 1;
         }
     }
-    assert!(checked > 4000, "expected thousands of differential cases, got {checked}");
+    assert!(
+        checked > 4000,
+        "expected thousands of differential cases, got {checked}"
+    );
 }
 
 #[test]
@@ -119,7 +126,11 @@ fn spend_bundle_reveal_dedup_preserves_semantics() {
         solution: solution.clone(),
     };
     let bundle = SpendBundle {
-        coin_spends: vec![mk_spend(1, reveal_hash), mk_spend(2, reveal_hash), mk_spend(3, reveal_hash)],
+        coin_spends: vec![
+            mk_spend(1, reveal_hash),
+            mk_spend(2, reveal_hash),
+            mk_spend(3, reveal_hash),
+        ],
         aggregated_signature: Bytes96::default(),
     };
     let height = MAINNET.hard_fork_height + 10;
@@ -132,7 +143,10 @@ fn spend_bundle_reveal_dedup_preserves_semantics() {
 
     // Same bundle, one wrong puzzle hash: still WrongPuzzleHash.
     let bad = SpendBundle {
-        coin_spends: vec![mk_spend(1, reveal_hash), mk_spend(2, Bytes32::new([0xAB; 32]))],
+        coin_spends: vec![
+            mk_spend(1, reveal_hash),
+            mk_spend(2, Bytes32::new([0xAB; 32])),
+        ],
         aggregated_signature: Bytes96::default(),
     };
     let err = conditions_from_spend_bundle(&bad, height, &MAINNET);

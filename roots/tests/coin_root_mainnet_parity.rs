@@ -98,19 +98,24 @@ async fn real_mainnet_aggregate_reconciles_to_phase1_root() {
     .fetch_all(&mut conn)
     .await
     .expect("coin rows");
-    assert!(!rows.is_empty(), "store has no coin_record rows <= {boundary}");
+    assert!(
+        !rows.is_empty(),
+        "store has no coin_record rows <= {boundary}"
+    );
 
     let mut blocks: BTreeMap<u32, BlockAcc> = BTreeMap::new();
     let mut survivors: Vec<Bytes32> = Vec::new();
     for row in &rows {
         let coin_id: Bytes32 = row.try_get("coin_name").expect("coin_name");
-        let confirmed =
-            u32::try_from(row.try_get::<i64, _>("confirmed_index").expect("confirmed"))
-                .expect("confirmed u32");
-        let spent = u32::try_from(row.try_get::<i64, _>("spent_index").expect("spent"))
-            .expect("spent u32");
+        let confirmed = u32::try_from(row.try_get::<i64, _>("confirmed_index").expect("confirmed"))
+            .expect("confirmed u32");
+        let spent =
+            u32::try_from(row.try_get::<i64, _>("spent_index").expect("spent")).expect("spent u32");
         let timestamp = row.try_get::<i64, _>("timestamp").expect("timestamp") as u64;
-        let meta = CoinMeta { created_height: confirmed, created_timestamp: timestamp };
+        let meta = CoinMeta {
+            created_height: confirmed,
+            created_timestamp: timestamp,
+        };
 
         blocks
             .entry(confirmed)

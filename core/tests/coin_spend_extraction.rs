@@ -57,15 +57,16 @@ fn extracted_coin_spend_round_trips_against_generator() {
         let Some(input) = generator_input(block) else {
             continue;
         };
-        let conds = execute_block_generator_result(&input)
-            .expect("fixture transaction block must execute");
+        let conds =
+            execute_block_generator_result(&input).expect("fixture transaction block must execute");
         blocks_checked += 1;
 
         for spend in &conds.spends {
             // Additions this spend produced, per the validated conditions (Bytes32 has no Ord, so
             // compare as sets).
-            let expected: HashSet<Bytes32> =
-                single_spend_additions(&conds, spend.coin_id).into_iter().collect();
+            let expected: HashSet<Bytes32> = single_spend_additions(&conds, spend.coin_id)
+                .into_iter()
+                .collect();
 
             let extracted = coin_spend_from_generator(&input, &spend.coin_id)
                 .expect("simple-generator extraction must not error")
@@ -126,8 +127,8 @@ fn hints_match_created_coins() {
         let Some(input) = generator_input(block) else {
             continue;
         };
-        let conds = execute_block_generator_result(&input)
-            .expect("fixture transaction block must execute");
+        let conds =
+            execute_block_generator_result(&input).expect("fixture transaction block must execute");
 
         for (hint, coin_id) in hints_for_conditions(&conds) {
             total_hints += 1;
@@ -140,11 +141,16 @@ fn hints_match_created_coins() {
                         amount: c.amount,
                     };
                     coin.name() == coin_id
-                        && c.hint.as_ref().map(dg_xch_core::blockchain::unsized_bytes::UnsizedBytes::as_slice)
+                        && c.hint
+                            .as_ref()
+                            .map(dg_xch_core::blockchain::unsized_bytes::UnsizedBytes::as_slice)
                             == Some(hint.as_ref())
                 })
             });
-            assert!(found, "emitted hint must name a real create-coin with that exact 32-byte memo");
+            assert!(
+                found,
+                "emitted hint must name a real create-coin with that exact 32-byte memo"
+            );
         }
     }
 

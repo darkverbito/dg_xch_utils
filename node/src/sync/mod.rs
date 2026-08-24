@@ -32,13 +32,13 @@ use tracing::Instrument;
 // confirm bodies back in height order (the store is the reorder buffer).
 type OrderedBodies = Arc<Mutex<BTreeMap<u32, Bytes32>>>;
 
+pub use peer_manager::{
+    Availability, FetchOutcome, LeasePriority, MAX_IN_TRANSIT_PER_PEER, PeerLease, PeerManager,
+};
 pub use prefetch::{
     PrefetchConfig, READAHEAD_ABS_MAX_DEPTH, READAHEAD_BYTE_BUDGET, READAHEAD_MAX_DEPTH,
     READAHEAD_MAX_PER_PEER, READAHEAD_MIN_DEPTH, READAHEAD_START_DEPTH, WindowReadahead,
     depth_within_budget,
-};
-pub use peer_manager::{
-    Availability, FetchOutcome, LeasePriority, MAX_IN_TRANSIT_PER_PEER, PeerLease, PeerManager,
 };
 pub use source::{BlockRangeSource, OutboundPeerSource, request_weight_proof};
 pub use watchdog::StallWatchdog;
@@ -165,7 +165,8 @@ pub async fn wp_fork_point<S: BlockStore + Sync>(
     // Collect (height, ses hash) descending from the peak. Bounded: at most WP_FORK_LOCAL_SES
     // summaries, and at most one over-length sub-epoch of records per summary (sub-epoch
     // boundaries drift past the nominal multiple by overflow blocks, never a full sub-epoch).
-    let step_cap = (WP_FORK_LOCAL_SES as u32 + 1).saturating_mul(sub_epoch_blocks.saturating_mul(2));
+    let step_cap =
+        (WP_FORK_LOCAL_SES as u32 + 1).saturating_mul(sub_epoch_blocks.saturating_mul(2));
     let mut cursor = peak_hash;
     let mut collected: Vec<u32> = Vec::new();
     let mut agree: Option<(usize, usize)> = None; // (summary index, position in `collected`)
@@ -1082,7 +1083,10 @@ where
         from_height: u32,
         to_height: u32,
     ) -> Result<(Option<(Bytes32, u32)>, Vec<ConfirmedDelta>), SyncError> {
-        match self.follow_to_reporting(source, from_height, to_height).await {
+        match self
+            .follow_to_reporting(source, from_height, to_height)
+            .await
+        {
             Err(e) if e.is_orphan() => {
                 self.follow_backtrack_reporting(source, from_height, to_height)
                     .await
@@ -1474,7 +1478,8 @@ where
                     let mut start = 0usize;
                     let mut sig_confirm_upto = 0usize;
                     for (i, (delta, _, hi)) in staged.iter().enumerate() {
-                        if let Some(tag) = crate::header::first_failing_sig(&sig_queue[start..*hi]) {
+                        if let Some(tag) = crate::header::first_failing_sig(&sig_queue[start..*hi])
+                        {
                             sig_confirm_upto = i;
                             sig_err = Some(
                                 crate::error::NodeError::Invalid(format!(

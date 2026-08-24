@@ -283,7 +283,8 @@ async fn send_msg<T: dg_xch_serialize::ChiaSerialize>(
     msg_type: ProtocolMessageTypes,
     body: &T,
 ) {
-    let msg = ChiaMessage::new(msg_type, ChiaProtocolVersion::default(), body, None).expect("encode");
+    let msg =
+        ChiaMessage::new(msg_type, ChiaProtocolVersion::default(), body, None).expect("encode");
     client
         .connection
         .write()
@@ -362,7 +363,11 @@ async fn already_seen_tx_with_mismatched_cost_bans_the_peer() {
         }
     }
     let real_cost = admitted_cost.expect("bundle admitted so it is now a validated mempool item");
-    assert_eq!(rig.inbound_peers.read().await.len(), 1, "still connected after honest admit");
+    assert_eq!(
+        rig.inbound_peers.read().await.len(),
+        1,
+        "still connected after honest admit"
+    );
 
     // Re-announce the SAME id with a cost that is neither the validated cost nor cost+tolerated.
     send_msg(
@@ -396,7 +401,9 @@ async fn unsolicited_transaction_body_is_dropped() {
     send_msg(
         &rig.client,
         ProtocolMessageTypes::RespondTransaction,
-        &RespondTransaction { transaction: bundle },
+        &RespondTransaction {
+            transaction: bundle,
+        },
     )
     .await;
     // Longer than the validator's 250 ms drain: a solicited body would be admitted by now.
@@ -508,10 +515,10 @@ async fn stand_up_capturing_rig() -> CapturingRig {
 // to say no to weak fees (chia at_full_capacity + min-fee-rate).
 async fn fill_mempool_to_capacity(node: &Arc<Node>) {
     use dg_xch_core::blockchain::coin::Coin;
-    use dg_xch_stores::CoinStore;
     use dg_xch_core::blockchain::coin_record::CoinRecord;
     use dg_xch_core::blockchain::spend::Spend;
     use dg_xch_core::blockchain::spend_bundle_conditions::SpendBundleConditions;
+    use dg_xch_stores::CoinStore;
     for i in 0..20u8 {
         let coin = Coin {
             parent_coin_info: Bytes32::from([0xF0 ^ i; 32]),
@@ -635,7 +642,10 @@ async fn full_pool_low_fee_announcement_is_not_pulled() {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    assert!(pulled, "a fee that beats the pool's min fee rate is fetched");
+    assert!(
+        pulled,
+        "a fee that beats the pool's min fee rate is fetched"
+    );
 }
 
 // chia full_node.py:2991-3004 — broadcast_added_tx sends NewTransaction to ALL full-node peers
@@ -668,7 +678,13 @@ async fn announce_drain_reaches_inbound_peers_and_excludes_origin() {
     rig.node.drain_tx_announcements(&registry).await;
     let mut got_x = false;
     for _ in 0..40 {
-        if rig.new_txs.lock().await.iter().any(|t| t.transaction_id == x) {
+        if rig
+            .new_txs
+            .lock()
+            .await
+            .iter()
+            .any(|t| t.transaction_id == x)
+        {
             got_x = true;
             break;
         }
@@ -699,7 +715,11 @@ async fn announce_drain_reaches_inbound_peers_and_excludes_origin() {
     rig.node.drain_tx_announcements(&registry).await;
     tokio::time::sleep(Duration::from_millis(700)).await;
     assert!(
-        !rig.new_txs.lock().await.iter().any(|t| t.transaction_id == y),
+        !rig.new_txs
+            .lock()
+            .await
+            .iter()
+            .any(|t| t.transaction_id == y),
         "the origin peer must not receive an echo of its own transaction"
     );
 }

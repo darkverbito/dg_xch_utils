@@ -1142,7 +1142,10 @@ mod send_timeout_tests {
         let mut sink = StalledSink;
         let msg = Message::Binary(vec![].into());
         let out = timeout_send(&mut sink, msg, Duration::from_millis(50)).await;
-        assert!(out.is_err(), "a stalled sink must time out, not hang the sender");
+        assert!(
+            out.is_err(),
+            "a stalled sink must time out, not hang the sender"
+        );
     }
 }
 
@@ -1172,7 +1175,10 @@ mod pending_request_tests {
         for _ in 0..1000 {
             let (id, rx) = pending.register();
             assert_ne!(id, 0, "id 0 is reserved (id-less gossip / handshake)");
-            assert!(ids.insert(id), "id {id} was handed out twice while still in flight");
+            assert!(
+                ids.insert(id),
+                "id {id} was handed out twice while still in flight"
+            );
             _keep.push(rx); // hold the receivers so their ids stay live and cannot be reused
         }
     }

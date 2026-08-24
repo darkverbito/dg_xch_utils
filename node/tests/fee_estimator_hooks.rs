@@ -144,9 +144,7 @@ async fn admission_and_block_inclusion_feed_the_tracker() {
     // A new peak two blocks later that spends the coin — the item is block-included, so the
     // estimator records a confirmation (process_block advances latest/first-recorded height).
     let spent = [coin(1, 1_000).name()];
-    mp.new_peak(&store, 102, 0, &spent)
-        .await
-        .expect("new peak");
+    mp.new_peak(&store, 102, 0, &spent).await.expect("new peak");
     assert_eq!(mp.len(), 0, "block-included item leaves the mempool");
     assert_eq!(
         mp.fee_estimator().tracker().latest_seen_height(),
@@ -182,10 +180,16 @@ async fn steady_pressure_through_mempool_estimator_is_positive_and_ordered() {
     let mut high = Mempool::new(&MAINNET);
     // wait = 1: txs confirm the next block, so even the shortest target has data.
     for height in 100u32..300 {
-        low.fee_estimator_mut()
-            .ingest_block(height, &[(5_000_000, 10_000_000, height - 1)], 5_000_000); // fpc 2
-        high.fee_estimator_mut()
-            .ingest_block(height, &[(5_000_000, 100_000_000, height - 1)], 5_000_000); // fpc 20
+        low.fee_estimator_mut().ingest_block(
+            height,
+            &[(5_000_000, 10_000_000, height - 1)],
+            5_000_000,
+        ); // fpc 2
+        high.fee_estimator_mut().ingest_block(
+            height,
+            &[(5_000_000, 100_000_000, height - 1)],
+            5_000_000,
+        ); // fpc 20
     }
     let low_rate = low.fee_estimator().estimate_fee_rate(0);
     let high_rate = high.fee_estimator().estimate_fee_rate(0);

@@ -694,7 +694,11 @@ async fn mmap_batch_coin_states_pages_filters_and_joins_hints() {
         .batch_coin_states_by_puzzle_hashes(&[ph], 0, &filters(true, true, true, 1_001), 50_000)
         .await
         .unwrap();
-    assert_eq!(rich.len(), 7, "the three 1_000-amount coins fall below the floor");
+    assert_eq!(
+        rich.len(),
+        7,
+        "the three 1_000-amount coins fall below the floor"
+    );
 
     // Paging: max_items=4 across 3-coin heights forces whole-height page cuts; the loop
     // recovers everything exactly once.

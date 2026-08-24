@@ -198,11 +198,7 @@ fn legit_values_round_trip_byte_identically() {
         let bytes = value.to_bytes(V).unwrap();
         let back = T::from_bytes_full(&bytes, V).unwrap();
         assert_eq!(back, value, "structural round-trip");
-        assert_eq!(
-            back.to_bytes(V).unwrap(),
-            bytes,
-            "byte-identical re-encode"
-        );
+        assert_eq!(back.to_bytes(V).unwrap(), bytes, "byte-identical re-encode");
     }
     check(String::new());
     check("hello world".to_string());

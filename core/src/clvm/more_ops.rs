@@ -5,8 +5,8 @@ use crate::clvm::debug_ops::op_print;
 use crate::clvm::dialect::Dialect;
 use crate::clvm::sexp_ext::SExpNumber;
 use crate::clvm::utils::{
-    CANONICAL_INTS, DISABLE_OP, LIMITS, NEW_COST_MODEL, atom, check_arg_count, check_cost, i32_atom,
-    int_atom, number_with_len, split, two_ints,
+    CANONICAL_INTS, DISABLE_OP, LIMITS, NEW_COST_MODEL, atom, check_arg_count, check_cost,
+    i32_atom, int_atom, number_with_len, split, two_ints,
 };
 use crate::errors::ClvmError;
 use crate::formatting::{number_from_slice, u32_from_slice, u64_from_bigint};
@@ -948,10 +948,7 @@ pub fn op_softfork<D: Dialect>(
             // zeros are accepted — byte-identical to the pre-SF9 behavior.
             if (dialect.flags() & CANONICAL_INTS) != 0 {
                 let buf = cost_bytes.as_ref();
-                if !buf.is_empty()
-                    && buf[0] == 0
-                    && (buf.len() < 2 || (buf[1] & 0x80) == 0)
-                {
+                if !buf.is_empty() && buf[0] == 0 && (buf.len() < 2 || (buf[1] & 0x80) == 0) {
                     return Err(ClvmError::Unsupported(
                         "softfork requires cost with no leading zeros".to_string(),
                     ));

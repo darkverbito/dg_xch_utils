@@ -42,8 +42,11 @@ async fn full_mainnet_slice_replays_and_every_header_validates() {
     assert!(chain.len() > 280, "the full slice is present");
     let wp_bytes =
         include_bytes!("../../weight-proof/tests/fixtures/weight_proof_mainnet_9054698.bin");
-    let wp = WeightProof::from_bytes(&mut Cursor::new(&wp_bytes[..]), ChiaProtocolVersion::default())
-        .expect("weight proof decodes");
+    let wp = WeightProof::from_bytes(
+        &mut Cursor::new(&wp_bytes[..]),
+        ChiaProtocolVersion::default(),
+    )
+    .expect("weight proof decodes");
     let summaries = dg_xch_weight_proof::sub_epoch_summaries_of(&wp, &MAINNET)
         .expect("phase-2 summary chain reconstructs and anchors");
 
@@ -61,12 +64,8 @@ async fn full_mainnet_slice_replays_and_every_header_validates() {
     }
 
     // The attested schedule must agree with the slice's known flat epoch parameters.
-    let schedule = dg_xch_node::EpochSchedule::from_summaries(
-        &summaries,
-        MAINNET.sub_epoch_blocks,
-        SSI,
-        DIFF,
-    );
+    let schedule =
+        dg_xch_node::EpochSchedule::from_summaries(&summaries, MAINNET.sub_epoch_blocks, SSI, DIFF);
     let first = chain.first().unwrap().height();
     let last = chain.last().unwrap().height();
     assert_eq!(schedule.at(first), (SSI, DIFF));
@@ -114,7 +113,11 @@ async fn full_mainnet_slice_replays_and_every_header_validates() {
         "the full span validated ({validated}/{})",
         chain.len()
     );
-    assert_eq!(golden_hits, GOLDEN.len(), "both reference goldens reproduced");
+    assert_eq!(
+        golden_hits,
+        GOLDEN.len(),
+        "both reference goldens reproduced"
+    );
     println!(
         "[sentinel] validated {validated}/{} headers ({first}..={last}), goldens {golden_hits}/{}",
         chain.len(),

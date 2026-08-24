@@ -326,8 +326,11 @@ async fn wait_for_served(rig: &Rig, n: usize) {
 async fn default_config_keeps_one_window_per_peer() {
     let rig = Rig::new();
     let sources: Vec<_> = (0..2).map(|i| rig.peer(i)).collect();
-    let mut ra =
-        WindowReadahead::with_config(Arc::new(SyncMetrics::default()), TIMEOUT, PrefetchConfig::default());
+    let mut ra = WindowReadahead::with_config(
+        Arc::new(SyncMetrics::default()),
+        TIMEOUT,
+        PrefetchConfig::default(),
+    );
     ra.fill(&sources, 0, 10_000, BATCH);
     assert_eq!(
         ra.inflight(),
@@ -354,14 +357,21 @@ async fn aggressive_knob_stacks_bounded_windows_per_peer() {
     let sources: Vec<_> = (0..2).map(|i| rig.peer(i)).collect();
     // Huge byte budget (no clamp here), aggregate in-flight cap 8, 2 planning peers → per_peer = 4.
     let cfg = PrefetchConfig::aggressive(1 << 20, Some(8), 2);
-    assert!(cfg.per_peer >= 2, "aggressive fan-out lifts the one-per-peer cap");
+    assert!(
+        cfg.per_peer >= 2,
+        "aggressive fan-out lifts the one-per-peer cap"
+    );
     let mut ra = WindowReadahead::with_config(Arc::new(SyncMetrics::default()), TIMEOUT, cfg);
     ra.fill(&sources, 0, 10_000, BATCH);
     // Depth still STARTS at START_DEPTH (the OOM-safe ramp), now spread over only 2 peers.
     assert_eq!(ra.inflight(), READAHEAD_START_DEPTH);
     wait_for_served(&rig, READAHEAD_START_DEPTH).await;
     let per_peer = served_by_peer(&rig);
-    assert_eq!(per_peer.len(), 2, "both peers used, spread not flooded: {per_peer:?}");
+    assert_eq!(
+        per_peer.len(),
+        2,
+        "both peers used, spread not flooded: {per_peer:?}"
+    );
     assert!(
         per_peer.values().all(|&c| c <= cfg.per_peer) && per_peer.values().any(|&c| c >= 2),
         "fan-out stacks >1 window on a peer but stays under the per-peer cap: {per_peer:?}"
@@ -407,7 +417,12 @@ async fn aggressive_depth_climbs_past_the_shipped_cap() {
         "aggregate in-flight exceeds the peer count (concurrency past one-per-peer): saw {max_inflight_seen}"
     );
     // The wait gauge was exercised — the signal that must trend toward zero as K rises.
-    assert!(ra.metrics().follow_fetch_wait_micros.load(Ordering::Relaxed) > 0);
+    assert!(
+        ra.metrics()
+            .follow_fetch_wait_micros
+            .load(Ordering::Relaxed)
+            > 0
+    );
     ra.abort_all();
     assert!(rig.drained().await);
 }

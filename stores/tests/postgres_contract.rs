@@ -378,5 +378,9 @@ async fn postgres_batch_coin_states_pages_filters_and_joins_hints() {
         assert!(pages < 20, "the page loop must terminate");
     }
     assert!(pages > 1, "the scenario must actually page");
-    assert_eq!(names.len(), 10, "the loop recovers every state exactly once");
+    assert_eq!(
+        names.len(),
+        10,
+        "the loop recovers every state exactly once"
+    );
 }

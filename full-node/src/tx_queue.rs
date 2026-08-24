@@ -206,7 +206,10 @@ mod tests {
         assert!(q.push(trusted, empty_bundle(), true, 0, 0));
         let batch = q.drain_batch();
         assert_eq!(batch.len(), 3);
-        assert_eq!(batch[0].0, trusted, "trusted high-priority lane jumps everything");
+        assert_eq!(
+            batch[0].0, trusted,
+            "trusted high-priority lane jumps everything"
+        );
         assert_eq!(
             batch[1].0, high,
             "untrusted: higher advertised fee-per-cost drains first"
@@ -225,7 +228,10 @@ mod tests {
         assert!(q.push(unknown, empty_bundle(), false, 0, 0));
         assert!(q.push(known, empty_bundle(), false, 10, 1000));
         let batch = q.drain_batch();
-        assert_eq!(batch[0].0, known, "known fee-per-cost drains before unknown-cost");
+        assert_eq!(
+            batch[0].0, known,
+            "known fee-per-cost drains before unknown-cost"
+        );
         assert_eq!(batch[1].0, unknown, "unknown-cost drains last");
     }
 

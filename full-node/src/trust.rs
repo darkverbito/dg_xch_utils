@@ -275,8 +275,7 @@ mod tests {
     // outside is untrusted; the caps lift for an in-CIDR peer.
     #[test]
     fn host_in_trusted_cidr_is_trusted() {
-        let policy =
-            TrustPolicy::from_config(&[], &["10.0.0.0/8".into(), "2001:db8::/32".into()]);
+        let policy = TrustPolicy::from_config(&[], &["10.0.0.0/8".into(), "2001:db8::/32".into()]);
         assert!(policy.is_trusted(&id(0xbb), Some(ip("10.1.2.3"))));
         assert!(policy.is_trusted(&id(0xbb), Some(ip("2001:db8::dead"))));
         assert!(!policy.is_trusted(&id(0xbb), Some(ip("11.0.0.1"))));

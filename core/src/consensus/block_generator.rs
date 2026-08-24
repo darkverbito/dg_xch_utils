@@ -5,9 +5,7 @@ use crate::blockchain::condition_with_args::{ConditionWithArgs, Message, Message
 use crate::blockchain::foliage_transaction_block::FoliageTransactionBlock;
 use crate::blockchain::npc_result::NPCResult;
 use crate::blockchain::sized_bytes::{Bytes32, Bytes48, Bytes96};
-use crate::blockchain::spend::{
-    ELIGIBLE_FOR_DEDUP, ELIGIBLE_FOR_FF, NewCoin, Spend, SpendMessage,
-};
+use crate::blockchain::spend::{ELIGIBLE_FOR_DEDUP, ELIGIBLE_FOR_FF, NewCoin, Spend, SpendMessage};
 use crate::blockchain::spend_bundle_conditions::SpendBundleConditions;
 use crate::blockchain::transactions_info::TransactionsInfo;
 use crate::blockchain::unsized_bytes::UnsizedBytes;
@@ -720,13 +718,16 @@ pub fn coin_spend_from_generator(
         .run(cost_left, input.flags.clvm_flags, &Program::default())
         .map_err(generator_run_error)?;
     let out_sexp = output.sexp();
-    let all_spends = out_sexp.first().map_err(|_| ChiaError::InvalidBlockSolution)?;
+    let all_spends = out_sexp
+        .first()
+        .map_err(|_| ChiaError::InvalidBlockSolution)?;
     for spend_sexp in all_spends.ref_list() {
         let parts = spend_sexp.ref_list();
         if parts.len() < 4 {
             return Err(ChiaError::InvalidBlockSolution);
         }
-        let parent_id = Bytes32::parse_atom(parts[0]).map_err(|_| ChiaError::InvalidBlockSolution)?;
+        let parent_id =
+            Bytes32::parse_atom(parts[0]).map_err(|_| ChiaError::InvalidBlockSolution)?;
         let puzzle_reveal = Program::new_ref(parts[1]);
         let amount = parts[2]
             .as_int()
@@ -1707,7 +1708,12 @@ fn spend_from_conditions(
         // be singletons, which use odd amounts. Cleared per condition below; consensus runs
         // (EmptyVisitor) leave flags 0.
         flags: if mempool {
-            ELIGIBLE_FOR_DEDUP | if coin.amount & 1 == 1 { ELIGIBLE_FOR_FF } else { 0 }
+            ELIGIBLE_FOR_DEDUP
+                | if coin.amount & 1 == 1 {
+                    ELIGIBLE_FOR_FF
+                } else {
+                    0
+                }
         } else {
             0
         },
@@ -1950,7 +1956,8 @@ fn spend_from_conditions(
         // A spend with an excess amount (paying a fee or funding siblings) must not dedup — the
         // duplicate would pay twice.
         if (spend.flags & ELIGIBLE_FOR_DEDUP) != 0 {
-            let spend_additions: u128 = spend.create_coin.iter().map(|c| u128::from(c.amount)).sum();
+            let spend_additions: u128 =
+                spend.create_coin.iter().map(|c| u128::from(c.amount)).sum();
             if u128::from(spend.coin_amount) > spend_additions {
                 spend.flags &= !ELIGIBLE_FOR_DEDUP;
             }
@@ -2868,7 +2875,8 @@ mod producer_tests {
             .collect();
 
         let plain = solution_generator_from_coin_spends(&spends).expect("plain");
-        let compressed = compressed_solution_generator_from_coin_spends(&spends).expect("compressed");
+        let compressed =
+            compressed_solution_generator_from_coin_spends(&spends).expect("compressed");
 
         // (d) the packing lever: repeated puzzle reveal ⇒ strictly smaller.
         assert!(
