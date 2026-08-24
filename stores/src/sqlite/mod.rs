@@ -125,15 +125,28 @@ fn spawn_checkpointer(
         // far), not a per-run delta — the counter must add only the advance since the last pass, and
         // treat a smaller value as a WAL reset (write pointer back at the front).
         let mut prev_checkpointed: i64 = 0;
+        // Bulk-phase drain cadence: near the tip the checkpointer drains every tick (1 s); during bulk
+        // catch-up it drains far less often so the confirm writer keeps most of the iSCSI write budget,
+        // but it MUST still drain. A fully-quiet bulk checkpointer let the WAL grow to the in-writer
+        // wal_autocheckpoint failsafe (262144 pages ≈ 1 GB) — whose blocking copy-to-DB stalls the
+        // confirmed peak for minutes on slow storage (peak freeze → liveness restart → repeat), because
+        // a from-genesis sync is millions of blocks from tip and never reaches the "drain at tip" path.
+        // At ~1 MB/s WAL growth a 20 s cadence bounds the file to tens of MB, orders of magnitude under
+        // the failsafe, and each off-writer PASSIVE pass is cheap.
+        const BULK_CHECKPOINT_TICKS: u32 = 20;
+        let mut bulk_tick: u32 = 0;
         loop {
             tick.tick().await;
             // Best-effort: a busy/failed checkpoint is retried on the next tick.
-            // Phase-aware: only drain the WAL near the tip. During bulk catch-up the checkpointer stays
-            // QUIET so the full iSCSI write budget goes to the confirm writer -- copying the WAL into the DB
-            // competes for the same ~56 MB/s and starves catch-up. Off near tip the WAL grows toward the
-            // wal_autocheckpoint failsafe; the first PASSIVE checkpoints once the node reaches tip drain it.
+            // Phase-aware cadence: near the tip drain every tick; during bulk drain on the slow cadence
+            // above — enough to bound the WAL below the failsafe while leaving the write budget to catch-up.
             if !near_tip.load(Ordering::Relaxed) {
-                continue;
+                bulk_tick = bulk_tick.wrapping_add(1);
+                if !bulk_tick.is_multiple_of(BULK_CHECKPOINT_TICKS) {
+                    continue;
+                }
+            } else {
+                bulk_tick = 0;
             }
             // Telemetry hook: the SAME pragma as before, but its result row — (busy, log,
             // checkpointed) per SQLite's wal_checkpoint docs — is captured instead of discarded, and
