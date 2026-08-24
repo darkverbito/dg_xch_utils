@@ -107,6 +107,12 @@ pub struct StoreTelemetry {
     /// `get_coin_records`) — the confirmed-set validation read volume, counted separately from
     /// the record reads so the residue attribution can split the two.
     pub coin_reads: AtomicU64,
+    /// Read-pool connections currently idle in the pool, sampled by the checkpointer. In WAL mode an
+    /// idle pooled reader can hold a read mark at an old WAL position and block the checkpoint reset —
+    /// a high idle count while `wal_frames` refuses to fall names the reader that pins the WAL.
+    pub read_pool_idle: AtomicU64,
+    /// Read-pool total connections (idle + in-use), sampled by the checkpointer.
+    pub read_pool_size: AtomicU64,
 }
 
 impl StoreTelemetry {

@@ -1026,6 +1026,20 @@ pub fn render_metrics(s: &MetricsSnapshot) -> String {
             "counter",
             st.coin_reads,
         );
+        g(
+            &mut out,
+            "fullnode_sqlite_read_pool_idle",
+            "Read-pool connections idle (in WAL mode an idle pooled reader can hold an old WAL read mark). High while wal_frames stays high names the reader pinning the checkpoint reset.",
+            "gauge",
+            st.read_pool_idle,
+        );
+        g(
+            &mut out,
+            "fullnode_sqlite_read_pool_size",
+            "Read-pool total connections (idle + in-use).",
+            "gauge",
+            st.read_pool_size,
+        );
     }
     // Block-producer pipeline — the first-block funnel. Read top-to-bottom: the first counter
     // that is 0 while the one above it is > 0 names the stalled stage, and the

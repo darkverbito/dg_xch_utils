@@ -75,8 +75,12 @@ impl SqliteStore {
             .await?;
         let near_tip = Arc::new(AtomicBool::new(false));
         let telemetry = StoreTelemetry::new();
-        let checkpointer =
-            spawn_checkpointer(opts.connect().await?, near_tip.clone(), telemetry.clone());
+        let checkpointer = spawn_checkpointer(
+            opts.connect().await?,
+            near_tip.clone(),
+            telemetry.clone(),
+            read.clone(),
+        );
         // SQLite's WAL file always lives at `<db>-wal` (same directory, suffix appended).
         let mut wal_os = path.as_os_str().to_os_string();
         wal_os.push("-wal");
@@ -117,6 +121,7 @@ fn spawn_checkpointer(
     mut conn: SqliteConnection,
     near_tip: Arc<AtomicBool>,
     telemetry: Arc<StoreTelemetry>,
+    read: SqlitePool,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(1));
@@ -137,6 +142,15 @@ fn spawn_checkpointer(
         let mut bulk_tick: u32 = 0;
         loop {
             tick.tick().await;
+            // Read-pool census every tick (cheap atomics): the WAL-pin witness. A high idle count while
+            // `wal_frames` refuses to fall means a pooled reader holds an old WAL read mark, blocking the
+            // checkpoint reset — names the reader that pins the WAL.
+            telemetry
+                .read_pool_idle
+                .store(read.num_idle() as u64, Ordering::Relaxed);
+            telemetry
+                .read_pool_size
+                .store(u64::from(read.size()), Ordering::Relaxed);
             // Best-effort: a busy/failed checkpoint is retried on the next tick.
             // Phase-aware cadence: near the tip drain every tick; during bulk drain on the slow cadence
             // above — enough to bound the WAL below the failsafe while leaving the write budget to catch-up.
