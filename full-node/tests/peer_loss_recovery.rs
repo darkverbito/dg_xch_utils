@@ -184,9 +184,15 @@ async fn dial_as_outbound_slot(
 ) {
     let handlers = Arc::new(RwLock::new((node.outbound_handler_factory())()));
     let run = Arc::new(AtomicBool::new(true));
-    let client = dial("127.0.0.1", peer_port, handlers.clone(), run.clone(), settings)
-        .await
-        .expect("dial peer");
+    let client = dial(
+        "127.0.0.1",
+        peer_port,
+        handlers.clone(),
+        run.clone(),
+        settings,
+    )
+    .await
+    .expect("dial peer");
     (client, handlers, run)
 }
 
@@ -205,7 +211,9 @@ async fn claimed_peak_recovers_after_a_peer_drop_and_redial() {
             .expect("boot"),
     );
     node.synced.store(false, Ordering::Relaxed);
-    let _rpc_run = node.spawn_rpc_server().expect("rpc server (attaches claimed_peak to live)");
+    let _rpc_run = node
+        .spawn_rpc_server()
+        .expect("rpc server (attaches claimed_peak to live)");
 
     let settings = P2pSettings::default();
 
