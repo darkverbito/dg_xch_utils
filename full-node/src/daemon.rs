@@ -5126,6 +5126,15 @@ async fn fetch_scheduler<S: BlockStore + CoinStore + Send + Sync + 'static>(
         if let Some(blocks) = fetched
             && !blocks.is_empty()
         {
+            // FOLLOW-band download liveness: count delivered bodies into the same counter the bulk
+            // download worker feeds at its write-through (sync/mod.rs download_worker). Without
+            // this the follow band was a metrics blindspot — `fullnode_blocks_downloaded_total`
+            // (and the /health secondary liveness witness watching it) froze while the follow
+            // producer was in fact delivering blocks into the queue.
+            readahead
+                .metrics()
+                .blocks_downloaded
+                .fetch_add(blocks.len() as u64, Ordering::Relaxed);
             for block in blocks {
                 queue.complete(block, dispatch_gen);
             }
