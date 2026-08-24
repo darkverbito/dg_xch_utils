@@ -1068,6 +1068,29 @@ where
         self.follow_blocks_reporting(&collected).await
     }
 
+    /// One tip-follow step as chia's `new_peak` ladder (chia full_node.py new_peak): try the FORWARD
+    /// extend first — the overwhelmingly common tip case is a block whose parent IS our peak, which
+    /// `follow_to_reporting` confirms by fetching only `[from_height, to_height]`. Fall back to the
+    /// backward `short_sync_backtrack` arm ONLY when the forward window fails with the unknown-parent
+    /// orphan ([`SyncError::is_orphan`]) — a genuine reorg at/below our tip. Going straight to
+    /// `follow_backtrack_reporting` (its depth-0 probe is `from_height - 1`, our own peak) re-fetches
+    /// the peak block and re-confirms it `AlreadyHave` on EVERY step, adding a needless backward fetch
+    /// + peer round-trip per block; that overhead is what keeps a follower from pinning tip at lag 0-1.
+    pub async fn follow_tip_step_reporting(
+        &mut self,
+        source: &Arc<dyn BlockRangeSource>,
+        from_height: u32,
+        to_height: u32,
+    ) -> Result<(Option<(Bytes32, u32)>, Vec<ConfirmedDelta>), SyncError> {
+        match self.follow_to_reporting(source, from_height, to_height).await {
+            Err(e) if e.is_orphan() => {
+                self.follow_backtrack_reporting(source, from_height, to_height)
+                    .await
+            }
+            other => other,
+        }
+    }
+
     /// The reorg-across-the-gap arm of the WP-anchored long sync (chia `_sync` →
     /// `sync_from_fork_point` with a fork point BELOW the peak, full_node.py:1104-1113): re-follow
     /// forward windows from `fork_point + 1`. Blocks identical to ours confirm as `AlreadyHave`; a

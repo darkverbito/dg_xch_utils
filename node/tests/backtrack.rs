@@ -255,3 +255,129 @@ async fn fork_deeper_than_the_backtrack_cap_signals_long_sync() {
         Some((chain_a.last().unwrap().header_hash().unwrap(), A_TIP))
     );
 }
+
+// ── tip-follow ladder (chia new_peak): forward-extend first, backtrack only on the orphan ──────────
+//
+// The near-tip deviation: the tip_follower drove EVERY step through `follow_backtrack_reporting`,
+// whose depth-0 probe is `from-1` (our own peak). So a plain direct child of the peak still triggered
+// a backward peak-refetch + a peer round-trip per block — the overhead that kept a live follower at
+// lag 3-6 instead of 0-1. `follow_tip_step_reporting` restores the ladder: forward first.
+
+// A peer that serves a chain by height and records the LOWEST height any fetch reached, so a test can
+// distinguish a forward-only extend (lowest == peak+1) from a backward backtrack probe (lowest <= peak).
+struct RecordingPeer {
+    by_height: HashMap<u32, FullBlock>,
+    lowest: AtomicU64,
+}
+
+impl RecordingPeer {
+    fn new(chain: &[FullBlock]) -> Self {
+        Self {
+            by_height: chain.iter().map(|b| (b.height(), b.clone())).collect(),
+            lowest: AtomicU64::new(u64::MAX),
+        }
+    }
+    fn lowest_fetched(&self) -> u64 {
+        self.lowest.load(Ordering::Relaxed)
+    }
+}
+
+#[async_trait]
+impl BlockRangeSource for RecordingPeer {
+    fn peer_id(&self) -> u64 {
+        0xd1
+    }
+    fn is_closed(&self) -> bool {
+        false
+    }
+    async fn fetch_range(&self, start: u32, end: u32) -> Result<Vec<FullBlock>, SyncError> {
+        self.lowest.fetch_min(u64::from(start), Ordering::Relaxed);
+        Ok((start..=end)
+            .filter_map(|h| self.by_height.get(&h).cloned())
+            .collect())
+    }
+}
+
+// A linear branch A extended two blocks past our peak (direct children, no fork).
+fn linear_chain_past_tip() -> (Vec<FullBlock>, Vec<FullBlock>) {
+    let base_a = common::load_full_block(5_000_000);
+    let chain_a = build_chain(&base_a, 100, A_TIP, common::synth_hash(0xaa, 99), a_weight);
+    let child = build_chain(
+        &base_a,
+        A_TIP + 1,
+        A_TIP + 2,
+        chain_a.last().unwrap().header_hash().unwrap(),
+        a_weight,
+    );
+    (chain_a, child)
+}
+
+// RED (pre-fix behavior): the backtrack recovery arm, driven for a DIRECT CHILD, still probes backward
+// to the peak (`from-1`) before confirming — the per-block overhead the tip_follower used to pay every
+// step. This pins the deviation the ladder removes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn backtrack_arm_refetches_the_peak_even_for_a_direct_child() {
+    let (chain_a, child) = linear_chain_past_tip();
+    let mut linear = chain_a.clone();
+    linear.extend(child.iter().cloned());
+    let peer = Arc::new(RecordingPeer::new(&linear));
+    let mut chaser = chaser_on_branch_a(&chain_a).await;
+
+    let source: Arc<dyn BlockRangeSource> = peer.clone();
+    let (peak, _deltas) = chaser
+        .follow_backtrack_reporting(&source, A_TIP + 1, A_TIP + 1)
+        .await
+        .expect("backtrack confirms the child too");
+    assert_eq!(peak, Some((child[0].header_hash().unwrap(), A_TIP + 1)));
+    // The deviation: the arm reached BELOW peak+1 (it probed the peak at from-1).
+    assert!(
+        peer.lowest_fetched() <= u64::from(A_TIP),
+        "the backtrack arm fetches backward to the peak even for a direct child"
+    );
+}
+
+// GREEN: the ladder extends a direct child with a single FORWARD fetch of [peak+1, peak+1] — no
+// backward probe — so a live follower confirms tip in one round-trip and pins lag at 0-1.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tip_step_extends_a_direct_child_forward_only() {
+    let (chain_a, child) = linear_chain_past_tip();
+    let mut linear = chain_a.clone();
+    linear.extend(child.iter().cloned());
+    let peer = Arc::new(RecordingPeer::new(&linear));
+    let mut chaser = chaser_on_branch_a(&chain_a).await;
+
+    let source: Arc<dyn BlockRangeSource> = peer.clone();
+    let (peak, _deltas) = chaser
+        .follow_tip_step_reporting(&source, A_TIP + 1, A_TIP + 1)
+        .await
+        .expect("the direct child extends via the forward arm");
+    assert_eq!(
+        peak,
+        Some((child[0].header_hash().unwrap(), A_TIP + 1)),
+        "the ladder advanced the peak to the direct child"
+    );
+    assert_eq!(
+        peer.lowest_fetched(),
+        u64::from(A_TIP + 1),
+        "forward-only: the ladder must not fetch below peak+1 for a direct child"
+    );
+}
+
+// PARITY: the ladder still resolves a real reorg — on the forward orphan it falls to the backtrack arm
+// and converges to the heavier branch tip, exactly as the standalone backtrack test does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tip_step_falls_back_to_backtrack_on_a_real_reorg() {
+    let (chain_a, chain_b) = fixture_chains();
+    let mut chaser = chaser_on_branch_a(&chain_a).await;
+    let peer: Arc<dyn BlockRangeSource> = Arc::new(ForkedPeer::new(&chain_a, &chain_b));
+
+    let (peak, _deltas) = chaser
+        .follow_tip_step_reporting(&peer, A_TIP + 1, B_TIP)
+        .await
+        .expect("the ladder recovers the reorg via the backtrack arm");
+    assert_eq!(
+        peak,
+        Some((chain_b.last().unwrap().header_hash().unwrap(), B_TIP)),
+        "a genuine reorg still converges to branch B's tip through the ladder"
+    );
+}

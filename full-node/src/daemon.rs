@@ -3293,6 +3293,32 @@ where
         self.finish_follow_step(peak, &deltas).await
     }
 
+    /// One near-tip follow step via chia's `new_peak` ladder: forward-extend first, backtrack only on
+    /// the unknown-parent orphan ([`Chaser::follow_tip_step_reporting`]). This is the near-tip band's
+    /// entry — a direct child of the peak confirms with a single forward `[from, to]` fetch, so the
+    /// confirmed peak pins the network tip at lag 0-1 instead of paying a backward peak-refetch per
+    /// block. A real reorg at/below the tip still resolves through the same backtrack recovery arm.
+    pub async fn sync_tip_step(
+        &self,
+        source: &Arc<dyn BlockRangeSource>,
+        from: u32,
+        to: u32,
+    ) -> Result<Option<(Bytes32, u32)>, SyncError> {
+        self.follow_inflight_since.store(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs()),
+            Ordering::Relaxed,
+        );
+        let stepped = {
+            let mut chaser = self.chaser.lock().await;
+            chaser.follow_tip_step_reporting(source, from, to).await
+        };
+        self.follow_inflight_since.store(0, Ordering::Relaxed);
+        let (peak, deltas) = stepped?;
+        self.finish_follow_step(peak, &deltas).await
+    }
+
     // Shared tail of every follow-shaped step: per-peak side effects + the synced flag.
     async fn finish_follow_step(
         &self,
@@ -4456,9 +4482,11 @@ async fn tip_follower<S: BlockStore + CoinStore + Send + Sync + 'static>(
         rotation = rotation.wrapping_add(1);
         let source: Arc<dyn BlockRangeSource> =
             Arc::new(OutboundPeerSource::new(peer, REQUEST_TIMEOUT));
-        // chia short_sync_backtrack(peer, local, claimed): fetch + confirm [local+1, claimed], reorg-safe.
+        // chia new_peak ladder: forward-extend [local+1, claimed] first (a direct child of the peak
+        // is the common case and needs one forward fetch, no backward peak-refetch), and fall to
+        // short_sync_backtrack only on the unknown-parent orphan — so the follower pins tip at lag 0-1.
         match node
-            .sync_backtrack(&source, local.saturating_add(1), claimed)
+            .sync_tip_step(&source, local.saturating_add(1), claimed)
             .await
         {
             Ok(Some((hash, height))) => {
