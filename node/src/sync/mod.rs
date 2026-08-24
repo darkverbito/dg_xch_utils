@@ -1395,6 +1395,10 @@ where
         let per_block_staging = self.engine.store().near_tip();
         let mut window_batch: Option<dg_xch_stores::BatchHandle> = None;
         let stage_started = std::time::Instant::now();
+        // Batch the loop's per-block store reads for the whole window (ONE candidate multi-get +
+        // one peak read — chia block_store.get_block_records_by_hash): the staging loop then
+        // awaits no per-block AlreadyHave/candidate point reads (the measured catch-up residue).
+        self.engine.preload_stage_context(blocks).await?;
         for block in blocks {
             let pre = pre_bodies.remove(&block.height());
             let outcome = if per_block_staging {
@@ -1429,6 +1433,10 @@ where
             self.engine.clear_staged_overlay();
             return Err(crate::error::NodeError::from(e).into());
         }
+        // The staging loop is the read context's ONLY consumer: drop it here so no later path
+        // (drain/confirm error, the next per-block follow) can consult this window's snapshot.
+        // The error return above clears it through clear_staged_overlay.
+        self.engine.clear_stage_preload();
         self.metrics.window_stage_micros.store(
             stage_started.elapsed().as_micros() as u64,
             Ordering::Relaxed,

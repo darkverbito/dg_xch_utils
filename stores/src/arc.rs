@@ -140,6 +140,12 @@ impl<T: BlockStore + Send + Sync> BlockStore for Arc<T> {
     async fn get_block_record_by_height(&self, h: u32) -> Result<Option<BlockRecord>, StoreError> {
         (**self).get_block_record_by_height(h).await
     }
+    async fn get_block_records_by_hash(
+        &self,
+        hashes: &[Bytes32],
+    ) -> Result<Vec<BlockRecord>, StoreError> {
+        (**self).get_block_records_by_hash(hashes).await
+    }
     async fn get_peak(&self) -> Result<Option<(Bytes32, u32)>, StoreError> {
         (**self).get_peak().await
     }

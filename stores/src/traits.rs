@@ -507,6 +507,28 @@ pub trait BlockStore {
     /// Returns [`StoreError`] on a query or decode failure.
     async fn get_block_record_by_height(&self, h: u32) -> Result<Option<BlockRecord>, StoreError>;
 
+    /// Multi-get: the records for `hashes` (absent hashes are simply missing from the result; no
+    /// order guarantee) — chia `block_store.get_block_records_by_hash` (block_store.py:328, the
+    /// fork-walk/wallet batch read). The staging preload fetches a whole sync window's candidate
+    /// records through this in one call instead of one point read per staged block. Default:
+    /// per-hash point reads (semantics-exact for every backend); backends override with a
+    /// single-round-trip batch.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] on a query or decode failure.
+    async fn get_block_records_by_hash(
+        &self,
+        hashes: &[Bytes32],
+    ) -> Result<Vec<BlockRecord>, StoreError> {
+        let mut out = Vec::with_capacity(hashes.len());
+        for hh in hashes {
+            if let Some(r) = self.get_block_record(hh).await? {
+                out.push(r);
+            }
+        }
+        Ok(out)
+    }
+
     /// # Errors
     /// Returns [`StoreError::Backend`] on a query failure.
     async fn get_peak(&self) -> Result<Option<(Bytes32, u32)>, StoreError>;

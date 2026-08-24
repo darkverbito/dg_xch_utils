@@ -290,9 +290,27 @@ pub struct ReorgReport {
 // the wallet push is best-effort — dropping the oldest report loses notifications, never state.
 const REORG_REPORT_CAP: usize = 8;
 
+// Bound on the prev-transaction-block cache walk (`prev_tx_context`): non-transaction runs on
+// mainnet are dozens of blocks at the extreme (a sub-slot burst); past this the walk falls back
+// to the store's by-height read rather than hopping unbounded.
+const MAX_PREV_TX_WALK: usize = 512;
+
 // The block-validation engine: binds to the CoinStore/BlockStore traits and the ConsensusPrimitives seam,
 // never a concrete backend. Confirms in weight order; a heavier fork triggers a pointer-flip reorg over the
 // archive. `pending` holds derived deltas for non-confirmed branches, bounded to a reorg horizon.
+// The batched read context for one staging window — see the `Engine::stage_preload` field note.
+struct StagePreload {
+    // Every header hash of the window (the coverage set): a hash NOT in here always reads the
+    // store, so nothing outside the preloaded window can consult stale context.
+    covered: std::collections::HashSet<Bytes32>,
+    // The window hashes' existing records (headers-first candidates / already-persisted rows),
+    // fetched in one `get_block_records_by_hash` call. Absent = no row, definitively (covered set).
+    candidates: HashMap<Bytes32, BlockRecord>,
+    // Confirmed peak height at window start. No in_main_chain row exists above it (`set_peak`
+    // bounds the flips), so a covered block above it is not-confirmed with ZERO reads.
+    peak_height: Option<u32>,
+}
+
 pub struct Engine<S, P> {
     store: S,
     primitives: P,
@@ -313,6 +331,16 @@ pub struct Engine<S, P> {
     // whose coins are not applied to the store until the window confirms). Inserted at stage,
     // drained at confirm; bounded by the window size.
     staged_deltas: HashMap<Bytes32, BlockDelta>,
+    // The window staging READ preload (chia `block_store.get_block_records_by_hash`,
+    // block_store.py:328, batched instead of per-block): candidate records for every window
+    // header hash fetched in ONE call, plus the confirmed peak height at window start. Serves
+    // `prepare_delta`'s AlreadyHave gate and headers-first candidate lookup without one awaited
+    // store round-trip per staged block (the measured catch-up residue: ~2 point reads per block,
+    // serialized across the window). `None` = no preload — every non-window path reads the store
+    // exactly as before. Same lifecycle as the staged overlay: set by
+    // [`Engine::preload_stage_context`], cleared with [`Engine::clear_staged_overlay`] /
+    // [`Engine::clear_stage_preload`].
+    stage_preload: Option<StagePreload>,
     horizon: u32,
     // assume-valid seam: below this height script/sig validation is bypassed but the block is
     // still confirmed and its PoW header still validated. 0 = off (fresh genesis default).
@@ -350,6 +378,7 @@ where
             staged_generators: HashMap::new(),
             seed_generators: HashMap::new(),
             staged_deltas: HashMap::new(),
+            stage_preload: None,
             horizon: crate::cache::BLOCK_RECORD_WINDOW as u32,
             assume_valid: 0,
             full_history: None,
@@ -713,6 +742,47 @@ where
         self.staged_generators.clear();
         self.seed_generators.clear();
         self.staged_deltas.clear();
+        self.stage_preload = None;
+    }
+
+    /// Batch the staging loop's per-block store reads for one window: ONE
+    /// `get_block_records_by_hash` over every window header hash (chia block_store.py:328) + one
+    /// peak read, consulted by `prepare_delta`'s AlreadyHave gate and candidate lookup instead of
+    /// two awaited point reads per staged block. The window loop calls this right before staging;
+    /// the context dies with the staged overlay (error paths) or via [`Self::clear_stage_preload`]
+    /// (the window's end), so no later per-block path can see a stale snapshot. Taking the peak
+    /// snapshot here is sound for the whole window: the engine is `&mut` throughout the loop —
+    /// nothing confirms between the preload and the last staged block.
+    ///
+    /// # Errors
+    /// Returns [`NodeError::Store`] on a store read failure.
+    pub async fn preload_stage_context(&mut self, blocks: &[FullBlock]) -> Result<(), NodeError> {
+        let mut covered = std::collections::HashSet::with_capacity(blocks.len());
+        let mut hashes = Vec::with_capacity(blocks.len());
+        for b in blocks {
+            let hh = b.header_hash()?;
+            covered.insert(hh);
+            hashes.push(hh);
+        }
+        let candidates = self
+            .store
+            .get_block_records_by_hash(&hashes)
+            .await?
+            .into_iter()
+            .map(|r| (r.header_hash, r))
+            .collect();
+        let peak_height = self.store.get_peak().await?.map(|(_, h)| h);
+        self.stage_preload = Some(StagePreload {
+            covered,
+            candidates,
+            peak_height,
+        });
+        Ok(())
+    }
+
+    /// Drop the window staging read context (see [`Self::preload_stage_context`]).
+    pub fn clear_stage_preload(&mut self) {
+        self.stage_preload = None;
     }
 
     /// Wipe only the out-of-span seed cache (leaving in-window staged entries). The daemon calls
@@ -814,10 +884,35 @@ where
         pre: Option<PrecomputedBody>,
     ) -> Result<Option<BlockDelta>, NodeError> {
         let header_hash = block.header_hash()?;
+        // The window read preload covers this block's candidate lookup and AlreadyHave gate
+        // without per-block store reads; a hash outside the preloaded window (or no preload —
+        // every non-window path) reads the store exactly as before.
+        let preloaded_candidate = match &self.stage_preload {
+            Some(p) if p.covered.contains(&header_hash) => {
+                Some(p.candidates.get(&header_hash).cloned())
+            }
+            _ => None,
+        };
         // AlreadyHave means already confirmed on the main chain — not merely that a candidate record exists.
         // The headers-first pass stores candidate records ahead of their bodies (in_main_chain = 0); the body
         // pipeline must still confirm those, so a bare record is not a short-circuit.
-        if self.pending.contains_key(&header_hash) || self.is_confirmed(&header_hash).await? {
+        let confirmed = match (&preloaded_candidate, &self.stage_preload) {
+            // Preloaded, no record row at all: cannot be on the main chain (a confirmed block
+            // always has its record row). Zero reads.
+            (Some(None), _) => false,
+            // Preloaded with a row ABOVE the confirmed peak: no in_main_chain row can exist there
+            // (`set_peak` bounds the flips at the peak). Zero reads — the forward-window case.
+            (Some(Some(r)), Some(p)) if p.peak_height.is_none_or(|ph| r.height > ph) => false,
+            // Preloaded with a row at-or-below the peak (a replayed window): the main-chain row at
+            // that height decides, exactly as the unpreloaded path (one read, replay-only).
+            (Some(Some(r)), _) => self
+                .store
+                .get_block_record_by_height(r.height)
+                .await?
+                .is_some_and(|c| c.header_hash == header_hash),
+            _ => self.is_confirmed(&header_hash).await?,
+        };
+        if self.pending.contains_key(&header_hash) || confirmed {
             return Ok(None);
         }
         let prev = self.prev_record(block).await?;
@@ -846,7 +941,10 @@ where
         // shallow for chia's epoch walk. Without it the anchor confirm would fabricate
         // sub_slot_iters_starting into the record and every descendant would inherit the poisoned value
         // (the required_iters-over-sp-interval rejections just after sub-epoch boundaries).
-        let candidate = self.store.get_block_record(&header_hash).await?;
+        let candidate = match preloaded_candidate {
+            Some(c) => c,
+            None => self.store.get_block_record(&header_hash).await?,
+        };
         let prev_tx = self
             .prev_tx_context(prev.as_ref(), candidate.as_ref())
             .await?;
@@ -1598,14 +1696,39 @@ where
             // the current fork regime instead of collapsing to height 0 (genesis flags).
             None => candidate.map_or((0u32, None), |c| (c.prev_transaction_block_height, None)),
             Some(p) if p.is_transaction_block() => (p.height, p.timestamp),
-            Some(p) => match self
-                .store
-                .get_block_record_by_height(p.prev_transaction_block_height)
-                .await?
-            {
-                Some(r) => (r.height, r.timestamp),
-                None => (p.prev_transaction_block_height, None),
-            },
+            Some(p) => {
+                // Walk parent-ward through the record cache to the previous transaction block
+                // before falling back to the store's main-chain read: in a staging window every
+                // ancestor between two transaction blocks is a cache entry (`finish_stage`
+                // inserts each staged record; confirm and the resume warm insert the recent
+                // confirmed ancestry), so the walk resolves without an awaited store round-trip
+                // per non-tx-parented block — one of the measured per-block reads of the
+                // catch-up staging residue. The walk follows `prev_hash` (branch ancestry —
+                // chia block_body_validation reads the previous transaction block through the
+                // blockchain's own records); any cache gap falls back to the store read below.
+                let target = p.prev_transaction_block_height;
+                let mut walked: Option<(u32, Option<u64>)> = None;
+                let mut cur = self.cache.get(&p.prev_hash);
+                for _ in 0..MAX_PREV_TX_WALK {
+                    match cur {
+                        Some(r) if r.height == target => {
+                            walked = Some((r.height, r.timestamp));
+                            break;
+                        }
+                        Some(r) if r.height > target && r.height > 0 => {
+                            cur = self.cache.get(&r.prev_hash);
+                        }
+                        _ => break,
+                    }
+                }
+                match walked {
+                    Some(ctx) => ctx,
+                    None => match self.store.get_block_record_by_height(target).await? {
+                        Some(r) => (r.height, r.timestamp),
+                        None => (target, None),
+                    },
+                }
+            }
         })
     }
 

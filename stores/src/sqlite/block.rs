@@ -155,6 +155,34 @@ impl BlockStore for SqliteStore {
         }
     }
 
+    async fn get_block_records_by_hash(
+        &self,
+        hashes: &[Bytes32],
+    ) -> Result<Vec<BlockRecord>, StoreError> {
+        if hashes.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.telemetry
+            .record_reads
+            .fetch_add(hashes.len() as u64, Ordering::Relaxed);
+        // Point-get each hash over the primary key on ONE acquired read connection — the
+        // `get_coin_records` shape (see that method's planner note: a dynamic `IN (...)` list
+        // collapses to a full table scan past SQLite's search-vs-scan crossover; a `= ?` PK
+        // lookup can never regress). One pool acquire and one read snapshot for the whole batch.
+        let mut conn = self.read.acquire().await?;
+        let mut out = Vec::with_capacity(hashes.len());
+        for hh in hashes {
+            if let Some(row) = sqlx::query("SELECT record FROM block_record WHERE header_hash = ?")
+                .bind(*hh)
+                .fetch_optional(&mut *conn)
+                .await?
+            {
+                out.push(decode_record(&row.try_get::<Vec<u8>, _>("record")?)?);
+            }
+        }
+        Ok(out)
+    }
+
     async fn get_block_record_by_height(&self, h: u32) -> Result<Option<BlockRecord>, StoreError> {
         self.telemetry.record_reads.fetch_add(1, Ordering::Relaxed);
         let row =
