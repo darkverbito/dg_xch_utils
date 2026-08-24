@@ -5013,6 +5013,10 @@ async fn fetch_scheduler<S: BlockStore + CoinStore + Send + Sync + 'static>(
     let mut last_gen = queue.current_gen();
     let mut peer_sources: Vec<Arc<dyn BlockRangeSource>> = Vec::new();
     let mut source_sig: Vec<(String, u16)> = Vec::new();
+    // Sync-stall diagnostics: track the fetch frontier across ticks to catch the decoupled-prefetch wedge
+    // (the frontier freezes while the confirm cursor / claimed tip keeps moving).
+    let mut last_from = 0u32;
+    let mut frozen_from_ticks = 0u32;
     while node.run.load(Ordering::Relaxed) {
         // Backpressure = the over-fill admission gate: park until a consumer drain frees budget. The tick
         // is a shutdown backstop.
@@ -5038,6 +5042,28 @@ async fn fetch_scheduler<S: BlockStore + CoinStore + Send + Sync + 'static>(
             last_gen = dispatch_gen;
         }
         let from = queue.next_fetch_height();
+        // Sync-stall diagnostics: a fetch frontier frozen across ticks WHILE work remains (from <= claimed)
+        // is the decoupled-prefetch wedge. Name the full reservation-vs-confirm state so it self-
+        // diagnoses which cursor is stuck — the frontier, the generation, or the readahead windows.
+        if from == last_from && from <= claimed {
+            frozen_from_ticks += 1;
+            if frozen_from_ticks == 3 || frozen_from_ticks % 16 == 0 {
+                warn!(
+                    from,
+                    claimed,
+                    frozen_ticks = frozen_from_ticks,
+                    low_water = queue.low_water(),
+                    generation = queue.current_gen(),
+                    resident_windows = queue.len(),
+                    readahead_inflight =
+                        node.sync_metrics.readahead_inflight.load(Ordering::Relaxed),
+                    "fetch frontier frozen while work remains — decoupled prefetch reservation wedge"
+                );
+            }
+        } else {
+            last_from = from;
+            frozen_from_ticks = 0;
+        }
         if from > claimed {
             tokio::time::sleep(DRIVER_TICK).await;
             continue;
@@ -5232,7 +5258,14 @@ async fn sync_driver<S: BlockStore + CoinStore + Send + Sync + 'static>(
             ) {
                 warn!(
                     low_water = queue.low_water(),
-                    claimed, "decoupled sync pipeline stalled; forced queue rebase (stall reclaim)"
+                    next_fetch = queue.next_fetch_height(),
+                    peak = local,
+                    generation = queue.current_gen(),
+                    readahead_inflight =
+                        node.sync_metrics.readahead_inflight.load(Ordering::Relaxed),
+                    resident_windows = queue.len(),
+                    claimed,
+                    "decoupled sync pipeline stalled; forced queue rebase (stall reclaim)"
                 );
             }
         }
