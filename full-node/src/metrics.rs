@@ -326,6 +326,11 @@ pub struct StoreSnapshot {
     pub wal_frames_checkpointed_total: u64,
     pub checkpoint_busy_total: u64,
     pub checkpoint_errors_total: u64,
+    // Read-path point-read counters (block records / coin records): the staging-residue
+    // attribution split — rate(record_reads) against the window cadence names the per-block
+    // read serialization; rate(coin_reads) is the confirmed-set validation volume.
+    pub record_reads: u64,
+    pub coin_reads: u64,
 }
 
 // A point-in-time sample rendered to Prometheus text. Plain numbers so the render is pure + unit-testable.
@@ -355,6 +360,9 @@ pub struct MetricsSnapshot {
     pub inbound_connections: u64,
     pub window_vdf_micros: u64,
     pub window_body_micros: u64,
+    // The sequential staging-loop wall (per-block store reads + record derivation + the window
+    // staging commit) — the previously unmeasured phase between body precompute and VDF drain.
+    pub window_stage_micros: u64,
     pub window_confirm_micros: u64,
     pub window_blocks: u64,
     pub window_tx_blocks: u64,
@@ -444,6 +452,8 @@ impl<S: BlockStore + Send + Sync> MetricsSources<S> {
             wal_frames_checkpointed_total: t.wal_frames_checkpointed_total.load(Ordering::Relaxed),
             checkpoint_busy_total: t.checkpoint_busy_total.load(Ordering::Relaxed),
             checkpoint_errors_total: t.checkpoint_errors_total.load(Ordering::Relaxed),
+            record_reads: t.record_reads.load(Ordering::Relaxed),
+            coin_reads: t.coin_reads.load(Ordering::Relaxed),
         });
         MetricsSnapshot {
             peak_height,
@@ -468,6 +478,7 @@ impl<S: BlockStore + Send + Sync> MetricsSources<S> {
             inbound_connections: self.inbound_peers.read().await.len() as u64,
             window_vdf_micros: m.window_vdf_micros.load(Ordering::Relaxed),
             window_body_micros: m.window_body_micros.load(Ordering::Relaxed),
+            window_stage_micros: m.window_stage_micros.load(Ordering::Relaxed),
             window_confirm_micros: m.window_confirm_micros.load(Ordering::Relaxed),
             window_blocks: m.window_blocks.load(Ordering::Relaxed),
             window_tx_blocks: m.window_tx_blocks.load(Ordering::Relaxed),
@@ -747,6 +758,13 @@ pub fn render_metrics(s: &MetricsSnapshot) -> String {
     );
     g(
         &mut out,
+        "fullnode_window_stage_micros",
+        "Last sync window sequential staging-loop wall time in microseconds (per-block store reads + record derivation + the window staging commit) — the residue phase between body precompute and VDF drain.",
+        "gauge",
+        s.window_stage_micros,
+    );
+    g(
+        &mut out,
         "fullnode_window_confirm_micros",
         "Last sync window batched-confirm wall time in microseconds.",
         "gauge",
@@ -993,6 +1011,20 @@ pub fn render_metrics(s: &MetricsSnapshot) -> String {
             "Checkpoint pragmas that failed outright (WAL not being drained).",
             "counter",
             st.checkpoint_errors_total,
+        );
+        g(
+            &mut out,
+            "fullnode_store_record_reads_total",
+            "Block-record point reads on the read path (each element of a multi-get counts) — rate against the window cadence attributes the staging loop's read serialization.",
+            "counter",
+            st.record_reads,
+        );
+        g(
+            &mut out,
+            "fullnode_store_coin_reads_total",
+            "Coin-record point reads on the read path (each element of a multi-get counts) — the confirmed-set validation read volume.",
+            "counter",
+            st.coin_reads,
         );
     }
     // Block-producer pipeline — the first-block funnel. Read top-to-bottom: the first counter
@@ -1586,6 +1618,8 @@ mod tests {
                 wal_frames_checkpointed_total: 88_000,
                 checkpoint_busy_total: 4,
                 checkpoint_errors_total: 1,
+                record_reads: 65_432,
+                coin_reads: 12_345,
             }),
             blocks_downloaded: 42,
             blocks_confirmed: 40,
@@ -1598,6 +1632,7 @@ mod tests {
             inbound_connections: 37,
             window_vdf_micros: 2_660_000,
             window_body_micros: 120_000,
+            window_stage_micros: 1_900_000,
             window_confirm_micros: 9_500,
             window_blocks: 32,
             window_tx_blocks: 13,
@@ -1650,6 +1685,7 @@ mod tests {
         assert!(text.contains("fullnode_outbound_peers 8"));
         assert!(text.contains("fullnode_window_vdf_micros 2660000"));
         assert!(text.contains("fullnode_window_body_micros 120000"));
+        assert!(text.contains("fullnode_window_stage_micros 1900000"));
         assert!(text.contains("fullnode_window_confirm_micros 9500"));
         assert!(text.contains("fullnode_window_blocks 32"));
         assert!(text.contains("fullnode_window_tx_blocks 13"));
@@ -1713,6 +1749,8 @@ mod tests {
         assert!(text.contains("fullnode_sqlite_wal_frames_checkpointed_total 88000"));
         assert!(text.contains("fullnode_sqlite_checkpoint_busy_total 4"));
         assert!(text.contains("fullnode_sqlite_checkpoint_errors_total 1"));
+        assert!(text.contains("fullnode_store_record_reads_total 65432"));
+        assert!(text.contains("fullnode_store_coin_reads_total 12345"));
         // The phase-labelled commit histogram in full Prometheus histogram shape —
         // cumulative buckets, +Inf, _sum in seconds, _count.
         assert!(text.contains("# TYPE fullnode_store_commit_seconds histogram"));

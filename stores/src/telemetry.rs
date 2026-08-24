@@ -99,6 +99,14 @@ pub struct StoreTelemetry {
     /// Checkpoint pragmas that failed outright (I/O or lock errors). Best-effort retries hide these
     /// from the logs; a climbing counter here means the WAL is not being drained at all.
     pub checkpoint_errors_total: AtomicU64,
+    /// Block-record point reads executed on the read path (`get_block_record`,
+    /// `get_block_record_by_height`, and each element of a multi-get) — the counted witness of
+    /// the sync staging loop's per-block read serialization (the unmeasured catch-up residue).
+    pub record_reads: AtomicU64,
+    /// Coin-record point reads executed on the read path (`get_coin_record` and each element of
+    /// `get_coin_records`) — the confirmed-set validation read volume, counted separately from
+    /// the record reads so the residue attribution can split the two.
+    pub coin_reads: AtomicU64,
 }
 
 impl StoreTelemetry {

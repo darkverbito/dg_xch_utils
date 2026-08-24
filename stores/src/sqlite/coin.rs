@@ -9,6 +9,7 @@ use dg_xch_core::blockchain::sized_bytes::Bytes32;
 #[cfg(feature = "coin-index")]
 use dg_xch_core::protocols::wallet::{CoinState, CoinStateFilters};
 use sqlx::Connection;
+use std::sync::atomic::Ordering;
 
 const INSERT_COIN: &str = "INSERT OR REPLACE INTO coin_record \
     (coin_name, confirmed_index, spent_index, coinbase, puzzle_hash, coin_parent, amount, timestamp) \
@@ -71,6 +72,7 @@ async fn rollback_to_on(
 #[async_trait]
 impl CoinStore for SqliteStore {
     async fn get_coin_record(&self, coin_name: &Bytes32) -> Result<Option<CoinRecord>, StoreError> {
+        self.telemetry.coin_reads.fetch_add(1, Ordering::Relaxed);
         let row = sqlx::query(SELECT_COIN)
             .bind(*coin_name)
             .fetch_optional(&self.read)
@@ -82,6 +84,9 @@ impl CoinStore for SqliteStore {
         if names.is_empty() {
             return Ok(Vec::new());
         }
+        self.telemetry
+            .coin_reads
+            .fetch_add(names.len() as u64, Ordering::Relaxed);
         // Point-get each name over the primary key rather than one `coin_name IN (...)` statement.
         //
         // A dynamic `IN (...)` list defeats the query planner once it grows past SQLite's

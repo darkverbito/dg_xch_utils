@@ -342,6 +342,11 @@ pub struct SyncMetrics {
     // Header-signature all-core drain wall time (the third precompute phase; the header-sig batch).
     pub window_sig_micros: AtomicU64,
     pub window_body_micros: AtomicU64,
+    // Sequential staging-loop wall time (per-block prepare_delta store reads + record derivation +
+    // the window staging commit) — the phase between the parallel body precompute and the VDF
+    // drain that was previously UNMEASURED: live windows showed vdf+body+confirm ≈ 0.78 s against
+    // a ~2.7 s window wall, and this gauge is what attributes that residue.
+    pub window_stage_micros: AtomicU64,
     pub window_confirm_micros: AtomicU64,
     // Last-window composition: total blocks and how many carried a transactions generator.
     // window.body runs ONLY the generator blocks, so charting body time against these two
@@ -1389,6 +1394,7 @@ where
         // lazily at the first block that actually stages.
         let per_block_staging = self.engine.store().near_tip();
         let mut window_batch: Option<dg_xch_stores::BatchHandle> = None;
+        let stage_started = std::time::Instant::now();
         for block in blocks {
             let pre = pre_bodies.remove(&block.height());
             let outcome = if per_block_staging {
@@ -1423,6 +1429,10 @@ where
             self.engine.clear_staged_overlay();
             return Err(crate::error::NodeError::from(e).into());
         }
+        self.metrics.window_stage_micros.store(
+            stage_started.elapsed().as_micros() as u64,
+            Ordering::Relaxed,
+        );
 
         // Silent-fallback ban: a poisoned sink (a panicked staging thread) must FAIL the window, never
         // yield an empty queue -- the old `unwrap_or_default()` made `queue.is_empty()` true and every

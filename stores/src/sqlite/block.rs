@@ -144,6 +144,7 @@ async fn set_peak_on(
 #[async_trait]
 impl BlockStore for SqliteStore {
     async fn get_block_record(&self, hh: &Bytes32) -> Result<Option<BlockRecord>, StoreError> {
+        self.telemetry.record_reads.fetch_add(1, Ordering::Relaxed);
         let row = sqlx::query("SELECT record FROM block_record WHERE header_hash = ?")
             .bind(*hh)
             .fetch_optional(&self.read)
@@ -155,6 +156,7 @@ impl BlockStore for SqliteStore {
     }
 
     async fn get_block_record_by_height(&self, h: u32) -> Result<Option<BlockRecord>, StoreError> {
+        self.telemetry.record_reads.fetch_add(1, Ordering::Relaxed);
         let row =
             sqlx::query("SELECT record FROM block_record WHERE height = ? AND in_main_chain = 1")
                 .bind(i64::from(h))
