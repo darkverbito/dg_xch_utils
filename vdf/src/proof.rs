@@ -375,7 +375,7 @@ fn prove_with_discriminant(
     let nl = nucomp_bound(discriminant);
 
     for i in 0..num_iterations {
-        if i % kl == 0 {
+        if i.is_multiple_of(kl) {
             intermediates.push(y.clone());
         }
         y = y.square_with(discriminant, &nl)?;

@@ -193,7 +193,7 @@ fn is_probable_prime_native(n: &BigUint) -> bool {
             .copied()
             .unwrap_or(0);
         for &p in &SMALL_PRIMES[start..i] {
-            if rem % p == 0 {
+            if rem.is_multiple_of(p) {
                 return *n == BigUint::from(p);
             }
         }

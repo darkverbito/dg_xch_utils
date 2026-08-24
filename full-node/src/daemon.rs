@@ -5047,7 +5047,7 @@ async fn fetch_scheduler<S: BlockStore + CoinStore + Send + Sync + 'static>(
         // diagnoses which cursor is stuck — the frontier, the generation, or the readahead windows.
         if from == last_from && from <= claimed {
             frozen_from_ticks += 1;
-            if frozen_from_ticks == 3 || frozen_from_ticks % 16 == 0 {
+            if frozen_from_ticks == 3 || frozen_from_ticks.is_multiple_of(16) {
                 warn!(
                     from,
                     claimed,

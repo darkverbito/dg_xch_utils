@@ -146,7 +146,7 @@ pub async fn phase1(
                     let mut b_stripe_pregame_pair = false;
                     let mut b_stripe_start_pair = false;
                     let mut need_new_bucket = false;
-                    let first_thread = i % num_threads == 0;
+                    let first_thread = i.is_multiple_of(num_threads);
                     let last_thread = i % num_threads == num_threads - 1;
 
                     let mut l_position_base = 0u64;

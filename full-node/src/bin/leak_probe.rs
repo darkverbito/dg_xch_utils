@@ -63,7 +63,7 @@ async fn main() {
     for i in 1..=ITERS {
         let prog = generator.to_program_backrefs().expect("parse");
         drop(prog);
-        if i % 1000 == 0 {
+        if i.is_multiple_of(1000) {
             let now = allocated();
             let delta = now as i64 - base as i64;
             println!(
@@ -104,7 +104,7 @@ async fn main() {
     for i in 1..=ITERS {
         let r = execute_block_generator_result(&input);
         drop(r);
-        if i % 1000 == 0 {
+        if i.is_multiple_of(1000) {
             let now = allocated();
             let delta = now as i64 - base_b as i64;
             println!(
