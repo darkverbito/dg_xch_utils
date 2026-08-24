@@ -9,7 +9,7 @@ parse_program_hex!(
 pub fn test_hashes() {
     assert_eq!(
         dg_xch_core::blockchain::sized_bytes::Bytes32::const_hex(
-            "72dec062874cd4d3aab892a0906688a1ae412b0109982e1797a170add88bdcdc"
+            "e889b0009716ec3ab166338a3785533b9c2c041f1c2e2346afe55bb1639c2904"
         ),
         P2_SINGLETON_FLASHLOAN_TREE_HASH
     );
