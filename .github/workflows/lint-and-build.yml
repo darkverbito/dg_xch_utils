@@ -39,7 +39,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # Windows MSVC is unsupported: the VDF crate depends on gmp-mpfr-sys for
+        # consensus-correct discriminant primality (chiavdf's Baillie-PSW — a different
+        # primality test would select a different prime and fork consensus), and
+        # gmp-mpfr-sys refuses to link on the MSVC target. The node targets Linux
+        # (server + aarch64 Raspberry Pi) and macOS.
+        os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout repository
