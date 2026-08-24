@@ -331,6 +331,8 @@ pub struct StoreSnapshot {
     // read serialization; rate(coin_reads) is the confirmed-set validation volume.
     pub record_reads: u64,
     pub coin_reads: u64,
+    pub read_pool_idle: u64,
+    pub read_pool_size: u64,
 }
 
 // A point-in-time sample rendered to Prometheus text. Plain numbers so the render is pure + unit-testable.
@@ -454,6 +456,8 @@ impl<S: BlockStore + Send + Sync> MetricsSources<S> {
             checkpoint_errors_total: t.checkpoint_errors_total.load(Ordering::Relaxed),
             record_reads: t.record_reads.load(Ordering::Relaxed),
             coin_reads: t.coin_reads.load(Ordering::Relaxed),
+            read_pool_idle: t.read_pool_idle.load(Ordering::Relaxed),
+            read_pool_size: t.read_pool_size.load(Ordering::Relaxed),
         });
         MetricsSnapshot {
             peak_height,
@@ -1634,6 +1638,8 @@ mod tests {
                 checkpoint_errors_total: 1,
                 record_reads: 65_432,
                 coin_reads: 12_345,
+                read_pool_idle: 3,
+                read_pool_size: 4,
             }),
             blocks_downloaded: 42,
             blocks_confirmed: 40,
