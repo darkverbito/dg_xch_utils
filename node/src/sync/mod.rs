@@ -1381,9 +1381,24 @@ where
         // that block's deferred work, so the batch attributes the failing height precisely.
         let mut staged: Vec<(BlockDelta, usize, usize)> = Vec::new();
         let mut stage_err: Option<SyncError> = None;
+        // Phase-aware STAGING commit granularity, mirroring `confirm_staged_batch`'s model on the
+        // confirm side: near the tip each staged block commits its own archive transaction
+        // (per-block durability is correct AT tip); during bulk catch-up the whole window's archive
+        // rows accumulate into ONE transaction, committed once below — on the SQLite backend that
+        // collapses 32 sequential writer-fsync round-trips per window into one. The batch opens
+        // lazily at the first block that actually stages.
+        let per_block_staging = self.engine.store().near_tip();
+        let mut window_batch: Option<dg_xch_stores::BatchHandle> = None;
         for block in blocks {
             let pre = pre_bodies.remove(&block.height());
-            match self.engine.stage_block_pre(block, &sink, pre).await {
+            let outcome = if per_block_staging {
+                self.engine.stage_block_pre(block, &sink, pre).await
+            } else {
+                self.engine
+                    .stage_block_pre_in(block, &sink, pre, &mut window_batch)
+                    .await
+            };
+            match outcome {
                 Ok(Some(delta)) => {
                     let vdf_mark = sink.vdf.lock().map(|q| q.len()).unwrap_or(0);
                     let sig_mark = sink.sig.lock().map(|q| q.len()).unwrap_or(0);
@@ -1395,6 +1410,18 @@ where
                     break;
                 }
             }
+        }
+        // The window staging commit: one writer transaction for every staged archive row. It must
+        // land HERE — before the drain and before confirm's own `begin()` (the open batch holds
+        // the single sqlite writer connection), and even when a mid-window stage error broke the
+        // loop, because the staged prefix still confirms below and its confirm (`set_peak`) walks
+        // these archive rows. A commit failure fails the window; the unconfirmed blocks re-stage
+        // next tick, so the overlay entries must not linger (same posture as the drain failure).
+        if let Some(b) = window_batch.take()
+            && let Err(e) = self.engine.store().commit(b).await
+        {
+            self.engine.clear_staged_overlay();
+            return Err(crate::error::NodeError::from(e).into());
         }
 
         // Silent-fallback ban: a poisoned sink (a panicked staging thread) must FAIL the window, never

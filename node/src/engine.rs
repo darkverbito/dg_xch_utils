@@ -513,17 +513,65 @@ where
             };
             let batch = self.persist_archive(block, &delta).await?;
             self.store.commit(batch).await?;
-            self.cache.insert(delta.record.clone());
-            if let Some(g) = &block.transactions_generator {
-                self.staged_generators.insert(delta.height, g.clone());
-            }
-            // Fork-view overlay: the NEXT window blocks validate their removals against this
-            // block's coin delta before it is applied to the store (see `staged_deltas`).
-            self.staged_deltas.insert(delta.header_hash, delta.clone());
-            Ok(Some(delta))
+            Ok(Some(self.finish_stage(block, delta)))
         }
         .instrument(span)
         .await
+    }
+
+    /// [`Engine::stage_block_pre`] with the archive writes threaded into a caller-owned WINDOW
+    /// staging batch instead of a per-block commit — the CATCH-UP half of the phase-aware commit
+    /// granularity [`Engine::confirm_staged_batch`] already applies on the confirm side (batch
+    /// during bulk sync, one transaction per block near the tip; chia's shape). On the SQLite
+    /// backend every commit is an fsync serialized on the single writer connection, so per-block
+    /// staging commits cost a full write round-trip per block of pure dead time between the
+    /// parallel body precompute and the confirm. The batch opens lazily at the first block that
+    /// actually stages (an all-`AlreadyHave` window opens no transaction); the caller commits it
+    /// once for the window — BEFORE any other `begin()` (the open batch holds the single writer),
+    /// and even on a mid-window stage error, because the already-staged prefix still confirms
+    /// (`set_peak` walks the archive rows this batch carries). A crash before the window commit
+    /// loses only candidate archive rows — the durable peak is untouched and the resume path
+    /// re-fetches the window, exactly as it re-fetches a window whose confirm batch was lost.
+    ///
+    /// # Errors
+    /// As [`Engine::stage_block_pre`].
+    pub async fn stage_block_pre_in(
+        &mut self,
+        block: &FullBlock,
+        vdf_sink: &crate::header::HeaderSink,
+        pre: Option<PrecomputedBody>,
+        batch: &mut Option<BatchHandle>,
+    ) -> Result<Option<BlockDelta>, NodeError> {
+        // Await-safe instrumentation: see `stage_block_pre`.
+        let span = info_span!("block.stage", height = block.height());
+        async move {
+            let Some(delta) = self.prepare_delta(block, Some(vdf_sink), pre).await? else {
+                return Ok(None);
+            };
+            if batch.is_none() {
+                *batch = Some(self.store.begin().await?);
+            }
+            let b = batch.as_mut().expect("window staging batch just opened");
+            self.persist_archive_in(block, &delta, b).await?;
+            Ok(Some(self.finish_stage(block, delta)))
+        }
+        .instrument(span)
+        .await
+    }
+
+    // The persistence-independent tail of staging: the walk-cache/overlay inserts that let the
+    // NEXT block of the window validate against this one before anything is committed — which is
+    // exactly why the window staging batch can stay open across the whole loop: no staging read
+    // goes back to the store for in-window state.
+    fn finish_stage(&mut self, block: &FullBlock, delta: BlockDelta) -> BlockDelta {
+        self.cache.insert(delta.record.clone());
+        if let Some(g) = &block.transactions_generator {
+            self.staged_generators.insert(delta.height, g.clone());
+        }
+        // Fork-view overlay: the NEXT window blocks validate their removals against this
+        // block's coin delta before it is applied to the store (see `staged_deltas`).
+        self.staged_deltas.insert(delta.header_hash, delta.clone());
+        delta
     }
 
     /// Confirm a whole staged window with PHASE-AWARE commit granularity, keyed on the store
@@ -777,9 +825,18 @@ where
         // each referenced height's generator is fetched from the confirmed chain, in ref-list order — empty
         // for a block with no ref-list. Body validation stays sync (derive_delta), so resolution — the only
         // async, store-touching step — happens here and the resolved refs are threaded down.
-        let generator_refs = self
-            .resolve_generator_refs(&block.transactions_generator_ref_list)
-            .await?;
+        // ONLY for the inline body run: when the window pipeline hands a `PrecomputedBody`, the
+        // precompute already resolved these refs and `run_body_expensive` consumed them; the
+        // precomputed branch of `validate_body` never reads them again (the `generator_refs_root`
+        // identity keys on the raw ref-list HEIGHTS, not the resolved generators). Re-resolving
+        // here would re-read every referenced generator body from the store per staged block —
+        // dead sequential reads on the sync hot path.
+        let generator_refs = if pre.is_some() {
+            Vec::new()
+        } else {
+            self.resolve_generator_refs(&block.transactions_generator_ref_list)
+                .await?
+        };
         // Previous-TRANSACTION-block context for the time-lock conditions: chia validates
         // ASSERT_HEIGHT/SECONDS against the previous transaction block's height/timestamp
         // (chia block_body_validation), never this block's own.
@@ -916,33 +973,46 @@ where
 
     // Persist the archive (record + cold body + status) into an OPEN batch; the record enters as a
     // candidate (in_main_chain flips only under set_peak). The single-block path folds confirm into
-    // the same batch (one commit/fsync per block); the staged path commits it immediately.
+    // the same batch (one commit/fsync per block); the per-block staged path commits it immediately;
+    // the catch-up window staging path threads one shared batch across the whole window.
     async fn persist_archive(
         &self,
         block: &FullBlock,
         delta: &BlockDelta,
     ) -> Result<BatchHandle, NodeError> {
+        let mut batch = self.store.begin().await?;
+        self.persist_archive_in(block, delta, &mut batch).await?;
+        Ok(batch)
+    }
+
+    // The batch-threading half of [`Self::persist_archive`]: the archive writes into a caller-owned
+    // open batch. The caller owns the commit — per block, or once per staged window.
+    async fn persist_archive_in(
+        &self,
+        block: &FullBlock,
+        delta: &BlockDelta,
+        batch: &mut BatchHandle,
+    ) -> Result<(), NodeError> {
         // Durable per-block status: Bypass below the assume-valid milestone, Validated otherwise.
         let status = if block.height() < self.assume_valid {
             BlockStatus::Bypass
         } else {
             BlockStatus::Validated
         };
-        let mut batch = self.store.begin().await?;
         async {
             self.store
-                .add_block_records_in(&mut batch, std::slice::from_ref(&delta.record))
+                .add_block_records_in(&mut *batch, std::slice::from_ref(&delta.record))
                 .await?;
             self.store
-                .append_many(&mut batch, std::slice::from_ref(block))
+                .append_many(&mut *batch, std::slice::from_ref(block))
                 .await?;
             self.store
-                .set_status_in(&mut batch, &delta.header_hash, status)
+                .set_status_in(&mut *batch, &delta.header_hash, status)
                 .await
         }
         .instrument(info_span!("store.persist", height = block.height()))
         .await?;
-        Ok(batch)
+        Ok(())
     }
 
     /// Persist a pre-derived, already-validated delta and run fork choice. Used by the confirm/reorg replay
