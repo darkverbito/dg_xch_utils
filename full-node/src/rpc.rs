@@ -1437,7 +1437,9 @@ const fn one() -> i64 {
 
 #[derive(Deserialize)]
 struct AutoFarmReq {
-    should_auto_farm: bool,
+    // chia's simulator RPC field is `auto_farm`; accept the older name too.
+    #[serde(rename = "auto_farm", alias = "should_auto_farm")]
+    auto_farm: bool,
 }
 
 /// The block-production control a simulator attaches to the RPC so the standard node RPC surface can
@@ -1652,9 +1654,14 @@ where
     }
 
     // Dispatch one request. `Ok(None)` = unknown endpoint (HTTP 404); `Ok(Some(map))` = the
-    // response object BEFORE the success flag is stamped; `Err` = the chia error envelope.
+    // response object BEFORE the success flag is stamped; `Err` = the chia error envelope. Public so
+    // the plain-HTTP control facade can serve the same RPC surface as the mTLS server.
     #[allow(clippy::too_many_lines)]
-    async fn route(&self, path: &str, body: &[u8]) -> Result<Option<Map<String, Value>>, RpcError> {
+    pub async fn route(
+        &self,
+        path: &str,
+        body: &[u8],
+    ) -> Result<Option<Map<String, Value>>, RpcError> {
         let out = match path {
             "/get_blockchain_state" => {
                 let summary = self.rpc.get_blockchain_state().await?;
@@ -1971,7 +1978,7 @@ where
                 let req: AutoFarmReq = parse(body)?;
                 obj_with(
                     "auto_farm_enabled",
-                    Value::from(sim.set_auto_farming(req.should_auto_farm)),
+                    Value::from(sim.set_auto_farming(req.auto_farm)),
                 )
             }
             "/get_auto_farming" => {

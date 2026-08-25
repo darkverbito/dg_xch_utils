@@ -8,7 +8,7 @@ use crate::server::{SharedChain, farm_reward_blocks};
 use dg_xch_keys::decode_puzzle_hash;
 use dg_xch_stores::SqliteStore;
 use dg_xch_stores::traits::BlockStore;
-use full_node::Node;
+use full_node::{Node, NodeRpcHandler};
 use http_body_util::{BodyExt, Full};
 use hyper::body::{Bytes, Incoming};
 use hyper::server::conn::http1;
@@ -30,6 +30,9 @@ pub(crate) fn spawn(
 ) -> Arc<AtomicBool> {
     let run = Arc::new(AtomicBool::new(true));
     let run_c = run.clone();
+    // The node's own RPC dispatch, so the plain-HTTP facade serves the full chia RPC surface
+    // (coin records, push_tx, mempool, auto-farming) the same way the mTLS server does.
+    let handler = Arc::new(NodeRpcHandler::new(node.rpc.clone()));
     tokio::spawn(async move {
         let listener = match TcpListener::bind(addr).await {
             Ok(l) => l,
@@ -44,8 +47,11 @@ pub(crate) fn spawn(
             };
             let chain = chain.clone();
             let node = node.clone();
+            let handler = handler.clone();
             tokio::spawn(async move {
-                let service = service_fn(move |req| handle(req, chain.clone(), node.clone()));
+                let service = service_fn(move |req| {
+                    handle(req, chain.clone(), node.clone(), handler.clone())
+                });
                 let _ = http1::Builder::new()
                     .serve_connection(TokioIo::new(stream), service)
                     .await;
@@ -59,6 +65,7 @@ async fn handle(
     req: Request<Incoming>,
     chain: SharedChain,
     node: Arc<Node<SqliteStore>>,
+    handler: Arc<NodeRpcHandler<SqliteStore>>,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
     let path = req.uri().path().to_string();
     let body = req
@@ -72,14 +79,28 @@ async fn handle(
             Ok(v) => (StatusCode::OK, v),
             Err(e) => (StatusCode::OK, json!({ "success": false, "error": e })),
         },
-        "/get_blockchain_state" | "/height" => match blockchain_state(&node).await {
+        // A minimal peak height for the wallet harness; the full chia `get_blockchain_state`
+        // (with header_hash and the rest) is served by the node RPC below.
+        "/height" => match blockchain_state(&node).await {
             Ok(v) => (StatusCode::OK, v),
             Err(e) => (StatusCode::OK, json!({ "success": false, "error": e })),
         },
-        _ => (
-            StatusCode::NOT_FOUND,
-            json!({ "success": false, "error": format!("unknown endpoint {path}") }),
-        ),
+        // Everything else the node's RPC already answers: reuse its dispatch and the chia envelope.
+        _ => match handler.route(&path, &body).await {
+            Ok(Some(mut map)) => {
+                map.entry("success".to_string())
+                    .or_insert(Value::from(true));
+                (StatusCode::OK, Value::Object(map))
+            }
+            Ok(None) => (
+                StatusCode::NOT_FOUND,
+                json!({ "success": false, "error": format!("unknown endpoint {path}") }),
+            ),
+            Err(e) => (
+                StatusCode::OK,
+                json!({ "success": false, "error": e.to_string(), "traceback": Value::Null, "structuredError": Value::Null }),
+            ),
+        },
     };
     let mut response = Response::new(Full::new(Bytes::from(payload.to_string())));
     *response.status_mut() = status;
