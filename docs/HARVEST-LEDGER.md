@@ -227,7 +227,7 @@ path is: `full-node/tests/puzzle_state.rs::mismatched_previous_header_hash_rejec
 | `test_subscriptions.py` | 15 | COVERED 10, PARTIAL 5 | `full-node/tests/wallet.rs` (caps incl. chia's exact untrusted max, trusted tier, newly-added reporting, remove subset/all), `puzzle_state.rs::remove_subscription_requests_are_answered`. PARTIAL: overlapping coin/ph subscription peer-maps and `peers_for_spent/created_coin` granularity. |
 | `test_sync_target_peak_gather.py` | 2 | COVERED 1, PARTIAL 1 | weight-ordered per-peer verified peak selection (`full-node/src/peak_book.rs`, 8 units — DIVERGENCE-28). PARTIAL: skip-on-deserialize-failure without banning arm. |
 | `test_transactions.py` | 3 | N/A 3 | multi-node wallet-to-wallet propagation simulator; the node-side propagation contract is `full-node/tests/tx_gossip.rs` |
-| `test_tx_processing_queue.py` | 8 | COVERED 6, PARTIAL 2 | `full-node/src/tx_queue.rs` (6 units: local-first, per-peer lanes, full-queue, cleanup, fee-per-cost order — DIVERGENCE-37 residual). PARTIAL: the round-robin deficit fairness + prioritization-fallback arms. |
+| `test_tx_processing_queue.py` | 8 | COVERED 8 | `full-node/src/tx_queue.rs` (9 units — DIVERGENCE-37 residual): local-first, per-peer lanes, full-queue, cleanup, per-lane fee-per-cost order, and (Q3 batch) the deficit-round-robin arms — chia's own DRR vector ported (`chia_deficit_round_robin_vector_orders_by_affordability`, incl. the no-cost-info `max_tx_clvm_cost` fallback) plus the cross-peer interleave pin. |
 
 `dos/` contains no tests (config only).
 
