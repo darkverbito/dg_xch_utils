@@ -10,8 +10,10 @@ use crate::blockchain::spend_bundle_conditions::SpendBundleConditions;
 use crate::blockchain::transactions_info::TransactionsInfo;
 use crate::blockchain::unsized_bytes::UnsizedBytes;
 use crate::blockchain::utils::{pkm_pairs_for_conditions, verify_agg_sig_unsafe_message};
+use crate::clvm::arena::{Arena, NodeKind, NodePtr};
 use crate::clvm::parser::{sexp_from_bytes, sexp_to_bytes};
 use crate::clvm::program::{Program, SerializedProgram};
+use crate::clvm::runtime::ClvmRuntime;
 use crate::clvm::sexp::{AtomBuf, PairBuf, SExp};
 use crate::clvm::tree_hash_cache::TreeHashCache;
 use crate::clvm::utils::{
@@ -417,6 +419,10 @@ fn map_condition_error(error: ClvmError) -> ChiaError {
         ClvmError::CostExceeded(_, _) => ChiaError::BlockCostExceedsMax,
         ClvmError::DoubleSpend(_) => ChiaError::DoubleSpend,
         ClvmError::DuplicateCreate(_) => ChiaError::DuplicateOutput,
+        // A condition that parsed but is invalid keeps chia's exact code (e.g. a huge or
+        // negative RESERVE_FEE → RESERVE_FEE_CONDITION_FAILED), matching the failure chia
+        // raises straight out of `parse_args`.
+        ClvmError::ConditionFailure(err) => err,
         _ => ChiaError::InvalidBlockSolution,
     }
 }
@@ -1494,18 +1500,28 @@ fn conditions_from_generator_output(
         let cost_left = max_cost
             .checked_sub(conds.cost)
             .ok_or(ClvmError::CostExceeded(max_cost, conds.cost))?;
-        let (puzzle_cost, puzzle_output) = puzzle_reveal.run(cost_left, clvm_flags, &solution)?;
+        // Run the puzzle and stream its conditions straight from the arena. An adversarial puzzle
+        // reveal expands a tiny program into a huge/deep condition output; `run` would `export` it
+        // into an owned tree first — deep-copying a shared ~268 MB integer atom once per condition
+        // (OOM) and building a spine whose `Drop` recurses (a 600,000-deep list overflows the
+        // native stack). `run_in_arena` leaves the result in the flat arena so
+        // `parse_and_apply_spend_from_arena` can walk it iteratively, cost-bounded, and bail early —
+        // mirroring chia_rs `run_block_generator` + `parse_spends` (chia-consensus 0.42.1).
+        let mut runtime = ClvmRuntime::new(cost_left, clvm_flags);
+        let (puzzle_cost, output_ptr) =
+            runtime.run_in_arena(puzzle_reveal.sexp(), solution.sexp())?;
         conds.cost = conds
             .cost
             .checked_add(puzzle_cost)
             .ok_or_else(|| ClvmError::Overflow("puzzle execution cost overflow".to_string()))?;
-        let conditions = puzzle_output.sexp().try_into()?;
-        let mut spend = spend_from_conditions(
+        let mut spend = parse_and_apply_spend_from_arena(
+            runtime.arena(),
+            output_ptr,
             coin,
-            conditions,
             &mut conds,
             constants,
             &mut conditions_cost,
+            max_cost,
             false,
         )?;
         spend.execution_cost = puzzle_cost;
@@ -1665,18 +1681,10 @@ fn clear_eligibility_for_condition(flags: &mut u32, condition: &ConditionWithArg
     }
 }
 
-fn spend_from_conditions(
-    coin: Coin,
-    conditions: Vec<ConditionWithArgs>,
-    conds: &mut SpendBundleConditions,
-    constants: &ConsensusConstants,
-    extra_cost: &mut u64,
-    // Compute chia_rs MempoolVisitor eligibility flags (the mempool conditions run); consensus
-    // runs pass false and leave `flags` 0 (chia_rs EmptyVisitor).
-    mempool: bool,
-) -> Result<Spend, ClvmError> {
-    let condition_cost_start = *extra_cost;
-    let mut spend = Spend {
+// The zero-valued [`Spend`] for `coin`, matching chia_rs `MempoolVisitor::new_spend` (a consensus
+// run's `EmptyVisitor` leaves `flags` 0). Shared by the collect-then-iterate and streaming forms.
+fn new_spend(coin: Coin, mempool: bool) -> Spend {
+    Spend {
         parent_id: coin.parent_coin_info,
         coin_amount: coin.amount,
         puzzle_hash: coin.puzzle_hash,
@@ -1705,8 +1713,7 @@ fn spend_from_conditions(
         sent_messages: Vec::new(),
         received_messages: Vec::new(),
         // chia_rs MempoolVisitor::new_spend: assume dedup-eligible; fast-forward candidates must
-        // be singletons, which use odd amounts. Cleared per condition below; consensus runs
-        // (EmptyVisitor) leave flags 0.
+        // be singletons, which use odd amounts. Cleared per condition; consensus runs leave 0.
         flags: if mempool {
             ELIGIBLE_FOR_DEDUP
                 | if coin.amount & 1 == 1 {
@@ -1719,228 +1726,657 @@ fn spend_from_conditions(
         },
         condition_cost: 0,
         execution_cost: 0,
+    }
+}
+
+// The maximum byte length any NON-integer condition argument may have before it is refused —
+// chia_rs `condition_sanitizers.rs::sanitize_announce_msg` (0.42.1): `> 1024` → error. Public keys
+// (48) and hashes (32) sit well under it; integer arguments (heights, timestamps, amounts, fees)
+// are classified by `sanitize_uint_from_arena` and never reach this path. Refusing to copy past
+// this stops an adversarial generator from materialising a multi-megabyte atom per condition.
+const MAX_CONDITION_ATOM: usize = 1024;
+
+// The maximum number of arena nodes a single condition subtree may span before the generic path
+// refuses it. A well-formed condition is a handful of nodes; this only fires on an adversarial
+// condition (e.g. a CREATE_COIN carrying a million memo cells) and stops it from being exported
+// into an owned `SExp` whose `Drop` would recurse.
+const MAX_CONDITION_NODES: usize = 1 << 16;
+
+// Port of chia_rs `sanitize_int.rs::sanitize_uint` (chia-consensus 0.42.1) reading straight from
+// the arena: it inspects only `buf[0]`, `buf[1]` and `buf.len()`, so a multi-megabyte integer atom
+// is classified WITHOUT being copied. `max_size` is 4 for the u32 slots (heights) and 8 for the u64
+// slots (timestamps, amounts, fees).
+enum SanitizedUint {
+    Ok(u64),
+    PositiveOverflow,
+    NegativeOverflow,
+    // A non-canonical leading-zero-padded positive; chia returns `Err(code)` for this shape.
+    LeadingZero,
+}
+
+fn sanitize_uint_from_arena(
+    arena: &Arena,
+    node: NodePtr,
+    max_size: usize,
+) -> Result<SanitizedUint, ClvmError> {
+    let atom = arena
+        .atom(node)
+        .ok_or_else(|| ClvmError::ExpectedAtomGotPair(arena.display(node)))?;
+    let buf = atom.as_ref();
+    if buf.is_empty() {
+        return Ok(SanitizedUint::Ok(0));
+    }
+    // top bit set ⇒ a negative two's-complement integer
+    if (buf[0] & 0x80) != 0 {
+        return Ok(SanitizedUint::NegativeOverflow);
+    }
+    // a leading zero is only allowed to keep a value positive; any other leading zero is invalid
+    if buf == [0_u8] || (buf.len() > 1 && buf[0] == 0 && (buf[1] & 0x80) == 0) {
+        return Ok(SanitizedUint::LeadingZero);
+    }
+    let size_limit = if buf[0] == 0 { max_size + 1 } else { max_size };
+    if buf.len() > size_limit {
+        return Ok(SanitizedUint::PositiveOverflow);
+    }
+    // buf.len() <= 9 here; fold big-endian into u64 (a single leading zero contributes nothing)
+    let mut value: u64 = 0;
+    for &b in buf {
+        value = (value << 8) | u64::from(b);
+    }
+    Ok(SanitizedUint::Ok(value))
+}
+
+// chia keeps only the STRICTEST height/seconds bound; a huge value is unreachable and must fail,
+// a negative one is a constraint about the past and is a no-op. chia raises the assertion's error
+// at parse for the overflow case; we saturate to the max so the SAME error surfaces from
+// `validate_block_conditions` (`height_absolute > block_height`), which is where the boundary suite
+// and `duplicate_large_integer*` vectors expect it — keeping the parse infallible so a heavy valid
+// block's remaining conditions still parse. A non-canonical leading-zero pad is treated as the
+// overflow chia rejects it as. Returns `None` for chia's `Skip` (a negative absolute/relative
+// assertion is dropped).
+fn saturating_assert_u64(verdict: SanitizedUint) -> Option<u64> {
+    match verdict {
+        SanitizedUint::Ok(value) => Some(value),
+        SanitizedUint::NegativeOverflow => None,
+        SanitizedUint::PositiveOverflow | SanitizedUint::LeadingZero => Some(u64::MAX),
+    }
+}
+
+fn saturating_assert_u32(verdict: SanitizedUint) -> Option<u32> {
+    saturating_assert_u64(verdict).map(|value| u32::try_from(value).unwrap_or(u32::MAX))
+}
+
+// Parse ONE condition straight out of the run arena, with bounded reads — the streaming, DoS-safe
+// counterpart to `puzzle_output.sexp().try_into::<Vec<ConditionWithArgs>>()`, which copies every
+// atom and materialises every condition up front.
+//
+// `Ok(None)` is chia's no-op `Skip` (a negative height/seconds assertion); `Err` is a parse-time
+// failure (a huge/negative RESERVE_FEE, an oversized non-integer atom); `Ok(Some(_))` otherwise.
+// The integer-argument opcodes an adversarial `concat`/`substr` ladder targets are classified via
+// `sanitize_uint_from_arena` WITHOUT copying the atom; every other opcode is re-materialised as a
+// bounded single-condition `SExp` and decoded by the existing `ConditionWithArgs::try_from`, so no
+// per-opcode parsing is duplicated (chia_rs `conditions.rs::parse_args`, 0.42.1).
+fn arena_condition(
+    arena: &Arena,
+    cond_ptr: NodePtr,
+) -> Result<Option<ConditionWithArgs>, ClvmError> {
+    // A condition is a list `(opcode arg ...)`; a bare atom in the condition list is malformed.
+    let Some((op_node, args)) = arena.next(cond_ptr) else {
+        return Err(ClvmError::InvalidSpendbundle(
+            "condition is not a list".to_string(),
+        ));
     };
+    // Only a 1-byte opcode is dispatched specially; anything else falls through to the generic path,
+    // which reproduces the existing decoder's handling (including its error) exactly.
+    if let Some(atom) = arena.atom(op_node)
+        && atom.as_ref().len() == 1
+    {
+        let opcode = ConditionOpcode::from(atom.as_ref()[0]);
+        match opcode {
+            // Integer-argument opcodes: classified with `sanitize_uint` (bounded reads, no copy).
+            ConditionOpcode::AssertHeightAbsolute
+            | ConditionOpcode::AssertHeightRelative
+            | ConditionOpcode::AssertSecondsAbsolute
+            | ConditionOpcode::AssertSecondsRelative
+            | ConditionOpcode::AssertBeforeHeightAbsolute
+            | ConditionOpcode::AssertBeforeHeightRelative
+            | ConditionOpcode::AssertBeforeSecondsAbsolute
+            | ConditionOpcode::AssertBeforeSecondsRelative
+            | ConditionOpcode::ReserveFee => {
+                return arena_uint_condition(arena, opcode, args);
+            }
+            // CREATE_COIN carries an optional memo list; chia (conditions.rs:411) reads only the
+            // first memo and only uses it (as a hint) when it is <= 32 bytes, IGNORING a larger one
+            // without copying it — so a 250 KiB memo is a valid coin, not a rejected atom. Handled
+            // explicitly to read the memo by LENGTH (the generic path's atom-size guard would
+            // wrongly reject the large memo, and exporting it would copy it).
+            ConditionOpcode::CreateCoin => return arena_create_coin(arena, args),
+            // REMARK ignores all of its arguments (chia `Condition::Skip`, all args unread) and an
+            // unknown opcode is a no-op in consensus mode — neither reads its args, so an oversized
+            // argument atom is harmless. Return the no-op condition WITHOUT touching the args (the
+            // generic path would otherwise reject/copy them).
+            ConditionOpcode::Remark => {
+                return Ok(Some(ConditionWithArgs::Remark(Message::new(Vec::new())?)));
+            }
+            ConditionOpcode::Unknown => return Ok(Some(ConditionWithArgs::Unknown)),
+            _ => {}
+        }
+    }
+    // Generic path: bound the condition subtree, export the (now-known-small) owned SExp, and reuse
+    // the existing per-opcode decoder. AGG_SIG (48-byte key), announcements / messages (<=1024
+    // bytes), the my_*/concurrent 32-byte hashes, ASSERT_MY_AMOUNT / birth / SOFTFORK integers etc.
+    // are all handled here byte-for-byte as before — every argument chia bounds to <= 1024 bytes,
+    // so the atom-size guard rejects exactly what chia rejects.
+    let bounded = export_bounded_condition(arena, cond_ptr)?;
+    Ok(Some(ConditionWithArgs::try_from(&bounded)?))
+}
+
+// The five single-integer-argument opcodes an adversarial ladder abuses. chia bounds each with
+// `sanitize_uint` and either saturates (heights/timestamps) or fails outright (RESERVE_FEE); the
+// huge atom is never copied.
+fn arena_uint_condition(
+    arena: &Arena,
+    opcode: ConditionOpcode,
+    args: NodePtr,
+) -> Result<Option<ConditionWithArgs>, ClvmError> {
+    let Some((arg_node, _)) = arena.next(args) else {
+        return Err(ClvmError::InvalidSpendbundle(format!(
+            "{opcode} missing argument"
+        )));
+    };
+    Ok(match opcode {
+        // chia parse_amount(8): any overflow (positive or negative) or non-canonical encoding fails
+        // the RESERVE_FEE condition outright (`conds` is None) — it cannot be saturated.
+        ConditionOpcode::ReserveFee => match sanitize_uint_from_arena(arena, arg_node, 8)? {
+            SanitizedUint::Ok(fee) => Some(ConditionWithArgs::ReserveFee(fee)),
+            _ => {
+                return Err(ClvmError::ConditionFailure(
+                    ChiaError::ReserveFeeConditionFailed,
+                ));
+            }
+        },
+        ConditionOpcode::AssertHeightAbsolute => {
+            saturating_assert_u32(sanitize_uint_from_arena(arena, arg_node, 4)?)
+                .map(ConditionWithArgs::AssertHeightAbsolute)
+        }
+        ConditionOpcode::AssertHeightRelative => {
+            saturating_assert_u32(sanitize_uint_from_arena(arena, arg_node, 4)?)
+                .map(ConditionWithArgs::AssertHeightRelative)
+        }
+        ConditionOpcode::AssertSecondsAbsolute => {
+            saturating_assert_u64(sanitize_uint_from_arena(arena, arg_node, 8)?)
+                .map(ConditionWithArgs::AssertSecondsAbsolute)
+        }
+        ConditionOpcode::AssertSecondsRelative => {
+            saturating_assert_u64(sanitize_uint_from_arena(arena, arg_node, 8)?)
+                .map(ConditionWithArgs::AssertSecondsRelative)
+        }
+        // ASSERT_BEFORE_* invert the verdict: a positive overflow is trivially satisfied (chia Skip),
+        // a negative / non-canonical value is unsatisfiable (chia Err). Saturating to 0 makes
+        // `validate_block_conditions` reject it with the same code chia raises at parse.
+        ConditionOpcode::AssertBeforeHeightAbsolute => {
+            saturating_before_u32(sanitize_uint_from_arena(arena, arg_node, 4)?)
+                .map(ConditionWithArgs::AssertBeforeHeightAbsolute)
+        }
+        ConditionOpcode::AssertBeforeHeightRelative => {
+            saturating_before_u32(sanitize_uint_from_arena(arena, arg_node, 4)?)
+                .map(ConditionWithArgs::AssertBeforeHeightRelative)
+        }
+        ConditionOpcode::AssertBeforeSecondsAbsolute => {
+            saturating_before_u64(sanitize_uint_from_arena(arena, arg_node, 8)?)
+                .map(ConditionWithArgs::AssertBeforeSecondsAbsolute)
+        }
+        ConditionOpcode::AssertBeforeSecondsRelative => {
+            saturating_before_u64(sanitize_uint_from_arena(arena, arg_node, 8)?)
+                .map(ConditionWithArgs::AssertBeforeSecondsRelative)
+        }
+        _ => unreachable!("arena_uint_condition called with {opcode:?}"),
+    })
+}
+
+// chia's ASSERT_BEFORE_* verdict (conditions.rs:606-660): a positive overflow is a trivially-true
+// bound → `Skip` (None); a negative or non-canonical value is unsatisfiable → chia raises the
+// before-condition's error at parse. We saturate the failing verdict to 0 so `validate_block_
+// conditions` (block_height >= 0 / prev_ts >= 0) raises the SAME code, keeping the parse infallible.
+fn saturating_before_u64(verdict: SanitizedUint) -> Option<u64> {
+    match verdict {
+        SanitizedUint::Ok(value) => Some(value),
+        SanitizedUint::PositiveOverflow => None,
+        SanitizedUint::NegativeOverflow | SanitizedUint::LeadingZero => Some(0),
+    }
+}
+
+fn saturating_before_u32(verdict: SanitizedUint) -> Option<u32> {
+    saturating_before_u64(verdict).map(|value| u32::try_from(value).unwrap_or(u32::MAX))
+}
+
+// chia CREATE_COIN parse (conditions.rs:411-451): a 32-byte puzzle hash, an amount bounded to 8
+// bytes, and an OPTIONAL memo list whose first element is used as the coin hint only when it is an
+// atom of <= 32 bytes — a larger memo is IGNORED (never copied), leaving the coin hint-less but
+// valid. Reproduced here so a legitimately large memo (mainnet carries them; the block-assembly
+// suite packs a 250 KiB one) is neither rejected nor deep-copied.
+fn arena_create_coin(arena: &Arena, args: NodePtr) -> Result<Option<ConditionWithArgs>, ClvmError> {
+    let Some((ph_node, after_ph)) = arena.next(args) else {
+        return Err(ClvmError::InvalidSpendbundle(
+            "CREATE_COIN missing puzzle hash".to_string(),
+        ));
+    };
+    // chia sanitize_hash(32): the puzzle hash must be exactly 32 bytes.
+    let puzzle_hash = match arena.atom(ph_node) {
+        Some(atom) if atom.as_ref().len() == 32 => Bytes32::from(atom.as_ref().to_vec()),
+        _ => {
+            return Err(ClvmError::InvalidSpendbundle(
+                "CREATE_COIN puzzle hash not 32 bytes".to_string(),
+            ));
+        }
+    };
+    let Some((amount_node, after_amount)) = arena.next(after_ph) else {
+        return Err(ClvmError::InvalidSpendbundle(
+            "CREATE_COIN missing amount".to_string(),
+        ));
+    };
+    // chia sanitize_uint(8): an amount exceeding 8 bytes or negative fails the coin.
+    let amount = match sanitize_uint_from_arena(arena, amount_node, 8)? {
+        SanitizedUint::Ok(value) => value,
+        SanitizedUint::NegativeOverflow => {
+            return Err(ClvmError::ConditionFailure(ChiaError::CoinAmountNegative));
+        }
+        SanitizedUint::PositiveOverflow | SanitizedUint::LeadingZero => {
+            return Err(ClvmError::ConditionFailure(
+                ChiaError::CoinAmountExceedsMaximum,
+            ));
+        }
+    };
+    // Optional memo list: take the first element as the hint only if it is an atom of <= 32 bytes.
+    let mut memos = Vec::new();
+    if let Some((memo_list, _)) = arena.next(after_amount)
+        && let Some((first_memo, _)) = arena.next(memo_list)
+        && let Some(memo_atom) = arena.atom(first_memo)
+        && memo_atom.as_ref().len() <= 32
+    {
+        memos.push(memo_atom.as_ref().to_vec());
+    }
+    Ok(Some(ConditionWithArgs::CreateCoin(
+        puzzle_hash,
+        amount,
+        memos,
+    )))
+}
+
+// Refuse a condition whose subtree is too deep/large or that carries an oversized atom, then export
+// the (now-known-bounded) subtree to an owned `SExp` for the existing decoder. The pre-walk is
+// iterative and bounded, so neither it nor the subsequent `Drop` can overflow the stack.
+fn export_bounded_condition(arena: &Arena, cond_ptr: NodePtr) -> Result<SExp<'static>, ClvmError> {
+    let mut stack = vec![cond_ptr];
+    let mut nodes = 0usize;
+    while let Some(node) = stack.pop() {
+        nodes += 1;
+        if nodes > MAX_CONDITION_NODES {
+            return Err(ClvmError::InvalidSpendbundle(
+                "condition subtree too large".to_string(),
+            ));
+        }
+        match arena.node_kind(node) {
+            NodeKind::Atom => {
+                if arena
+                    .atom_len(node)
+                    .is_some_and(|len| len > MAX_CONDITION_ATOM)
+                {
+                    return Err(ClvmError::InvalidSpendbundle(
+                        "condition argument atom too large".to_string(),
+                    ));
+                }
+            }
+            NodeKind::Pair(first, rest) => {
+                stack.push(first);
+                stack.push(rest);
+            }
+        }
+    }
+    Ok(arena.export(cond_ptr))
+}
+
+// Stream a spend's conditions straight out of the CLVM run arena — the DoS-safe counterpart to
+// exporting the puzzle output and materialising every `ConditionWithArgs` first. Mirrors chia_rs
+// `conditions.rs::parse_conditions` (0.42.1): the condition list is walked iteratively, each
+// condition is parsed with bounded reads, per-condition cost is charged and the block-cost ceiling
+// is enforced INCREMENTALLY (bail before the next condition is parsed), and a duplicate CREATE_COIN
+// fails at the first duplicate — none of which requires the whole output to exist at once.
+#[allow(clippy::too_many_arguments)]
+fn parse_and_apply_spend_from_arena(
+    arena: &Arena,
+    output: NodePtr,
+    coin: Coin,
+    conds: &mut SpendBundleConditions,
+    constants: &ConsensusConstants,
+    extra_cost: &mut u64,
+    max_cost: u64,
+    mempool: bool,
+) -> Result<Spend, ClvmError> {
+    let condition_cost_start = *extra_cost;
+    let mut spend = new_spend(coin, mempool);
+    conds.removal_amount = conds
+        .removal_amount
+        .checked_add(u128::from(coin.amount))
+        .ok_or_else(|| ClvmError::Overflow("removal amount overflow".to_string()))?;
+    let mut cursor = output;
+    let mut condition_index = 0usize;
+    while let Some((cond_ptr, rest)) = arena.next(cursor) {
+        cursor = rest;
+        let Some(condition) = arena_condition(arena, cond_ptr)? else {
+            continue;
+        };
+        apply_parsed_condition(
+            &mut spend,
+            conds,
+            coin,
+            condition,
+            condition_index,
+            constants,
+            extra_cost,
+            mempool,
+        )?;
+        // chia charges each condition's cost and bails the instant it would cross
+        // MAX_BLOCK_COST_CLVM (conditions.rs:1064 `if *max_cost < cost { return CostExceeded }`),
+        // before the next condition is even parsed — so a create-coin / agg-sig flood cannot run to
+        // completion. Our per-condition costs land in `*extra_cost` inside `apply_parsed_condition`.
+        let running = conds
+            .cost
+            .checked_add(*extra_cost)
+            .ok_or_else(|| ClvmError::Overflow("block generator cost overflow".to_string()))?;
+        if running > max_cost {
+            return Err(ClvmError::CostExceeded(max_cost, running));
+        }
+        condition_index += 1;
+    }
+    finalize_spend(&mut spend, *extra_cost, condition_cost_start, mempool);
+    Ok(spend)
+}
+
+fn spend_from_conditions(
+    coin: Coin,
+    conditions: Vec<ConditionWithArgs>,
+    conds: &mut SpendBundleConditions,
+    constants: &ConsensusConstants,
+    extra_cost: &mut u64,
+    // Compute chia_rs MempoolVisitor eligibility flags (the mempool conditions run); consensus
+    // runs pass false and leave `flags` 0 (chia_rs EmptyVisitor).
+    mempool: bool,
+) -> Result<Spend, ClvmError> {
+    let condition_cost_start = *extra_cost;
+    let mut spend = new_spend(coin, mempool);
     conds.removal_amount = conds
         .removal_amount
         .checked_add(u128::from(coin.amount))
         .ok_or_else(|| ClvmError::Overflow("removal amount overflow".to_string()))?;
     for (condition_index, condition) in conditions.into_iter().enumerate() {
-        if mempool {
-            clear_eligibility_for_condition(&mut spend.flags, &condition, condition_index);
-        }
-        // chia rejects the BLS G1 infinity/identity element as an AGG_SIG_*
-        // public key with Err.INVALID_CONDITION (soft-fork-5, enforced at every
-        // current mainnet height). Reject it here, during condition aggregation
-        // and before signature verification, so the block is refused on
-        // condition validity rather than a deferred aggregate-signature failure.
-        if let Some(public_key) = condition.agg_sig_infinity_pubkey() {
-            return Err(ClvmError::InvalidPublicKey(public_key));
-        }
-        match condition {
-            ConditionWithArgs::CreateCoin(puzzle_hash, amount, memos) => {
-                *extra_cost = extra_cost
-                    .checked_add(CREATE_COIN_COST)
-                    .ok_or_else(|| ClvmError::Overflow("create coin cost overflow".to_string()))?;
-                conds.addition_amount = conds
-                    .addition_amount
-                    .checked_add(u128::from(amount))
-                    .ok_or_else(|| ClvmError::Overflow("addition amount overflow".to_string()))?;
-                spend.create_coin.insert(NewCoin {
-                    puzzle_hash,
-                    amount,
-                    hint: memos.first().map(|memo| UnsizedBytes::new(memo.clone())),
-                });
-            }
-            ConditionWithArgs::ReserveFee(fee) => {
-                conds.reserve_fee = conds
-                    .reserve_fee
-                    .checked_add(fee)
-                    .ok_or_else(|| ClvmError::Overflow("reserve fee overflow".to_string()))?;
-            }
-            ConditionWithArgs::AssertHeightAbsolute(height) => {
-                conds.height_absolute = max(conds.height_absolute, height);
-            }
-            ConditionWithArgs::AssertSecondsAbsolute(seconds) => {
-                conds.seconds_absolute = max(conds.seconds_absolute, seconds);
-            }
-            ConditionWithArgs::AssertBeforeHeightAbsolute(height) => {
-                conds.before_height_absolute = Some(match conds.before_height_absolute {
-                    Some(existing) => min(existing, height),
-                    None => height,
-                });
-            }
-            ConditionWithArgs::AssertBeforeSecondsAbsolute(seconds) => {
-                conds.before_seconds_absolute = Some(match conds.before_seconds_absolute {
-                    Some(existing) => min(existing, seconds),
-                    None => seconds,
-                });
-            }
-            ConditionWithArgs::AssertHeightRelative(height) => {
-                spend.height_relative = Some(max(spend.height_relative.unwrap_or(0), height));
-            }
-            ConditionWithArgs::AssertSecondsRelative(seconds) => {
-                spend.seconds_relative = Some(max(spend.seconds_relative.unwrap_or(0), seconds));
-            }
-            ConditionWithArgs::AssertBeforeHeightRelative(height) => {
-                spend.before_height_relative = Some(match spend.before_height_relative {
-                    Some(existing) => min(existing, height),
-                    None => height,
-                });
-            }
-            ConditionWithArgs::AssertBeforeSecondsRelative(seconds) => {
-                spend.before_seconds_relative = Some(match spend.before_seconds_relative {
-                    Some(existing) => min(existing, seconds),
-                    None => seconds,
-                });
-            }
-            ConditionWithArgs::AssertMyBirthHeight(height) => spend.birth_height = Some(height),
-            ConditionWithArgs::AssertMyBirthSeconds(seconds) => spend.birth_seconds = Some(seconds),
-            ConditionWithArgs::AggSigMe(pk, msg) => {
-                *extra_cost = extra_cost.checked_add(AGG_SIG_COST).ok_or_else(|| {
-                    ClvmError::Overflow("aggregate signature cost overflow".to_string())
-                })?;
-                spend.agg_sig_me.push((
-                    UnsizedBytes::new(pk.bytes().to_vec()),
-                    UnsizedBytes::from(msg.data()),
-                ));
-            }
-            ConditionWithArgs::AggSigParent(pk, msg) => {
-                *extra_cost = extra_cost.checked_add(AGG_SIG_COST).ok_or_else(|| {
-                    ClvmError::Overflow("aggregate signature cost overflow".to_string())
-                })?;
-                spend.agg_sig_parent.push((
-                    UnsizedBytes::new(pk.bytes().to_vec()),
-                    UnsizedBytes::from(msg.data()),
-                ));
-            }
-            ConditionWithArgs::AggSigPuzzle(pk, msg) => {
-                *extra_cost = extra_cost.checked_add(AGG_SIG_COST).ok_or_else(|| {
-                    ClvmError::Overflow("aggregate signature cost overflow".to_string())
-                })?;
-                spend.agg_sig_puzzle.push((
-                    UnsizedBytes::new(pk.bytes().to_vec()),
-                    UnsizedBytes::from(msg.data()),
-                ));
-            }
-            ConditionWithArgs::AggSigAmount(pk, msg) => {
-                *extra_cost = extra_cost.checked_add(AGG_SIG_COST).ok_or_else(|| {
-                    ClvmError::Overflow("aggregate signature cost overflow".to_string())
-                })?;
-                spend.agg_sig_amount.push((
-                    UnsizedBytes::new(pk.bytes().to_vec()),
-                    UnsizedBytes::from(msg.data()),
-                ));
-            }
-            ConditionWithArgs::AggSigPuzzleAmount(pk, msg) => {
-                *extra_cost = extra_cost.checked_add(AGG_SIG_COST).ok_or_else(|| {
-                    ClvmError::Overflow("aggregate signature cost overflow".to_string())
-                })?;
-                spend.agg_sig_puzzle_amount.push((
-                    UnsizedBytes::new(pk.bytes().to_vec()),
-                    UnsizedBytes::from(msg.data()),
-                ));
-            }
-            ConditionWithArgs::AggSigParentAmount(pk, msg) => {
-                *extra_cost = extra_cost.checked_add(AGG_SIG_COST).ok_or_else(|| {
-                    ClvmError::Overflow("aggregate signature cost overflow".to_string())
-                })?;
-                spend.agg_sig_parent_amount.push((
-                    UnsizedBytes::new(pk.bytes().to_vec()),
-                    UnsizedBytes::from(msg.data()),
-                ));
-            }
-            ConditionWithArgs::AggSigParentPuzzle(pk, msg) => {
-                *extra_cost = extra_cost.checked_add(AGG_SIG_COST).ok_or_else(|| {
-                    ClvmError::Overflow("aggregate signature cost overflow".to_string())
-                })?;
-                spend.agg_sig_parent_puzzle.push((
-                    UnsizedBytes::new(pk.bytes().to_vec()),
-                    UnsizedBytes::from(msg.data()),
-                ));
-            }
-            ConditionWithArgs::AggSigUnsafe(pk, msg) => {
-                *extra_cost = extra_cost.checked_add(AGG_SIG_COST).ok_or_else(|| {
-                    ClvmError::Overflow("aggregate signature cost overflow".to_string())
-                })?;
-                verify_agg_sig_unsafe_message(&msg, constants)?;
-                conds.agg_sig_unsafe.push((
-                    UnsizedBytes::new(pk.bytes().to_vec()),
-                    UnsizedBytes::from(msg.data()),
-                ));
-            }
-            ConditionWithArgs::CreateCoinAnnouncement(msg) => {
-                spend
-                    .create_coin_announcements
-                    .push(UnsizedBytes::from(msg.data()));
-            }
-            ConditionWithArgs::AssertCoinAnnouncement(announcement) => {
-                spend.assert_coin_announcements.push(announcement);
-            }
-            ConditionWithArgs::CreatePuzzleAnnouncement(msg) => {
-                spend
-                    .create_puzzle_announcements
-                    .push(UnsizedBytes::from(msg.data()));
-            }
-            ConditionWithArgs::AssertPuzzleAnnouncement(announcement) => {
-                spend.assert_puzzle_announcements.push(announcement);
-            }
-            ConditionWithArgs::AssertMyCoinId(coin_id) if coin_id != coin.name() => {
-                return Err(ClvmError::InvalidSpendbundle(
-                    "ASSERT_MY_COIN_ID".to_string(),
-                ));
-            }
-            ConditionWithArgs::AssertMyParentId(parent_id)
-                if parent_id != coin.parent_coin_info =>
-            {
-                return Err(ClvmError::InvalidSpendbundle(
-                    "ASSERT_MY_PARENT_ID".to_string(),
-                ));
-            }
-            ConditionWithArgs::AssertMyPuzzlehash(puzzle_hash)
-                if puzzle_hash != coin.puzzle_hash =>
-            {
-                return Err(ClvmError::InvalidSpendbundle(
-                    "ASSERT_MY_PUZZLEHASH".to_string(),
-                ));
-            }
-            ConditionWithArgs::AssertMyAmount(amount) if amount != coin.amount => {
-                return Err(ClvmError::InvalidSpendbundle(
-                    "ASSERT_MY_AMOUNT".to_string(),
-                ));
-            }
-            ConditionWithArgs::SoftFork(cost) => {
-                *extra_cost = extra_cost
-                    .checked_add(cost)
-                    .ok_or_else(|| ClvmError::Overflow("soft fork cost overflow".to_string()))?;
-            }
-            ConditionWithArgs::AssertConcurrentSpend(coin_id) => {
-                spend.assert_concurrent_spend.push(coin_id);
-            }
-            ConditionWithArgs::AssertConcurrentPuzzle(puzzle_hash) => {
-                spend.assert_concurrent_puzzle.push(puzzle_hash);
-            }
-            ConditionWithArgs::AssertEphemeral => {
-                spend.assert_ephemeral = true;
-            }
-            ConditionWithArgs::SendMessage(mode, message, args) => {
-                spend.sent_messages.push(SpendMessage {
-                    mode,
-                    message: message.data().to_vec(),
-                    args,
-                });
-            }
-            ConditionWithArgs::ReceiveMessage(mode, message, args) => {
-                spend.received_messages.push(SpendMessage {
-                    mode,
-                    message: message.data().to_vec(),
-                    args,
-                });
-            }
-            _ => {}
-        }
+        apply_parsed_condition(
+            &mut spend,
+            conds,
+            coin,
+            condition,
+            condition_index,
+            constants,
+            extra_cost,
+            mempool,
+        )?;
     }
+    finalize_spend(&mut spend, *extra_cost, condition_cost_start, mempool);
+    Ok(spend)
+}
+
+// Apply ONE parsed condition to the spend / bundle accumulators — the former body of the
+// `spend_from_conditions` loop, extracted verbatim so it can also be driven one condition at a
+// time by the streaming arena parser ([`parse_and_apply_spend_from_arena`]). The only behavioural
+// change from the collect-then-iterate form: a duplicate CREATE_COIN (same puzzle hash, amount and
+// hint within the spend) now fails at the FIRST duplicate with `DuplicateOutput` (chia_rs
+// chia-consensus 0.42.1 `conditions.rs`: `if !spend.create_coin.insert(new_coin) { return
+// Err(..DuplicateOutput) }`), instead of being silently swallowed by the `HashSet`.
+#[allow(clippy::too_many_arguments)]
+fn apply_parsed_condition(
+    spend: &mut Spend,
+    conds: &mut SpendBundleConditions,
+    coin: Coin,
+    condition: ConditionWithArgs,
+    condition_index: usize,
+    constants: &ConsensusConstants,
+    extra_cost: &mut u64,
+    mempool: bool,
+) -> Result<(), ClvmError> {
+    if mempool {
+        clear_eligibility_for_condition(&mut spend.flags, &condition, condition_index);
+    }
+    // chia rejects the BLS G1 infinity/identity element as an AGG_SIG_*
+    // public key with Err.INVALID_CONDITION (soft-fork-5, enforced at every
+    // current mainnet height). Reject it here, during condition aggregation
+    // and before signature verification, so the block is refused on
+    // condition validity rather than a deferred aggregate-signature failure.
+    if let Some(public_key) = condition.agg_sig_infinity_pubkey() {
+        return Err(ClvmError::InvalidPublicKey(public_key));
+    }
+    match condition {
+        ConditionWithArgs::CreateCoin(puzzle_hash, amount, memos) => {
+            *extra_cost = extra_cost
+                .checked_add(CREATE_COIN_COST)
+                .ok_or_else(|| ClvmError::Overflow("create coin cost overflow".to_string()))?;
+            conds.addition_amount = conds
+                .addition_amount
+                .checked_add(u128::from(amount))
+                .ok_or_else(|| ClvmError::Overflow("addition amount overflow".to_string()))?;
+            let new_coin = NewCoin {
+                puzzle_hash,
+                amount,
+                hint: memos.first().map(|memo| UnsizedBytes::new(memo.clone())),
+            };
+            // chia_rs conditions.rs: `if !spend.create_coin.insert(new_coin) { return
+            // Err(..DuplicateOutput) }` — two CREATE_COINs with the same puzzle hash, amount
+            // and hint are rejected at the FIRST duplicate. Honoring the insert result (rather
+            // than letting the HashSet swallow the dupe) is what lets a 600,000-identical-
+            // CREATE_COIN generator fail at coin #2 instead of building the whole list.
+            if !spend.create_coin.insert(new_coin) {
+                return Err(ClvmError::DuplicateCreate(format!(
+                    "{}",
+                    Coin {
+                        parent_coin_info: coin.name(),
+                        puzzle_hash,
+                        amount,
+                    }
+                    .name()
+                )));
+            }
+        }
+        ConditionWithArgs::ReserveFee(fee) => {
+            conds.reserve_fee = conds
+                .reserve_fee
+                .checked_add(fee)
+                .ok_or_else(|| ClvmError::Overflow("reserve fee overflow".to_string()))?;
+        }
+        ConditionWithArgs::AssertHeightAbsolute(height) => {
+            conds.height_absolute = max(conds.height_absolute, height);
+        }
+        ConditionWithArgs::AssertSecondsAbsolute(seconds) => {
+            conds.seconds_absolute = max(conds.seconds_absolute, seconds);
+        }
+        ConditionWithArgs::AssertBeforeHeightAbsolute(height) => {
+            conds.before_height_absolute = Some(match conds.before_height_absolute {
+                Some(existing) => min(existing, height),
+                None => height,
+            });
+        }
+        ConditionWithArgs::AssertBeforeSecondsAbsolute(seconds) => {
+            conds.before_seconds_absolute = Some(match conds.before_seconds_absolute {
+                Some(existing) => min(existing, seconds),
+                None => seconds,
+            });
+        }
+        ConditionWithArgs::AssertHeightRelative(height) => {
+            spend.height_relative = Some(max(spend.height_relative.unwrap_or(0), height));
+        }
+        ConditionWithArgs::AssertSecondsRelative(seconds) => {
+            spend.seconds_relative = Some(max(spend.seconds_relative.unwrap_or(0), seconds));
+        }
+        ConditionWithArgs::AssertBeforeHeightRelative(height) => {
+            spend.before_height_relative = Some(match spend.before_height_relative {
+                Some(existing) => min(existing, height),
+                None => height,
+            });
+        }
+        ConditionWithArgs::AssertBeforeSecondsRelative(seconds) => {
+            spend.before_seconds_relative = Some(match spend.before_seconds_relative {
+                Some(existing) => min(existing, seconds),
+                None => seconds,
+            });
+        }
+        ConditionWithArgs::AssertMyBirthHeight(height) => spend.birth_height = Some(height),
+        ConditionWithArgs::AssertMyBirthSeconds(seconds) => spend.birth_seconds = Some(seconds),
+        ConditionWithArgs::AggSigMe(pk, msg) => {
+            *extra_cost = extra_cost.checked_add(AGG_SIG_COST).ok_or_else(|| {
+                ClvmError::Overflow("aggregate signature cost overflow".to_string())
+            })?;
+            spend.agg_sig_me.push((
+                UnsizedBytes::new(pk.bytes().to_vec()),
+                UnsizedBytes::from(msg.data()),
+            ));
+        }
+        ConditionWithArgs::AggSigParent(pk, msg) => {
+            *extra_cost = extra_cost.checked_add(AGG_SIG_COST).ok_or_else(|| {
+                ClvmError::Overflow("aggregate signature cost overflow".to_string())
+            })?;
+            spend.agg_sig_parent.push((
+                UnsizedBytes::new(pk.bytes().to_vec()),
+                UnsizedBytes::from(msg.data()),
+            ));
+        }
+        ConditionWithArgs::AggSigPuzzle(pk, msg) => {
+            *extra_cost = extra_cost.checked_add(AGG_SIG_COST).ok_or_else(|| {
+                ClvmError::Overflow("aggregate signature cost overflow".to_string())
+            })?;
+            spend.agg_sig_puzzle.push((
+                UnsizedBytes::new(pk.bytes().to_vec()),
+                UnsizedBytes::from(msg.data()),
+            ));
+        }
+        ConditionWithArgs::AggSigAmount(pk, msg) => {
+            *extra_cost = extra_cost.checked_add(AGG_SIG_COST).ok_or_else(|| {
+                ClvmError::Overflow("aggregate signature cost overflow".to_string())
+            })?;
+            spend.agg_sig_amount.push((
+                UnsizedBytes::new(pk.bytes().to_vec()),
+                UnsizedBytes::from(msg.data()),
+            ));
+        }
+        ConditionWithArgs::AggSigPuzzleAmount(pk, msg) => {
+            *extra_cost = extra_cost.checked_add(AGG_SIG_COST).ok_or_else(|| {
+                ClvmError::Overflow("aggregate signature cost overflow".to_string())
+            })?;
+            spend.agg_sig_puzzle_amount.push((
+                UnsizedBytes::new(pk.bytes().to_vec()),
+                UnsizedBytes::from(msg.data()),
+            ));
+        }
+        ConditionWithArgs::AggSigParentAmount(pk, msg) => {
+            *extra_cost = extra_cost.checked_add(AGG_SIG_COST).ok_or_else(|| {
+                ClvmError::Overflow("aggregate signature cost overflow".to_string())
+            })?;
+            spend.agg_sig_parent_amount.push((
+                UnsizedBytes::new(pk.bytes().to_vec()),
+                UnsizedBytes::from(msg.data()),
+            ));
+        }
+        ConditionWithArgs::AggSigParentPuzzle(pk, msg) => {
+            *extra_cost = extra_cost.checked_add(AGG_SIG_COST).ok_or_else(|| {
+                ClvmError::Overflow("aggregate signature cost overflow".to_string())
+            })?;
+            spend.agg_sig_parent_puzzle.push((
+                UnsizedBytes::new(pk.bytes().to_vec()),
+                UnsizedBytes::from(msg.data()),
+            ));
+        }
+        ConditionWithArgs::AggSigUnsafe(pk, msg) => {
+            *extra_cost = extra_cost.checked_add(AGG_SIG_COST).ok_or_else(|| {
+                ClvmError::Overflow("aggregate signature cost overflow".to_string())
+            })?;
+            verify_agg_sig_unsafe_message(&msg, constants)?;
+            conds.agg_sig_unsafe.push((
+                UnsizedBytes::new(pk.bytes().to_vec()),
+                UnsizedBytes::from(msg.data()),
+            ));
+        }
+        ConditionWithArgs::CreateCoinAnnouncement(msg) => {
+            spend
+                .create_coin_announcements
+                .push(UnsizedBytes::from(msg.data()));
+        }
+        ConditionWithArgs::AssertCoinAnnouncement(announcement) => {
+            spend.assert_coin_announcements.push(announcement);
+        }
+        ConditionWithArgs::CreatePuzzleAnnouncement(msg) => {
+            spend
+                .create_puzzle_announcements
+                .push(UnsizedBytes::from(msg.data()));
+        }
+        ConditionWithArgs::AssertPuzzleAnnouncement(announcement) => {
+            spend.assert_puzzle_announcements.push(announcement);
+        }
+        ConditionWithArgs::AssertMyCoinId(coin_id) if coin_id != coin.name() => {
+            return Err(ClvmError::InvalidSpendbundle(
+                "ASSERT_MY_COIN_ID".to_string(),
+            ));
+        }
+        ConditionWithArgs::AssertMyParentId(parent_id) if parent_id != coin.parent_coin_info => {
+            return Err(ClvmError::InvalidSpendbundle(
+                "ASSERT_MY_PARENT_ID".to_string(),
+            ));
+        }
+        ConditionWithArgs::AssertMyPuzzlehash(puzzle_hash) if puzzle_hash != coin.puzzle_hash => {
+            return Err(ClvmError::InvalidSpendbundle(
+                "ASSERT_MY_PUZZLEHASH".to_string(),
+            ));
+        }
+        ConditionWithArgs::AssertMyAmount(amount) if amount != coin.amount => {
+            return Err(ClvmError::InvalidSpendbundle(
+                "ASSERT_MY_AMOUNT".to_string(),
+            ));
+        }
+        ConditionWithArgs::SoftFork(cost) => {
+            *extra_cost = extra_cost
+                .checked_add(cost)
+                .ok_or_else(|| ClvmError::Overflow("soft fork cost overflow".to_string()))?;
+        }
+        ConditionWithArgs::AssertConcurrentSpend(coin_id) => {
+            spend.assert_concurrent_spend.push(coin_id);
+        }
+        ConditionWithArgs::AssertConcurrentPuzzle(puzzle_hash) => {
+            spend.assert_concurrent_puzzle.push(puzzle_hash);
+        }
+        ConditionWithArgs::AssertEphemeral => {
+            spend.assert_ephemeral = true;
+        }
+        ConditionWithArgs::SendMessage(mode, message, args) => {
+            spend.sent_messages.push(SpendMessage {
+                mode,
+                message: message.data().to_vec(),
+                args,
+            });
+        }
+        ConditionWithArgs::ReceiveMessage(mode, message, args) => {
+            spend.received_messages.push(SpendMessage {
+                mode,
+                message: message.data().to_vec(),
+                args,
+            });
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+// chia_rs MempoolVisitor::post_spend plus the spend's share of the accumulated condition cost —
+// the post-loop bookkeeping shared by both the collect-then-iterate ([`spend_from_conditions`])
+// and streaming ([`parse_and_apply_spend_from_arena`]) forms.
+fn finalize_spend(spend: &mut Spend, extra_cost: u64, condition_cost_start: u64, mempool: bool) {
     // This spend's share of the accumulated condition cost (chia_rs SpendConditions
-    // .condition_cost) — the delta the loop above added to the bundle-wide accumulator.
+    // .condition_cost) — the delta the loop added to the bundle-wide accumulator.
     spend.condition_cost = extra_cost.saturating_sub(condition_cost_start);
     if mempool {
         // chia_rs MempoolVisitor::post_spend: a fast-forward candidate must actually look like a
@@ -1963,7 +2399,6 @@ fn spend_from_conditions(
             }
         }
     }
-    Ok(spend)
 }
 
 // chia_rs MempoolVisitor::post_process (chia-consensus conditions.rs 0.42.1): the bundle-level

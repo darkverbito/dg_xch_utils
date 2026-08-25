@@ -53,6 +53,29 @@ impl ClvmRuntime {
     }
 
     pub fn run(&mut self, program: &SExp, args: &SExp) -> Result<(u64, SExp<'static>), ClvmError> {
+        let (cost, node) = self.run_in_arena(program, args)?;
+        Ok((cost, self.arena.export(node)))
+    }
+
+    /// Evaluate `program` and leave the result in this runtime's arena, returning its
+    /// [`NodePtr`] and the cost — WITHOUT `export`ing it to an owned `SExp` tree.
+    ///
+    /// [`Self::run`] exports the result; that is unsafe for an adversarial block generator
+    /// whose output the caller streams. `export` (`Arena::export`) deep-copies each atom by
+    /// reference — a `concat`/`substr` ladder that emits one shared ~268 MB integer `num`
+    /// times is copied `num` times (a 280,000-arg vector OOM-killed a 24 GiB pod) — and the
+    /// exported owned `SExp` is a `PairBuf::Owned(Arc<..>)` spine whose `Drop` recurses, so a
+    /// 600,000-deep condition list overflows the native stack. clvmr never materializes the
+    /// result: `run_program` leaves it in the flat `Allocator` and `parse_spends` walks
+    /// `NodePtr`s, charging condition cost incrementally and bailing at the first duplicate /
+    /// `MAX_BLOCK_COST_CLVM` (chia_rs chia-consensus 0.42.1 `conditions.rs::parse_conditions`
+    /// / `sanitize_int.rs::sanitize_uint`). Callers that need to bound a large output must
+    /// walk it from [`Self::arena`] rather than `run`.
+    pub fn run_in_arena(
+        &mut self,
+        program: &SExp,
+        args: &SExp,
+    ) -> Result<(u64, NodePtr), ClvmError> {
         self.reset();
         let program = self.arena.import(program)?;
         let args = self.arena.import(args)?;
@@ -80,7 +103,14 @@ impl ClvmRuntime {
         let duration = start.elapsed();
         debug!("Program duration: {duration:?}");
         let return_value = self.value_stack.pop().ok_or(ClvmError::ValueStackEmpty)?;
-        Ok((current_cost, self.arena.export(return_value)))
+        Ok((current_cost, return_value))
+    }
+
+    /// Borrow the arena holding the last [`Self::run_in_arena`] result, so a caller can walk
+    /// a large/deep output iteratively (bounded, streaming) instead of exporting it.
+    #[must_use]
+    pub fn arena(&self) -> &Arena {
+        &self.arena
     }
 
     fn reset(&mut self) {

@@ -15,18 +15,19 @@
 // multiples of chia's reference-HW seconds), catching a superlinear blowup, not this builder's raw
 // speed vs chia's CI.
 //
-// DIVERGENCE-51 (OPEN — live remote DoS): the high-`num` vectors below are `#[ignore]`d because they
-// CRASH this node, not because they pass. `execute_block_generator_result` materializes the WHOLE
-// generator output before cost-bounding it, so an adversarial generator that emits a huge integer
-// (`concat`/`substr` ladder, ~268 MB per arg) `num` times exhausts memory (a single 280,000-arg
-// vector OOM-killed a 24 GiB builder), and one emitting a 600,000-deep condition list overflows the
-// native stack in the output walk/drop. chia bounds both by charging condition cost INCREMENTALLY as
-// it parses the output and bailing at `MAX_BLOCK_COST_CLVM` / the first duplicate ("we'll just end up
-// looking at two of them, and fail at the first duplicate" — test_mempool.py:2867-2869). The fix is a
-// streaming, cost-bounded condition parse (its own rung); until it lands these stay `#[ignore]`d so
-// the gate is green and CI-safe. The vectors this node DOES survive run active below and prove the
-// bounds that already hold (incl. chia's 1024-announcement cap being MEMPOOL-only — consensus accepts
-// it, our deliberate parity).
+// DIVERGENCE-51 (FIXED): every vector below now runs. Before the fix the high-`num` vectors CRASHED
+// this node — `execute_block_generator_result` `export`ed the WHOLE puzzle output before bounding it,
+// so an adversarial generator that emits a huge integer (`concat`/`substr` ladder, ~268 MB per arg)
+// `num` times deep-copied that shared atom once per condition (a single 280,000-arg vector OOM-killed
+// a 24 GiB builder), and one emitting a 600,000-deep CREATE_COIN list built an owned `SExp` whose
+// `Drop` recursed and overflowed the native stack. The fix (`ClvmRuntime::run_in_arena` +
+// `parse_and_apply_spend_from_arena` in `core/src/consensus/block_generator.rs`) walks the run arena
+// iteratively, classifies every integer argument with a `sanitize_uint` port WITHOUT copying it,
+// charges condition cost incrementally and bails at `MAX_BLOCK_COST_CLVM`, and fails at the first
+// duplicate CREATE_COIN ("we'll just end up looking at two of them, and fail at the first duplicate"
+// — test_mempool.py:2867-2869) — mirroring chia_rs `conditions.rs::parse_conditions` /
+// `sanitize_int.rs::sanitize_uint` (chia-consensus 0.42.1). The `timed` ceilings below are the
+// HW-independent safety valves that catch a superlinear regression.
 
 use dg_xch_core::blockchain::condition_opcode::ConditionOpcode;
 use dg_xch_core::blockchain::spend_bundle_conditions::SpendBundleConditions;
@@ -88,14 +89,24 @@ fn build_generator(program_src: &str, coin_amount: u64) -> BlockGeneratorInput {
     }
 }
 
-// Run the generator under a wall-clock ceiling (chia's benchmark_runner.assert_runtime analog).
-fn timed<T>(ceiling: Duration, f: impl FnOnce() -> T) -> T {
+// A generous multiple of chia's reference-HW seconds. The `timed` ceilings are chia's
+// `benchmark_runner.assert_runtime` values (reference HW, optimized); the pre-fix DoS blew those to
+// OOM / stack-overflow / minutes, so a HW- and BUILD-MODE-independent tripwire only has to separate
+// "seconds" from "OOM / minutes", not measure this builder's speed. This slack keeps an unoptimized
+// `cargo test` build — which runs the 280k/600k-condition CLVM programs several times slower than
+// release — comfortably green while still catching a superlinear regression.
+const DOS_CEILING_SLACK: u32 = 10;
+
+// Run the generator under a wall-clock ceiling (chia's benchmark_runner.assert_runtime analog),
+// widened by `DOS_CEILING_SLACK`.
+fn timed<T>(reference: Duration, f: impl FnOnce() -> T) -> T {
+    let ceiling = reference * DOS_CEILING_SLACK;
     let start = Instant::now();
     let out = f();
     let elapsed = start.elapsed();
     assert!(
         elapsed <= ceiling,
-        "malicious generator exceeded {ceiling:?} (took {elapsed:?}) — DoS bound regressed"
+        "malicious generator exceeded {ceiling:?} (took {elapsed:?}, chia reference {reference:?}) — DoS bound regressed"
     );
     out
 }
@@ -159,20 +170,20 @@ fn validate_ladder(
 }
 
 // ---- test_duplicate_large_integer_ladder (test_mempool.py:2736) ------------------------------
-// DIVERGENCE-51 (sanitization sub-point): num=28 does NOT OOM (only 28 conditions), but it probes
-// condition-arg byte-length sanitization. chia expects ASSERT_HEIGHT_ABSOLUTE_FAILED; this node
-// strips the concat's ~16 MB of leading zeros to the small counter value (height 28) and SATISFIES
-// it. That is either (a) chia failing the oversized atom by RAW byte length before stripping, which
-// we would then be under-rejecting, or (b) a difference in the height context these are validated
-// against — needs a chia_rs `sanitize_uint` confirmation before an expected error is pinned. Ignored
-// (not asserting a guessed expectation) until that is settled.
-#[ignore = "DIVERGENCE-51: leading-zero-padded oversized height atom; chia_rs sanitize_uint semantics unconfirmed"]
+// DIVERGENCE-51 (sanitization sub-point, RESOLVED): num=28 does NOT OOM (only 28 conditions), but it
+// probes condition-arg byte-length sanitization. Each asserted value is ~16 MB of leading zeros then
+// a small counter. Pre-fix this node stripped the leading zeros to the small counter (height 28) and
+// SATISFIED the lock — an under-rejection. chia's `sanitize_int.rs::sanitize_uint` (0.42.1) rejects a
+// leading-zero-padded value outright (`buf.len() > 1 && buf[0] == 0 && (buf[1] & 0x80) == 0` → the
+// condition's error code), so chia fails it with ASSERT_HEIGHT_ABSOLUTE_FAILED. `sanitize_uint_from_
+// arena` now classifies the pad as `LeadingZero` and saturates the height to `u32::MAX`, so
+// `validate_block_conditions` raises the SAME code — the expectation asserted below.
 #[test]
 fn duplicate_large_integer_ladder() {
     for &opcode in LADDER_OPCODES {
         let src = fmt(SINGLE_ARG_INT_LADDER_COND, opcode as u8, 28, "", "0x00");
         let req = build_generator(&src, 123);
-        let conds = timed(Duration::from_secs(60), || {
+        let conds = timed(Duration::from_secs(1), || {
             execute_block_generator_result(&req)
         })
         .expect("ladder program parses to conditions");
@@ -185,14 +196,14 @@ fn duplicate_large_integer_ladder() {
 }
 
 // ---- test_duplicate_large_integer (test_mempool.py:2755) -------------------------------------
-// DIVERGENCE-51: num=280,000 huge-integer args OOM-kill the node (materialized before cost-bounding).
-#[ignore = "DIVERGENCE-51: 280,000 huge-integer args OOM the node; chia streams cost and bails"]
+// DIVERGENCE-51 (FIXED): num=280,000 huge-integer args OOM-killed the node pre-fix (the shared
+// ~268 MB atom was deep-copied once per condition); now each is sanitize_uint-classified without a copy.
 #[test]
 fn duplicate_large_integer() {
     for &opcode in LADDER_OPCODES {
         let src = fmt(SINGLE_ARG_INT_COND, opcode as u8, 280_000, "100", "0x00");
         let req = build_generator(&src, 123);
-        let conds = timed(Duration::from_secs(4), || {
+        let conds = timed(Duration::from_secs(3), || {
             execute_block_generator_result(&req)
         })
         .expect("large-integer program parses");
@@ -204,8 +215,8 @@ fn duplicate_large_integer() {
 }
 
 // ---- test_duplicate_large_integer_substr (test_mempool.py:2774) ------------------------------
-// DIVERGENCE-51: same OOM class as `duplicate_large_integer` (substr variant, num=280,000).
-#[ignore = "DIVERGENCE-51: 280,000 substr huge-integer args OOM the node"]
+// DIVERGENCE-51 (FIXED): same OOM class as `duplicate_large_integer`, substr variant (num=280,000);
+// arena new_substr is a zero-copy view, so the 280,000 whittled atoms cost O(1) each to classify.
 #[test]
 fn duplicate_large_integer_substr() {
     for &opcode in LADDER_OPCODES {
@@ -217,7 +228,7 @@ fn duplicate_large_integer_substr() {
             "0x00",
         );
         let req = build_generator(&src, 123);
-        let conds = timed(Duration::from_secs(3), || {
+        let conds = timed(Duration::from_secs(2), || {
             execute_block_generator_result(&req)
         })
         .expect("substr program parses");
@@ -229,9 +240,8 @@ fn duplicate_large_integer_substr() {
 }
 
 // ---- test_duplicate_large_integer_substr_tail (test_mempool.py:2793) -------------------------
-// DIVERGENCE-51: num=280 but each arg is a large integer whittled by substr; same materialize-first
-// memory class — ignored conservatively (not re-run against the shared 24 GiB builder).
-#[ignore = "DIVERGENCE-51: substr-tail large-integer vector, same materialize-first DoS class"]
+// DIVERGENCE-51 (FIXED): num=280, each arg a large integer whittled from the tail by substr; same
+// materialize-first class pre-fix, now streamed and bounded.
 #[test]
 fn duplicate_large_integer_substr_tail() {
     for &opcode in LADDER_OPCODES {
@@ -243,7 +253,7 @@ fn duplicate_large_integer_substr_tail() {
             "0x00",
         );
         let req = build_generator(&src, 123);
-        let conds = timed(Duration::from_secs(2), || {
+        let conds = timed(Duration::from_secs(1), || {
             execute_block_generator_result(&req)
         })
         .expect("substr-tail program parses");
@@ -257,14 +267,14 @@ fn duplicate_large_integer_substr_tail() {
 // ---- test_duplicate_large_integer_negative (test_mempool.py:2814) ----------------------------
 // A negative filler (0xff) makes every asserted value negative → a no-op, so the block is ACCEPTED
 // with exactly one spend (chia: error None, len(spends) == 1).
-// DIVERGENCE-51: num=280,000 huge negative-integer args OOM the node before the no-op collapse.
-#[ignore = "DIVERGENCE-51: 280,000 huge negative-integer args OOM the node"]
+// DIVERGENCE-51 (FIXED): num=280,000 huge negative-integer args OOM-killed the node pre-fix before the
+// no-op collapse; sanitize_uint now reads only the sign byte (NegativeOverflow → Skip).
 #[test]
 fn duplicate_large_integer_negative() {
     for &opcode in LADDER_OPCODES {
         let src = fmt(SINGLE_ARG_INT_COND, opcode as u8, 280_000, "100", "0xff");
         let req = build_generator(&src, 123);
-        let conds = timed(Duration::from_secs(4), || {
+        let conds = timed(Duration::from_millis(2750), || {
             execute_block_generator_result(&req)
         })
         .expect("negative program parses");
@@ -277,8 +287,8 @@ fn duplicate_large_integer_negative() {
 }
 
 // ---- test_duplicate_reserve_fee (test_mempool.py:2826) ---------------------------------------
-// DIVERGENCE-51: num=280,000 huge reserve-fee args OOM the node.
-#[ignore = "DIVERGENCE-51: 280,000 huge reserve-fee args OOM the node"]
+// DIVERGENCE-51 (FIXED): num=280,000 huge reserve-fee args OOM-killed the node pre-fix; parse_amount(8)
+// now fails the first oversized fee outright.
 #[test]
 fn duplicate_reserve_fee() {
     let src = fmt(
@@ -289,7 +299,7 @@ fn duplicate_reserve_fee() {
         "0x00",
     );
     let req = build_generator(&src, 123);
-    let result = timed(Duration::from_secs(3), || {
+    let result = timed(Duration::from_millis(1500), || {
         execute_block_generator_result(&req)
     });
     // chia: RESERVE_FEE_CONDITION_FAILED. A reserve fee this size cannot be paid.
@@ -297,8 +307,7 @@ fn duplicate_reserve_fee() {
 }
 
 // ---- test_duplicate_reserve_fee_negative (test_mempool.py:2835) ------------------------------
-// DIVERGENCE-51: num=200,000 huge negative reserve-fee args OOM the node.
-#[ignore = "DIVERGENCE-51: 200,000 huge negative reserve-fee args OOM the node"]
+// DIVERGENCE-51 (FIXED): num=200,000 huge negative reserve-fee args OOM-killed the node pre-fix.
 #[test]
 fn duplicate_reserve_fee_negative() {
     let src = fmt(
@@ -309,7 +318,7 @@ fn duplicate_reserve_fee_negative() {
         "0xff",
     );
     let req = build_generator(&src, 123);
-    let result = timed(Duration::from_secs(3), || {
+    let result = timed(Duration::from_millis(1500), || {
         execute_block_generator_result(&req)
     });
     // chia: a negative RESERVE_FEE fails unconditionally (conds is None).
@@ -328,7 +337,7 @@ fn duplicate_coin_announces() {
     ] {
         let src = fmt(CREATE_ANNOUNCE_COND, opcode as u8, 1024, "", "");
         let req = build_generator(&src, 123);
-        let conds = timed(Duration::from_secs(20), || {
+        let conds = timed(Duration::from_secs(14), || {
             execute_block_generator_result(&req)
         })
         .expect("1024 announcements are accepted in consensus mode");
@@ -343,14 +352,14 @@ fn duplicate_coin_announces() {
 }
 
 // ---- test_create_coin_duplicates (test_mempool.py:2865) --------------------------------------
-// DIVERGENCE-51: num=600,000 identical CREATE_COINs build a 600k-deep condition list that overflows
-// the native stack in the output walk/drop — chia fails at the first duplicate before materializing.
-#[ignore = "DIVERGENCE-51: 600,000-deep CREATE_COIN list overflows the stack; chia bails at dup #2"]
+// DIVERGENCE-51 (FIXED): num=600,000 identical CREATE_COINs built a 600k-deep condition list whose
+// owned-SExp Drop overflowed the native stack pre-fix; the streaming parser now fails at the first
+// duplicate (coin #2), never materializing the list.
 #[test]
 fn create_coin_duplicates() {
     let src = CREATE_COIN.replace("{num}", "600000");
     let req = build_generator(&src, 123);
-    let result = timed(Duration::from_secs(3), || {
+    let result = timed(Duration::from_millis(1500), || {
         execute_block_generator_result(&req)
     });
     // chia: DUPLICATE_OUTPUT, failing at the first duplicate (conds None).
@@ -362,7 +371,7 @@ fn create_coin_duplicates() {
 fn many_create_coin() {
     let src = CREATE_UNIQUE_COINS.replace("{num}", "6094");
     let req = build_generator(&src, 123_000_000);
-    let conds = timed(Duration::from_secs(2), || {
+    let conds = timed(Duration::from_millis(300), || {
         execute_block_generator_result(&req)
     })
     .expect("6094 distinct create-coins are accepted");

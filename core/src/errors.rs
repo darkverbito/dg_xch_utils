@@ -6,6 +6,12 @@ use std::fmt;
 pub enum ClvmError {
     AtomNotValidU64(String),
     BadEncoding,
+    /// A condition parsed successfully but is invalid, carrying the exact chia error code the
+    /// condition parser assigns (e.g. `RESERVE_FEE_CONDITION_FAILED`, `COIN_AMOUNT_NEGATIVE`).
+    /// chia_rs surfaces these as `ValidationErr(node, ErrorCode)` straight out of `parse_args`
+    /// (chia-consensus 0.42.1 `conditions.rs`); this variant carries the same code through the
+    /// `ClvmError` → `ChiaError` mapping (`map_condition_error`) instead of collapsing it.
+    ConditionFailure(ChiaError),
     CostExceeded(u64, u64),
     DoubleSpend(String),
     DuplicateCreate(String),
