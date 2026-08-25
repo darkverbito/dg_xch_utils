@@ -1373,7 +1373,9 @@ pub fn build_rpc_tls_context() -> Result<RpcTlsContext, IoError> {
             .build()
             .map_err(|e| IoError::other(format!("client verifier: {e:?}")))?
     };
-    let server_config = ServerConfig::builder()
+    // TLS 1.3 floor — chia CHIA-2102 (e57358aea): server-side sockets refuse TLS 1.2. Chia's
+    // 8555 RPC context comes from the same `ssl_context_for_server` rules.
+    let server_config = ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
         .with_client_cert_verifier(verifier)
         .with_single_cert(certs, key)
         .map_err(|e| IoError::other(format!("invalid RPC server cert: {e:?}")))?;

@@ -264,7 +264,11 @@ impl WebsocketServer {
             })?;
         }
         Ok(Arc::new(
-            ServerConfig::builder()
+            // TLS 1.3 floor — chia CHIA-2102 (e57358aea): `ssl_context_for_server` pins
+            // `minimum_version = TLSv1_3` (and drops the 1.2 cipher list), so every CNI
+            // server-side socket refuses a 1.2 handshake. rustls' default builder would accept
+            // 1.2 + 1.3; pin the version set to 1.3 only (`servers/tests/tls13_floor.rs`).
+            ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
                 .with_client_cert_verifier(AllowAny::new())
                 .with_single_cert(certs, key)
                 .map_err(|e| {
