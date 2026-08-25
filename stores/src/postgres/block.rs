@@ -427,6 +427,11 @@ impl BlockStore for PostgresStore {
         // coin-index build.
         // Comment lines are stripped BEFORE the ';' split — a ';' inside a comment must not cut
         // a statement in half.
+        //
+        // First, repair the stale-btree defect (0009): a leg whose confirmed_index predates the
+        // BRIN decision carries a multi-GB btree under the name 0006's IF NOT EXISTS would then
+        // silently keep forever.
+        convert_confirmed_index_to_brin(&self.pool).await?;
         let mut sql = crate::strip_sql_comments(include_str!(
             "../../migrations/postgres/0006_reorg_indexes.sql"
         ));
@@ -477,6 +482,63 @@ impl BlockStore for PostgresStore {
         ] {
             sqlx::query(stmt).execute(&self.pool).await?;
         }
+        // Repair the stale-btree confirmed_index here too (0009): the deep-behind leg this shed
+        // exists for may not see a rising-edge build for months, yet pays the btree's per-insert
+        // maintenance on every one of the millions of catch-up coins. Runs LAST — the drops
+        // above are momentary catalog ops, while the BRIN replacement is an online CONCURRENTLY
+        // heap scan.
+        convert_confirmed_index_to_brin(&self.pool).await?;
         Ok(())
     }
+}
+
+/// The 0009 btree->BRIN swap for `coin_record_confirmed_index` — see the migration file for the
+/// full rationale and crash-safety argument. Guarded: converts only when the live index exists
+/// and is NOT a valid BRIN (a stale btree from the old 0001 schema, or an INVALID leftover from
+/// a crashed CONCURRENTLY build); a BRIN-native leg pays one catalog probe and no heap scan.
+/// Absent index: nothing to convert — the caller's `CREATE ... IF NOT EXISTS` builds the BRIN
+/// fresh (any stale temp is still cleared so it cannot shadow a later conversion).
+async fn convert_confirmed_index_to_brin(pool: &sqlx::PgPool) -> Result<(), StoreError> {
+    use sqlx::Row;
+    let live = sqlx::query(
+        "SELECT a.amname, i.indisvalid FROM pg_class c \
+         JOIN pg_am a ON a.oid = c.relam \
+         JOIN pg_index i ON i.indexrelid = c.oid \
+         WHERE c.oid = to_regclass('coin_record_confirmed_index')",
+    )
+    .fetch_optional(pool)
+    .await?;
+    let needs_swap = match &live {
+        Some(row) => row.get::<String, _>(0) != "brin" || !row.get::<bool, _>(1),
+        None => false,
+    };
+    if !needs_swap {
+        // Clear any INVALID temp a crashed earlier conversion left, then done.
+        sqlx::query("DROP INDEX CONCURRENTLY IF EXISTS coin_record_confirmed_index_brin")
+            .execute(pool)
+            .await?;
+        return Ok(());
+    }
+    // 0009's online statements, one at a time on autocommit (CONCURRENTLY cannot run inside a
+    // transaction): clear a stale temp, then build the replacement BRIN without blocking writes.
+    let sql = crate::strip_sql_comments(include_str!(
+        "../../migrations/postgres/0009_confirmed_index_brin.sql"
+    ));
+    for stmt in sql.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+        sqlx::query(stmt).execute(pool).await?;
+    }
+    // The transactional swap: drop the stale index and take over its name as one atomic catalog
+    // change (momentary ACCESS EXCLUSIVE — no heap work). A crash before COMMIT rolls back to
+    // the old btree plus a finished temp the next conversion pass clears and rebuilds.
+    let mut tx = pool.begin().await?;
+    sqlx::query("DROP INDEX coin_record_confirmed_index")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        "ALTER INDEX coin_record_confirmed_index_brin RENAME TO coin_record_confirmed_index",
+    )
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
 }

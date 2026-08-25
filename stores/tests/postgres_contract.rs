@@ -478,3 +478,90 @@ async fn postgres_shed_drops_service_and_spent_index_and_build_restores() {
         assert!(pg_index_am(idx).await.is_some(), "{idx} restored by build");
     }
 }
+
+async fn pg_exec(sql: &str) {
+    let url = std::env::var("DGXCH_PG_URL").expect("set DGXCH_PG_URL to a dedicated test database");
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&url)
+        .await
+        .expect("exec pool");
+    sqlx::raw_sql(sql).execute(&pool).await.expect("exec");
+}
+
+// Live defect (§3.3 of the index strategy): legs that predate the BRIN decision carry
+// coin_record_confirmed_index as a 3-4 GB BTREE left over from the old 0001 schema, maintained
+// on EVERY coin insert, while 0006/ensure_reorg_indexes specify BRIN — and their
+// `IF NOT EXISTS` create silently keeps the stale btree forever. The 0009 conversion (driven
+// from build_indexes and the falling-edge shed) must swap it: build the BRIN CONCURRENTLY
+// under a temp name, then transactionally drop-the-btree + rename — and no-op on BRIN-native
+// legs. Env-gated like the contract test above.
+#[tokio::test]
+#[ignore = "requires a dedicated Postgres test database (DGXCH_PG_URL)"]
+async fn postgres_stale_btree_confirmed_index_converts_to_brin() {
+    use dg_xch_stores::CoinStore;
+    let store = open_clean().await;
+
+    // Simulate the stale leg: the pre-BRIN schema's btree under the live name.
+    pg_exec("DROP INDEX IF EXISTS coin_record_confirmed_index").await;
+    pg_exec("CREATE INDEX coin_record_confirmed_index ON coin_record (confirmed_index)").await;
+    assert_eq!(
+        pg_index_am("coin_record_confirmed_index").await.as_deref(),
+        Some("btree"),
+        "precondition: the stale btree is in place"
+    );
+
+    // The rising-edge build converts it (IF NOT EXISTS alone would skip it forever).
+    store.build_indexes().await.unwrap();
+    assert_eq!(
+        pg_index_am("coin_record_confirmed_index").await.as_deref(),
+        Some("brin"),
+        "build_indexes must swap the stale btree for the BRIN the code specifies"
+    );
+    assert!(
+        pg_index_am("coin_record_confirmed_index_brin")
+            .await
+            .is_none(),
+        "the temp-name index must not survive the swap"
+    );
+
+    // The falling-edge shed converts too — the deep-behind leg that needs this most may not
+    // see a rising edge for months.
+    pg_exec("DROP INDEX coin_record_confirmed_index").await;
+    pg_exec("CREATE INDEX coin_record_confirmed_index ON coin_record (confirmed_index)").await;
+    store.shed_service_indexes().await.unwrap();
+    assert_eq!(
+        pg_index_am("coin_record_confirmed_index").await.as_deref(),
+        Some("brin"),
+        "the shed path must also repair the stale btree"
+    );
+
+    // BRIN-native legs no-op: a second pass leaves the (valid) BRIN untouched.
+    store.build_indexes().await.unwrap();
+    assert_eq!(
+        pg_index_am("coin_record_confirmed_index").await.as_deref(),
+        Some("brin")
+    );
+    assert!(
+        pg_index_am("coin_record_confirmed_index_brin")
+            .await
+            .is_none()
+    );
+
+    // The rollback range predicate still works over the converted index.
+    let coin = Coin {
+        parent_coin_info: Bytes32::from([0x61u8; 32]),
+        puzzle_hash: Bytes32::from([0x62u8; 32]),
+        amount: 5,
+    };
+    let cr = CoinRecord {
+        coin,
+        confirmed_block_index: 30,
+        spent_block_index: 0,
+        coinbase: false,
+        timestamp: 0,
+        spent: false,
+    };
+    store.apply_block(30, 0, &[cr], &[]).await.unwrap();
+    assert_eq!(store.rollback_to(29).await.unwrap(), 1);
+}
