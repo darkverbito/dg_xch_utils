@@ -1404,3 +1404,157 @@ async fn pending_height_cache_and_conflict_cache_are_independent() {
         "conflict cache untouched by the pending drain — B still waiting"
     );
 }
+
+// chia 481ccb305 "Mempool spend limit (#20703)": mempool priority is fee per VIRTUAL cost,
+// where virtual cost = CLVM cost + num_spends * SPEND_PENALTY_COST (500_000)
+// (chia/types/mempool_item.py::virtual_cost) — UNCONDITIONALLY: the penalty is mempool
+// policy with no activation gate, applied to eviction (both paths), and block-assembly order
+// (chia/full_node/mempool.py `ORDER BY priority DESC, seq ASC`). A many-spend bundle whose
+// RAW fee-per-cost beats a simple bundle must still lose the priority order when the
+// per-spend penalty outweighs its fee edge — the anti-spam intent: spends-per-block are
+// capped, so many-spend bundles consume the scarcer resource.
+//
+// Written RED against the SF9-gated ordering: ours computed the spend penalty only at/past
+// soft-fork 9 activation height, so below it (this test's peak era) priority degraded to raw
+// fee-per-cost and the many-spend bundle won — divergent eviction and block composition vs
+// chia under many-spend spam.
+#[tokio::test]
+async fn many_spend_bundle_is_deprioritized_by_the_spend_penalty() {
+    let store = store().await;
+    // One coin for the simple bundle, eight for the many-spend bundle — all confirmed.
+    let simple_coin = coin(0x20, 1_000);
+    let many_coins: Vec<Coin> = (0x10u8..0x18).map(|t| coin(t, 1_000)).collect();
+    let mut records = vec![record(simple_coin, 100)];
+    records.extend(many_coins.iter().map(|c| record(*c, 100)));
+    store.apply_block(100, 0, &records, &[]).await.unwrap();
+
+    let mut mp = Mempool::new(&MAINNET);
+    mp.set_peak(100, 0);
+
+    // Simple: 1 spend, cost 1_000_000, fee 700.
+    //   raw fpc = 0.0007          virtual = 1_500_000 -> v-fpc ~= 0.000467
+    // Many:   8 spends, cost 1_000_000, fee 800.
+    //   raw fpc = 0.0008 (BEATS)  virtual = 5_000_000 -> v-fpc = 0.00016 (LOSES)
+    let simple = mp
+        .admit(
+            &store,
+            bundle(0xd1),
+            conds(vec![mk_spend(&simple_coin)], 700, 1_000_000),
+        )
+        .await
+        .expect("simple admitted");
+    let many = mp
+        .admit(
+            &store,
+            bundle(0xd2),
+            conds(many_coins.iter().map(mk_spend).collect(), 800, 1_000_000),
+        )
+        .await
+        .expect("many-spend admitted");
+
+    let ordered = mp.items_by_fee();
+    assert_eq!(
+        ordered[0].name, simple,
+        "priority is fee per VIRTUAL cost (chia 481ccb305, unconditional): the 8-spend bundle's \
+         4M-cost spend penalty must outweigh its raw fee-per-cost edge"
+    );
+    assert_eq!(ordered[1].name, many);
+    // The raw ordering really is inverted — this is the divergence the virtual key corrects.
+    assert!(
+        ordered[1].fee_per_cost() > ordered[0].fee_per_cost(),
+        "precondition: the many-spend bundle wins on RAW fee-per-cost"
+    );
+}
+
+// chia 481ccb305: the POOL_FULL eviction victim is the LOWEST-priority item by fee per VIRTUAL
+// cost — chia/full_node/mempool.py:447-459 keeps the highest-priority prefix
+// (`SUM(cost) OVER (ORDER BY priority DESC, seq ASC)`) and evicts the rest. Written RED against
+// the SF9-gated key: below SF9 activation the gate degraded priority to raw fee-per-cost, which
+// flips the victim — the simple bundle was evicted and the many-spend spam kept.
+#[tokio::test]
+async fn pool_full_eviction_removes_lowest_virtual_cost_priority() {
+    let store = store().await;
+    const FILLERS: u64 = 20;
+    let filler_coins: Vec<Coin> = (0x70u8..0x70 + FILLERS as u8)
+        .map(|t| coin(t, u64::MAX / 2))
+        .collect();
+    let simple_coin = coin(0x31, 1_000);
+    let incoming_coin = coin(0x32, u64::MAX / 2);
+    let many_coins: Vec<Coin> = (0x40u8..0x48).map(|t| coin(t, 1_000)).collect();
+    let mut records = vec![record(simple_coin, 100), record(incoming_coin, 100)];
+    records.extend(filler_coins.iter().map(|c| record(*c, 100)));
+    records.extend(many_coins.iter().map(|c| record(*c, 100)));
+    store.apply_block(100, 0, &records, &[]).await.unwrap();
+
+    let mut mp = Mempool::new(&MAINNET);
+    mp.set_peak(100, 0);
+
+    // Fill to EXACTLY max_total_cost: high-fee fillers (each within the per-tx cost cap of
+    // MAX_BLOCK_COST_CLVM / 2) plus the two 1M-cost candidates. 109_998_000_000 / 20 =
+    // 5_499_900_000 exactly, under the 5.5B per-tx cap.
+    let filler_cost = (mp.max_total_cost() - 2_000_000) / FILLERS;
+    assert_eq!(
+        filler_cost * FILLERS + 2_000_000,
+        mp.max_total_cost(),
+        "filler sizing divides the pool budget exactly"
+    );
+    let mut fillers = Vec::new();
+    for (i, c) in filler_coins.iter().enumerate() {
+        let name = mp
+            .admit(
+                &store,
+                bundle(0xa0 + i as u8),
+                // fpc 1.0 — far above both candidates, far below nothing that matters.
+                conds(vec![mk_spend(c)], filler_cost, filler_cost),
+            )
+            .await
+            .expect("filler admitted");
+        fillers.push(name);
+    }
+    // Same (fee, cost, spends) shapes as the priority test: many wins RAW fpc, loses virtual.
+    let simple = mp
+        .admit(
+            &store,
+            bundle(0xe2),
+            conds(vec![mk_spend(&simple_coin)], 700, 1_000_000),
+        )
+        .await
+        .expect("simple admitted");
+    let many = mp
+        .admit(
+            &store,
+            bundle(0xe3),
+            conds(many_coins.iter().map(mk_spend).collect(), 800, 1_000_000),
+        )
+        .await
+        .expect("many-spend admitted");
+    assert_eq!(mp.total_cost(), mp.max_total_cost(), "pool is exactly full");
+
+    // Incoming 1M-cost item paying fpc 5.0: clears the nonzero floor (5) and the min fee rate
+    // (both RAW-fpc gates, unchanged by 481ccb305), forcing a 1M-cost eviction.
+    let incoming = mp
+        .admit(
+            &store,
+            bundle(0xe4),
+            conds(vec![mk_spend(&incoming_coin)], 5_000_000, 1_000_000),
+        )
+        .await
+        .expect("incoming item displaces the lowest-priority resident");
+
+    assert!(
+        mp.get(&many).is_none(),
+        "eviction victim is the lowest fee per VIRTUAL cost (chia 481ccb305, mempool.py:447-459): \
+         the 8-spend bundle must go despite winning on RAW fee-per-cost"
+    );
+    assert!(mp.get(&simple).is_some(), "simple bundle survives");
+    assert!(
+        fillers.iter().all(|f| mp.get(f).is_some()),
+        "high-fee fillers untouched"
+    );
+    assert!(mp.get(&incoming).is_some(), "incoming item resident");
+    assert_eq!(
+        mp.total_cost(),
+        mp.max_total_cost(),
+        "evicted exactly one 1M-cost item for the 1M-cost incoming"
+    );
+}
