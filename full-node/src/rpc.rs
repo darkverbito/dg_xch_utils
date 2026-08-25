@@ -688,7 +688,13 @@ where
             return Ok(Vec::new());
         }
         let input = generator_input_for_block(self.store.as_ref(), &self.constants, &block).await?;
-        coin_spends_from_generator(&input)
+        // Off the async runtime: a full generator run is unbounded CLVM CPU (up to a whole
+        // block's cost) — chia 12948b837 moved this endpoint's execution into a thread pool
+        // (later the PriorityThreadPoolExecutor, 38bb6d358) so RPC load cannot stall the event
+        // loop. `spawn_blocking` is the tokio analog.
+        tokio::task::spawn_blocking(move || coin_spends_from_generator(&input))
+            .await
+            .map_err(|e| RpcError::BadRequest(format!("spends worker panicked: {e:?}")))?
             .map_err(|e| RpcError::BadRequest(format!("Failed to get spends for block: {e:?}")))
     }
 
@@ -707,7 +713,10 @@ where
             return Ok(Vec::new());
         }
         let input = generator_input_for_block(self.store.as_ref(), &self.constants, &block).await?;
-        coin_spends_with_conditions_from_generator(&input)
+        // Off the async runtime — see get_block_spends (chia 12948b837 / 38bb6d358).
+        tokio::task::spawn_blocking(move || coin_spends_with_conditions_from_generator(&input))
+            .await
+            .map_err(|e| RpcError::BadRequest(format!("spends worker panicked: {e:?}")))?
             .map_err(|e| RpcError::BadRequest(format!("Failed to get spends for block: {e:?}")))
     }
 

@@ -230,7 +230,7 @@ against our arms.
 | ede354c58 handled above; d29d31692 | 2023-11-29 | typo in deep-reorg perf fix | N/A — in code we don't share |
 | 25154a104 above; 206b5c518 | 2023-11-08 | wallet node discovery | N/A — wallet |
 | 3584b3ba7, 3a1f70a9b, ef98949a3, 82f3b0605, dafd8b41d, 8f4b0b6a-era peers | 2023-24 | introducer/peer-list config features | N/A — feature work; our discovery arm covered by t040 handler tests |
-| 12948b837 | 2025-08-13 | run compute-heavy RPC jobs in a thread pool | UNCLEAR `[ind]` — only the weight-proof verify is `spawn_blocking` (`daemon.rs:3915-3917`); CLVM-running RPC endpoints (`get_block_spends`-class) may execute on runtime workers and add tail latency under RPC load. Resolve: audit `full-node/src/rpc.rs` CLVM call sites; offload if hot. Latency, not correctness. |
+| 12948b837 | 2025-08-13 | run compute-heavy RPC jobs in a thread pool | COVERED `[ind]` — resolved from UNCLEAR. Audit of `full-node/src/rpc.rs` CLVM call sites against chia 2.7.1's end state (12948b837's `run_in_executor`, evolved into the `PriorityThreadPoolExecutor` pool in 38bb6d358): chia offloads exactly the two full-generator-run endpoints, `get_block_spends` and `get_block_spends_with_conditions`, while `get_puzzle_and_solution` runs inline. Ours had all three inline; the two chia offloads are now `tokio::task::spawn_blocking` (`rpc.rs::get_block_spends`/`get_block_spends_with_conditions`), and `get_puzzle_and_solution` deliberately stays inline — chia parity. Existing endpoint tests (`full-node/tests/rpc.rs` spends family) pin results unchanged; no new red test — the gap is an event-loop-latency property, not an observable result. The weight-proof verify was already `spawn_blocking` (`daemon.rs`). |
 | a10df3b61 | 2025-07-21 | remove exception catching from node RPC | N/A — python error-shape |
 | 387d8073a | 2025-07-07 | drop unserializable spends, not the whole request | DESIGN `[ana]` — serialization of stored types is infallible in Rust |
 
@@ -378,8 +378,9 @@ one stranding-class divergence before this sweep.
 8. **`b1b68072a` — close on unknown message type (hygiene).** CLOSED — disconnect + short
    host ban in the read loop (see the §4 row).
 
-UNCLEAR (2): `ede354c58` (tolerant parse for the `error` protocol message — verify CNI
-sender behavior), `12948b837` (audit RPC CLVM call sites for runtime-thread stalls).
+UNCLEAR (0): both resolved to COVERED in the Q3 network-hardening batch — `ede354c58`
+(error message modeled + tolerated) and `12948b837` (get_block_spends pair offloaded to
+`spawn_blocking`); see their §1/§4 rows.
 
 ## Sweep boundaries (honest statement)
 
