@@ -115,7 +115,7 @@ pending/conflict caches `:786-830`, assembly `:1695-1912`. `node/tests/t060_memp
 
 | commit | date | what it fixed | disposition |
 |---|---|---|---|
-| 481ccb305 | 2026-03-20 | **mempool priority = fee per VIRTUAL cost** (cost + 500k/spend penalty) for eviction, min-fee floor, and block-assembly order | **GAP** `[ind]` — diff read: chia 2.7.1 orders by `fee_per_virtual_cost` (`chia/types/mempool_item.py::virtual_cost`, `mempool.py:438`); ours orders by raw `fee_per_cost` (`mempool.rs:707`, :970 comment cites the pre-fix `ORDER BY fee_per_cost`). Failure: many-spend low-value bundles CNI deprioritizes/evicts stay competitive here — divergent eviction under load and divergent block contents; the anti-spam intent of the penalty is absent. Policy/DoS class, not consensus-splitting. |
+| 481ccb305 | 2026-03-20 | **mempool priority = fee per VIRTUAL cost** (cost + 500k/spend penalty) for eviction, min-fee floor, and block-assembly order | COVERED `[ind]` — closed on this branch right after the sweep: `8f9ca63` pins priority as fee per VIRTUAL cost unconditionally, `2912063` applies the spend penalty unconditionally and splits serving order from priority (both cite chia 481ccb305; `node/src/mempool.rs`, `node/tests/t060_mempool.rs`). |
 | b0bc56dff | 2026-04-16 | pending drain off-by-one delayed exact-match height asserts a block | COVERED `[ind]` — drain is `assert_height <= height` (`mempool.rs:2176`), matching post-fix `drain(new_peak.height)` with `<=` |
 | d69c5214b | 2026-03-16 | PendingTxCache eviction crash on empty height buckets | DESIGN `[ind]` — no by-height bucket structure; flat map + scan-max eviction (`mempool.rs:1552-1560`) |
 | fb2a93960 | 2023-09-26 | typo in PendingTxCache | DESIGN — same |
@@ -344,12 +344,16 @@ against the three enumeration lists; zero unassigned, zero extra):
 
 | disposition | count |
 |---|---|
-| COVERED | 103 |
+| COVERED | 113 |
 | COVERED-BY-DESIGN | 39 |
-| GAP | 9 (8 distinct findings; `04b9d010b` is the cherry-pick of `9491c6ee3`) |
-| UNCLEAR | 2 |
+| GAP | 1 (`3461286e8`, exempt-network rate-limit bypass — operational) |
+| UNCLEAR | 0 |
 | N/A (incl. the 14-commit HF2/PoS2 standing bucket) | 186 |
 | **Total** | **339** |
+
+As-swept (2026-08-24) the tallies were COVERED 103 / GAP 9 / UNCLEAR 2; the mempool
+virtual-cost fix (`8f9ca63`+`2912063`) and the Q3 network-hardening batch closed eight of
+the nine GAP rows and both UNCLEAR rows (see the per-row entries for anchors and tests).
 
 ## Ranked gap list
 
@@ -358,11 +362,8 @@ node-stranding gaps were found** — every validation-rule fix in the range is e
 ported, tested, or architecturally excluded; the store-backed fork walk (#193) closed the
 one stranding-class divergence before this sweep.
 
-1. **`481ccb305` — mempool fee-per-virtual-cost priority (DoS/policy).** CNI 2.7.1
-   penalizes each spend 500k virtual cost in eviction, min-fee, and block-assembly order;
-   we use raw fee-per-cost. Under a many-spend spam load our mempool retains and mines
-   what CNI evicts. Fix is contained: a `virtual_cost` accessor + swapping the three
-   ordering sites in `node/src/mempool.rs`.
+1. **`481ccb305` — mempool fee-per-virtual-cost priority (DoS/policy).** CLOSED —
+   `8f9ca63` + `2912063` (see the §2 row).
 2. **`b483e59f2` — CHIA-4203 list-limited deserialization (DoS/CPU, Pi-4 floor).** CLOSED —
    decode-time list caps on the four wallet-protocol request handlers (see the §4 row).
 3. **`a1b12d321` — RATE_LIMITS_V3 window-based limits (DoS-hardening parity).** CLOSED —
