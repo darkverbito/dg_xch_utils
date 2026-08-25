@@ -183,6 +183,20 @@ const STALL_SECS: u64 = 300;
 // verify before its first fast-sync peak lands. The probe cannot fail inside this window regardless of
 // progress — it covers the cold from-zero start where peak legitimately sits at 0 for a while.
 const BOOT_GRACE_SECS: u64 = 120;
+// In-flight confirm ceiling for the `/health` verdict. A window-batched confirm FREEZES both progress
+// witnesses while it runs: on a Postgres/SAN catch-up node the coin_record INSERT is I/O-bound (~70s
+// observed, IO:DataFileRead on the 134 GB / 434 M-row table), the confirmed peak jumps its 32 blocks
+// atomically only AFTER the commit lands, and blocks_downloaded already peaked before the write began.
+// So a node that is actively, correctly committing looks identical to a stall by peak/download alone.
+// `follow_inflight_since` (set for the whole drain+confirm window, daemon.rs block_processor) is the
+// backend-agnostic witness that a confirm is in flight — treat that as progress. This ceiling is the
+// anti-unkillable guard: a confirm still in flight past it with no peak advance is a genuine deadlock,
+// not a slow write, and must 503 so the orchestrator restarts it. 300s = ~4× the worst observed 70s
+// window commit — generous headroom for a heavier catch-up batch on a contended SAN (larger window,
+// autovacuum overlap, checkpoint pressure) while still bounding a real wedge to five minutes. It mirrors
+// the driver's own force-rebase watchdog, which already excludes confirm time via the same flag
+// (daemon.rs RECLAIM_TIMEOUT rationale).
+const CONFIRM_MAX_SECS: u64 = 300;
 
 // Seconds since the Unix epoch (0 on a clock before the epoch — never panics).
 fn unix_now() -> u64 {
@@ -292,7 +306,7 @@ impl HealthState {
     //   - the confirmed peak (or download counter) advanced within STALL_SECS.
     // Unhealthy (503) is exactly the complement: below tip, WITH peers, PAST grace, and no advance for
     // more than STALL_SECS — the silent-stall signature the orchestrator should restart.
-    fn verdict(&self, snap: &MetricsSnapshot, now: u64) -> Health {
+    fn verdict(&self, snap: &MetricsSnapshot, now: u64, follow_inflight_since: u64) -> Health {
         if now.saturating_sub(self.boot_unix) < BOOT_GRACE_SECS {
             return Health::ok("boot grace");
         }
@@ -305,6 +319,20 @@ impl HealthState {
         let since = now.saturating_sub(self.last_progress_unix.load(Ordering::Relaxed));
         if since <= STALL_SECS {
             return Health::ok("advancing");
+        }
+        // Past the stall window with no witnessed peak advance or download climb — BUT a window-batched
+        // confirm actively in flight IS progress: it freezes both witnesses (the confirmed peak jumps its
+        // whole window only after the store commit; blocks_downloaded already peaked before the write) while
+        // the node is correctly committing. `follow_inflight_since` (0 = idle) is set for the entire
+        // drain+confirm window on every backend, so it is the correct, backend-agnostic liveness signal on
+        // the Postgres/SAN catch-up path where last_commit_unix is None. Bounded by CONFIRM_MAX_SECS so a
+        // genuinely wedged/deadlocked writer still eventually 503s (anti-unkillable). Monotonic-safe:
+        // saturating_sub yields 0 if the set-time reads ahead of `now` under clock skew (favor healthy while
+        // freshly set).
+        if follow_inflight_since != 0
+            && now.saturating_sub(follow_inflight_since) <= CONFIRM_MAX_SECS
+        {
+            return Health::ok("confirm in flight");
         }
         Health::stalled(since, snap.outbound_peers)
     }
@@ -1255,7 +1283,12 @@ async fn serve<S: BlockStore + Send + Sync + 'static>(
             // the accept loop like /metrics — no spawn — since a kubelet poll every ~15s is tiny.
             let now = unix_now();
             let snap = sources.sample_liveness().await;
-            let health = sources.health.verdict(&snap, now);
+            // A confirm actively in flight (set for the whole drain+confirm window by the block
+            // processor, daemon.rs) counts as progress even when the confirmed peak is frozen mid-commit
+            // — the fix for the Postgres/SAN catch-up doom-loop where a ~70s coin_record INSERT froze
+            // both progress witnesses and the 503 SIGKILLed the node mid-write.
+            let follow_inflight_since = sources.follow_inflight_since.load(Ordering::Relaxed);
+            let health = sources.health.verdict(&snap, now, follow_inflight_since);
             // Stall self-report: the FIRST 503 of an episode logs one structured dump of what the
             // node was last doing (see log_stall_dump); a healthy verdict re-arms it. This replaces
             // inferring a wedged writer from last-span timestamps after 7 silent minutes.
@@ -1497,7 +1530,7 @@ fn jemalloc_prof_dump() -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BOOT_GRACE_SECS, HealthState, MetricsSnapshot, STALL_SECS, StoreSnapshot,
+        BOOT_GRACE_SECS, CONFIRM_MAX_SECS, HealthState, MetricsSnapshot, STALL_SECS, StoreSnapshot,
         jemalloc_prof_dump, render_metrics,
     };
     use dg_xch_stores::HistogramSnapshot;
@@ -1520,7 +1553,7 @@ mod tests {
     #[test]
     fn boot_grace_is_healthy_even_when_below_tip() {
         let hs = HealthState::new_at(BOOT);
-        let v = hs.verdict(&below_tip_with_peers(), BOOT + BOOT_GRACE_SECS - 1);
+        let v = hs.verdict(&below_tip_with_peers(), BOOT + BOOT_GRACE_SECS - 1, 0);
         assert_eq!(v.status, "200 OK");
         assert!(v.body.contains("boot grace"), "body: {}", v.body);
     }
@@ -1537,7 +1570,7 @@ mod tests {
             ..Default::default()
         };
         // Far past grace and far past the stall window — caught-up must still win.
-        let v = hs.verdict(&snap, BOOT + BOOT_GRACE_SECS + STALL_SECS * 10);
+        let v = hs.verdict(&snap, BOOT + BOOT_GRACE_SECS + STALL_SECS * 10, 0);
         assert_eq!(v.status, "200 OK");
         assert!(v.body.contains("caught up"), "body: {}", v.body);
     }
@@ -1553,7 +1586,7 @@ mod tests {
             outbound_peers: 0,
             ..Default::default()
         };
-        let v = hs.verdict(&snap, BOOT + BOOT_GRACE_SECS + STALL_SECS + 5);
+        let v = hs.verdict(&snap, BOOT + BOOT_GRACE_SECS + STALL_SECS + 5, 0);
         assert_eq!(v.status, "200 OK");
         assert!(v.body.contains("no outbound peers"), "body: {}", v.body);
     }
@@ -1564,7 +1597,7 @@ mod tests {
         let hs = HealthState::new_at(BOOT);
         let progressed_at = BOOT + BOOT_GRACE_SECS + 10;
         hs.observe(60, 0, progressed_at); // confirmed peak advanced 0 -> 60
-        let v = hs.verdict(&below_tip_with_peers(), progressed_at + STALL_SECS - 1);
+        let v = hs.verdict(&below_tip_with_peers(), progressed_at + STALL_SECS - 1, 0);
         assert_eq!(v.status, "200 OK");
         assert!(v.body.contains("advancing"), "body: {}", v.body);
     }
@@ -1576,7 +1609,7 @@ mod tests {
         let hs = HealthState::new_at(BOOT);
         // last_progress is seeded to BOOT; evaluate well past both grace and the stall window.
         let now = BOOT + STALL_SECS + BOOT_GRACE_SECS + 1;
-        let v = hs.verdict(&below_tip_with_peers(), now);
+        let v = hs.verdict(&below_tip_with_peers(), now, 0);
         assert_eq!(v.status, "503 Service Unavailable");
         assert!(v.body.contains("stalled"), "body: {}", v.body);
     }
@@ -1588,7 +1621,7 @@ mod tests {
         let hs = HealthState::new_at(BOOT);
         let t = BOOT + BOOT_GRACE_SECS + 10;
         hs.observe(0, 5000, t); // peak flat, only blocks_downloaded advanced
-        let v = hs.verdict(&below_tip_with_peers(), t + STALL_SECS - 1);
+        let v = hs.verdict(&below_tip_with_peers(), t + STALL_SECS - 1, 0);
         assert_eq!(v.status, "200 OK");
         assert!(v.body.contains("advancing"), "body: {}", v.body);
     }
@@ -1813,6 +1846,38 @@ mod tests {
         assert!(!text.contains("fullnode_store_near_tip"));
         // An empty store has NO sync floor — absent, never a fake genesis 0.
         assert!(!text.contains("fullnode_sync_base_height"));
+    }
+
+    // The epyc doom-loop regression: below tip, with peers, past grace, peak frozen well past
+    // STALL_SECS — but a confirm is ACTIVELY in flight (a window-batched coin_record INSERT that
+    // freezes both progress witnesses on the Postgres/SAN path). An in-flight confirm IS progress,
+    // so the verdict must be 200 — a batch commit landing is exactly the work liveness should protect,
+    // never kill. RED before the fix (the frozen peak alone read 503, which sent SIGKILL mid-commit).
+    #[test]
+    fn confirm_in_flight_is_healthy_though_peak_is_frozen() {
+        let hs = HealthState::new_at(BOOT);
+        // Evaluate long past both grace and the stall window with no observed progress.
+        let now = BOOT + BOOT_GRACE_SECS + STALL_SECS * 3;
+        // A confirm went in flight recently and is still running (well under the ceiling).
+        let inflight_since = now - 40;
+        let v = hs.verdict(&below_tip_with_peers(), now, inflight_since);
+        assert_eq!(v.status, "200 OK");
+        assert!(v.body.contains("confirm in flight"), "body: {}", v.body);
+    }
+
+    // The anti-unkillable guard: a confirm that has been "in flight" past CONFIRM_MAX_SECS with no
+    // peak advance is not a slow write, it is a wedged/deadlocked writer — the node must still 503 so
+    // the orchestrator can restart it. Without this ceiling a permanent deadlock would keep the pod
+    // alive forever behind a stuck confirm.
+    #[test]
+    fn confirm_in_flight_past_ceiling_is_unhealthy() {
+        let hs = HealthState::new_at(BOOT);
+        let now = BOOT + BOOT_GRACE_SECS + STALL_SECS * 3;
+        // In flight longer than the ceiling permits — a genuine deadlock, not a legitimate commit.
+        let inflight_since = now - (CONFIRM_MAX_SECS + 5);
+        let v = hs.verdict(&below_tip_with_peers(), now, inflight_since);
+        assert_eq!(v.status, "503 Service Unavailable");
+        assert!(v.body.contains("stalled"), "body: {}", v.body);
     }
 
     // The stall dump fires exactly once per stall episode: first 503 wins, repeats are suppressed,
