@@ -245,4 +245,7 @@ impl<T: BlockStore + Send + Sync> BlockStore for Arc<T> {
     async fn build_indexes(&self) -> Result<(), StoreError> {
         (**self).build_indexes().await
     }
+    async fn shed_service_indexes(&self) -> Result<(), StoreError> {
+        (**self).shed_service_indexes().await
+    }
 }

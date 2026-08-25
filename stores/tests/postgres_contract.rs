@@ -384,3 +384,97 @@ async fn postgres_batch_coin_states_pages_filters_and_joins_hints() {
         "the loop recovers every state exactly once"
     );
 }
+
+// Access method ('btree' / 'brin') of a named index, or None when it does not exist — the
+// pg_class/pg_am probe the index-phase tests key on.
+async fn pg_index_am(name: &str) -> Option<String> {
+    use sqlx::Row;
+    let url = std::env::var("DGXCH_PG_URL").expect("set DGXCH_PG_URL to a dedicated test database");
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&url)
+        .await
+        .expect("probe pool");
+    sqlx::query(
+        "SELECT a.amname FROM pg_class c JOIN pg_am a ON a.oid = c.relam \
+         WHERE c.oid = to_regclass($1)",
+    )
+    .bind(name)
+    .fetch_optional(&pool)
+    .await
+    .expect("probe query")
+    .map(|r| r.get::<String, _>(0))
+}
+
+// The falling-edge shed on Postgres: drops the service tier + the spent_index reorg btree
+// (re-enabling HOT spend-updates during deep re-catch-up) while KEEPING confirmed_index — on
+// Postgres it is a near-free BRIN, not worth churning. ensure_reorg_indexes restores the reorg
+// tier on demand for a reorg-while-shed, and the rising-edge build restores the full set.
+// Env-gated like the contract test above.
+#[tokio::test]
+#[ignore = "requires a dedicated Postgres test database (DGXCH_PG_URL)"]
+async fn postgres_shed_drops_service_and_spent_index_and_build_restores() {
+    use dg_xch_stores::CoinStore;
+    // The sheddable set under the enabled feature tier: always the spent_index reorg btree;
+    // the service tier under coin-index; the coin_hint secondary under hint.
+    let mut sheddable = vec!["coin_record_spent_index"];
+    #[cfg(feature = "coin-index")]
+    sheddable.extend([
+        "coin_record_puzzle_hash",
+        "coin_record_coin_parent",
+        "coin_record_unspent_by_ph",
+    ]);
+    #[cfg(feature = "hint")]
+    sheddable.push("coin_hint_coin_name");
+
+    let store = open_clean().await;
+    store.build_indexes().await.unwrap();
+    for idx in sheddable
+        .iter()
+        .chain(["coin_record_confirmed_index"].iter())
+    {
+        assert!(pg_index_am(idx).await.is_some(), "{idx} built at the edge");
+    }
+
+    store.shed_service_indexes().await.unwrap();
+    for idx in &sheddable {
+        assert!(
+            pg_index_am(idx).await.is_none(),
+            "{idx} must be shed for deep re-catch-up"
+        );
+    }
+    assert_eq!(
+        pg_index_am("coin_record_confirmed_index").await.as_deref(),
+        Some("brin"),
+        "confirmed_index is kept through the shed (near-free BRIN)"
+    );
+
+    // A reorg requested while shed still works: the reorg tier is rebuilt on demand.
+    store.ensure_reorg_indexes().await.unwrap();
+    assert!(pg_index_am("coin_record_spent_index").await.is_some());
+    let coin = Coin {
+        parent_coin_info: Bytes32::from([0x51u8; 32]),
+        puzzle_hash: Bytes32::from([0x52u8; 32]),
+        amount: 77,
+    };
+    let cr = CoinRecord {
+        coin,
+        confirmed_block_index: 20,
+        spent_block_index: 0,
+        coinbase: false,
+        timestamp: 0,
+        spent: false,
+    };
+    store.apply_block(20, 0, &[cr], &[]).await.unwrap();
+    assert_eq!(
+        store.rollback_to(19).await.unwrap(),
+        1,
+        "rollback over the on-demand indexes reverts the applied coin"
+    );
+
+    // The rising edge restores the full set on top of whatever subset an interrupted shed left.
+    store.build_indexes().await.unwrap();
+    for idx in &sheddable {
+        assert!(pg_index_am(idx).await.is_some(), "{idx} restored by build");
+    }
+}

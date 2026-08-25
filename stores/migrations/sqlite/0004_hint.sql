@@ -4,4 +4,7 @@ CREATE TABLE IF NOT EXISTS coin_hint (
     PRIMARY KEY (hint, coin_name)
 ) WITHOUT ROWID;
 
-CREATE INDEX IF NOT EXISTS coin_hint_coin_name ON coin_hint (coin_name);
+-- The coin_hint_coin_name secondary is SERVICE tier and phases with the coin_record service
+-- indexes (see the postgres twin): created by build_indexes at the sync->tip transition,
+-- dropped by shed_service_indexes on a deep fall-behind. Not created here — an at-open create
+-- would silently rebuild it on a restart mid-catch-up after a shed.

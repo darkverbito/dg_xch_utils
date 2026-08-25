@@ -147,6 +147,17 @@ const SYNC_BLOCKS_BEHIND_THRESHOLD: u32 = 300;
 // the confirmed peak tracks the tip within 0-1. The tip_follower owns this band; FOLLOW_BATCH catch-up
 // and bulk_sync own the wider bands (chia full_node.py:856-873).
 const SHORT_SYNC_BLOCKS_BEHIND_THRESHOLD: u32 = 20;
+// Falling-edge hysteresis for the secondary-index shed (`update_synced`): shed only when the node
+// is more than this many blocks behind the claimed network tip. The shed pays for itself only if
+// the index-lean catch-up saves more than the one-time drop + CONCURRENTLY-rebuild round trip
+// (hours over ~435M coin rows on slow storage), so the threshold must sit well past that
+// crossover AND far outside every normal tip excursion: the raw `synced` bit decays on a 1-block
+// dip or a restart wobble, and SYNC_BLOCKS_BEHIND_THRESHOLD-scale (300-block) long-syncs are
+// routine — none of those may churn a multi-GB index set. 50,000 blocks (~10.8 days of mainnet
+// tip advance at 4,608 blocks/day) is reachable only by a genuine outage or a leg whose confirm
+// rate lost to the chain for days — exactly the deep re-catch-up phase the shed exists for, with
+// the rebuild cost amortized over the tens of thousands of index-lean block applies that follow.
+const SHED_TIP_LAG_BLOCKS: u32 = 50_000;
 // Tip-follower safety re-check: a stored notify permit means an advance is never missed, so this is
 // only a backstop against a lost wakeup.
 const TIP_FOLLOW_IDLE: Duration = Duration::from_secs(2);
@@ -2830,8 +2841,13 @@ pub struct Node<S = SqliteStore> {
     pub synced: Arc<AtomicBool>,
     pub run: Arc<AtomicBool>,
     // One-shot latch for the deferred secondary-index build fired on the not-synced -> synced
-    // edge in `update_synced`; reset on a failed build so a later edge retries.
+    // edge in `update_synced`; reset on a failed build so a later edge retries, and by the
+    // falling-edge shed so the next tip edge rebuilds what the shed dropped.
     deferred_indexes_started: Arc<AtomicBool>,
+    // One-shot latch for the falling-edge index shed fired when the node is deeper behind than
+    // SHED_TIP_LAG_BLOCKS in `update_synced`; reset by a successful rising-edge build (arming
+    // the next fall) or on a failed shed so the phase re-fires it.
+    service_indexes_shed: Arc<AtomicBool>,
     constants: ConsensusConstants,
     claimed_peak: Arc<AtomicU32>,
     // The per-peer peak-claim book (chia sync_store): per-connection claims, heaviest-claim selection,
@@ -3014,6 +3030,7 @@ where
             synced,
             run: Arc::new(AtomicBool::new(true)),
             deferred_indexes_started: Arc::new(AtomicBool::new(false)),
+            service_indexes_shed: Arc::new(AtomicBool::new(false)),
             constants,
             claimed_peak: claimed_peak.clone(),
             peak_book: Arc::new(PeakBook::new(claimed_peak)),
@@ -3358,7 +3375,11 @@ where
     /// this on every confirmed step and every idle tick, so the flag also DECAYS back to false
     /// when the tip goes stale (peers lost) — chia recomputes it on every gate check.
     pub async fn update_synced(&self) {
-        let synced = self.chain_is_current().await;
+        let peak = self.store.get_peak().await.ok().flatten();
+        let synced = match peak {
+            Some((hash, _)) => self.chain_is_current(&hash).await,
+            None => false,
+        };
         let was = self.synced.swap(synced, Ordering::Relaxed);
         // The not-synced -> synced rising edge is the sync->tip transition: fire the deferred
         // secondary-index build exactly once (during bulk sync the coin_record secondary
@@ -3366,17 +3387,23 @@ where
         // tip-serving node needs them). Off the follow path: Postgres builds CONCURRENTLY and
         // SQLite yields the writer between statements, so confirms continue underneath. CREATE
         // INDEX IF NOT EXISTS makes a restart-at-tip re-run a cheap no-op; on failure the latch
-        // resets so the next rising edge (or a restart) retries.
+        // resets so the next rising edge (or a restart) retries. A successful build re-arms the
+        // falling-edge shed below — the two latches alternate, so the drop/rebuild cycle can
+        // only run once per genuine fall-behind/re-catch-up excursion.
         if synced && !was && !self.deferred_indexes_started.swap(true, Ordering::Relaxed) {
             let store = self.store.clone();
             let latch = self.deferred_indexes_started.clone();
+            let shed_latch = self.service_indexes_shed.clone();
             tokio::spawn(async move {
                 let started = std::time::Instant::now();
                 match store.build_indexes().await {
-                    Ok(()) => info!(
-                        elapsed_ms = started.elapsed().as_millis() as u64,
-                        "deferred secondary indexes built at tip"
-                    ),
+                    Ok(()) => {
+                        shed_latch.store(false, Ordering::Relaxed);
+                        info!(
+                            elapsed_ms = started.elapsed().as_millis() as u64,
+                            "deferred secondary indexes built at tip"
+                        );
+                    }
                     Err(e) => {
                         latch.store(false, Ordering::Relaxed);
                         warn!(error = %e, "deferred index build failed; retrying on the next sync edge");
@@ -3384,17 +3411,56 @@ where
                 }
             });
         }
+        // The FALLING edge — the phase the rising-edge-only design left unhandled: a node that
+        // reached tip (full index set built) and then fell DEEP behind re-applies settled
+        // history while maintaining every secondary index — measured on a SAN-backed leg as
+        // 531.9 s of a 32-block window (98.8%) spent in coin_record index/heap random reads
+        // with 0% HOT spend-updates. Shed the secondary indexes once, off the follow path, and
+        // re-arm the build latch so the rising edge rebuilds them at the next sync->tip
+        // transition — BEFORE the node re-enters the reorg-exposed zone. Keyed on tip_lag
+        // depth, not the raw synced bit: `synced` flips on a 1-block dip and would churn a
+        // multi-GB drop/rebuild. The latch is armed by depth alone (not the synced
+        // transition), so a restart mid-deep-catch-up re-derives the shed from the live phase
+        // and re-enters it with a cheap idempotent re-drop instead of carrying stale state.
+        if !synced {
+            let local = peak.map_or(0, |(_, h)| h);
+            let tip_lag = self
+                .claimed_peak
+                .load(Ordering::Relaxed)
+                .saturating_sub(local);
+            if local > 0
+                && tip_lag > SHED_TIP_LAG_BLOCKS
+                && !self.service_indexes_shed.swap(true, Ordering::Relaxed)
+            {
+                let store = self.store.clone();
+                let build_latch = self.deferred_indexes_started.clone();
+                let latch = self.service_indexes_shed.clone();
+                tokio::spawn(async move {
+                    let started = std::time::Instant::now();
+                    match store.shed_service_indexes().await {
+                        Ok(()) => {
+                            build_latch.store(false, Ordering::Relaxed);
+                            info!(
+                                elapsed_ms = started.elapsed().as_millis() as u64,
+                                tip_lag, "secondary indexes shed for deep re-catch-up"
+                            );
+                        }
+                        Err(e) => {
+                            latch.store(false, Ordering::Relaxed);
+                            warn!(error = %e, "index shed failed; retrying while still deep behind");
+                        }
+                    }
+                });
+            }
+        }
     }
 
     // chia full_node.py:930-948 — walk from the peak to the last transaction block and compare its
     // timestamp against now - 7 minutes. The walk is bounded generously: mainnet guarantees a
     // transaction block within far fewer records, and a missing/older-than-window record is simply
     // "not synced" (fail-closed, same verdict chia reaches on a stale chain).
-    async fn chain_is_current(&self) -> bool {
-        let Ok(Some((hash, _))) = self.store.get_peak().await else {
-            return false;
-        };
-        let mut curr = self.store.get_block_record(&hash).await.ok().flatten();
+    async fn chain_is_current(&self, peak_hash: &Bytes32) -> bool {
+        let mut curr = self.store.get_block_record(peak_hash).await.ok().flatten();
         for _ in 0..512 {
             match &curr {
                 None => return false,
@@ -9092,6 +9158,22 @@ mod tests {
     struct FaultStore {
         inner: Arc<SqliteStore>,
         fail_get_block_record: Arc<AtomicBool>,
+        // Edge-controller probes: how many times the daemon fired the deferred build / the
+        // falling-edge shed. Counted at the store seam so the tests observe the spawned tasks'
+        // actual store calls, not the latch state.
+        build_calls: Arc<std::sync::atomic::AtomicUsize>,
+        shed_calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl FaultStore {
+        fn new(inner: Arc<SqliteStore>, fail_get_block_record: Arc<AtomicBool>) -> Self {
+            Self {
+                inner,
+                fail_get_block_record,
+                build_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                shed_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }
+        }
     }
 
     #[async_trait]
@@ -9359,7 +9441,14 @@ mod tests {
             self.inner.persist_sub_epoch_segments(ses_hash, bytes).await
         }
         async fn build_indexes(&self) -> Result<(), dg_xch_stores::StoreError> {
+            self.build_calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             self.inner.build_indexes().await
+        }
+        async fn shed_service_indexes(&self) -> Result<(), dg_xch_stores::StoreError> {
+            self.shed_calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.inner.shed_service_indexes().await
         }
     }
 
@@ -9379,10 +9468,7 @@ mod tests {
             std::env::temp_dir().join(format!("fn_ubfault_{}_{nanos}.sqlite", std::process::id()));
         let inner = open_backend(&Backend::Sqlite(db)).await.expect("store");
         let fail = Arc::new(AtomicBool::new(false));
-        let store = Arc::new(FaultStore {
-            inner,
-            fail_get_block_record: fail.clone(),
-        });
+        let store = Arc::new(FaultStore::new(inner, fail.clone()));
         let node = Arc::new(
             Node::boot_with_store(
                 Config {
@@ -9448,6 +9534,163 @@ mod tests {
             node.producer.dropped_count("ub_prev_unknown"),
             1,
             "genesis parent absent on a healthy store is the genuine ub_prev_unknown park"
+        );
+    }
+
+    // The two-edge index-phase controller in update_synced. Rising edge (not-synced -> synced):
+    // build the deferred secondary indexes once. Falling edge (deep behind: tip_lag past the
+    // hysteresis band): shed them once, so re-catch-up runs index-lean with HOT spends, and
+    // re-arm the build latch so the next tip edge rebuilds. A shallow dip (a few blocks, a
+    // restart wobble) must never churn a multi-GB drop/rebuild — only depth past
+    // SHED_TIP_LAG_BLOCKS sheds.
+    #[tokio::test]
+    async fn deep_fall_behind_sheds_indexes_once_and_the_tip_edge_rebuilds() {
+        use dg_xch_core::blockchain::unsized_bytes::UnsizedBytes;
+        use dg_xch_core::blockchain::vdf_output::VdfOutput;
+
+        // A minimal main-chain record at `height` whose transaction-block timestamp is `ts` —
+        // chain_is_current derives synced solely from that timestamp's freshness.
+        fn rec_at(height: u32, ts: u64) -> BlockRecord {
+            BlockRecord {
+                header_hash: Bytes32::from([height as u8; 32]),
+                prev_hash: Bytes32::from([height.wrapping_sub(1) as u8; 32]),
+                height,
+                weight: u128::from(height) * 100,
+                total_iters: u128::from(height),
+                signage_point_index: 0,
+                challenge_vdf_output: VdfOutput {
+                    data: UnsizedBytes::new(vec![]),
+                },
+                infused_challenge_vdf_output: None,
+                reward_infusion_new_challenge: Bytes32::default(),
+                challenge_block_info_hash: Bytes32::default(),
+                sub_slot_iters: MAINNET.sub_slot_iters_starting,
+                pool_puzzle_hash: Bytes32::default(),
+                farmer_puzzle_hash: Bytes32::default(),
+                required_iters: 1,
+                deficit: 0,
+                overflow: false,
+                prev_transaction_block_height: 0,
+                timestamp: Some(ts),
+                prev_transaction_block_hash: None,
+                fees: None,
+                reward_claims_incorporated: None,
+                finished_challenge_slot_hashes: None,
+                finished_infused_challenge_slot_hashes: None,
+                finished_reward_slot_hashes: None,
+                sub_epoch_summary_included: None,
+            }
+        }
+
+        async fn confirm_at<S: dg_xch_stores::BlockStore + dg_xch_stores::CoinStore>(
+            store: &S,
+            height: u32,
+            ts: u64,
+        ) {
+            let rec = rec_at(height, ts);
+            store
+                .add_block_records(std::slice::from_ref(&rec))
+                .await
+                .expect("record");
+            store.set_peak(&rec.header_hash).await.expect("peak");
+        }
+
+        async fn wait_count(counter: &Arc<std::sync::atomic::AtomicUsize>, want: usize) -> bool {
+            for _ in 0..200 {
+                if counter.load(Ordering::Relaxed) == want {
+                    return true;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            counter.load(Ordering::Relaxed) == want
+        }
+
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let db =
+            std::env::temp_dir().join(format!("fn_idxphase_{}_{nanos}.sqlite", std::process::id()));
+        let inner = open_backend(&Backend::Sqlite(db)).await.expect("store");
+        let store = Arc::new(FaultStore::new(inner, Arc::new(AtomicBool::new(false))));
+        let node = Arc::new(
+            Node::boot_with_store(
+                Config {
+                    listen: "127.0.0.1:0".parse().unwrap(),
+                    rpc: "127.0.0.1:0".parse().unwrap(),
+                    introducer: None,
+                    manual_peers: Vec::new(),
+                    advertise: None,
+                    backend: Backend::Sqlite(std::path::PathBuf::from("unused")),
+                    network_id: "mainnet".to_string(),
+                    metrics: None,
+                    capture_dir: None,
+                    genesis_sync: false,
+                    sync_from: 0,
+                    uncompact: false,
+                    prefetch_memory_mb: None,
+                    prefetch_max_inflight: None,
+                    trusted_peers: Vec::new(),
+                    trusted_cidrs: Vec::new(),
+                },
+                store.clone(),
+            )
+            .expect("boot node"),
+        );
+        let now = || {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+        };
+
+        // Rising edge at tip: the deferred build fires exactly once.
+        confirm_at(&*store, 100, now()).await;
+        node.claimed_peak.store(100, Ordering::Relaxed);
+        node.update_synced().await;
+        assert!(
+            wait_count(&store.build_calls, 1).await,
+            "the sync->tip rising edge fires the deferred index build"
+        );
+
+        // A shallow fall (stale tip, a few blocks behind) must NOT shed — hysteresis.
+        confirm_at(&*store, 110, now() - 3_600).await;
+        node.claimed_peak.store(120, Ordering::Relaxed);
+        for _ in 0..3 {
+            node.update_synced().await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(
+            store.shed_calls.load(Ordering::Relaxed),
+            0,
+            "a shallow dip below tip must never churn the index set"
+        );
+
+        // A DEEP fall (tip_lag past the hysteresis band): shed fires exactly once, off the
+        // follow path, no matter how often update_synced re-observes the phase.
+        node.claimed_peak.store(110 + 50_001, Ordering::Relaxed);
+        node.update_synced().await;
+        assert!(
+            wait_count(&store.shed_calls, 1).await,
+            "the deep falling edge sheds the secondary indexes"
+        );
+        for _ in 0..3 {
+            node.update_synced().await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(
+            store.shed_calls.load(Ordering::Relaxed),
+            1,
+            "the shed is one-shot per falling edge"
+        );
+
+        // Back at tip: the rising edge re-fires the build (the shed re-armed the build latch).
+        confirm_at(&*store, 200, now()).await;
+        node.claimed_peak.store(200, Ordering::Relaxed);
+        node.update_synced().await;
+        assert!(
+            wait_count(&store.build_calls, 2).await,
+            "the next tip edge rebuilds what the shed dropped"
         );
     }
 

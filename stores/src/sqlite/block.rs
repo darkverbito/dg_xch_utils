@@ -517,7 +517,36 @@ impl BlockStore for SqliteStore {
             + &crate::strip_sql_comments(include_str!(
                 "../../migrations/sqlite/0003_service_indexes.sql"
             ));
+        // The coin_hint secondary phases with the service tier (0-scan during sync, wallet-only
+        // at tip), so it is created HERE, not by 0004 at open — an at-open create would silently
+        // rebuild it on a restart mid-catch-up after a shed.
+        #[cfg(feature = "hint")]
+        let sql = sql + "CREATE INDEX IF NOT EXISTS coin_hint_coin_name ON coin_hint (coin_name);";
         for stmt in sql.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+            let mut guard = self.writer.lock().await;
+            sqlx::query(stmt).execute(&mut *guard).await?;
+        }
+        Ok(())
+    }
+
+    async fn shed_service_indexes(&self) -> Result<(), StoreError> {
+        // The falling-edge counterpart of `build_indexes` for a deep re-catch-up: return the
+        // store to the index-lean bulk-sync posture (coin_record pkey only). Unlike the
+        // Postgres twin, `confirmed_index` is shed too — SQLite has no BRIN, so here it is a
+        // full btree paying random maintenance per insert, exactly the write-amplification the
+        // shed exists to remove; `ensure_reorg_indexes` restores both reorg btrees on demand if
+        // a reorg is nonetheless requested while shed. One statement per writer-lock
+        // acquisition (the `build_indexes` pattern) so confirms interleave; a shed interrupted
+        // part-way leaves a subset absent, which the `IF NOT EXISTS` rebuild handles.
+        for stmt in [
+            "DROP INDEX IF EXISTS coin_record_puzzle_hash",
+            "DROP INDEX IF EXISTS coin_record_coin_parent",
+            "DROP INDEX IF EXISTS coin_record_unspent_by_ph",
+            "DROP INDEX IF EXISTS coin_record_spent_index",
+            "DROP INDEX IF EXISTS coin_record_confirmed_index",
+            #[cfg(feature = "hint")]
+            "DROP INDEX IF EXISTS coin_hint_coin_name",
+        ] {
             let mut guard = self.writer.lock().await;
             sqlx::query(stmt).execute(&mut *guard).await?;
         }

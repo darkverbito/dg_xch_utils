@@ -434,9 +434,47 @@ impl BlockStore for PostgresStore {
         sql.push_str(&crate::strip_sql_comments(include_str!(
             "../../migrations/postgres/0003_service_indexes.sql"
         )));
+        // The coin_hint secondary phases with the service tier (0-scan during sync, wallet-only
+        // at tip), so it is created HERE, not by 0004 at open — an at-open create would silently
+        // rebuild it on a restart mid-catch-up after a shed.
+        #[cfg(feature = "hint")]
+        sql.push_str(
+            "CREATE INDEX CONCURRENTLY IF NOT EXISTS coin_hint_coin_name ON coin_hint (coin_name);",
+        );
         // Fresh planner statistics over the fully-synced tables close the build out.
         sql.push_str("ANALYZE coin_record; ANALYZE block_record;");
         for stmt in sql.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+            sqlx::query(stmt).execute(&self.pool).await?;
+        }
+        Ok(())
+    }
+
+    async fn shed_service_indexes(&self) -> Result<(), StoreError> {
+        // The falling-edge counterpart of `build_indexes` for a deep re-catch-up: drop the
+        // service tier AND the spent_index reorg btree. Shedding spent_index (and the partial
+        // unspent_by_ph) is what re-enables HOT spend-updates — an UPDATE touching an indexed
+        // column can never be HOT, and the measured HOT rate at tip is 0% — so index-lean
+        // re-catch-up saves both the per-coin index maintenance and the vacuum debt.
+        // confirmed_index is KEPT: as a BRIN it is near-free to maintain and still serves the
+        // rollback DELETE range cheaply. Deep catch-up applies settled history (reorgs are a
+        // tip phenomenon); if a reorg is nonetheless requested while shed,
+        // `ensure_reorg_indexes` rebuilds the reorg tier on demand before the rollback runs.
+        //
+        // Plain DROP, not CONCURRENTLY: an interrupted DROP CONCURRENTLY leaves the index
+        // INVALID-but-present, which the later `CREATE INDEX CONCURRENTLY IF NOT EXISTS`
+        // rebuild then skips forever (the same trap `ensure_reorg_indexes` documents for
+        // CREATE) — whereas a killed plain DROP rolls back cleanly. Each drop is a catalog
+        // update + file unlink: the ACCESS EXCLUSIVE lock is momentary. One autocommit
+        // statement per index; a shed interrupted between statements leaves a subset absent,
+        // which the `IF NOT EXISTS` rebuild handles.
+        for stmt in [
+            "DROP INDEX IF EXISTS coin_record_puzzle_hash",
+            "DROP INDEX IF EXISTS coin_record_coin_parent",
+            "DROP INDEX IF EXISTS coin_record_unspent_by_ph",
+            "DROP INDEX IF EXISTS coin_record_spent_index",
+            #[cfg(feature = "hint")]
+            "DROP INDEX IF EXISTS coin_hint_coin_name",
+        ] {
             sqlx::query(stmt).execute(&self.pool).await?;
         }
         Ok(())

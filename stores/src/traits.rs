@@ -718,4 +718,31 @@ pub trait BlockStore {
     /// # Errors
     /// Returns [`StoreError::Backend`] if index creation fails.
     async fn build_indexes(&self) -> Result<(), StoreError>;
+
+    /// Drop the deferred secondary `coin_record` indexes for a deep re-catch-up — the falling
+    /// edge of the [`Self::build_indexes`] rising edge.
+    ///
+    /// A node that reached tip (built the full index set) and then fell far behind re-applies
+    /// settled history with every secondary index still present: each coin insert maintains
+    /// them all, and each spend-update is non-HOT because `spent_index` is indexed — measured
+    /// on a SAN-backed leg as 98.8% of the confirm window spent in index/heap random reads.
+    /// Deep catch-up is applying canonical, settled blocks — reorgs are a tip phenomenon — so
+    /// the service tier (`puzzle_hash`, `coin_parent`, `unspent_by_ph`, the `coin_hint`
+    /// secondary) AND the `spent_index` reorg btree are all safe to shed: shedding
+    /// `spent_index` is what re-enables HOT spend-updates. If a reorg is nonetheless requested
+    /// while shed, [`CoinStore::ensure_reorg_indexes`] rebuilds the reorg tier on demand before
+    /// the rollback runs (slower, correct). The rising edge (`build_indexes`) restores
+    /// everything before the node re-enters the reorg-exposed tip zone.
+    ///
+    /// Idempotent (`DROP INDEX IF EXISTS`); a shed interrupted mid-way leaves a subset absent,
+    /// which the `IF NOT EXISTS` rebuild handles. Consensus indexes (the `coin_record` pkey,
+    /// `block_record` pkey/height, `coin_hint` pkey) are never touched.
+    ///
+    /// Default: no-op — a backend with no deferred SQL indexes (the mmap store) sheds nothing.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Backend`] if an index drop fails.
+    async fn shed_service_indexes(&self) -> Result<(), StoreError> {
+        Ok(())
+    }
 }

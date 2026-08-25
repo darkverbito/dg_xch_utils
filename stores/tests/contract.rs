@@ -172,6 +172,75 @@ async fn deferred_index_build_creates_service_indexes() {
     );
 }
 
+// The falling-edge counterpart of the deferred build: a node that reached tip (full index set)
+// and then fell far behind sheds every secondary coin_record index — service tier AND the reorg
+// btrees — returning the store to the same index-lean posture as bulk sync (shedding spent_index
+// is what re-enables HOT spend-updates on the SQL backends). The rising-edge build restores the
+// full set, and a reorg during the lean phase rebuilds the reorg tier on demand via
+// ensure_reorg_indexes before its rollback runs.
+#[tokio::test]
+async fn falling_edge_shed_drops_secondary_indexes_and_build_restores_them() {
+    use dg_xch_stores::CoinStore;
+    let path = common::unique_db_path();
+    let store = common::new_store_at(&path).await;
+    store.build_indexes().await.unwrap();
+    assert!(common::index_exists(&path, "coin_record_confirmed_index").await);
+    assert!(common::index_exists(&path, "coin_record_spent_index").await);
+
+    store.shed_service_indexes().await.unwrap();
+    for idx in [
+        "coin_record_confirmed_index",
+        "coin_record_spent_index",
+        "coin_record_puzzle_hash",
+        "coin_record_coin_parent",
+        "coin_record_unspent_by_ph",
+    ] {
+        assert!(
+            !common::index_exists(&path, idx).await,
+            "{idx} must be shed for deep re-catch-up"
+        );
+    }
+    #[cfg(feature = "hint")]
+    assert!(
+        !common::index_exists(&path, "coin_hint_coin_name").await,
+        "the coin_hint secondary phases with the service tier"
+    );
+
+    // A reorg requested while shed still works: ensure_reorg_indexes rebuilds the reorg tier on
+    // demand, then the rollback runs over it.
+    let (adds, _) = common::load_adds_rems(5_000_000);
+    store.apply_block(10, 0, &adds[..4], &[]).await.unwrap();
+    store.ensure_reorg_indexes().await.unwrap();
+    assert!(common::index_exists(&path, "coin_record_confirmed_index").await);
+    assert!(common::index_exists(&path, "coin_record_spent_index").await);
+    assert_eq!(
+        store.rollback_to(9).await.unwrap(),
+        4,
+        "rollback over the on-demand indexes reverts the applied coins"
+    );
+
+    // The rising edge restores the full set on top of whatever subset an interrupted shed left.
+    store.build_indexes().await.unwrap();
+    assert!(common::index_exists(&path, "coin_record_confirmed_index").await);
+    assert!(common::index_exists(&path, "coin_record_spent_index").await);
+    #[cfg(feature = "coin-index")]
+    for idx in [
+        "coin_record_puzzle_hash",
+        "coin_record_coin_parent",
+        "coin_record_unspent_by_ph",
+    ] {
+        assert!(
+            common::index_exists(&path, idx).await,
+            "{idx} must be restored by the rising-edge build"
+        );
+    }
+    #[cfg(feature = "hint")]
+    assert!(
+        common::index_exists(&path, "coin_hint_coin_name").await,
+        "the coin_hint secondary rebuilds with the service tier"
+    );
+}
+
 #[tokio::test]
 async fn one_batch_carries_the_whole_per_block_apply() {
     use dg_xch_stores::CoinStore;
