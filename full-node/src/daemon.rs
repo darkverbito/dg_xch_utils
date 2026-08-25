@@ -234,6 +234,9 @@ struct StoreApi<S> {
     // The sync-status flag: slot/unfinished gossip is tip-context, so a deep-syncing node pulls
     // nothing it cannot validate (chia's "Ignore if syncing" guard on these handlers).
     synced: Arc<AtomicBool>,
+    // Simulator only: serve wallets a v1-shaped proof of space in headers (stock wallets cannot
+    // deserialize a v2 proof). Off on a production node.
+    wallet_compat: Arc<AtomicBool>,
     // Received bundles awaiting the validator worker (never validated on the read loop). A trusted
     // peer's bundle takes the high-priority lane (chia TransactionQueue high_priority).
     tx_inbox: Arc<Mutex<TxQueue>>,
@@ -709,15 +712,13 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
 
     async fn mempool_items(&self, filter: Vec<u8>) -> Vec<NewTransaction> {
         // chia mempool_manager.get_items_not_in_filter (:1066-1082): decode the peer's BIP158
-        // filter and serve up to `limit` (100) items NOT in it, scanning at most `max_checked`
-        // (5000) in RAW fee-per-cost order — chia iterates `items_by_feerate()`
-        // (mempool.py:257-260 `ORDER BY fee_per_cost DESC, seq ASC`), NOT the virtual-cost
-        // priority order assembly/eviction use. A malformed filter decodes to None and we serve
-        // unfiltered — over-announcing is the safe superset (the peer's own dedup absorbs it).
+        // filter and serve up to `limit` (100) highest-fee items NOT in it, scanning at most
+        // `max_checked` (5000). A malformed filter decodes to None and we serve unfiltered —
+        // over-announcing is the safe superset (the peer's own dedup absorbs it).
         let decoded = dg_xch_core::consensus::block_filter::decode_chia_block_filter(&filter);
         let mp = self.mempool.lock().await;
         let mut out = Vec::new();
-        for (checked, item) in mp.items_by_feerate().into_iter().enumerate() {
+        for (checked, item) in mp.items_by_fee().into_iter().enumerate() {
             if out.len() >= 100 || checked >= 5000 {
                 break;
             }
@@ -2054,6 +2055,29 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> StoreApi<S> {
     // the tx-block + want_filter case computes. None = a store failure (chia raises → no reply).
     // Coin-index tier: without the added/removed-at-height indexes the b"\x00" default stands
     // (that tier serves no wallet-sync surface at all).
+    // A stock (non-v2) wallet cannot deserialize a v2 proof of space, and a light wallet never uses
+    // the proof anyway (it reads the header for the timestamp + filter). When `wallet_compat` is set
+    // — only by a simulator serving stock wallets — re-encode the header's proof in the v1 wire shape
+    // so `RespondBlockHeader` deserializes. The stored block keeps its real v2 proof.
+    fn wallet_compat_header(
+        &self,
+        mut hb: dg_xch_core::blockchain::header_block::HeaderBlock,
+    ) -> dg_xch_core::blockchain::header_block::HeaderBlock {
+        if self.wallet_compat.load(Ordering::Relaxed) {
+            let p = &hb.reward_chain_block.proof_of_space;
+            hb.reward_chain_block.proof_of_space =
+                dg_xch_core::blockchain::proof_of_space::ProofOfSpace::v1(
+                    p.challenge,
+                    p.pool_public_key,
+                    p.pool_contract_puzzle_hash,
+                    p.plot_public_key,
+                    if p.size == 0 { 32 } else { p.size },
+                    p.proof.clone(),
+                );
+        }
+        hb
+    }
+
     #[cfg(feature = "coin-index")]
     async fn served_header_block(
         &self,
@@ -2076,7 +2100,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> StoreApi<S> {
                 chia_block_filter(&items),
             );
         }
-        Some(hb)
+        Some(self.wallet_compat_header(hb))
     }
 
     #[cfg(not(feature = "coin-index"))]
@@ -2085,7 +2109,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> StoreApi<S> {
         block: &FullBlock,
         _want_filter: bool,
     ) -> Option<dg_xch_core::blockchain::header_block::HeaderBlock> {
-        Some(dg_xch_node::header_block_from_full_block(block))
+        Some(self.wallet_compat_header(dg_xch_node::header_block_from_full_block(block)))
     }
 
     /// The initial `CoinState` set for a puzzle-hash subscription — chia `register_for_ph_updates`
@@ -2453,7 +2477,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> StoreApi<S> {
         let Some(iters) = resolve_candidate_iters(
             &self.constants,
             quality_string,
-            declare.proof_of_space.size,
+            &declare.proof_of_space,
             difficulty,
             sub_slot_iters,
             declare.signage_point_index,
@@ -2828,6 +2852,9 @@ pub struct Node<S = SqliteStore> {
     wallet_sync_sem: Arc<LimitedSemaphore>,
     pub rpc: Arc<NodeRpc<S>>,
     pub synced: Arc<AtomicBool>,
+    /// Simulator only: serve wallets a v1-shaped proof of space in block headers (a stock wallet
+    /// cannot deserialize a v2 proof). Off on a production node.
+    pub wallet_compat: Arc<AtomicBool>,
     pub run: Arc<AtomicBool>,
     // One-shot latch for the deferred secondary-index build fired on the not-synced -> synced
     // edge in `update_synced`; reset on a failed build so a later edge retries.
@@ -2971,6 +2998,16 @@ where
     /// Infallible today; kept fallible so store-dependent wiring can fail cleanly later.
     pub fn boot_with_store(config: Config, store: Arc<S>) -> Result<Self, Error> {
         let constants = constants_for(&config.network_id);
+        Self::boot_with_store_constants(config, store, constants)
+    }
+
+    /// As [`boot_with_store`], but with the consensus constants supplied directly rather than
+    /// resolved from the network id — the seam a simulator uses to serve under its own constants.
+    pub fn boot_with_store_constants(
+        config: Config,
+        store: Arc<S>,
+        constants: ConsensusConstants,
+    ) -> Result<Self, Error> {
         let engine = Engine::new(store.clone(), NativePrimitives, constants);
         let chaser = Chaser::new(engine, SyncConfig::default());
         // Clone the chaser's metrics handle up front so the /metrics server can read the same atomics the
@@ -2993,6 +3030,7 @@ where
             WALLET_SYNC_WAITING_LIMIT,
         ));
         let synced = Arc::new(AtomicBool::new(false));
+        let wallet_compat = Arc::new(AtomicBool::new(false));
         let tx_announce = Arc::new(Mutex::new(Vec::new()));
         let tx_requested = Arc::new(Mutex::new(HashMap::new()));
         let slot_state = Arc::new(Mutex::new(SlotState::new(constants)));
@@ -3012,6 +3050,7 @@ where
             wallet_sync_sem,
             rpc,
             synced,
+            wallet_compat,
             run: Arc::new(AtomicBool::new(true)),
             deferred_indexes_started: Arc::new(AtomicBool::new(false)),
             constants,
@@ -3110,6 +3149,7 @@ where
             ub_inbox: self.ub_inbox.clone(),
             ip_inbox: self.ip_inbox.clone(),
             synced: self.synced.clone(),
+            wallet_compat: self.wallet_compat.clone(),
             tx_inbox: self.tx_inbox.clone(),
             tx_announce: self.tx_announce.clone(),
             tx_origin: self.tx_origin.clone(),
@@ -3456,6 +3496,7 @@ where
         let port = self.config.listen.port();
         let record_window = self.record_window.clone();
         let sync_metrics = self.sync_metrics.clone();
+        let wallet_compat = self.wallet_compat.clone();
         Arc::new(move || {
             let api: Arc<dyn FullNodeApi> = Arc::new(StoreApi {
                 store: store.clone(),
@@ -3477,6 +3518,7 @@ where
                 ub_inbox: ub_inbox.clone(),
                 ip_inbox: ip_inbox.clone(),
                 synced: synced_flag.clone(),
+                wallet_compat: wallet_compat.clone(),
                 tx_inbox: tx_inbox.clone(),
                 tx_announce: tx_announce.clone(),
                 tx_origin: tx_origin.clone(),
@@ -4178,7 +4220,11 @@ where
     // `reorg` is Some on the first re-applied block of a landed reorg (the chaser's
     // [`ConfirmedDelta`] feed): the rolled-back coin states are pushed to subscribers and the true
     // fork height replaces the height-1 simplification.
-    async fn notify_new_peak(
+    /// Apply a locally-produced peak's wallet-facing effects: revalidate the mempool at the new
+    /// peak, roll wallet subscriptions forward (or back on a reorg), and push `CoinStateUpdate` +
+    /// `NewPeakWallet` to every subscribed wallet peer. A simulator that produces blocks out of band
+    /// drives this directly, since it does not run the follow loop that normally calls it.
+    pub async fn notify_new_peak(
         &self,
         d: &BlockDelta,
         reorg: Option<&ReorgWalletDelta>,
@@ -8108,6 +8154,7 @@ mod tests {
             ub_inbox: Arc::new(Mutex::new(Vec::new())),
             ip_inbox: Arc::new(Mutex::new(Vec::new())),
             synced: Arc::new(AtomicBool::new(true)),
+            wallet_compat: Arc::new(AtomicBool::new(false)),
             tx_inbox: Arc::new(Mutex::new(TxQueue::new(TX_INBOX_CAP, TX_INBOX_PER_PEER))),
             tx_announce: Arc::new(Mutex::new(Vec::new())),
             tx_origin: Arc::new(Mutex::new(HashMap::new())),
@@ -8420,6 +8467,10 @@ mod tests {
         let sk = SecretKey::key_gen_v3(&[0x5Au8; 32], &[]).expect("sk");
         let plot_pk: Bytes48 = sk.sk_to_pk().into();
         let pos = ProofOfSpace {
+            version: 0,
+            plot_index: 0,
+            meta_group: 0,
+            strength: 0,
             challenge: Bytes32::from([1u8; 32]),
             pool_public_key: None,
             pool_contract_puzzle_hash: Some(Bytes32::from([2u8; 32])),
@@ -8509,6 +8560,7 @@ mod tests {
             ub_inbox: ub_inbox.clone(),
             ip_inbox: Arc::new(Mutex::new(Vec::new())),
             synced: Arc::new(AtomicBool::new(true)),
+            wallet_compat: Arc::new(AtomicBool::new(false)),
             tx_inbox: Arc::new(Mutex::new(TxQueue::new(TX_INBOX_CAP, TX_INBOX_PER_PEER))),
             tx_announce: Arc::new(Mutex::new(Vec::new())),
             tx_origin: Arc::new(Mutex::new(HashMap::new())),
@@ -8738,6 +8790,10 @@ mod tests {
             FarmerSignatures, create_unfinished_block_with_sigs, g2_infinity,
         };
         let pos = ProofOfSpace {
+            version: 0,
+            plot_index: 0,
+            meta_group: 0,
+            strength: 0,
             challenge: MAINNET.genesis_challenge,
             pool_public_key: None,
             pool_contract_puzzle_hash: Some(Bytes32::from([2u8; 32])),
@@ -8833,6 +8889,7 @@ mod tests {
             ub_inbox: Arc::new(Mutex::new(Vec::new())),
             ip_inbox: ip_inbox.clone(),
             synced,
+            wallet_compat: Arc::new(AtomicBool::new(false)),
             tx_inbox: Arc::new(Mutex::new(TxQueue::new(TX_INBOX_CAP, TX_INBOX_PER_PEER))),
             tx_announce: Arc::new(Mutex::new(Vec::new())),
             tx_origin: Arc::new(Mutex::new(HashMap::new())),
@@ -9790,6 +9847,7 @@ mod tests {
                 ub_inbox: Arc::new(Mutex::new(Vec::new())),
                 ip_inbox: Arc::new(Mutex::new(Vec::new())),
                 synced: Arc::new(AtomicBool::new(true)),
+                wallet_compat: Arc::new(AtomicBool::new(false)),
                 tx_inbox: Arc::new(Mutex::new(TxQueue::new(TX_INBOX_CAP, TX_INBOX_PER_PEER))),
                 tx_announce: Arc::new(Mutex::new(Vec::new())),
                 tx_origin: Arc::new(Mutex::new(HashMap::new())),

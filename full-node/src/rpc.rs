@@ -214,6 +214,9 @@ pub struct NodeRpc<S> {
     tx_announce: Arc<Mutex<Vec<NewTransaction>>>,
     // Daemon live-state, attached once by spawn_rpc_server (None in store-only unit tests).
     live: OnceLock<NodeRpcLive>,
+    // Simulator block-production control, attached once when a simulator serves this RPC. `None` on a
+    // production node, where the simulator endpoints answer 404.
+    sim: OnceLock<Arc<dyn SimControl>>,
 }
 
 impl<S> NodeRpc<S>
@@ -235,12 +238,19 @@ where
             synced,
             tx_announce,
             live: OnceLock::new(),
+            sim: OnceLock::new(),
         }
     }
 
     /// Attach the daemon's live state (idempotent — the first attach wins).
     pub fn attach_live(&self, live: NodeRpcLive) {
         let _ = self.live.set(live);
+    }
+
+    /// Attach a simulator's block-production control, enabling the `farm_block` / `set_auto_farming`
+    /// / `get_auto_farming` endpoints (idempotent — the first attach wins).
+    pub fn attach_sim(&self, sim: Arc<dyn SimControl>) {
+        let _ = self.sim.set(sim);
     }
 
     #[must_use]
@@ -1413,6 +1423,44 @@ struct HeightReq {
 }
 
 #[derive(Deserialize)]
+struct FarmBlockReq {
+    address: String,
+    #[serde(default = "one")]
+    blocks: i64,
+    #[serde(default)]
+    guarantee_tx_block: bool,
+}
+
+const fn one() -> i64 {
+    1
+}
+
+#[derive(Deserialize)]
+struct AutoFarmReq {
+    should_auto_farm: bool,
+}
+
+/// The block-production control a simulator attaches to the RPC so the standard node RPC surface can
+/// also drive it — the additional endpoints chia's simulator serves (`farm_block`,
+/// `set_auto_farming`, `get_auto_farming`). A production node attaches none, and those endpoints 404.
+#[async_trait]
+pub trait SimControl: Send + Sync {
+    /// Farm `blocks` blocks whose rewards pay `address` (a bech32 puzzle-hash address), sealing any
+    /// pending mempool transactions; `guarantee_tx_block` forces each to be a transaction block.
+    async fn farm_block(
+        &self,
+        address: &str,
+        blocks: u32,
+        guarantee_tx_block: bool,
+    ) -> Result<(), String>;
+    /// Set auto-farming (a block is sealed whenever a wallet submits a transaction); returns the new
+    /// state.
+    fn set_auto_farming(&self, should_auto_farm: bool) -> bool;
+    /// Whether auto-farming is on.
+    fn auto_farming(&self) -> bool;
+}
+
+#[derive(Deserialize)]
 struct NamesReq {
     names: Vec<Bytes32>,
     #[serde(flatten)]
@@ -1905,6 +1953,33 @@ where
             ),
             "/get_version" => obj_with("version", Value::from(env!("CARGO_PKG_VERSION"))),
             "/healthz" => Map::new(),
+            "/farm_block" => {
+                let Some(sim) = self.rpc.sim.get() else {
+                    return Ok(None);
+                };
+                let req: FarmBlockReq = parse(body)?;
+                let blocks = u32::try_from(req.blocks.max(0)).unwrap_or(u32::MAX);
+                sim.farm_block(&req.address, blocks, req.guarantee_tx_block)
+                    .await
+                    .map_err(RpcError::BadRequest)?;
+                Map::new()
+            }
+            "/set_auto_farming" => {
+                let Some(sim) = self.rpc.sim.get() else {
+                    return Ok(None);
+                };
+                let req: AutoFarmReq = parse(body)?;
+                obj_with(
+                    "auto_farm_enabled",
+                    Value::from(sim.set_auto_farming(req.should_auto_farm)),
+                )
+            }
+            "/get_auto_farming" => {
+                let Some(sim) = self.rpc.sim.get() else {
+                    return Ok(None);
+                };
+                obj_with("auto_farm_enabled", Value::from(sim.auto_farming()))
+            }
             _ => return Ok(None),
         };
         Ok(Some(out))
