@@ -13,13 +13,14 @@
 
 use dg_xch_core::blockchain::block_record::BlockRecord;
 use dg_xch_core::blockchain::pool_target::PoolTarget;
+use dg_xch_core::blockchain::proof_of_space::ProofOfSpace;
 use dg_xch_core::blockchain::signage_point::SignagePoint;
 use dg_xch_core::blockchain::sized_bytes::Bytes32;
 use dg_xch_core::blockchain::subslot_bundle::SubSlotBundle;
 use dg_xch_core::blockchain::unfinished_block::UnfinishedBlock;
 use dg_xch_core::consensus::constants::ConsensusConstants;
 use dg_xch_core::consensus::pot_iterations::{
-    calculate_ip_iters, calculate_iterations_quality, calculate_sp_iters,
+    calculate_ip_iters, calculate_iterations_quality_for_proof, calculate_sp_iters,
 };
 use dg_xch_core::consensus::producer::{
     FarmerSignatures, RewardBlockClaim, calculate_infusion_point_total_iters,
@@ -422,7 +423,7 @@ pub struct CandidateIters {
 pub fn resolve_candidate_iters(
     constants: &ConsensusConstants,
     quality_string: Bytes32,
-    pos_size: u8,
+    pos: &ProofOfSpace,
     difficulty: u64,
     sub_slot_iters: u64,
     signage_point_index: u8,
@@ -430,10 +431,10 @@ pub fn resolve_candidate_iters(
     cc_sp_hash: Bytes32,
     total_iters_pos_slot: u128,
 ) -> Option<CandidateIters> {
-    let required_iters = calculate_iterations_quality(
-        constants.difficulty_constant_factor,
+    let required_iters = calculate_iterations_quality_for_proof(
+        constants,
+        pos,
         quality_string,
-        pos_size,
         difficulty,
         cc_sp_hash,
     );
@@ -657,6 +658,10 @@ mod tests {
             signage_point_index: index,
             reward_chain_sp: Bytes32::from([cc_sp.wrapping_add(1); 32]),
             proof_of_space: ProofOfSpace {
+                version: 0,
+                plot_index: 0,
+                meta_group: 0,
+                strength: 0,
                 challenge: Bytes32::from([9; 32]),
                 pool_public_key: Some(Bytes48::from([1; 48])),
                 pool_contract_puzzle_hash: None,
@@ -926,10 +931,18 @@ mod tests {
     fn iters_filter_rejects_an_out_of_range_required_iters() {
         // chia declare:1069-1082 — an impossibly hard difficulty pushes required_iters to u64::MAX, so
         // calculate_ip_iters errors (required_iters >= sp_interval_iters) and we bail with no candidate.
+        let pos = ProofOfSpace::v1(
+            Bytes32::from([9; 32]),
+            Some(Bytes48::from([1; 48])),
+            None,
+            Bytes48::from([2; 48]),
+            32,
+            ProofBytes::from(vec![0u8; 64]),
+        );
         let out = resolve_candidate_iters(
             &MAINNET,
             Bytes32::from([3; 32]),
-            32,
+            &pos,
             u64::MAX,
             MAINNET.sub_slot_iters_starting,
             2,

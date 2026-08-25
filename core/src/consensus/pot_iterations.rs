@@ -1,3 +1,4 @@
+use crate::blockchain::proof_of_space::ProofOfSpace;
 use crate::blockchain::sized_bytes::Bytes32;
 use crate::consensus::constants::ConsensusConstants;
 use crate::constants::TWO_POW_256;
@@ -106,6 +107,73 @@ pub fn calculate_iterations_quality(
     max(1, bigint.to_u64().unwrap_or(0))
 }
 
+/// The quality lottery routed through the size model the proof's version uses, which is the shape
+/// chia gives this function: a v1 proof carries its own k, a v2 proof plays at the network's fixed
+/// v2 plot size.
+#[must_use]
+pub fn calculate_iterations_quality_for_proof(
+    constants: &ConsensusConstants,
+    pos: &ProofOfSpace,
+    quality_string: Bytes32,
+    difficulty: u64,
+    cc_sp_output_hash: Bytes32,
+) -> u64 {
+    if pos.version == 0 {
+        calculate_iterations_quality(
+            constants.difficulty_constant_factor,
+            quality_string,
+            pos.size,
+            difficulty,
+            cc_sp_output_hash,
+        )
+    } else {
+        calculate_iterations_quality_v2(
+            constants.difficulty_constant_factor,
+            quality_string,
+            constants.plot_size_v2,
+            difficulty,
+            cc_sp_output_hash,
+        )
+    }
+}
+
+/// chia `_expected_plot_size` for a v2 plot: `(2^k) * (k + 1.46) / 8`, computed in f64 and
+/// truncated exactly as the reference does. All v2 plots share one k, the network's
+/// `plot_size_v2`.
+#[allow(clippy::cast_possible_truncation)]
+#[allow(clippy::cast_sign_loss)]
+#[must_use]
+pub fn expected_plot_size_v2(k: u8) -> u64 {
+    ((1u64 << k) as f64 * (f64::from(k) + 1.46) / 8.0) as u64
+}
+
+/// [`calculate_iterations_quality`] for a v2 proof: the same quality lottery over the v2 plot
+/// size model.
+#[must_use]
+pub fn calculate_iterations_quality_v2(
+    difficulty_constant_factor: u128,
+    quality_string: Bytes32,
+    plot_size_v2: u8,
+    difficulty: u64,
+    cc_sp_output_hash: Bytes32,
+) -> u64 {
+    let mut to_hash: Vec<u8> = Vec::new();
+    to_hash.extend(quality_string);
+    to_hash.extend(cc_sp_output_hash);
+    let hashed = hash_256(to_hash);
+    let quality_int = BigUint::from_bytes_be(hashed.as_slice());
+    let top: BigUint =
+        BigUint::from(difficulty) * BigUint::from(difficulty_constant_factor) * quality_int;
+    let bottom: BigUint = (*TWO_POW_256)
+        .clone()
+        .mul(expected_plot_size_v2(plot_size_v2));
+    let bigint: BigUint = top / bottom;
+    if bigint.gt(&u64::MAX.into()) {
+        return u64::MAX;
+    }
+    max(1, bigint.to_u64().unwrap_or(0))
+}
+
 #[cfg(test)]
 mod tests {
     //! Harvested from `chia/_tests/core/consensus/test_pot_iterations.py` (the "harvest Chia's tests,
@@ -114,10 +182,10 @@ mod tests {
     //! overflow boundary is `32 - NUM_SP_INTERVALS_EXTRA(3) = 29`. Every vector below is chia's, verbatim.
     //!
     //! DIVERGENCES (flagged, not bugs):
-    //!   * chia's `calculate_iterations_quality` takes a `PlotParam` (v1 or v2); dg_xch takes the v1
-    //!     `size: u8`. All v1 vectors port faithfully; the v2 plot model (`PlotParam::make_v2`,
-    //!     `PLOT_SIZE_V2`, `_expected_plot_size` v2) does not exist in dg_xch, so the v2-only tests are
-    //!     `#[ignore]`d with that reason.
+    //!   * chia's `calculate_iterations_quality` takes a `PlotParam` (v1 or v2); dg_xch keeps the
+    //!     v1 `size: u8` signature and routes versions through
+    //!     `calculate_iterations_quality_for_proof`. The v2 vectors port against
+    //!     `expected_plot_size_v2` / `calculate_iterations_quality_v2`.
     //!   * on an astronomically-large quotient chia's `uint64(...)` would raise; dg_xch CLAMPS to
     //!     `u64::MAX` (see `clamps_to_u64_max_on_overflow`). Both reject the impossible proof downstream
     //!     (`calculate_ip_iters` then errors on `required_iters >= sp_interval_iters`) — a defensive
@@ -277,24 +345,42 @@ mod tests {
     // this is a v1-only reduction of chia's vector — the proportionality property still holds among v1
     // farmers. It is also a ~400k-iteration probabilistic vector (1% tolerance) that was NOT run locally
     // (no-cargo constraint), so it is ignored until confirmed on the cluster rather than shipped green.
+    // chia test_pot_iterations.py::TestPotIterations::test_win_percentage — the full mixed fixture:
+    // five v1 farmer classes and three v2 classes. The three v2 classes share the network's fixed
+    // v2 plot size, so chia's fixture gives them identical space and identical win counts; strength
+    // deliberately plays no part in the lottery.
     #[test]
-    #[ignore = "v1-only reduction of chia test_win_percentage (no v2 plot model in dg_xch); heavy \
-                probabilistic vector, confirm on cluster before un-ignoring"]
-    fn test_win_percentage_v1_only() {
-        use std::collections::BTreeMap;
-
+    fn test_win_percentage() {
+        struct FarmerClass {
+            version: u8,
+            k: u8,
+            count: u64,
+            space: u128,
+            wins: u64,
+        }
         let constants = ConsensusConstants {
             num_sps_sub_slot: 32,
             difficulty_constant_factor: 2u128.pow(25),
             ..MAINNET
         };
-        // chia farmer_ks — v1 only (v2 entries dropped: no dg_xch model).
-        let farmer_ks: [(u8, u64); 5] = [(32, 100), (33, 100), (34, 100), (35, 100), (36, 100)];
-        let farmer_space: BTreeMap<u8, u128> = farmer_ks
-            .iter()
-            .map(|&(k, count)| (k, u128::from(expected_plot_size(k)) * u128::from(count)))
+        let v2_size = u128::from(expected_plot_size_v2(constants.plot_size_v2));
+        let mut classes: Vec<FarmerClass> = [32u8, 33, 34, 35, 36]
+            .into_iter()
+            .map(|k| FarmerClass {
+                version: 0,
+                k,
+                count: 100,
+                space: u128::from(expected_plot_size(k)) * 100,
+                wins: 0,
+            })
+            .chain((0..3).map(|_| FarmerClass {
+                version: 1,
+                k: constants.plot_size_v2,
+                count: 200,
+                space: v2_size * 200,
+                wins: 0,
+            }))
             .collect();
-        let mut wins: BTreeMap<u8, u64> = farmer_ks.iter().map(|&(k, _)| (k, 0)).collect();
 
         let total_slots = 50u32;
         let num_sps = 16u32;
@@ -308,47 +394,90 @@ mod tests {
                 sp_in.extend_from_slice(&slot_index.to_be_bytes());
                 sp_in.extend_from_slice(&sp_index.to_be_bytes());
                 let sp_hash = Bytes32::new(hash_256(sp_in));
-                for &(k, count) in &farmer_ks {
-                    for farmer_index in 0..count {
+                for class in &mut classes {
+                    for farmer_index in 0..class.count {
                         // chia: std_hash(slot_be4 + k_1byte + bytes(farmer_index)) — bytes(n) is n zeros.
                         let mut q_in = Vec::new();
                         q_in.extend_from_slice(&slot_index.to_be_bytes());
-                        q_in.push(k);
+                        q_in.push(class.k);
                         let base = q_in.len();
                         q_in.resize(base + farmer_index as usize, 0u8);
                         let quality = Bytes32::new(hash_256(q_in));
-                        let required_iters = calculate_iterations_quality(
-                            constants.difficulty_constant_factor,
-                            quality,
-                            k,
-                            difficulty,
-                            sp_hash,
-                        );
+                        let required_iters = if class.version == 0 {
+                            calculate_iterations_quality(
+                                constants.difficulty_constant_factor,
+                                quality,
+                                class.k,
+                                difficulty,
+                                sp_hash,
+                            )
+                        } else {
+                            calculate_iterations_quality_v2(
+                                constants.difficulty_constant_factor,
+                                quality,
+                                constants.plot_size_v2,
+                                difficulty,
+                                sp_hash,
+                            )
+                        };
                         if required_iters < sp_interval_iters {
-                            *wins.get_mut(&k).unwrap() += 1;
+                            class.wins += 1;
                         }
                     }
                 }
             }
         }
 
-        let total_space: u128 = farmer_space.values().sum();
-        let total_wins: u64 = wins.values().sum();
-        for &(k, _) in &farmer_ks {
-            let percentage_space = farmer_space[&k] as f64 / total_space as f64;
-            let win_percentage = wins[&k] as f64 / total_wins as f64;
+        let total_space: u128 = classes.iter().map(|c| c.space).sum();
+        let total_wins: u64 = classes.iter().map(|c| c.wins).sum();
+        for class in &classes {
+            let percentage_space = class.space as f64 / total_space as f64;
+            let win_percentage = class.wins as f64 / total_wins as f64;
             assert!(
                 (win_percentage - percentage_space).abs() < 0.01,
-                "k={k}: win {win_percentage} vs space {percentage_space}"
+                "v{} k={}: win {win_percentage} vs space {percentage_space}",
+                class.version,
+                class.k
             );
         }
+        // The three v2 classes are indistinguishable to the lottery by construction.
+        assert_eq!(classes[5].wins, classes[6].wins);
+        assert_eq!(classes[6].wins, classes[7].wins);
     }
 
-    // chia test_pot_iterations.py::test_expected_plot_size_v2 — NOT PORTED.
-    // REASON (not faked): requires the v2 plot-size model — `_expected_plot_size(PlotParam::make_v2(...))`
-    // asserting the constant 988_513_566 — which dg_xch does not implement (v1 `expected_plot_size(k)`
-    // only). No faithful port exists until dg_xch grows a v2 plot model.
+    // chia test_pot_iterations.py::test_expected_plot_size_v2: the v2 size is one constant, blind
+    // to strength, plot index and group.
     #[test]
-    #[ignore = "no v2 plot-size model in dg_xch (_expected_plot_size v2 / PLOT_SIZE_V2 absent)"]
-    fn test_expected_plot_size_v2() {}
+    fn test_expected_plot_size_v2() {
+        let c = ConsensusConstants {
+            num_sps_sub_slot: 32,
+            ..MAINNET
+        };
+        assert_eq!(expected_plot_size_v2(c.plot_size_v2), 988_513_566);
+    }
+
+    #[test]
+    fn v2_expected_plot_size_matches_the_reference_float_math() {
+        // int((2**k) * (k + 1.46) / 8) in the reference, IEEE754 f64 both sides.
+        assert_eq!(super::expected_plot_size_v2(28), 988_513_566);
+        assert_eq!(super::expected_plot_size_v2(18), 637_665);
+        assert_eq!(super::expected_plot_size_v2(30), 4_222_489_722);
+    }
+
+    #[test]
+    fn v2_iterations_scale_inversely_with_plot_size() {
+        use crate::blockchain::sized_bytes::Bytes32;
+        let q = Bytes32::from([7u8; 32]);
+        let sp = Bytes32::from([9u8; 32]);
+        let small = super::calculate_iterations_quality_v2(2u128.pow(67), q, 18, 1000, sp);
+        let big = super::calculate_iterations_quality_v2(2u128.pow(67), q, 28, 1000, sp);
+        // A larger plot wins the same quality draw with fewer required iterations.
+        assert!(big < small, "big {big} !< small {small}");
+        assert!(small >= 1 && big >= 1);
+        // The v1 and v2 size models are different functions, even at the same k.
+        assert_ne!(
+            super::calculate_iterations_quality(2u128.pow(67), q, 28, 1000, sp),
+            big
+        );
+    }
 }

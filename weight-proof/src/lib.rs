@@ -12,7 +12,8 @@ use dg_xch_core::blockchain::weight_proof::{
 };
 use dg_xch_core::consensus::constants::ConsensusConstants;
 use dg_xch_core::consensus::pot_iterations::{
-    calculate_ip_iters, calculate_iterations_quality, calculate_sp_iters, is_overflow_block,
+    calculate_ip_iters, calculate_iterations_quality_for_proof, calculate_sp_iters,
+    is_overflow_block,
 };
 use dg_xch_core::utils::hash_256;
 use dg_xch_pos::verify_and_get_quality_string;
@@ -1136,13 +1137,8 @@ fn validate_pospace(
         None => return Ok(None),
     };
     // difficulty_constant_factor pinned from the target chain's constants — never defaulted.
-    let required_iters = calculate_iterations_quality(
-        c.difficulty_constant_factor,
-        q_str,
-        pos.size,
-        curr_diff,
-        cc_sp_hash,
-    );
+    let required_iters =
+        calculate_iterations_quality_for_proof(c, pos, q_str, curr_diff, cc_sp_hash);
     Ok(Some(required_iters))
 }
 

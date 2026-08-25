@@ -1301,6 +1301,10 @@ mod tests {
                     signage_point_index: 0,
                     pos_ss_cc_challenge_hash: Bytes32::default(),
                     proof_of_space: ProofOfSpace {
+                        version: 0,
+                        plot_index: 0,
+                        meta_group: 0,
+                        strength: 0,
                         challenge: Bytes32::default(),
                         pool_public_key: None,
                         pool_contract_puzzle_hash: Some(Bytes32::default()),

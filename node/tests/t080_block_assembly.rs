@@ -195,6 +195,10 @@ fn declare(index: u8, cc_sp: u8, challenge_hash: Bytes32) -> DeclareProofOfSpace
         signage_point_index: index,
         reward_chain_sp: Bytes32::from([cc_sp.wrapping_add(1); 32]),
         proof_of_space: ProofOfSpace {
+            version: 0,
+            plot_index: 0,
+            meta_group: 0,
+            strength: 0,
             challenge: Bytes32::from([9; 32]),
             pool_public_key: Some(Bytes48::from([1; 48])),
             pool_contract_puzzle_hash: None,
