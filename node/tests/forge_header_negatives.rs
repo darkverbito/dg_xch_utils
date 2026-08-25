@@ -18,8 +18,11 @@ use std::collections::HashMap;
 use std::io::Cursor;
 
 use dg_xch_core::blockchain::block_record::BlockRecord;
+use dg_xch_core::blockchain::class_group_element::ClassgroupElement;
 use dg_xch_core::blockchain::header_block::HeaderBlock;
 use dg_xch_core::blockchain::sized_bytes::{Bytes32, Bytes96};
+use dg_xch_core::blockchain::unsized_bytes::UnsizedBytes;
+use dg_xch_core::blockchain::vdf_proof::VdfProof;
 use dg_xch_core::blockchain::weight_proof::RecentChainData;
 use dg_xch_core::consensus::block_header_validation::{
     ValidationState, validate_pospace_and_get_required_iters,
@@ -279,5 +282,78 @@ fn signage_point_index_at_bound_is_invalid_sp_index() {
     assert_rejects(
         |b| b.reward_chain_block.signage_point_index = bound,
         "INVALID_SP_INDEX",
+    );
+}
+
+// ======================================================================================
+// Tier-1 B-class: infusion-point VDF-mutation negatives.
+//
+// chia asserts an EXACT per-gate code (INVALID_CC_IP_VDF / INVALID_RC_IP_VDF). Our window pipeline
+// DEFERS every VDF proof out of the sequential header walk and verifies the whole window's batch
+// across all cores afterwards (node/src/header.rs). A `QueuedVdf` — unlike a `QueuedSig` — carries no
+// gate tag, so a deferred-batch VDF failure collapses to the coarse "INVALID_VDF ... (deferred
+// batch)" string on the single-block path. So B-class arms assert the ACCEPTED-SET (the coarse
+// string) here; C5 adds a VdfGateTag + first_failing_vdf and tightens these to the exact chia codes.
+//
+// A garbage VDF PROOF is the cleanest mutation: the proof is a HeaderBlock field, NOT inside the
+// reward_chain_block, so it perturbs no reward-block hash commitment — the deferred batch is the sole
+// catch, no re-cohere. A VDF OUTPUT mutation lives inside the reward_chain_block, so it also breaks
+// the finished reward-block hash (check 32) and needs the pure-hash re-cohere.
+
+fn garbage_proof() -> VdfProof {
+    // witness_type 0, a non-empty non-witness, not normalized-to-identity: takes the standard
+    // validate_vdf branch, which the deferred batch then fails (chia uses VDFProof(0, std_hash(b""),
+    // False) in test_bad_cc_ip_vdf / test_bad_rc_ip_vdf).
+    VdfProof {
+        witness_type: 0,
+        witness: UnsizedBytes::new(vec![0u8; 100]),
+        normalized_to_identity: false,
+    }
+}
+
+// chia test_bad_cc_ip_vdf (test_blockchain.py:1750), proof arm: a bad challenge-chain infusion-point
+// VDF proof → INVALID_CC_IP_VDF. Coarse: INVALID_VDF (deferred batch) until C5.
+#[test]
+fn bad_cc_ip_proof_is_invalid_vdf() {
+    assert_rejects(
+        |b| b.challenge_chain_ip_proof = garbage_proof(),
+        "INVALID_VDF",
+    );
+}
+
+// chia test_bad_rc_ip_vdf (test_blockchain.py:1778), proof arm: a bad reward-chain infusion-point VDF
+// proof → INVALID_RC_IP_VDF. Coarse: INVALID_VDF (deferred batch) until C5.
+#[test]
+fn bad_rc_ip_proof_is_invalid_vdf() {
+    assert_rejects(|b| b.reward_chain_ip_proof = garbage_proof(), "INVALID_VDF");
+}
+
+// chia test_bad_cc_ip_vdf (test_blockchain.py:1750), output arm: a wrong challenge-chain IP VDF
+// output. The output lives in the reward_chain_block, so check 29's DATA comparison still holds (both
+// sides read the mutated output) but the finished reward-block hash (check 32) breaks — re-cohere it
+// so the deferred proof check is the sole catch.
+#[test]
+fn bad_cc_ip_output_is_invalid_vdf() {
+    assert_rejects(
+        |b| {
+            b.reward_chain_block.challenge_chain_ip_vdf.output =
+                ClassgroupElement::get_default_element();
+            recohere_reward_hashes(b);
+        },
+        "INVALID_VDF",
+    );
+}
+
+// chia test_bad_rc_ip_vdf (test_blockchain.py:1778), output arm: a wrong reward-chain IP VDF output
+// (target-form check 30) → INVALID_RC_IP_VDF, coarse INVALID_VDF. Same reward-block-hash re-cohere.
+#[test]
+fn bad_rc_ip_output_is_invalid_vdf() {
+    assert_rejects(
+        |b| {
+            b.reward_chain_block.reward_chain_ip_vdf.output =
+                ClassgroupElement::get_default_element();
+            recohere_reward_hashes(b);
+        },
+        "INVALID_VDF",
     );
 }
