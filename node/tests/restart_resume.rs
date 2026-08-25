@@ -14,11 +14,10 @@ mod common;
 
 use common::{MemSource, MisbehavingSource, Misbehavior, candidate_record, synth_hash};
 use dg_xch_core::blockchain::block_record::BlockRecord;
+use dg_xch_core::blockchain::class_group_element::ClassgroupElement;
 use dg_xch_core::blockchain::full_block::FullBlock;
 use dg_xch_core::blockchain::sized_bytes::Bytes32;
 use dg_xch_core::blockchain::sub_epoch_summary::SubEpochSummary;
-use dg_xch_core::blockchain::unsized_bytes::UnsizedBytes;
-use dg_xch_core::blockchain::vdf_output::VdfOutput;
 use dg_xch_core::consensus::constants::MAINNET;
 use dg_xch_core::consensus::difficulty_adjustment::{
     consensus_walk_window, get_next_sub_slot_iters_and_difficulty,
@@ -305,9 +304,7 @@ fn walk_record(
         weight: WEIGHT_BASE + u128::from(h),
         total_iters: 10_000_000 * u128::from(h),
         signage_point_index: 0,
-        challenge_vdf_output: VdfOutput {
-            data: UnsizedBytes::new(vec![]),
-        },
+        challenge_vdf_output: ClassgroupElement::get_default_element(),
         infused_challenge_vdf_output: None,
         reward_infusion_new_challenge: Bytes32::default(),
         challenge_block_info_hash: Bytes32::default(),

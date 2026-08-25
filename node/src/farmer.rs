@@ -619,7 +619,6 @@ mod tests {
     use dg_xch_core::blockchain::sized_bytes::Bytes48;
     use dg_xch_core::blockchain::unsized_bytes::UnsizedBytes;
     use dg_xch_core::blockchain::vdf_info::VdfInfo;
-    use dg_xch_core::blockchain::vdf_output::VdfOutput;
     use dg_xch_core::blockchain::vdf_proof::VdfProof;
     use dg_xch_core::consensus::constants::MAINNET;
 
@@ -874,9 +873,7 @@ mod tests {
             weight,
             total_iters: 0,
             signage_point_index: 0,
-            challenge_vdf_output: VdfOutput {
-                data: UnsizedBytes::new(vec![]),
-            },
+            challenge_vdf_output: ClassgroupElement::get_default_element(),
             infused_challenge_vdf_output: None,
             reward_infusion_new_challenge: Bytes32::default(),
             challenge_block_info_hash: Bytes32::default(),

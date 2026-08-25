@@ -4,6 +4,7 @@ pub mod error;
 pub mod mmap;
 #[cfg(feature = "postgres")]
 pub mod postgres;
+mod record_compat;
 pub mod sqlite;
 pub mod telemetry;
 pub mod traits;

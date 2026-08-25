@@ -22,9 +22,8 @@ const UPSERT_RECORD: &str = "INSERT INTO block_record \
     is_transaction_block = excluded.is_transaction_block, sub_epoch_summary = excluded.sub_epoch_summary, \
     record = excluded.record";
 
-fn decode_record(blob: &[u8]) -> Result<BlockRecord, StoreError> {
-    BlockRecord::from_bytes(&mut Cursor::new(blob), VERSION).map_err(StoreError::Io)
-}
+// Legacy-tolerant (pre-#155 blobs decode via the fallback walk; see record_compat.rs).
+use crate::record_compat::decode_record;
 
 // Shared write bodies, parameterized over the connection so the same statements run either in a
 // self-contained transaction (the standalone trait methods) or joined onto an open batch (the `_in`

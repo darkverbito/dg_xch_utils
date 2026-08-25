@@ -21,9 +21,8 @@ const UPSERT_RECORD: &str = "INSERT INTO block_record \
     is_transaction_block = excluded.is_transaction_block, sub_epoch_summary = excluded.sub_epoch_summary, \
     record = excluded.record";
 
-fn decode_record(blob: &[u8]) -> Result<BlockRecord, StoreError> {
-    BlockRecord::from_bytes(&mut Cursor::new(blob), VERSION).map_err(StoreError::Io)
-}
+// Legacy-tolerant (pre-#155 blobs decode via the fallback walk; see record_compat.rs).
+use crate::record_compat::decode_record;
 
 fn wrong_backend() -> StoreError {
     StoreError::Corrupt("batch was opened by a different backend".to_string())

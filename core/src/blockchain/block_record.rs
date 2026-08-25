@@ -1,7 +1,7 @@
+use crate::blockchain::class_group_element::ClassgroupElement;
 use crate::blockchain::coin::Coin;
 use crate::blockchain::sized_bytes::Bytes32;
 use crate::blockchain::sub_epoch_summary::SubEpochSummary;
-use crate::blockchain::vdf_output::VdfOutput;
 use crate::consensus::constants::ConsensusConstants;
 use crate::consensus::pot_iterations::{calculate_ip_iters, calculate_sp_iters};
 use dg_xch_macros::ChiaSerial;
@@ -16,8 +16,11 @@ pub struct BlockRecord {
     pub weight: u128,
     pub total_iters: u128,
     pub signage_point_index: u8,
-    pub challenge_vdf_output: VdfOutput,
-    pub infused_challenge_vdf_output: Option<VdfOutput>,
+    // chia_rs 0.42.1 `BlockRecord`: both VDF outputs are `ClassgroupElement` — bare fixed
+    // 100-byte values on the wire, no length prefix (byte parity locked by
+    // tests/block_record_wire.rs against real mainnet records; campaign issue #155).
+    pub challenge_vdf_output: ClassgroupElement,
+    pub infused_challenge_vdf_output: Option<ClassgroupElement>,
     pub reward_infusion_new_challenge: Bytes32,
     pub challenge_block_info_hash: Bytes32,
     pub sub_slot_iters: u64,

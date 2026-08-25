@@ -8687,8 +8687,7 @@ mod tests {
     // Chain (header_hash = [h;32]): h0 genesis tx + first-in-sub-slot; h1 non-tx; h2 tx; h3 non-tx peak.
     #[tokio::test]
     async fn candidate_store_walks_match_chia() {
-        use dg_xch_core::blockchain::unsized_bytes::UnsizedBytes;
-        use dg_xch_core::blockchain::vdf_output::VdfOutput;
+        use dg_xch_core::blockchain::class_group_element::ClassgroupElement;
 
         fn rec(
             height: u32,
@@ -8705,9 +8704,7 @@ mod tests {
                 weight: u128::from(height),
                 total_iters,
                 signage_point_index: 0,
-                challenge_vdf_output: VdfOutput {
-                    data: UnsizedBytes::new(vec![]),
-                },
+                challenge_vdf_output: ClassgroupElement::get_default_element(),
                 infused_challenge_vdf_output: None,
                 reward_infusion_new_challenge: Bytes32::from([rin; 32]),
                 challenge_block_info_hash: Bytes32::default(),
@@ -9579,8 +9576,7 @@ mod tests {
     // SHED_TIP_LAG_BLOCKS sheds.
     #[tokio::test]
     async fn deep_fall_behind_sheds_indexes_once_and_the_tip_edge_rebuilds() {
-        use dg_xch_core::blockchain::unsized_bytes::UnsizedBytes;
-        use dg_xch_core::blockchain::vdf_output::VdfOutput;
+        use dg_xch_core::blockchain::class_group_element::ClassgroupElement;
 
         // A minimal main-chain record at `height` whose transaction-block timestamp is `ts` —
         // chain_is_current derives synced solely from that timestamp's freshness.
@@ -9592,9 +9588,7 @@ mod tests {
                 weight: u128::from(height) * 100,
                 total_iters: u128::from(height),
                 signage_point_index: 0,
-                challenge_vdf_output: VdfOutput {
-                    data: UnsizedBytes::new(vec![]),
-                },
+                challenge_vdf_output: ClassgroupElement::get_default_element(),
                 infused_challenge_vdf_output: None,
                 reward_infusion_new_challenge: Bytes32::default(),
                 challenge_block_info_hash: Bytes32::default(),
@@ -11134,8 +11128,7 @@ mod tests {
         // prev_hash, so add_block_records + set_peak(tip) marks the whole ancestry in-main-chain
         // and height_to_hash resolves every page boundary.
         fn chain_rec(height: u32) -> BlockRecord {
-            use dg_xch_core::blockchain::unsized_bytes::UnsizedBytes;
-            use dg_xch_core::blockchain::vdf_output::VdfOutput;
+            use dg_xch_core::blockchain::class_group_element::ClassgroupElement;
             BlockRecord {
                 header_hash: Bytes32::from([height as u8; 32]),
                 prev_hash: Bytes32::from([height.wrapping_sub(1) as u8; 32]),
@@ -11143,9 +11136,7 @@ mod tests {
                 weight: u128::from(height) * 100,
                 total_iters: u128::from(height),
                 signage_point_index: 0,
-                challenge_vdf_output: VdfOutput {
-                    data: UnsizedBytes::new(vec![]),
-                },
+                challenge_vdf_output: ClassgroupElement::get_default_element(),
                 infused_challenge_vdf_output: None,
                 reward_infusion_new_challenge: Bytes32::default(),
                 challenge_block_info_hash: Bytes32::default(),

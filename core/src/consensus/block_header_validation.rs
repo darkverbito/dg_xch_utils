@@ -334,12 +334,7 @@ pub fn validate_unfinished_parts(
                         if pb.is_challenge_block(c.min_blocks_per_challenge_block) {
                             icc_vdf_input = Some(ClassgroupElement::get_default_element());
                         } else {
-                            icc_vdf_input = pb
-                                .infused_challenge_vdf_output
-                                .as_ref()
-                                .map(ClassgroupElement::try_from)
-                                .transpose()
-                                .map_err(|_| e("invalid infused challenge VDF output"))?;
+                            icc_vdf_input = pb.infused_challenge_vdf_output;
                         }
                     } else if block.finished_sub_slots[n - 1].reward_chain.deficit
                         < c.min_blocks_per_challenge_block
@@ -467,8 +462,7 @@ pub fn validate_unfinished_parts(
                     rc_eos_vdf_challenge = pb.reward_infusion_new_challenge;
                     eos_vdf_iters =
                         pb.sub_slot_iters - pb.ip_iters(c).map_err(|_| e("ip_iters"))?;
-                    cc_start_element = ClassgroupElement::try_from(&pb.challenge_vdf_output)
-                        .map_err(|_| e("invalid challenge VDF output"))?;
+                    cc_start_element = pb.challenge_vdf_output;
                 } else {
                     rc_eos_vdf_challenge = block.finished_sub_slots[n - 1].reward_chain.hash()?;
                 }
@@ -1003,8 +997,7 @@ pub fn validate_finished_header_block(
             rc_vdf_challenge = pb.reward_infusion_new_challenge;
             ip_vdf_iters =
                 u64::try_from(rcb.total_iters - pb.total_iters).map_err(|_| e("ip_vdf_iters"))?;
-            cc_vdf_output = ClassgroupElement::try_from(&pb.challenge_vdf_output)
-                .map_err(|_| e("invalid challenge VDF output"))?;
+            cc_vdf_output = pb.challenge_vdf_output;
         }
     }
 
@@ -1102,10 +1095,6 @@ pub fn validate_finished_header_block(
                         Some(ClassgroupElement::get_default_element())
                     } else {
                         pb.infused_challenge_vdf_output
-                            .as_ref()
-                            .map(ClassgroupElement::try_from)
-                            .transpose()
-                            .map_err(|_| e("invalid infused challenge VDF output"))?
                     };
                     let mut curr = pb;
                     while curr.finished_infused_challenge_slot_hashes.is_none()

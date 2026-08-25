@@ -11,11 +11,10 @@
 // separately by the full-node emission contract.
 
 use dg_xch_core::blockchain::block_record::BlockRecord;
+use dg_xch_core::blockchain::class_group_element::ClassgroupElement;
 use dg_xch_core::blockchain::full_block::FullBlock;
 use dg_xch_core::blockchain::sized_bytes::Bytes32;
 use dg_xch_core::blockchain::unfinished_block::UnfinishedBlock;
-use dg_xch_core::blockchain::unsized_bytes::UnsizedBytes;
-use dg_xch_core::blockchain::vdf_output::VdfOutput;
 use dg_xch_core::consensus::producer::unfinished_block_to_full_block;
 use dg_xch_core::protocols::full_node::RespondBlocks;
 use dg_xch_serialize::{ChiaProtocolVersion, ChiaSerialize};
@@ -57,9 +56,7 @@ fn synthetic_prev(block: &FullBlock, difficulty: u64) -> BlockRecord {
         weight: block.reward_chain_block.weight - u128::from(difficulty),
         total_iters: 0,
         signage_point_index: 0,
-        challenge_vdf_output: VdfOutput {
-            data: UnsizedBytes::new(vec![]),
-        },
+        challenge_vdf_output: ClassgroupElement::get_default_element(),
         infused_challenge_vdf_output: None,
         reward_infusion_new_challenge: Bytes32::default(),
         challenge_block_info_hash: Bytes32::default(),

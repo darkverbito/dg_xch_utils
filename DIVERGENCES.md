@@ -73,6 +73,20 @@ Unnumbered but ledgered: **DIV-HINT** — the `coin_hint` index stores only 32-b
 (chia stores any-length hint blobs); query behavior is identical. DOCUMENTED-INTENTIONAL.
 **Hardening #180** — length-prefixed decode pre-allocation bounded
 (`core/tests/streamable_alloc_bomb.rs`), FIXED (`70b9cfe`).
+**BlockRecord byte-layout #155** — `challenge_vdf_output` / `infused_challenge_vdf_output`
+serialized as length-prefixed byte vecs (`VdfOutput { data: UnsizedBytes }`) where chia_rs 0.42.1
+carries bare 100-byte `ClassgroupElement`s (+4 bytes per present output vs chia). FIXED — the
+fields are now `ClassgroupElement` / `Option<ClassgroupElement>` (`VdfOutput` deleted), locked
+byte-exact against real mainnet `full_blocks.block_record` blobs from a synced chia 2.7.1 node
+(`core/tests/block_record_wire.rs` + `core/tests/fixtures/block_record_mainnet_3000000.txt`:
+heights 3000000-3000003 + SES boundary 3000209 — decode, re-encode-identical, and variable-part
+coverage incl. the 5-field 2.7.1 `SubEpochSummary` embedding). Store compat: the fleet's existing
+`block_record.record` blobs are in the legacy layout; `stores/src/record_compat.rs` decodes
+chia-layout-first with exact-fit framing and falls back to a field-by-field legacy walk (no store
+migration, no resync — legacy blobs age out on rewrite; new writes are always chia-layout).
+Proven by `stores/src/record_compat.rs::tests` (legacy layout pinned structurally in-test) and
+the restart-resume-class `stores/tests/legacy_record_store.rs` (a downgraded store opens, serves,
+and follows under the new code).
 
 ## Documented-intentional deltas carried in code (no number minted)
 
@@ -88,7 +102,6 @@ Unnumbered but ledgered: **DIV-HINT** — the `coin_hint` index stores only 32-b
 
 | Item | What | Where tracked / evidence |
 |---|---|---|
-| **BlockRecord serialization byte-layout** (campaign issue #155) | `BlockRecord.challenge_vdf_output` / `infused_challenge_vdf_output` are `VdfOutput { data: UnsizedBytes }` — a variable-size carrier — where chia_rs `BlockRecord` carries fixed 100-byte `ClassgroupElement`s. Length is guarded at use sites (`TryFrom<&VdfOutput> for ClassgroupElement` rejects non-100-byte), but the serialized `BlockRecord` byte layout is not chia-identical; any surface that hashes or exchanges BlockRecord bytes must not assume parity until this is reconciled and locked with a byte-parity test. | `core/src/blockchain/vdf_output.rs`, `core/src/blockchain/block_record.rs:19-20` |
 | **Deep-fork (> backtrack cap, < recent-chain) bulk entry untested** | The band between the short-sync backtrack floor (`node/src/sync/mod.rs` `BACKTRACK_MAX_DEPTH`) and the WP-anchored long-sync band (DIVERGENCE-35) has no test at any scale; chia proves 1500-block reorgs (`test_long_reorg*`). Ranked gap #3 in `docs/HARVEST-LEDGER.md`. | harvest ledger; `node/tests/backtrack.rs::fork_deeper_than_the_backtrack_cap_signals_long_sync` covers the *escalation*, not the entry |
 | **`puzzle_state` default-features failure** | `full-node` integration test `tests/puzzle_state.rs` reported failing under a non-default feature combination (default-features build matrix). Not re-verified in this session (builds are cluster-only); needs a feature-matrix CI leg to pin. | campaign tracker |
 | **Produce→broadcast e2e is stubbed at four seams** | The emission-contract table (`full-node/tests/emission_contract.rs`) carries four explicit `Ignored` entries: (1) in-process UB acceptance needs a real plot proof + VDF-populated SlotState; (2) `broadcast_new_peak` construction needs a stored FullBlock + outbound-peer capture harness (proven live by the sync sentinel only); (3) the tx-announce queue drain needs the in-process mempool-admit harness; (4) `process_compact_vdf_inbox` consume/swap runs live-only. The assembly halves are pinned (`producer_differential`, `declare_proof_of_space`, `unfinished_to_full_block_reconstruct`); the broadcast halves are not. | `full-node/tests/emission_contract.rs` (`Status::Ignored` entries) |

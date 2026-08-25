@@ -6,7 +6,6 @@ use crate::blockchain::challenge_block_info::ChallengeBlockInfo;
 use crate::blockchain::header_block::HeaderBlock;
 use crate::blockchain::sized_bytes::Bytes32;
 use crate::blockchain::sub_epoch_summary::SubEpochSummary;
-use crate::blockchain::vdf_output::VdfOutput;
 use crate::consensus::constants::ConsensusConstants;
 use std::io::Error;
 
@@ -73,8 +72,8 @@ pub fn header_block_to_sub_block_record(
         weight: block.weight(),
         total_iters: block.total_iters(),
         signage_point_index: rcb.signage_point_index,
-        challenge_vdf_output: VdfOutput::from(rcb.challenge_chain_ip_vdf.output),
-        infused_challenge_vdf_output: icc_output.map(VdfOutput::from),
+        challenge_vdf_output: rcb.challenge_chain_ip_vdf.output,
+        infused_challenge_vdf_output: icc_output,
         reward_infusion_new_challenge: rcb.hash()?,
         challenge_block_info_hash: cbi.hash()?,
         sub_slot_iters,

@@ -162,66 +162,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-// chia's DB (and chia_rs) BlockRecord stores each VDF output as a bare fixed-100-byte
-// ClassgroupElement; our VdfOutput carries it as a length-prefixed byte vec. Every other field
-// matches our ChiaSerialize layout, so this reads chia's exact layout and converts the two
-// VDF outputs by hand. (Aligning our record encoding to chia's byte-for-byte is tracked
-// separately — it invalidates stored records in every backend.)
+// chia's DB (and chia_rs) BlockRecord layout is byte-identical to ours since campaign issue
+// #155 landed (the VDF outputs are bare fixed-100-byte ClassgroupElements): decode directly,
+// with chia's exact-fit framing (from_bytes + no trailing bytes).
 fn parse_chia_db_record(bytes: &[u8]) -> Result<BlockRecord, Box<dyn std::error::Error>> {
-    use dg_xch_core::blockchain::unsized_bytes::UnsizedBytes;
-    use dg_xch_core::blockchain::vdf_output::VdfOutput;
     let mut c = Cursor::new(bytes);
-    fn f<T: ChiaSerialize>(c: &mut Cursor<&[u8]>) -> Result<T, Box<dyn std::error::Error>> {
-        Ok(T::from_bytes(c, VERSION)?)
+    let record = BlockRecord::from_bytes(&mut c, VERSION)?;
+    if c.position() != bytes.len() as u64 {
+        return Err("trailing bytes after chia DB BlockRecord".into());
     }
-    fn bare_vdf(c: &mut Cursor<&[u8]>) -> Result<VdfOutput, Box<dyn std::error::Error>> {
-        let pos = c.position() as usize;
-        let data = c
-            .get_ref()
-            .get(pos..pos + 100)
-            .ok_or("truncated ClassgroupElement")?
-            .to_vec();
-        c.set_position((pos + 100) as u64);
-        Ok(VdfOutput {
-            data: UnsizedBytes::new(data),
-        })
-    }
-    fn opt<T>(
-        c: &mut Cursor<&[u8]>,
-        read: impl Fn(&mut Cursor<&[u8]>) -> Result<T, Box<dyn std::error::Error>>,
-    ) -> Result<Option<T>, Box<dyn std::error::Error>> {
-        let pos = c.position() as usize;
-        let tag = *c.get_ref().get(pos).ok_or("truncated Option tag")?;
-        c.set_position((pos + 1) as u64);
-        Ok(if tag != 0 { Some(read(c)?) } else { None })
-    }
-    Ok(BlockRecord {
-        header_hash: f(&mut c)?,
-        prev_hash: f(&mut c)?,
-        height: f(&mut c)?,
-        weight: f(&mut c)?,
-        total_iters: f(&mut c)?,
-        signage_point_index: f(&mut c)?,
-        challenge_vdf_output: bare_vdf(&mut c)?,
-        infused_challenge_vdf_output: opt(&mut c, bare_vdf)?,
-        reward_infusion_new_challenge: f(&mut c)?,
-        challenge_block_info_hash: f(&mut c)?,
-        sub_slot_iters: f(&mut c)?,
-        pool_puzzle_hash: f(&mut c)?,
-        farmer_puzzle_hash: f(&mut c)?,
-        required_iters: f(&mut c)?,
-        deficit: f(&mut c)?,
-        overflow: f(&mut c)?,
-        prev_transaction_block_height: f(&mut c)?,
-        timestamp: f(&mut c)?,
-        prev_transaction_block_hash: f(&mut c)?,
-        fees: f(&mut c)?,
-        reward_claims_incorporated: f(&mut c)?,
-        finished_challenge_slot_hashes: f(&mut c)?,
-        finished_infused_challenge_slot_hashes: f(&mut c)?,
-        finished_reward_slot_hashes: f(&mut c)?,
-        sub_epoch_summary_included: f(&mut c)?,
-    })
+    Ok(record)
 }
 
 fn maybe_unzstd(raw: Vec<u8>) -> Result<Vec<u8>, Box<dyn std::error::Error>> {

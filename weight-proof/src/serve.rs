@@ -1044,7 +1044,6 @@ mod tests {
     use dg_xch_core::blockchain::subslot_bundle::SubSlotBundle;
     use dg_xch_core::blockchain::subslot_proofs::SubSlotProofs;
     use dg_xch_core::blockchain::unsized_bytes::UnsizedBytes;
-    use dg_xch_core::blockchain::vdf_output::VdfOutput;
     use dg_xch_core::blockchain::vdf_proof::VdfProof;
     use dg_xch_core::clvm::program::SerializedProgram;
     use dg_xch_core::consensus::constants::MAINNET;
@@ -1352,9 +1351,7 @@ mod tests {
                 weight: u128::from(h) + 1,
                 total_iters: (u128::from(h) + 1) * 10_000_000,
                 signage_point_index: 0,
-                challenge_vdf_output: VdfOutput {
-                    data: UnsizedBytes::new(vec![0u8; 100]),
-                },
+                challenge_vdf_output: ClassgroupElement::get_default_element(),
                 infused_challenge_vdf_output: None,
                 reward_infusion_new_challenge: Bytes32::default(),
                 challenge_block_info_hash: Bytes32::default(),

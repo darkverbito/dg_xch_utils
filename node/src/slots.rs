@@ -364,7 +364,7 @@ impl SlotState {
                 return None;
             }
             rc_challenge = eos.reward_chain.end_of_slot_vdf.challenge;
-            cc_start_element = ClassgroupElement::try_from(&peak.challenge_vdf_output).ok()?;
+            cc_start_element = peak.challenge_vdf_output;
             iters = u64::try_from(total_iters - peak.total_iters).ok()?;
             if peak.reward_infusion_new_challenge != rc_challenge {
                 // Depends on an infusion we have not seen: cache under that challenge.
@@ -387,8 +387,6 @@ impl SlotState {
                 Some(ClassgroupElement::get_default_element())
             } else {
                 peak.infused_challenge_vdf_output
-                    .as_ref()
-                    .and_then(|o| ClassgroupElement::try_from(o).ok())
             };
 
             if peak.deficit < self.constants.min_blocks_per_challenge_block {
@@ -740,9 +738,9 @@ impl SlotState {
             let start_ele = if check_from_start {
                 ClassgroupElement::get_default_element()
             } else {
-                match curr.map(|c| ClassgroupElement::try_from(&c.challenge_vdf_output)) {
-                    Some(Ok(e)) => e,
-                    _ => return false,
+                match curr {
+                    Some(c) => c.challenge_vdf_output,
+                    None => return false,
                 }
             };
             if !skip_vdf_validation {

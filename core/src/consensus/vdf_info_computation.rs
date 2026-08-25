@@ -73,8 +73,7 @@ pub fn get_signage_point_vdf_info(
         if curr.total_iters < sp_total_iters {
             sp_vdf_iters = u64::try_from(sp_total_iters - curr.total_iters)
                 .map_err(|_| rejected("sp_vdf: iters"))?;
-            cc_vdf_input = ClassgroupElement::try_from(&curr.challenge_vdf_output)
-                .map_err(|_| rejected("invalid challenge VDF output"))?;
+            cc_vdf_input = curr.challenge_vdf_output;
             rc_vdf_challenge = curr.reward_infusion_new_challenge;
         } else {
             let hashes = curr
@@ -144,8 +143,7 @@ pub fn get_signage_point_vdf_info(
         if let Some(pre) = sp_pre_sb {
             sp_vdf_iters = u64::try_from(sp_total_iters - pre.total_iters)
                 .map_err(|_| rejected("sp_vdf: iters"))?;
-            cc_vdf_input = ClassgroupElement::try_from(&pre.challenge_vdf_output)
-                .map_err(|_| rejected("invalid challenge VDF output"))?;
+            cc_vdf_input = pre.challenge_vdf_output;
             rc_vdf_challenge = pre.reward_infusion_new_challenge;
         } else {
             sp_vdf_iters = sp_iters;
@@ -165,8 +163,7 @@ pub fn get_signage_point_vdf_info(
         if curr.total_iters < sp_total_iters {
             sp_vdf_iters = u64::try_from(sp_total_iters - curr.total_iters)
                 .map_err(|_| rejected("sp_vdf: iters"))?;
-            cc_vdf_input = ClassgroupElement::try_from(&curr.challenge_vdf_output)
-                .map_err(|_| rejected("invalid challenge VDF output"))?;
+            cc_vdf_input = curr.challenge_vdf_output;
             rc_vdf_challenge = curr.reward_infusion_new_challenge;
         } else {
             let hashes = curr

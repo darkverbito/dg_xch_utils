@@ -427,8 +427,7 @@ pub fn difficulty_record_depth(constants: &ConsensusConstants, prev_height: u32)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::blockchain::unsized_bytes::UnsizedBytes;
-    use crate::blockchain::vdf_output::VdfOutput;
+    use crate::blockchain::class_group_element::ClassgroupElement;
     use crate::consensus::constants::MAINNET;
     use std::collections::HashMap;
 
@@ -438,10 +437,8 @@ mod tests {
         Bytes32::from(b)
     }
 
-    fn empty_vdf() -> VdfOutput {
-        VdfOutput {
-            data: UnsizedBytes::new(vec![]),
-        }
+    fn empty_vdf() -> ClassgroupElement {
+        ClassgroupElement::get_default_element()
     }
 
     #[allow(clippy::too_many_arguments)]
