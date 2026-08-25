@@ -30,13 +30,17 @@ async fn apply_block_on(
     additions: &[CoinRecord],
     removals: &[Bytes32],
 ) -> Result<(), StoreError> {
+    // Batches are sorted by coin_name BEFORE chunking (see lib.rs sort_additions_by_name): each
+    // statement's rows then probe adjacent pkey leaf pages instead of one random multi-GB btree
+    // descent per coin — the measured confirm bottleneck on high-latency storage.
+    let additions = crate::sort_additions_by_name(additions);
     for chunk in additions.chunks(ADDITIONS_PER_STATEMENT) {
         let mut qb = sqlx::QueryBuilder::new(
             "INSERT INTO coin_record \
              (coin_name, confirmed_index, spent_index, coinbase, puzzle_hash, coin_parent, amount, timestamp) ",
         );
-        qb.push_values(chunk, |mut b, cr| {
-            b.push_bind(cr.coin.name())
+        qb.push_values(chunk, |mut b, (name, cr)| {
+            b.push_bind(*name)
                 .push_bind(i64::from(height))
                 .push_bind(0_i64)
                 .push_bind(i64::from(cr.coinbase))
@@ -56,6 +60,7 @@ async fn apply_block_on(
         // QueryBuilder doc prescribes non-persistent execution for variable-length tuples.
         qb.build().persistent(false).execute(&mut *conn).await?;
     }
+    let removals = crate::sorted_removal_names(removals);
     for chunk in removals.chunks(REMOVALS_PER_STATEMENT) {
         let mut qb = sqlx::QueryBuilder::new("UPDATE coin_record SET spent_index = ");
         qb.push_bind(i64::from(height));

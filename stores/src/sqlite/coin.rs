@@ -26,9 +26,14 @@ async fn apply_block_on(
     additions: &[CoinRecord],
     removals: &[Bytes32],
 ) -> Result<(), StoreError> {
-    for cr in additions {
+    // Batches are sorted by coin_name first (see lib.rs sort_additions_by_name): the per-row
+    // point writes then walk the WITHOUT ROWID coin_name btree in key order — adjacent leaf
+    // pages, shared interior paths — instead of one random descent per coin. The upsert
+    // (INSERT OR REPLACE over unique names) and the spent-update are order-independent, so the
+    // landed rows are identical for any input order.
+    for (name, cr) in crate::sort_additions_by_name(additions) {
         sqlx::query(INSERT_COIN)
-            .bind(cr.coin.name())
+            .bind(name)
             .bind(i64::from(height))
             .bind(i64::from(cr.coinbase))
             .bind(cr.coin.puzzle_hash)
@@ -38,10 +43,10 @@ async fn apply_block_on(
             .execute(&mut *conn)
             .await?;
     }
-    for name in removals {
+    for name in crate::sorted_removal_names(removals) {
         sqlx::query("UPDATE coin_record SET spent_index = ? WHERE coin_name = ?")
             .bind(i64::from(height))
-            .bind(*name)
+            .bind(name)
             .execute(&mut *conn)
             .await?;
     }

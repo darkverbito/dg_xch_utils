@@ -716,3 +716,53 @@ mod batch_puzzle_state {
         );
     }
 }
+
+// apply_block sorts its addition/removal batches by coin_name before writing (pkey-locality:
+// key-contiguous chunks share btree paths instead of one random descent per coin). That sort must
+// be invisible: the upsert (INSERT OR REPLACE / ON CONFLICT) and the IN-list spend-update are
+// order-independent, so any input order lands the identical final rows.
+#[tokio::test]
+async fn apply_order_never_changes_the_landed_rows() {
+    let (adds, _) = common::load_adds_rems(5_000_000);
+    let adds = &adds[..64];
+    let spend: Vec<Bytes32> = adds[..16].iter().map(|c| c.coin.name()).collect();
+
+    let forward = common::new_store().await;
+    forward
+        .apply_block(10, 1_700_000_000, adds, &[])
+        .await
+        .unwrap();
+    forward
+        .apply_block(11, 1_700_000_100, &[], &spend)
+        .await
+        .unwrap();
+
+    let mut shuffled_adds: Vec<CoinRecord> = adds.to_vec();
+    shuffled_adds.reverse();
+    let mut shuffled_spend = spend.clone();
+    shuffled_spend.reverse();
+    let reversed = common::new_store().await;
+    reversed
+        .apply_block(10, 1_700_000_000, &shuffled_adds, &[])
+        .await
+        .unwrap();
+    reversed
+        .apply_block(11, 1_700_000_100, &[], &shuffled_spend)
+        .await
+        .unwrap();
+
+    let names: Vec<Bytes32> = adds.iter().map(|c| c.coin.name()).collect();
+    let a = sort_by_name(forward.get_coin_records(&names).await.unwrap());
+    let b = sort_by_name(reversed.get_coin_records(&names).await.unwrap());
+    assert_eq!(a.len(), 64, "every addition lands");
+    assert_eq!(
+        bytes(&a),
+        bytes(&b),
+        "input order must be invisible in the rows"
+    );
+    assert_eq!(
+        a.iter().filter(|c| c.spent).count(),
+        16,
+        "exactly the spent set is marked spent"
+    );
+}
