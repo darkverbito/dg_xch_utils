@@ -246,9 +246,17 @@ fn v1_limit(t: ProtocolMessageTypes) -> Limit {
         P::RespondChildren => rl(true, 2000, MIB),
         P::RequestFeeEstimates => rl(true, 10, 100),
         P::RespondFeeEstimates => rl(true, 10, 100),
-        // Types our enum does not model (configure_window_sizes, error, solve, solution_response,
-        // partial_proofs) and the Unknown sentinel: a conservative aggregate-limited default. chia
-        // would KeyError; we refuse to leave an unhandled code as a limit bypass.
+        // chia rate_limit_numbers.py:174-179 — the error / solver / partial-proof rows, plus the
+        // configure_window_sizes handshake follow-up (:76, added in a1b12d321).
+        P::Error => rl(false, 50000, 100),
+        P::ConfigureWindowSizes => rl_total(true, 5, KIB, KIB),
+        P::Solve => rl(false, 120, KIB),
+        P::SolutionResponse => rl(false, 120, KIB),
+        P::PartialProofs => rl(false, 120, 3 * KIB),
+        // The Unknown sentinel (a code chia 2.7.1 does not define): a conservative
+        // aggregate-limited default. chia would KeyError; we refuse to leave an unhandled code as
+        // a limit bypass — and the read loop now disconnects on it (chia b1b68072a) before the
+        // limiter ever matters.
         P::Unknown => rl(true, 100, 1024),
     }
 }
@@ -549,6 +557,32 @@ mod tests {
             .is_some(),
             "a RespondBlocks over 50 MiB is a violation"
         );
+    }
+
+    // The five rows added with message-type completeness pin chia's exact numbers
+    // (rate_limit_numbers.py:174-179 error/solve/solution_response/partial_proofs, :76
+    // configure_window_sizes) — constants mirrored, never defaulted.
+    #[test]
+    fn late_protocol_rows_match_chia_numbers() {
+        use ProtocolMessageTypes as P;
+        let cases: [(P, bool, u32, u64, Option<u64>); 5] = [
+            (P::Error, false, 50000, 100, None),
+            (P::ConfigureWindowSizes, true, 5, 1024, Some(1024)),
+            (P::Solve, false, 120, 1024, None),
+            (P::SolutionResponse, false, 120, 1024, None),
+            (P::PartialProofs, false, 120, 3 * 1024, None),
+        ];
+        for (t, aggregate, freq, max_size, max_total) in cases {
+            match composed_limit(t, true) {
+                Limit::Rl(s) => {
+                    assert_eq!(s.aggregate_limit, aggregate, "{t:?} aggregate flag");
+                    assert_eq!(s.frequency, freq, "{t:?} frequency");
+                    assert_eq!(s.max_size, max_size, "{t:?} max_size");
+                    assert_eq!(s.max_total_size, max_total, "{t:?} max_total_size");
+                }
+                Limit::Unlimited(_) => panic!("{t:?} must be a time-based RLSettings row"),
+            }
+        }
     }
 
     // Incoming counters advance unconditionally: once over budget, they stay over (chia's finally

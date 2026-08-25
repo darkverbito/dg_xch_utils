@@ -15,7 +15,7 @@ use dg_xch_core::protocols::full_node::{
     RequestUnfinishedBlock2, RespondBlock, RespondBlocks, RespondCompactVDF, RespondEndOfSubSlot,
     RespondPeers, RespondSignagePoint, RespondTransaction, RespondUnfinishedBlock,
 };
-use dg_xch_core::protocols::shared::{CAPABILITIES, Handshake};
+use dg_xch_core::protocols::shared::{CAPABILITIES, ErrorMessage, Handshake};
 use dg_xch_core::protocols::timelord::{
     NewEndOfSubSlotVDF, NewInfusionPointVDF, NewPeakTimelord, NewSignagePointVDF,
     RespondCompactProofOfTime,
@@ -1878,6 +1878,25 @@ impl FullNodeHandler {
                 )
                 .await
             }
+            ProtocolMessageTypes::Error => {
+                // The `error` protocol message (chia ede354c58, code 255): a CNI ≥ 0.0.35 peer
+                // reports a handler-side ApiError in place of a typed reject. chia's `_api_call`
+                // decodes it, logs a WARNING, and carries on — no ban, no disconnect
+                // (ws_connection.py:490-493). Tolerant parse only; we do not emit Error frames.
+                match decode::<ErrorMessage>(msg, version) {
+                    Ok(err) => {
+                        log::warn!(
+                            "Peer {peer_id} sent protocol Error: code={} message={:?}",
+                            err.code,
+                            err.message
+                        );
+                    }
+                    Err(e) => {
+                        log::warn!("Peer {peer_id} sent an undecodable protocol Error: {e:?}");
+                    }
+                }
+                Ok(())
+            }
             _ => Ok(()),
         }
     }
@@ -1976,6 +1995,10 @@ fn served(msg_type: ProtocolMessageTypes) -> bool {
             // Fee estimation (chia wallet_protocol code 89): the wallet asks for fee-rate
             // estimates at a set of target times; answered with a RespondFeeEstimates group.
             | ProtocolMessageTypes::RequestFeeEstimates
+            // The `error` protocol message (chia code 255): tolerated + logged, never banned —
+            // chia's own posture (ws_connection.py `_api_call` warns and returns). Matching it
+            // here keeps a conforming CNI peer's ApiError report off the unknown-type close path.
+            | ProtocolMessageTypes::Error
     )
 }
 

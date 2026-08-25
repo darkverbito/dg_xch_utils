@@ -175,6 +175,17 @@ pub enum ProtocolMessageTypes {
     MempoolItemsRemoved = 105,
     RequestCostInfo = 106,
     RespondCostInfo = 107,
+
+    //New farmer protocol messages (chia protocol_message_types.py: solution_response = 108)
+    SolutionResponse = 108,
+    //Solver protocol (chia: solve = 109)
+    Solve = 109,
+    //Harvester partial proofs (chia: partial_proofs = 110)
+    PartialProofs = 110,
+    //Rate-limits-v3 handshake follow-up (chia a1b12d321: configure_window_sizes = 111)
+    ConfigureWindowSizes = 111,
+    //The error protocol message (chia ede354c58: error = 255) — see shared::ErrorMessage
+    Error = 255,
 }
 impl From<u8> for ProtocolMessageTypes {
     #[allow(clippy::too_many_lines)]
@@ -487,6 +498,17 @@ impl From<u8> for ProtocolMessageTypes {
             i if i == ProtocolMessageTypes::RespondCostInfo as u8 => {
                 ProtocolMessageTypes::RespondCostInfo
             }
+            i if i == ProtocolMessageTypes::SolutionResponse as u8 => {
+                ProtocolMessageTypes::SolutionResponse
+            }
+            i if i == ProtocolMessageTypes::Solve as u8 => ProtocolMessageTypes::Solve,
+            i if i == ProtocolMessageTypes::PartialProofs as u8 => {
+                ProtocolMessageTypes::PartialProofs
+            }
+            i if i == ProtocolMessageTypes::ConfigureWindowSizes as u8 => {
+                ProtocolMessageTypes::ConfigureWindowSizes
+            }
+            i if i == ProtocolMessageTypes::Error as u8 => ProtocolMessageTypes::Error,
             _ => ProtocolMessageTypes::Unknown,
         }
     }

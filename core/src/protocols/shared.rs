@@ -25,6 +25,20 @@ pub struct Handshake {
     pub capabilities: Capabilities, //Min Version 0.0.34
 }
 
+/// The `error` protocol message body — chia `shared_protocol.Error` (introduced in chia
+/// ede354c58; message-type code 255). CNI ≥ protocol 0.0.35 peers send it in place of a typed
+/// reject when a handler raises `ApiError` (ws_connection.py `error_response_version`), and
+/// tolerate receiving it: chia's `_api_call` decodes an inbound `error`, logs a warning, and
+/// carries on — no ban, no disconnect. Named `ErrorMessage` here (chia calls the streamable
+/// `Error`) to keep `std::io::Error` unambiguous at use sites. `data` streams as chia `bytes`
+/// (u32 length prefix + raw bytes — `Vec<u8>`'s exact wire shape).
+#[derive(ChiaSerial, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ErrorMessage {
+    pub code: i16,
+    pub message: String,
+    pub data: Option<Vec<u8>>,
+}
+
 pub const CAPABILITIES: [(u16, &str); 3] = [
     (Capability::Base as u16, "1"),
     (Capability::BlockHeaders as u16, "1"),
