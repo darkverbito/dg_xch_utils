@@ -368,6 +368,17 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
         self.constants.max_block_count_per_requests
     }
 
+    // CHIA-4203 (chia b483e59f22): the decode-time list caps resolve from the trusted-peer policy
+    // — the SAME values the handlers enforce post-parse (chia's `list_limits` lambdas call
+    // `self.max_subscriptions(peer)` / `self.max_subscribe_response_items(peer)`), so decode
+    // truncation and handler truncation can never disagree.
+    fn max_subscriptions(&self, peer: &Bytes32, host: Option<IpAddr>) -> u32 {
+        u32::try_from(self.wallet.max_subscriptions(peer, host)).unwrap_or(u32::MAX)
+    }
+    fn max_subscribe_response_items(&self, peer: &Bytes32, host: Option<IpAddr>) -> u32 {
+        u32::try_from(self.trust.max_subscribe_response_items(peer, host)).unwrap_or(u32::MAX)
+    }
+
     async fn gossip_peers(&self) -> Vec<TimestampedPeerInfo> {
         self.known_peers.read().await.clone()
     }

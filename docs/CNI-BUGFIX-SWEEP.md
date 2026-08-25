@@ -191,7 +191,7 @@ against our arms.
 | commit | date | what it fixed | disposition |
 |---|---|---|---|
 | a1b12d321 | 2026-05-01 | **RATE_LIMITS_V3: window-based rate limits capability + ConfigureWindowSizes** | **GAP** `[ind]` — in tag 2.7.1; our `core/src/protocols/shared.rs` tops out at `RateLimitsV2 = 3` and `rate_limits.rs` implements v1+v2 only. Interop is safe (capability-negotiated fallback), but the tightened per-window budgets CNI 2.7.1 peers enforce between themselves don't protect us, and we can't negotiate the smaller windows. DoS-hardening parity. |
-| b483e59f2 | 2026-04-30 | **CHIA-4203 list-limited deserialization** (1.2M coin_ids parsed ~6s on a Pi4 before the handler truncates) | **GAP (partial)** `[ind]` — our `Vec` decoder never pre-allocates from the count and fails fast on short input (`serialize/src/lib.rs:276-308`), so the memory half is covered; but a size-cap-compliant message is still fully parsed before handler-level truncation — the CPU half chia fixed remains, and our floor is Pi-4-class hardware. |
+| b483e59f2 | 2026-04-30 | **CHIA-4203 list-limited deserialization** (1.2M coin_ids parsed ~6s on a Pi4 before the handler truncates) | COVERED `[ind]` — both halves. Memory: no pre-allocation from the count (#180, `serialize/src/lib.rs` + `core/tests/streamable_alloc_bomb.rs`). CPU (closed this sweep): `dg_xch_serialize::parse_vec_limited` mirrors chia `parse_list_limited` (truncate during decode, O(1) seek past the fixed-size tail), wired into the same four handlers chia wires (`core/src/protocols/wallet.rs::from_bytes_limited` × 4, `p2p/src/handlers.rs` dispatch arms, caps resolved from the trust policy in `full-node/src/daemon.rs`). Tests: `core/tests/list_limited_decode.rs`, `p2p/tests/t049_list_limited_decode.rs` (red→green over the loopback). |
 | e57358aea | 2025-10-22 | minimum TLS 1.3 | **GAP (minor)** `[ind]` — `core/src/ssl.rs` still implements `verify_tls12_signature` and does not restrict protocol versions; CNI requires 1.3. Practical interop is unaffected (1.3 negotiates); hardening parity. |
 | 0046a3a4e | 2026-03-26 | inbound TIMELORD connections only from localhost/exempt networks | **GAP (minor)** `[ind]` — diff read; we accept timelord handshakes and their VDF inboxes from any peer (`p2p/src/handlers.rs:898`, timelord inboxes in `daemon.rs:230-233`). Mitigations already present: inboxes bounded, and infusion results are assembled into a FullBlock that the engine fully validates (junk VDFs fail); residual risk is wasted verify CPU. |
 | b1b68072a | 2026-03-17 | disconnect + short ban on unknown protocol message type | **GAP (trivial)** `[ind]` — diff read; unknown types map to `ProtocolMessageTypes::Unknown` and fall out of the served-filter as a logged error (`handlers.rs`), connection stays open. Chia now closes with PROTOCOL_ERROR. Hygiene only. |
@@ -363,9 +363,8 @@ one stranding-class divergence before this sweep.
    we use raw fee-per-cost. Under a many-spend spam load our mempool retains and mines
    what CNI evicts. Fix is contained: a `virtual_cost` accessor + swapping the three
    ordering sites in `node/src/mempool.rs`.
-2. **`b483e59f2` — CHIA-4203 list-limited deserialization (DoS/CPU, Pi-4 floor).** Memory
-   half already safe (no prealloc); add per-handler list caps checked during decode for
-   the wallet-protocol request types so a max-size message can't buy seconds of parse CPU.
+2. **`b483e59f2` — CHIA-4203 list-limited deserialization (DoS/CPU, Pi-4 floor).** CLOSED —
+   decode-time list caps on the four wallet-protocol request handlers (see the §4 row).
 3. **`a1b12d321` — RATE_LIMITS_V3 window-based limits (DoS-hardening parity).**
    Capability, table, and `ConfigureWindowSizes` message are absent. Interop-safe today;
    schedule with the HF2 bucket (same protocol-era).

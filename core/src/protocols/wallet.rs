@@ -5,7 +5,13 @@ use crate::blockchain::spend_bundle::SpendBundle;
 use crate::blockchain::tx_status::TXStatus;
 use crate::clvm::program::SerializedProgram;
 use dg_xch_macros::ChiaSerial;
+use dg_xch_serialize::{ChiaProtocolVersion, ChiaSerialize, parse_vec_limited};
 use serde::{Deserialize, Serialize};
+use std::io::{Cursor, Error};
+
+/// The fixed wire size of a [`Bytes32`] list element — the O(1)-skip stride for the CHIA-4203
+/// limited decoders below (chia `_element_fixed_size` reads the type's `_size`).
+const BYTES32_WIRE_SIZE: u64 = 32;
 
 #[derive(ChiaSerial, Clone, PartialEq, Eq, Serialize, Deserialize, Debug)]
 pub struct RequestPuzzleSolution {
@@ -160,6 +166,29 @@ pub struct RegisterForPhUpdates {
     pub min_height: u32,             //Min Version 0.0.34
 }
 
+impl RegisterForPhUpdates {
+    /// Decode with `puzzle_hashes` truncated at `max_puzzle_hashes` DURING parse — the CPU half
+    /// of CHIA-4203 (chia `b483e59f22`: `register_for_ph_updates` wires
+    /// `list_limits={"puzzle_hashes": max_subscriptions(peer)}`). Elements past the cap are
+    /// skipped in O(1), never parsed; the fields after the list decode from the exact post-skip
+    /// position.
+    pub fn from_bytes_limited(
+        bytes: &mut Cursor<&[u8]>,
+        version: ChiaProtocolVersion,
+        max_puzzle_hashes: u32,
+    ) -> Result<Self, Error> {
+        Ok(Self {
+            puzzle_hashes: parse_vec_limited(
+                bytes,
+                version,
+                max_puzzle_hashes,
+                Some(BYTES32_WIRE_SIZE),
+            )?,
+            min_height: u32::from_bytes(bytes, version)?,
+        })
+    }
+}
+
 #[derive(ChiaSerial, Clone, PartialEq, Eq, Serialize, Deserialize, Debug)]
 pub struct RespondToPhUpdates {
     pub puzzle_hashes: Vec<Bytes32>, //Min Version 0.0.34
@@ -178,6 +207,23 @@ pub struct CoinState {
 pub struct RegisterForCoinUpdates {
     pub coin_ids: Vec<Bytes32>, //Min Version 0.0.34
     pub min_height: u32,        //Min Version 0.0.34
+}
+
+impl RegisterForCoinUpdates {
+    /// Decode with `coin_ids` truncated at `max_coin_ids` DURING parse — CHIA-4203
+    /// (chia `b483e59f22`: `register_for_coin_updates` wires
+    /// `list_limits={"coin_ids": max_subscriptions(peer)}`). See
+    /// [`RegisterForPhUpdates::from_bytes_limited`].
+    pub fn from_bytes_limited(
+        bytes: &mut Cursor<&[u8]>,
+        version: ChiaProtocolVersion,
+        max_coin_ids: u32,
+    ) -> Result<Self, Error> {
+        Ok(Self {
+            coin_ids: parse_vec_limited(bytes, version, max_coin_ids, Some(BYTES32_WIRE_SIZE))?,
+            min_height: u32::from_bytes(bytes, version)?,
+        })
+    }
 }
 
 #[derive(ChiaSerial, Clone, PartialEq, Eq, Serialize, Deserialize, Debug)]
@@ -282,6 +328,31 @@ pub struct RequestPuzzleState {
     pub subscribe_when_finished: bool,
 }
 
+impl RequestPuzzleState {
+    /// Decode with `puzzle_hashes` truncated at `max_puzzle_hashes` DURING parse — CHIA-4203
+    /// (chia `b483e59f22`: `request_puzzle_state` wires
+    /// `list_limits={"puzzle_hashes": CoinStore.MAX_PUZZLE_HASH_BATCH_SIZE}`). See
+    /// [`RegisterForPhUpdates::from_bytes_limited`].
+    pub fn from_bytes_limited(
+        bytes: &mut Cursor<&[u8]>,
+        version: ChiaProtocolVersion,
+        max_puzzle_hashes: u32,
+    ) -> Result<Self, Error> {
+        Ok(Self {
+            puzzle_hashes: parse_vec_limited(
+                bytes,
+                version,
+                max_puzzle_hashes,
+                Some(BYTES32_WIRE_SIZE),
+            )?,
+            previous_height: Option::<u32>::from_bytes(bytes, version)?,
+            header_hash: Bytes32::from_bytes(bytes, version)?,
+            filters: CoinStateFilters::from_bytes(bytes, version)?,
+            subscribe_when_finished: bool::from_bytes(bytes, version)?,
+        })
+    }
+}
+
 #[derive(ChiaSerial, Clone, PartialEq, Eq, Serialize, Deserialize, Debug)]
 pub struct RespondPuzzleState {
     pub puzzle_hashes: Vec<Bytes32>,
@@ -302,6 +373,26 @@ pub struct RequestCoinState {
     pub previous_height: Option<u32>,
     pub header_hash: Bytes32,
     pub subscribe: bool,
+}
+
+impl RequestCoinState {
+    /// Decode with `coin_ids` truncated at `max_coin_ids` DURING parse — CHIA-4203's motivating
+    /// case (chia `b483e59f22`: a `RequestCoinState` with 1.2M coin_ids cost ~6 s of parse CPU on
+    /// a Pi4; `request_coin_state` wires
+    /// `list_limits={"coin_ids": max_subscribe_response_items(peer)}`). See
+    /// [`RegisterForPhUpdates::from_bytes_limited`].
+    pub fn from_bytes_limited(
+        bytes: &mut Cursor<&[u8]>,
+        version: ChiaProtocolVersion,
+        max_coin_ids: u32,
+    ) -> Result<Self, Error> {
+        Ok(Self {
+            coin_ids: parse_vec_limited(bytes, version, max_coin_ids, Some(BYTES32_WIRE_SIZE))?,
+            previous_height: Option::<u32>::from_bytes(bytes, version)?,
+            header_hash: Bytes32::from_bytes(bytes, version)?,
+            subscribe: bool::from_bytes(bytes, version)?,
+        })
+    }
 }
 
 #[derive(ChiaSerial, Clone, PartialEq, Eq, Serialize, Deserialize, Debug)]

@@ -80,6 +80,21 @@ pub trait FullNodeApi: Send + Sync {
     fn max_block_count_per_requests(&self) -> u32 {
         32
     }
+    // The per-peer combined subscription cap — chia `max_subscriptions(peer)`
+    // (full_node_api.py, config `max_subscriptions`). The store-blind default is chia's UNTRUSTED
+    // config default (initial-config.yaml `max_subscriptions: 200000`); the daemon overrides it
+    // with the trusted-tier policy (200,000 untrusted / 2,000,000 trusted). Since CHIA-4203
+    // (chia `b483e59f22`) this cap is applied DURING decode of the two register arms, so it must
+    // be resolvable before the message body is parsed.
+    fn max_subscriptions(&self, _peer: &Bytes32, _host: Option<IpAddr>) -> u32 {
+        200_000
+    }
+    // chia `max_subscribe_response_items(peer)` (initial-config.yaml
+    // `max_subscribe_response_items: 100000`, trusted 500,000) — the decode-time list cap for
+    // `RequestCoinState.coin_ids` (CHIA-4203).
+    fn max_subscribe_response_items(&self, _peer: &Bytes32, _host: Option<IpAddr>) -> u32 {
+        100_000
+    }
     async fn gossip_peers(&self) -> Vec<TimestampedPeerInfo>;
     async fn on_new_peak(&self, _peer: Bytes32, _peak: NewPeak) {}
     // A NewTransaction announcement; return the action the dispatch layer takes (pull the bundle,
@@ -753,6 +768,13 @@ async fn send<T: ChiaSerialize>(
 fn decode<T: ChiaSerialize>(msg: &ChiaMessage, version: ChiaProtocolVersion) -> Result<T, Error> {
     T::from_bytes(&mut Cursor::new(msg.data.as_slice()), version)
 }
+
+/// chia `CoinStore.MAX_PUZZLE_HASH_BATCH_SIZE = SQLITE_MAX_VARIABLE_NUMBER - 10 = 32690`
+/// (coin_store.py:588) — the decode-time list cap CHIA-4203 (chia `b483e59f22`) wires onto
+/// `request_puzzle_state.puzzle_hashes`. Kept numerically in sync with
+/// `dg_xch_stores::traits::MAX_PUZZLE_HASH_BATCH_SIZE` (this crate is store-blind, so the value is
+/// mirrored here; a cross-crate equality test in `full-node` pins the two together).
+pub const MAX_PUZZLE_HASH_BATCH_SIZE: u32 = 32_700 - 10;
 
 /// Close a misbehaving peer's connection (chia `peer.close(ban_time)`). All three halves of chia's
 /// close: (1) enter the peer's REMOTE host into the timed ban list for `cause`'s duration, so a
@@ -1624,8 +1646,14 @@ impl FullNodeHandler {
                 .await
             }
             ProtocolMessageTypes::RegisterInterestInPuzzleHash => {
-                let req = decode::<RegisterForPhUpdates>(msg, version)?;
+                // CHIA-4203 (chia b483e59f22): the subscription cap is applied DURING decode —
+                // puzzle hashes past max_subscriptions(peer) are skipped in O(1), never parsed.
                 let host = peer_host(peers, peer_id).await;
+                let req = RegisterForPhUpdates::from_bytes_limited(
+                    &mut Cursor::new(msg.data.as_slice()),
+                    version,
+                    self.api.max_subscriptions(peer_id, host),
+                )?;
                 let reg = self.api.register_for_ph_updates(*peer_id, host, req).await;
                 // On the peer's first registration, stand up the per-peer CoinStateUpdate forwarder.
                 if let Some(rx) = reg.receiver {
@@ -1649,8 +1677,13 @@ impl FullNodeHandler {
                 .await
             }
             ProtocolMessageTypes::RegisterInterestInCoin => {
-                let req = decode::<RegisterForCoinUpdates>(msg, version)?;
+                // CHIA-4203: coin_ids past max_subscriptions(peer) are skipped at decode time.
                 let host = peer_host(peers, peer_id).await;
+                let req = RegisterForCoinUpdates::from_bytes_limited(
+                    &mut Cursor::new(msg.data.as_slice()),
+                    version,
+                    self.api.max_subscriptions(peer_id, host),
+                )?;
                 let reg = self
                     .api
                     .register_for_coin_updates(*peer_id, host, req)
@@ -1679,7 +1712,13 @@ impl FullNodeHandler {
             // request is answered with exactly one Respond*/Reject* echoing the request id — the
             // silent drop of these four was why Sage could not sync against this node at all.
             ProtocolMessageTypes::RequestPuzzleState => {
-                let req = decode::<RequestPuzzleState>(msg, version)?;
+                // CHIA-4203: puzzle_hashes past the store batch bound are skipped at decode time
+                // (chia wires CoinStore.MAX_PUZZLE_HASH_BATCH_SIZE here).
+                let req = RequestPuzzleState::from_bytes_limited(
+                    &mut Cursor::new(msg.data.as_slice()),
+                    version,
+                    MAX_PUZZLE_HASH_BATCH_SIZE,
+                )?;
                 let host = peer_host(peers, peer_id).await;
                 match self.api.puzzle_state(*peer_id, host, req).await {
                     PuzzleStateReply::Respond(resp, receiver) => {
@@ -1724,8 +1763,15 @@ impl FullNodeHandler {
                 }
             }
             ProtocolMessageTypes::RequestCoinState => {
-                let req = decode::<RequestCoinState>(msg, version)?;
+                // CHIA-4203's motivating case: a RequestCoinState claiming 1.2M coin_ids cost
+                // ~6 s of parse CPU on a Pi4 (our hardware floor) before the handler truncated.
+                // The cap now bounds the parse itself.
                 let host = peer_host(peers, peer_id).await;
+                let req = RequestCoinState::from_bytes_limited(
+                    &mut Cursor::new(msg.data.as_slice()),
+                    version,
+                    self.api.max_subscribe_response_items(peer_id, host),
+                )?;
                 match self.api.coin_state(*peer_id, host, req).await {
                     CoinStateReply::Respond(resp, receiver) => {
                         if let Some(rx) = receiver {

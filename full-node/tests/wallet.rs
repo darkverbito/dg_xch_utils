@@ -486,3 +486,16 @@ async fn limited_semaphore_rejects_beyond_active_plus_waiting() {
     // Slots restored: a fresh acquire succeeds again.
     assert!(sem.acquire().await.is_ok());
 }
+
+// CHIA-4203 cross-crate pin: the store-blind copy of chia's
+// `CoinStore.MAX_PUZZLE_HASH_BATCH_SIZE` in the p2p handler layer (the decode-time list cap on
+// `request_puzzle_state.puzzle_hashes`) must equal the store layer's authoritative constant —
+// the two crates cannot depend on each other, so this test is the tie.
+#[test]
+fn p2p_puzzle_hash_batch_cap_matches_the_store_constant() {
+    assert_eq!(
+        dg_xch_p2p::handlers::MAX_PUZZLE_HASH_BATCH_SIZE as usize,
+        dg_xch_stores::traits::MAX_PUZZLE_HASH_BATCH_SIZE,
+        "p2p decode cap and store batch bound must stay in lockstep (chia coin_store.py:588)"
+    );
+}

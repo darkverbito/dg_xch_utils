@@ -307,6 +307,58 @@ where
     }
 }
 
+/// Decode a length-prefixed list, parsing at most `max_items` elements and skipping the rest —
+/// the CPU half of CHIA-4203 (chia `b483e59f22`, #20829: `chia/util/streamable.py::
+/// parse_list_limited`). A request whose list claims far more items than the handler will ever
+/// use (chia's motivating case: a `RequestCoinState` with 1.2M coin_ids, ~6 s of parse CPU on a
+/// Pi4 before the handler truncated) is truncated DURING decode:
+///   - the first `min(count, max_items)` elements are parsed normally (head kept, order kept);
+///   - when `element_fixed_size` is `Some(n)` the remaining `count - max_items` elements are
+///     skipped in O(1) by advancing the cursor `remaining * n` bytes (chia `f.seek(remaining *
+///     element_fixed_size, 1)`) — never allocated, never parsed;
+///   - a variable-size element type still parses the tail element-by-element, exactly as chia's
+///     fallback loop does (the O(1) skip is only sound for fixed-size elements).
+///
+/// Seek-past-end tolerance mirrors chia: python `BytesIO.seek` beyond the buffer end succeeds and
+/// the outer full-consumption check then reads an empty remainder, so a message whose CLAIMED
+/// count overstates the bytes actually present is accepted with the truncated head once the claim
+/// is past the limit. The cursor is clamped to the buffer end (same observable behavior, no
+/// position/len underflow in [`ChiaSerialize::from_bytes_full`]'s consumed check); trailing
+/// garbage after a skip that lands INSIDE the buffer is still rejected there, as in chia.
+///
+/// The MEMORY half of CHIA-4203 (no pre-allocation from the untrusted count) landed with #180 —
+/// this decoder, like `Vec<T>::from_bytes`, starts empty and grows per parsed element.
+pub fn parse_vec_limited<T: ChiaSerialize>(
+    bytes: &mut Cursor<&[u8]>,
+    version: ChiaProtocolVersion,
+    max_items: u32,
+    element_fixed_size: Option<u64>,
+) -> Result<Vec<T>, Error> {
+    let mut u32_buf: [u8; 4] = [0; 4];
+    bytes.read_exact(&mut u32_buf)?;
+    let claimed = u32::from_be_bytes(u32_buf);
+    let to_parse = claimed.min(max_items);
+    let mut out: Vec<T> = Vec::new();
+    for _ in 0..to_parse {
+        out.push(T::from_bytes(bytes, version)?);
+    }
+    let remaining = u64::from(claimed - to_parse);
+    if remaining > 0 {
+        if let Some(size) = element_fixed_size {
+            let end = bytes.get_ref().as_ref().len() as u64;
+            let target = bytes
+                .position()
+                .saturating_add(remaining.saturating_mul(size));
+            bytes.set_position(target.min(end));
+        } else {
+            for _ in 0..remaining {
+                let _ = T::from_bytes(bytes, version)?;
+            }
+        }
+    }
+    Ok(out)
+}
+
 macro_rules! impl_primitives {
     ($($name: ident, $size:expr);*) => {
         $(
