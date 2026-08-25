@@ -161,3 +161,43 @@ async fn bulk_wal_past_the_drain_trigger_is_checkpointed_by_size_not_cadence() {
         .await
         .expect("post-drain apply");
 }
+
+// The writer's page-cache profile follows the sync phase: 256 MiB during bulk catch-up (the
+// dirty set of a cross-window batch commit — the largest measured confirm window spilled
+// ~240 MiB to the WAL, i.e. the 64 MiB cache was the spill), dropping back to 64 MiB at the
+// tip where a single block's dirty set fits. Writer-only: the read pool and checkpointer keep
+// the small default, so the bulk profile costs one connection's cache, released at tip.
+#[tokio::test]
+async fn writer_cache_profile_follows_the_sync_phase() {
+    let store = common::new_store().await;
+    assert_eq!(
+        store.writer_cache_size().await.expect("probe"),
+        -262_144,
+        "bulk (default) phase opens with the 256 MiB writer cache"
+    );
+
+    store.set_near_tip(true);
+    let mut near = 0i64;
+    for _ in 0..50 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        near = store.writer_cache_size().await.expect("probe");
+        if near == -65_536 {
+            break;
+        }
+    }
+    assert_eq!(near, -65_536, "near-tip flip shrinks the writer cache");
+
+    store.set_near_tip(false);
+    let mut bulk = 0i64;
+    for _ in 0..50 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        bulk = store.writer_cache_size().await.expect("probe");
+        if bulk == -262_144 {
+            break;
+        }
+    }
+    assert_eq!(
+        bulk, -262_144,
+        "falling back to bulk restores the big cache"
+    );
+}

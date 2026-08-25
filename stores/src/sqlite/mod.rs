@@ -51,6 +51,24 @@ impl Drop for SqliteStore {
 /// liveness exit 137 x13.
 const WAL_DRAIN_TRIGGER_BYTES: u64 = 128 * 1024 * 1024;
 
+/// WRITER-connection page-cache profile by sync phase (`PRAGMA cache_size`, negative = KiB).
+///
+/// Bulk catch-up: 256 MiB. The 64 MiB cache holds ONE block's dirty set, but catch-up commits
+/// span whole multi-block windows — the largest measured single confirm window spilled ~240 MiB
+/// to the WAL, i.e. at 64 MiB the cache-spill path (not the commit) was writing most of the
+/// WAL, which is exactly the growth that feeds the WAL-drain pathology. 256 MiB covers that
+/// measured worst window so a batch commit spills nothing.
+///
+/// Near tip: back to 64 MiB — per-block commits fit easily, and the memory is returned.
+///
+/// Writer-only on one connection: the read pool and the checkpointer keep the 64 MiB connect
+/// default, so the bulk profile costs at most one connection's cache (allocated lazily), not
+/// pool-size multiples — the smallest SQLite deployment measured has the headroom, and the
+/// profile shrinks again the moment the node reaches the tip. (The Raspberry-Pi floor profile
+/// is the separate mmap backend; it has no SQLite cache and is untouched.)
+const WRITER_CACHE_BULK_KIB: i64 = 262_144;
+const WRITER_CACHE_NEAR_TIP_KIB: i64 = 65_536;
+
 impl SqliteStore {
     /// Open (creating if missing) a WAL-mode store at `path` and apply the migrations for the enabled
     /// feature tier.
@@ -80,10 +98,13 @@ impl SqliteStore {
             .busy_timeout(Duration::from_secs(5))
             .foreign_keys(true)
             .pragma("mmap_size", "268435456")
-            // Page cache. The SQLite default (-2000 = 2 MiB) forces near-constant cache-spill to the
-            // WAL when a confirm writes thousands of random `coin_name` (hash-keyed, WITHOUT ROWID)
-            // rows into the multi-GB coin_record b-tree. 64 MiB holds a single block's dirty working
-            // set so a per-block confirm spills nothing, and sharply cuts spill for a multi-block batch.
+            // Page cache, the CONNECT default (read pool + checkpointer). The SQLite default
+            // (-2000 = 2 MiB) forces near-constant cache-spill to the WAL when a confirm writes
+            // thousands of random `coin_name` (hash-keyed, WITHOUT ROWID) rows into the multi-GB
+            // coin_record b-tree; 64 MiB holds a single block's working set. The WRITER is
+            // re-profiled by phase on top of this — bulk 256 MiB / near-tip 64 MiB (see
+            // WRITER_CACHE_BULK_KIB) — because catch-up batch commits span many blocks and spill
+            // at 64 MiB.
             .pragma("cache_size", "-65536")
             // Keep the writer-COMMIT autocheckpoint OUT of normal operation. The store runs on network
             // block storage (iSCSI, measured ~100 ms/fsync). An autocheckpoint firing inside a confirm
@@ -95,6 +116,11 @@ impl SqliteStore {
             // checkpointer is alive; it only bounds the WAL if that background task ever stops.
             .pragma("wal_autocheckpoint", "262144");
         let mut writer = opts.clone().connect().await?;
+        // The store opens in the bulk (catch-up) phase: give the writer the bulk cache profile
+        // now; `set_near_tip` re-profiles it on every phase flip.
+        sqlx::query(&format!("PRAGMA cache_size = -{WRITER_CACHE_BULK_KIB}"))
+            .execute(&mut writer)
+            .await?;
         migrate(&mut writer).await?;
         // Read-pool connections are RECYCLED (idle_timeout + max_lifetime): a pooled WAL reader
         // that sits on an old read mark pins the checkpoint reset point — PASSIVE can copy
@@ -138,6 +164,44 @@ impl SqliteStore {
     #[must_use]
     pub fn wal_file_bytes(&self) -> u64 {
         std::fs::metadata(&self.wal_path).map_or(0, |m| m.len())
+    }
+
+    /// The WRITER connection's current `PRAGMA cache_size` (negative = KiB, SQLite's
+    /// convention) — the phase-profile probe: bulk catch-up runs the large cache, near-tip the
+    /// small one. Diagnostic/test seam; takes the writer lock briefly.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Backend`] if the pragma query fails.
+    pub async fn writer_cache_size(&self) -> Result<i64, StoreError> {
+        let mut guard = self.writer.lock().await;
+        let row = sqlx::query("PRAGMA cache_size")
+            .fetch_one(&mut *guard)
+            .await?;
+        Ok(row.try_get(0)?)
+    }
+
+    /// Re-apply the phase-appropriate writer cache profile (see [`WRITER_CACHE_BULK_KIB`]).
+    /// Called from `set_near_tip` (a sync trait method), so the pragma runs on a spawned task
+    /// that takes the writer lock; it reads the CURRENT phase at execution time, so racing
+    /// flips converge on the latest phase. `PRAGMA cache_size` takes effect immediately on the
+    /// connection; shrinking releases the pages lazily.
+    pub(crate) fn apply_writer_cache_profile(&self) {
+        let writer = self.writer.clone();
+        let near_tip = self.near_tip.clone();
+        tokio::spawn(async move {
+            let kib = if near_tip.load(Ordering::Relaxed) {
+                WRITER_CACHE_NEAR_TIP_KIB
+            } else {
+                WRITER_CACHE_BULK_KIB
+            };
+            let mut guard = writer.lock().await;
+            if let Err(e) = sqlx::query(&format!("PRAGMA cache_size = -{kib}"))
+                .execute(&mut *guard)
+                .await
+            {
+                log::warn!("writer cache re-profile to -{kib} KiB failed: {e}");
+            }
+        });
     }
 }
 

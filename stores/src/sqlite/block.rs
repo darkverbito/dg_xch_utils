@@ -351,7 +351,13 @@ impl BlockStore for SqliteStore {
     }
 
     fn set_near_tip(&self, near_tip: bool) {
-        self.near_tip.store(near_tip, Ordering::Relaxed);
+        let was = self.near_tip.swap(near_tip, Ordering::Relaxed);
+        if was != near_tip {
+            // Phase flip: swap the writer between the bulk (256 MiB) and near-tip (64 MiB)
+            // cache profiles — catch-up batch commits span many blocks and spill the small
+            // cache to the WAL (see WRITER_CACHE_BULK_KIB in mod.rs).
+            self.apply_writer_cache_profile();
+        }
     }
 
     fn telemetry(&self) -> Option<std::sync::Arc<crate::telemetry::StoreTelemetry>> {
