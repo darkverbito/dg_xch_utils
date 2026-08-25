@@ -431,6 +431,7 @@ async fn handle_connection(
     );
     // Hold our own handle so the teardown below can prove the map still points at THIS
     // connection (and not a peer that reconnected in the meantime) before removing it.
+    let v3 = websocket.v3();
     let socket_peer = Arc::new(SocketPeer {
         node_type: Arc::new(RwLock::new(NodeType::Unknown)),
         protocol_version: Arc::new(RwLock::new(ChiaProtocolVersion::default())),
@@ -442,6 +443,7 @@ async fn handle_connection(
         host: Some(peer_addr.ip()),
         bans: Some(bans),
         outbound_limiter,
+        v3,
     });
     let removed = peers.write().await.insert(*peer_id, socket_peer.clone());
     if let Some(removed) = removed {

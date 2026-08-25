@@ -7,6 +7,7 @@ pub mod introducer;
 pub mod outbound_limiter;
 pub mod pool;
 pub mod rate_limits;
+pub mod rate_limits_v3;
 pub mod shared;
 pub mod timelord;
 pub mod wallet;
@@ -41,7 +42,7 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use uuid::Uuid;
 
 #[repr(u8)]
-#[derive(ChiaSerial, Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(ChiaSerial, Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ProtocolMessageTypes {
     Unknown = 0,
     //Shared protocol (all services)
@@ -735,6 +736,11 @@ pub struct SocketPeer {
     /// written, so a re-gossip burst cannot get US banned. `None` on non-full-node links, and on
     /// `None` [`SocketPeer::send`] writes directly — identical to the pre-throttle behaviour.
     pub outbound_limiter: Option<Arc<outbound_limiter::OutboundLimiter>>,
+    /// Per-connection RATE_LIMITS_V3 state (chia a1b12d321) — the same instance the link's
+    /// [`WebsocketConnection`] and [`ReadStream`] hold, so the handshake arm (negotiation), the
+    /// read loop (receive windows), and the request senders (outbound windows) all see one
+    /// truth. Inert (`!is_active()`) unless the capability was negotiated.
+    pub v3: Arc<rate_limits_v3::V3Link>,
 }
 impl SocketPeer {
     /// Send `msg` to this peer, self-throttling first when an outbound limiter is installed. The
@@ -817,6 +823,9 @@ pub struct WebsocketConnection {
     /// Correlation table for request/reply on this connection; shared with the [`ReadStream`] that
     /// routes replies back to their waiters (see [`PendingRequests`]).
     pending: Arc<PendingRequests>,
+    /// Per-connection RATE_LIMITS_V3 state, shared with the [`ReadStream`] (and the
+    /// [`SocketPeer`] callers wire up). See [`rate_limits_v3::V3Link`].
+    v3: Arc<rate_limits_v3::V3Link>,
 }
 /// Upper bound on a single websocket write. A peer that stops draining (full TCP receive window
 /// → Sink backpressure) must never wedge the sender: the caller holds the connection write lock
@@ -849,10 +858,12 @@ impl WebsocketConnection {
     ) -> (Self, ReadStream) {
         let (write, read) = websocket.split();
         let pending = Arc::new(PendingRequests::default());
+        let v3 = Arc::new(rate_limits_v3::V3Link::default());
         let websocket = WebsocketConnection {
             write,
             message_handlers: message_handlers.clone(),
             pending: pending.clone(),
+            v3: v3.clone(),
         };
         let stream = ReadStream {
             read,
@@ -861,8 +872,16 @@ impl WebsocketConnection {
             peers,
             pending,
             limiter,
+            v3,
         };
         (websocket, stream)
+    }
+
+    /// This link's shared RATE_LIMITS_V3 state — callers thread it onto the [`SocketPeer`], and
+    /// the request senders consult it for outbound windows.
+    #[must_use]
+    pub fn v3(&self) -> Arc<rate_limits_v3::V3Link> {
+        self.v3.clone()
     }
     pub async fn send(&mut self, msg: Message) -> Result<(), Error> {
         timeout_send(&mut self.write, msg, SEND_TIMEOUT).await
@@ -878,8 +897,11 @@ impl WebsocketConnection {
     }
 
     /// Release a reserved correlation id whose reply never arrived (timeout / send failure).
+    /// Frees any RATE_LIMITS_V3 outbound-window slot the request occupied (chia decrements
+    /// `in_flight` in `send_request`'s finally).
     pub fn cancel_request(&self, id: u16) {
         self.pending.cancel(id);
+        self.v3.out_release(id);
     }
 
     pub async fn subscribe(&self, uuid: Uuid, handle: Arc<ChiaMessageHandler>) {
@@ -921,6 +943,10 @@ pub struct ReadStream {
     /// and evicts the peer (chia `close(RATE_LIMITER_BAN_SECONDS)`). `None` on non-full-node links
     /// (harvester/farmer/wallet clients), which chia also leaves unpoliced.
     limiter: Option<Arc<rate_limits::RateLimiter>>,
+    /// Per-connection RATE_LIMITS_V3 state (shared with the [`WebsocketConnection`]): when the
+    /// capability was negotiated, v3-tabled types bypass the time-based limiter and bounded
+    /// request types are admitted through in-flight receive windows instead (chia a1b12d321).
+    v3: Arc<rate_limits_v3::V3Link>,
 }
 impl ReadStream {
     pub async fn run(&mut self, run: Arc<AtomicBool>) {
@@ -995,6 +1021,67 @@ impl ReadStream {
                                                 }
                                                 return;
                                             }
+                                            // RATE_LIMITS_V3 (chia a1b12d321): once negotiated,
+                                            // v3-tabled types are NOT subject to the time-based
+                                            // limiter; bounded request types are admitted through
+                                            // an in-flight receive window instead — over-window
+                                            // closes with the RATE_LIMITER ban, exactly like a v2
+                                            // violation. Localhost peers bypass window enforcement
+                                            // (chia: `not is_localhost and not exempt`), but still
+                                            // bypass v2 for v3 types.
+                                            let v3_typed = self.v3.is_active()
+                                                && rate_limits_v3::v3_setting(msg_arc.msg_type)
+                                                    .is_some();
+                                            let mut recv_guard: Option<
+                                                Arc<rate_limits_v3::RecvGuard>,
+                                            > = None;
+                                            if v3_typed {
+                                                let is_local = peer_self
+                                                    .as_ref()
+                                                    .and_then(|p| p.host)
+                                                    .is_some_and(|h| h.is_loopback());
+                                                if !is_local {
+                                                    match self.v3.recv_acquire(msg_arc.msg_type) {
+                                                        Ok(true) => {
+                                                            recv_guard = Some(Arc::new(
+                                                                rate_limits_v3::RecvGuard::new(
+                                                                    self.v3.clone(),
+                                                                    msg_arc.msg_type,
+                                                                ),
+                                                            ));
+                                                        }
+                                                        Ok(false) => {}
+                                                        Err(()) => {
+                                                            warn!(
+                                                                "Peer {} exceeded the v3 receive window for {:?}; closing connection",
+                                                                self.peer_id, msg_arc.msg_type
+                                                            );
+                                                            if let Some(peer) = self
+                                                                .peers
+                                                                .write()
+                                                                .await
+                                                                .remove(self.peer_id.as_ref())
+                                                            {
+                                                                if let (Some(bans), Some(host)) =
+                                                                    (peer.bans.as_ref(), peer.host)
+                                                                {
+                                                                    bans.ban(
+                                                                        host,
+                                                                        ban::BanCause::RateLimit,
+                                                                    );
+                                                                }
+                                                                let _ = peer
+                                                                    .websocket
+                                                                    .write()
+                                                                    .await
+                                                                    .close(None)
+                                                                    .await;
+                                                            }
+                                                            return;
+                                                        }
+                                                    }
+                                                }
+                                            }
                                             // Inbound rate limit (chia `inbound_rate_limiter` in
                                             // `_read_one_message`): charge EVERY message against the
                                             // composed per-connection limits BEFORE the correlation
@@ -1002,7 +1089,9 @@ impl ReadStream {
                                             // count too. A violation closes the connection and evicts
                                             // the peer (chia `close(RATE_LIMITER_BAN_SECONDS)`; our
                                             // timed-ban behavior is applied below).
-                                            if let Some(limiter) = &self.limiter {
+                                            if let Some(limiter) = &self.limiter
+                                                && !v3_typed
+                                            {
                                                 let size = msg_arc.data.as_slice().len();
                                                 if let Some(reason) = limiter.process_and_check(
                                                     msg_arc.msg_type,
@@ -1050,6 +1139,10 @@ impl ReadStream {
                                             if let Some(id) = msg_arc.id
                                                 && self.pending.deliver(id, msg_arc.clone())
                                             {
+                                                // A solicited reply frees any v3 outbound-window
+                                                // slot its request occupied (chia decrements
+                                                // `in_flight` when the response resolves).
+                                                self.v3.out_release(id);
                                                 debug!(
                                                     "Routed reply id={id}: {:?}",
                                                     msg_arc.msg_type
@@ -1064,7 +1157,12 @@ impl ReadStream {
                                                     let peer_id = self.peer_id.clone();
                                                     let peers = self.peers.clone();
                                                     let v_arc_c = v.handle.clone();
+                                                    // The v3 receive-window slot stays occupied
+                                                    // until every handler task for this message
+                                                    // finishes (the guard's last clone drops).
+                                                    let guard = recv_guard.clone();
                                                     tokio::spawn(async move {
+                                                        let _guard = guard;
                                                         if let Err(e) = v_arc_c.handle(msg_arc_c.clone(), peer_id, peers).await {
                                                             error!("Error Handling Message({:#?}): {e:?}", msg_arc_c.msg_type);
                                                         }

@@ -250,6 +250,7 @@ impl WsClient {
             peers.clone(),
             limiter,
         );
+        let v3 = ws_con.v3();
         let connection = Arc::new(RwLock::new(ws_con));
         let peer_capabilities = Arc::new(RwLock::new(Vec::new()));
         peers.write().await.insert(
@@ -265,6 +266,10 @@ impl WsClient {
                 host: client_config.host.parse::<std::net::IpAddr>().ok(),
                 bans: None,
                 outbound_limiter: outbound_limiter.clone(),
+                // Outbound dials keep chia 2.7.1's default capability set (no RATE_LIMITS_V3),
+                // so this link's v3 state stays inert — the responder can only mirror what the
+                // initiator advertises.
+                v3,
             }),
         );
         let handle_run = run.clone();
@@ -417,6 +422,44 @@ impl MessageHandler for OneShotHandler {
 ///
 /// # Errors
 /// Returns an error if the send fails, the connection drops the waiter, or `timeout` ms elapse first.
+/// RATE_LIMITS_V3 outbound window (chia `_send_message`): when the link negotiated v3 and the
+/// request's type is bounded by the PEER's advertised window, wait for an in-flight slot before
+/// sending — chia defers the message with `_wait_and_retry`; we bound the wait so a peer that
+/// never answers cannot park the sender forever (the request would time out anyway). The slot is
+/// released when the reply routes back (read loop), or by `cancel_request` on timeout/failure.
+async fn acquire_v3_out_window(
+    connection: &Arc<RwLock<WebsocketConnection>>,
+    msg: &ChiaMessage,
+    id: u16,
+) -> Result<(), Error> {
+    let v3 = connection.read().await.v3();
+    if !v3.is_active() {
+        return Ok(());
+    }
+    const WAIT_STEP_MS: u64 = 25;
+    const WAIT_CAP_MS: u64 = 30_000;
+    let mut waited: u64 = 0;
+    loop {
+        match v3.out_acquire(msg.msg_type, id) {
+            Ok(_) => return Ok(()),
+            Err(()) => {
+                if waited >= WAIT_CAP_MS {
+                    connection.read().await.cancel_request(id);
+                    return Err(Error::new(
+                        ErrorKind::TimedOut,
+                        format!(
+                            "peer's v3 in-flight window for {:?} stayed full for {WAIT_CAP_MS} ms",
+                            msg.msg_type
+                        ),
+                    ));
+                }
+                tokio::time::sleep(Duration::from_millis(WAIT_STEP_MS)).await;
+                waited += WAIT_STEP_MS;
+            }
+        }
+    }
+}
+
 pub async fn oneshot_message(
     connection: Arc<RwLock<WebsocketConnection>>,
     mut msg: ChiaMessage,
@@ -426,6 +469,7 @@ pub async fn oneshot_message(
 ) -> Result<Arc<ChiaMessage>, Error> {
     let (id, rx) = connection.read().await.register_request();
     msg.id = Some(id);
+    acquire_v3_out_window(&connection, &msg, id).await?;
     if let Err(e) = connection.write().await.send(msg.into()).await {
         connection.read().await.cancel_request(id);
         return Err(Error::new(
@@ -460,6 +504,7 @@ pub async fn oneshot<R: ChiaSerialize>(
     if msg_id.is_some() || msg.id.is_some() {
         let (id, rx) = connection.read().await.register_request();
         msg.id = Some(id);
+        acquire_v3_out_window(&connection, &msg, id).await?;
         if let Err(e) = connection.write().await.send(msg.into()).await {
             connection.read().await.cancel_request(id);
             return Err(Error::new(

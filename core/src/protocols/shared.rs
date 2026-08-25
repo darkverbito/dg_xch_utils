@@ -10,6 +10,16 @@ pub enum Capability {
     BlockHeaders = 2,
     RateLimitsV2 = 3,
     NoneResponse = 4,
+    // chia shared_protocol.Capability (2.7.1): the mempool-update push surface — deliberately
+    // NOT advertised (see the DIVERGENCES documented-intentional table).
+    MempoolUpdates = 5,
+    // Signals Hard Fork 2 support — pre-activation on mainnet (HF2 standing bucket).
+    HardFork2 = 6,
+    // chia a1b12d321: when both peers advertise this, a ConfigureWindowSizes message follows
+    // the handshake and window-based (in-flight) rate limits replace v2 for the supported
+    // message types (`rate_limits_v3`). Not in the default outgoing set — chia 2.7.1 parity:
+    // the responder mirrors it when the initiator advertises it.
+    RateLimitsV3 = 7,
 }
 
 pub type Capabilities = Vec<(u16, String)>;
@@ -37,6 +47,15 @@ pub struct ErrorMessage {
     pub code: i16,
     pub message: String,
     pub data: Option<Vec<u8>>,
+}
+
+/// The rate-limits-v3 handshake follow-up (chia `shared_protocol.ConfigureWindowSizes`,
+/// message-type code 111, added in a1b12d321): the sender's window sizes per message type —
+/// `(message_type_code, window_size)` with 0 meaning unlimited. See
+/// `crate::protocols::rate_limits_v3`.
+#[derive(ChiaSerial, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ConfigureWindowSizes {
+    pub settings: Vec<(u8, u16)>,
 }
 
 pub const CAPABILITIES: [(u16, &str); 3] = [

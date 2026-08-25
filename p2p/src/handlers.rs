@@ -15,7 +15,12 @@ use dg_xch_core::protocols::full_node::{
     RequestUnfinishedBlock2, RespondBlock, RespondBlocks, RespondCompactVDF, RespondEndOfSubSlot,
     RespondPeers, RespondSignagePoint, RespondTransaction, RespondUnfinishedBlock,
 };
-use dg_xch_core::protocols::shared::{CAPABILITIES, ErrorMessage, Handshake};
+use dg_xch_core::protocols::rate_limits_v3::{
+    configure_message, peer_supports_v3, settings_from_configure,
+};
+use dg_xch_core::protocols::shared::{
+    CAPABILITIES, Capability, ConfigureWindowSizes, ErrorMessage, Handshake,
+};
 use dg_xch_core::protocols::timelord::{
     NewEndOfSubSlotVDF, NewInfusionPointVDF, NewPeakTimelord, NewSignagePointVDF,
     RespondCompactProofOfTime,
@@ -882,16 +887,26 @@ impl FullNodeHandler {
                     // version above. Emitting a reply here would be a duplicate mid-stream handshake.
                     return Ok(());
                 }
+                // RATE_LIMITS_V3 responder mirror (chia a1b12d321, ws_connection.py
+                // `perform_handshake`): "If the peer advertises v3, let's advertise v3 as well" —
+                // the responder appends the capability to its reply and both sides exchange
+                // ConfigureWindowSizes. Our outbound dials keep the default set (chia 2.7.1's
+                // `_capabilities` has no v3), so only inbound-initiated links ever activate.
+                let peer_is_v3 = peer_supports_v3(&hs.capabilities);
+                let mut reply_caps: dg_xch_core::protocols::shared::Capabilities = CAPABILITIES
+                    .iter()
+                    .map(|e| (e.0, e.1.to_string()))
+                    .collect();
+                if peer_is_v3 {
+                    reply_caps.push((Capability::RateLimitsV3 as u16, "1".to_string()));
+                }
                 let reply = Handshake {
                     network_id: self.network_id.clone(),
                     protocol_version: negotiated.to_string(),
                     software_version: dg_xch_clients::websocket::version(),
                     server_port: self.server_port,
                     node_type: NodeType::FullNode as u8,
-                    capabilities: CAPABILITIES
-                        .iter()
-                        .map(|e| (e.0, e.1.to_string()))
-                        .collect(),
+                    capabilities: reply_caps,
                 };
                 send(
                     &self.counters,
@@ -903,6 +918,24 @@ impl FullNodeHandler {
                     negotiated,
                 )
                 .await?;
+                if peer_is_v3 {
+                    // Immediately after the handshake: our ConfigureWindowSizes (chia sequence —
+                    // each side sends its settings and validates the peer's). Activation completes
+                    // when the peer's configure arrives (the dispatch arm below).
+                    if let Some(peer) = peers.read().await.get(peer_id) {
+                        peer.v3.offer();
+                    }
+                    send(
+                        &self.counters,
+                        peers,
+                        peer_id,
+                        ProtocolMessageTypes::ConfigureWindowSizes,
+                        &configure_message(),
+                        None,
+                        negotiated,
+                    )
+                    .await?;
+                }
                 // chia 0046a3a4e (CHIA-3995): an inbound TIMELORD is accepted only from
                 // localhost / an exempt network. The refusal happens right after the handshake
                 // completes and BEFORE any greeting, and closes WITHOUT banning — chia's
@@ -1950,6 +1983,34 @@ impl FullNodeHandler {
                 )
                 .await
             }
+            ProtocolMessageTypes::ConfigureWindowSizes => {
+                // The peer's RATE_LIMITS_V3 settings (chia a1b12d321). Only legitimate on a link
+                // where the capability was negotiated (we mirrored it in our handshake reply);
+                // otherwise, and on any validation failure (empty / oversized / bounding one of
+                // OUR unlimited types), chia raises INVALID_HANDSHAKE — close with the short
+                // protocol ban.
+                let Some(peer) = peers.read().await.get(peer_id).cloned() else {
+                    return Ok(());
+                };
+                if !peer.v3.is_offered() {
+                    log::warn!(
+                        "Peer {peer_id} sent ConfigureWindowSizes without negotiating \
+                         RATE_LIMITS_V3; closing"
+                    );
+                    return close_peer(peers, peer_id, Some(BanCause::InvalidProtocol)).await;
+                }
+                let cfg = decode::<ConfigureWindowSizes>(msg, version)?;
+                match settings_from_configure(&cfg) {
+                    Ok(settings) => {
+                        peer.v3.activate(settings);
+                        Ok(())
+                    }
+                    Err(e) => {
+                        log::warn!("Peer {peer_id} sent an invalid ConfigureWindowSizes: {e}");
+                        close_peer(peers, peer_id, Some(BanCause::InvalidProtocol)).await
+                    }
+                }
+            }
             ProtocolMessageTypes::Error => {
                 // The `error` protocol message (chia ede354c58, code 255): a CNI ≥ 0.0.35 peer
                 // reports a handler-side ApiError in place of a typed reject. chia's `_api_call`
@@ -2071,6 +2132,9 @@ fn served(msg_type: ProtocolMessageTypes) -> bool {
             // chia's own posture (ws_connection.py `_api_call` warns and returns). Matching it
             // here keeps a conforming CNI peer's ApiError report off the unknown-type close path.
             | ProtocolMessageTypes::Error
+            // RATE_LIMITS_V3 configure exchange (chia code 111): the peer's window settings,
+            // validated + stored by the dispatch arm.
+            | ProtocolMessageTypes::ConfigureWindowSizes
     )
 }
 
