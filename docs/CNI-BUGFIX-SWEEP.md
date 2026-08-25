@@ -194,7 +194,7 @@ against our arms.
 | b483e59f2 | 2026-04-30 | **CHIA-4203 list-limited deserialization** (1.2M coin_ids parsed ~6s on a Pi4 before the handler truncates) | COVERED `[ind]` — both halves. Memory: no pre-allocation from the count (#180, `serialize/src/lib.rs` + `core/tests/streamable_alloc_bomb.rs`). CPU (closed this sweep): `dg_xch_serialize::parse_vec_limited` mirrors chia `parse_list_limited` (truncate during decode, O(1) seek past the fixed-size tail), wired into the same four handlers chia wires (`core/src/protocols/wallet.rs::from_bytes_limited` × 4, `p2p/src/handlers.rs` dispatch arms, caps resolved from the trust policy in `full-node/src/daemon.rs`). Tests: `core/tests/list_limited_decode.rs`, `p2p/tests/t049_list_limited_decode.rs` (red→green over the loopback). |
 | e57358aea | 2025-10-22 | minimum TLS 1.3 | **GAP (minor)** `[ind]` — `core/src/ssl.rs` still implements `verify_tls12_signature` and does not restrict protocol versions; CNI requires 1.3. Practical interop is unaffected (1.3 negotiates); hardening parity. |
 | 0046a3a4e | 2026-03-26 | inbound TIMELORD connections only from localhost/exempt networks | **GAP (minor)** `[ind]` — diff read; we accept timelord handshakes and their VDF inboxes from any peer (`p2p/src/handlers.rs:898`, timelord inboxes in `daemon.rs:230-233`). Mitigations already present: inboxes bounded, and infusion results are assembled into a FullBlock that the engine fully validates (junk VDFs fail); residual risk is wasted verify CPU. |
-| b1b68072a | 2026-03-17 | disconnect + short ban on unknown protocol message type | **GAP (trivial)** `[ind]` — diff read; unknown types map to `ProtocolMessageTypes::Unknown` and fall out of the served-filter as a logged error (`handlers.rs`), connection stays open. Chia now closes with PROTOCOL_ERROR. Hygiene only. |
+| b1b68072a | 2026-03-17 | disconnect + short ban on unknown protocol message type | COVERED `[ind]` — the read loop now closes with a PROTOCOL_ERROR (1002) frame and enters the host into the timed ban list (`BanCause::InternalProtocolError`, chia's INTERNAL_PROTOCOL_ERROR_BAN_SECONDS) before the rate limiter or dispatch sees the message (`core/src/protocols/mod.rs` ReadStream). Prerequisite completeness (ede354c58 row) pins our recognized-code set equal to chia 2.7.1's, so a conforming CNI peer can never trip it. Test: `p2p/tests/t050_unknown_and_error_frames.rs` (evict + ban + refused reconnect; error frame 255 still tolerated). |
 | 3461286e8 | 2025-12-15 | no rate limits / bans for exempt peer networks | **GAP (minor)** `[ind]` — no exempt-network bypass in `rate_limits.rs`; a trusted co-located peer (own farmer/wallet infra) can be throttled or banned by us. Operational, not security. |
 | 9491c6ee3 + 04b9d010b | 2026-01-12 | deficit round robin across peers in TransactionQueue.pop | **GAP (documented)** `[ind]` — `full-node/src/tx_queue.rs:20-23` records the delta: per-peer share caps exist, cross-peer round-robin of validation order does not. Gossip fairness under adversarial load. |
 | 0d706d591 | 2026-04-28 | nonced timed-out request handling in _send_message | COVERED `[ind]` — correlation-waiter table drops dead waiters so the table never leaks (`core/src/protocols/mod.rs:656-680`), reserved ids released on timeout (`:858`) |
@@ -378,8 +378,8 @@ one stranding-class divergence before this sweep.
    be throttled/banned by us.
 7. **`e57358aea` — TLS 1.3 minimum (hardening parity).** Drop the TLS 1.2 arms in
    `core/src/ssl.rs`.
-8. **`b1b68072a` — close on unknown message type (hygiene).** We log and continue; CNI
-   disconnects with PROTOCOL_ERROR.
+8. **`b1b68072a` — close on unknown message type (hygiene).** CLOSED — disconnect + short
+   host ban in the read loop (see the §4 row).
 
 UNCLEAR (2): `ede354c58` (tolerant parse for the `error` protocol message — verify CNI
 sender behavior), `12948b837` (audit RPC CLVM call sites for runtime-thread stalls).

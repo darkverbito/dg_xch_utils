@@ -952,6 +952,49 @@ impl ReadStream {
                                     match ChiaMessage::from_bytes(&mut cursor, protocol_version) {
                                         Ok(chia_msg) => {
                                             let msg_arc: Arc<ChiaMessage> = Arc::new(chia_msg);
+                                            // chia b1b68072a (`_read_one_message`): a message type
+                                            // outside chia's enum disconnects the peer with the short
+                                            // INTERNAL_PROTOCOL_ERROR ban and a PROTOCOL_ERROR (1002)
+                                            // close, BEFORE the rate limiter or any dispatch sees it.
+                                            // Safe because our recognized-code set is pinned EQUAL to
+                                            // chia 2.7.1's (core/tests/protocol_message_codes.rs) —
+                                            // this can never fire on a conforming CNI peer. Links
+                                            // without a ban registry / resolved host (outbound
+                                            // clients) still close, they just cannot host-ban.
+                                            if msg_arc.msg_type == ProtocolMessageTypes::Unknown {
+                                                error!(
+                                                    "Disconnecting peer {} for unknown message type",
+                                                    self.peer_id
+                                                );
+                                                if let Some(peer) = self
+                                                    .peers
+                                                    .write()
+                                                    .await
+                                                    .remove(self.peer_id.as_ref())
+                                                {
+                                                    if let (Some(bans), Some(host)) =
+                                                        (peer.bans.as_ref(), peer.host)
+                                                    {
+                                                        bans.ban(
+                                                            host,
+                                                            ban::BanCause::InternalProtocolError,
+                                                        );
+                                                    }
+                                                    let close_frame = Message::Close(Some(
+                                                        tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                                                            code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Protocol,
+                                                            reason: "INVALID_PROTOCOL_MESSAGE".into(),
+                                                        },
+                                                    ));
+                                                    let _ = peer
+                                                        .websocket
+                                                        .write()
+                                                        .await
+                                                        .close(Some(close_frame))
+                                                        .await;
+                                                }
+                                                return;
+                                            }
                                             // Inbound rate limit (chia `inbound_rate_limiter` in
                                             // `_read_one_message`): charge EVERY message against the
                                             // composed per-connection limits BEFORE the correlation
