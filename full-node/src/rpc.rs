@@ -1512,6 +1512,13 @@ struct HintReq {
 }
 
 #[derive(Deserialize)]
+struct HintsReq {
+    hints: Vec<Bytes32>,
+    #[serde(flatten)]
+    window: CoinQueryWindow,
+}
+
+#[derive(Deserialize)]
 struct PuzzleSolutionReq {
     coin_id: Bytes32,
     height: u32,
@@ -1857,6 +1864,15 @@ where
                         .get_coin_records_by_hint(&req.hint, req.window)
                         .await?,
                 )?
+            }
+            #[cfg(feature = "hint")]
+            "/get_coin_records_by_hints" => {
+                let req: HintsReq = parse(body)?;
+                let mut records = Vec::new();
+                for hint in &req.hints {
+                    records.extend(self.rpc.get_coin_records_by_hint(hint, req.window).await?);
+                }
+                envelope("coin_records", &records)?
             }
             #[cfg(feature = "coin-index")]
             "/get_additions_and_removals" => {
