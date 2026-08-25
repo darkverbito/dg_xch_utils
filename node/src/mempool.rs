@@ -57,9 +57,11 @@ const NONZERO_FEE_MINIMUM_FPC: f64 = 5.0;
 const EXPIRING_BLOCK_CUTOFF: u32 = 48;
 const EXPIRING_TIME_CUTOFF: u64 = 900;
 
-// chia mempool.py: past SF9's 6,000-spend block limit, ordering uses fee per VIRTUAL cost
-// (cost + spends x this) so many-spend low-cost bundles cannot crowd out the spend budget.
-const VIRTUAL_COST_PER_SPEND: u64 = 500_000;
+// chia SPEND_PENALTY_COST (chia/types/mempool_item.py:13): the per-spend penalty added to CLVM
+// cost when computing virtual cost. Blocks are capped at 6,000 spends besides the cost limit, so
+// pricing spend slots keeps many-spend low-cost bundles from crowding out the spend budget
+// (chia/full_node/mempool.py:64-71).
+const SPEND_PENALTY_COST: u64 = 500_000;
 
 // chia mempool.py:54 PRIORITY_TX_THRESHOLD: once this many items have been skipped during block
 // assembly, items carrying dedup/fast-forward spends are skipped outright — their processing is
@@ -734,17 +736,20 @@ impl MempoolItem {
             .collect()
     }
 
-    // The SF9-era ordering key: fee per virtual cost (chia mempool.py). Below SF9 the spend
-    // surcharge is zero and this equals fee_per_cost.
+    // The mempool priority key: fee per VIRTUAL cost, where virtual cost adds a per-spend
+    // penalty — chia 481ccb305 "Mempool spend limit (#20703)":
+    // `virtual_cost = cost + num_spends * SPEND_PENALTY_COST` (chia/types/mempool_item.py
+    // ::virtual_cost) and eviction/assembly order by `priority DESC, seq ASC`
+    // (chia/full_node/mempool.py). UNCONDITIONAL: the penalty is mempool policy with no
+    // activation gate — the earlier SF9 gating here was our own invention and diverged below
+    // the SF9 height (many-spend spam stayed competitive that chia deprioritizes; spends per
+    // block are capped, so spend count is the scarcer resource the penalty prices).
     #[must_use]
     #[allow(clippy::cast_precision_loss)]
-    pub fn fee_per_virtual_cost(&self, sf9_active: bool) -> f64 {
-        let vcost = if sf9_active {
-            self.cost
-                .saturating_add(self.spends as u64 * VIRTUAL_COST_PER_SPEND)
-        } else {
-            self.cost
-        };
+    pub fn fee_per_virtual_cost(&self) -> f64 {
+        let vcost = self
+            .cost
+            .saturating_add(self.spends as u64 * SPEND_PENALTY_COST);
         if vcost == 0 {
             0.0
         } else {
@@ -778,10 +783,8 @@ pub struct Mempool {
     // be spent by SEVERAL resident items (identical dedup spends coexist; multiple FF spends of
     // one singleton chain), and a fast-forward spend indexes under its LATEST singleton coin id.
     by_coin: HashMap<Bytes32, Vec<Bytes32>>,
-    // monotonic insertion counter: FIFO tiebreak at equal fee-per-cost (chia: fee_per_cost DESC, seq ASC).
+    // monotonic insertion counter: FIFO tiebreak at equal priority (chia: priority DESC, seq ASC).
     seq: u64,
-    // SF9 activation height: at/past it, ordering switches to fee per virtual cost.
-    sf9_height: u32,
     // Bundles parked for an unmet ASSERT_HEIGHT — absolute or relative, keyed by the EFFECTIVE
     // assert height — chia PendingTxCache; drained by `new_peak` once `assert_height <= peak`.
     // Only height locks park: chia fails seconds-based locks outright (the pend-vs-fail split
@@ -850,7 +853,6 @@ impl Mempool {
             items: HashMap::new(),
             by_coin: HashMap::new(),
             seq: 0,
-            sf9_height: constants.soft_fork9_height,
             pending: HashMap::new(),
             conflict: HashMap::new(),
             conflict_order: std::collections::VecDeque::new(),
@@ -1355,7 +1357,6 @@ impl Mempool {
     // re-compare against the incoming fee.
     fn add_to_pool(&mut self, item: MempoolItem) -> Result<(), MempoolError> {
         let (peak_height, peak_timestamp) = self.peak.unwrap_or((0, 0));
-        let sf9 = self.peak.is_some_and(|(h, _)| h >= self.sf9_height);
         // chia mempool.py:406-444 — expiring-soon budget: if the incoming item expires within 48
         // blocks / 900 seconds, all such items together may hold at most one block's cost.
         // chia's window query = expiring items ordered (priority DESC, seq ASC) with a running
@@ -1371,7 +1372,7 @@ impl Mempool {
                 .items
                 .values()
                 .filter(|i| expires_soon(&i.timelocks))
-                .map(|i| (i.name, i.fee_per_virtual_cost(sf9), i.seq, i.cost))
+                .map(|i| (i.name, i.fee_per_virtual_cost(), i.seq, i.cost))
                 .collect();
             expiring.sort_by(|a, b| {
                 b.1.partial_cmp(&a.1)
@@ -1386,7 +1387,7 @@ impl Mempool {
                     (name, priority, cumulative)
                 })
                 .collect();
-            let incoming_priority = item.fee_per_virtual_cost(sf9);
+            let incoming_priority = item.fee_per_virtual_cost();
             let mut to_remove: Vec<Bytes32> = Vec::new();
             for (name, priority, cumulative_cost) in rows.into_iter().rev() {
                 // There's room for us below this row: stop pruning.
@@ -1410,7 +1411,7 @@ impl Mempool {
             let mut by_priority: Vec<(Bytes32, f64, u64, u64)> = self
                 .items
                 .values()
-                .map(|i| (i.name, i.fee_per_virtual_cost(sf9), i.seq, i.cost))
+                .map(|i| (i.name, i.fee_per_virtual_cost(), i.seq, i.cost))
                 .collect();
             by_priority.sort_by(|a, b| {
                 b.1.partial_cmp(&a.1)
@@ -1663,15 +1664,31 @@ impl Mempool {
         Some(item)
     }
 
-    /// Fee-ordered view (highest fee-per-cost first, FIFO on ties) — the block-builder feed and the
-    /// admission-order proof.
+    /// Priority-ordered view (highest fee per VIRTUAL cost first, FIFO on ties) — the
+    /// block-builder feed, chia `ORDER BY priority DESC, seq ASC`
+    /// (chia/full_node/mempool.py:605, :722).
     #[must_use]
     pub fn items_by_fee(&self) -> Vec<&MempoolItem> {
-        let sf9 = self.peak.is_some_and(|(h, _)| h >= self.sf9_height);
         let mut v: Vec<&MempoolItem> = self.items.values().collect();
         v.sort_by(|a, b| {
-            b.fee_per_virtual_cost(sf9)
-                .partial_cmp(&a.fee_per_virtual_cost(sf9))
+            b.fee_per_virtual_cost()
+                .partial_cmp(&a.fee_per_virtual_cost())
+                .unwrap_or(Ordering::Equal)
+                .then(a.seq.cmp(&b.seq))
+        });
+        v
+    }
+
+    /// RAW fee-per-cost view — chia `Mempool.items_by_feerate` (chia/full_node/mempool.py:257-260
+    /// `ORDER BY fee_per_cost DESC, seq ASC`), the `request_mempool_transactions` serve order via
+    /// `get_items_not_in_filter` (mempool_manager.py:1066-1082). The one ordering 481ccb305 left
+    /// on the RAW key: assembly and eviction use the virtual-cost priority, serving does not.
+    #[must_use]
+    pub fn items_by_feerate(&self) -> Vec<&MempoolItem> {
+        let mut v: Vec<&MempoolItem> = self.items.values().collect();
+        v.sort_by(|a, b| {
+            b.fee_per_cost()
+                .partial_cmp(&a.fee_per_cost())
                 .unwrap_or(Ordering::Equal)
                 .then(a.seq.cmp(&b.seq))
         });

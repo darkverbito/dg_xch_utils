@@ -1558,3 +1558,50 @@ async fn pool_full_eviction_removes_lowest_virtual_cost_priority() {
         "evicted exactly one 1M-cost item for the 1M-cost incoming"
     );
 }
+
+// chia serves `request_mempool_transactions` in RAW fee-per-cost order: `items_by_feerate`
+// (chia/full_node/mempool.py:257-260 `ORDER BY fee_per_cost DESC, seq ASC`) feeds
+// `get_items_not_in_filter` (mempool_manager.py:1066-1082). 481ccb305 left serving on the RAW
+// key — only assembly and eviction moved to virtual-cost priority. The two orders must diverge
+// on the many-spend bundle.
+#[tokio::test]
+async fn items_by_feerate_orders_by_raw_fee_per_cost() {
+    let store = store().await;
+    let simple_coin = coin(0x50, 1_000);
+    let many_coins: Vec<Coin> = (0x60u8..0x68).map(|t| coin(t, 1_000)).collect();
+    let mut records = vec![record(simple_coin, 100)];
+    records.extend(many_coins.iter().map(|c| record(*c, 100)));
+    store.apply_block(100, 0, &records, &[]).await.unwrap();
+
+    let mut mp = Mempool::new(&MAINNET);
+    mp.set_peak(100, 0);
+    let simple = mp
+        .admit(
+            &store,
+            bundle(0xf1),
+            conds(vec![mk_spend(&simple_coin)], 700, 1_000_000),
+        )
+        .await
+        .expect("simple admitted");
+    let many = mp
+        .admit(
+            &store,
+            bundle(0xf2),
+            conds(many_coins.iter().map(mk_spend).collect(), 800, 1_000_000),
+        )
+        .await
+        .expect("many-spend admitted");
+
+    let by_feerate: Vec<Bytes32> = mp.items_by_feerate().iter().map(|i| i.name).collect();
+    assert_eq!(
+        by_feerate,
+        vec![many, simple],
+        "serve order is RAW fee-per-cost DESC (chia mempool.py:257-260): many-spend first"
+    );
+    let by_priority: Vec<Bytes32> = mp.items_by_fee().iter().map(|i| i.name).collect();
+    assert_eq!(
+        by_priority,
+        vec![simple, many],
+        "assembly order is virtual-cost priority: simple first — the two orders diverge"
+    );
+}

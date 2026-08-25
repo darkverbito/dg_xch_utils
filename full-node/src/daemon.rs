@@ -709,13 +709,15 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
 
     async fn mempool_items(&self, filter: Vec<u8>) -> Vec<NewTransaction> {
         // chia mempool_manager.get_items_not_in_filter (:1066-1082): decode the peer's BIP158
-        // filter and serve up to `limit` (100) highest-fee items NOT in it, scanning at most
-        // `max_checked` (5000). A malformed filter decodes to None and we serve unfiltered —
-        // over-announcing is the safe superset (the peer's own dedup absorbs it).
+        // filter and serve up to `limit` (100) items NOT in it, scanning at most `max_checked`
+        // (5000) in RAW fee-per-cost order — chia iterates `items_by_feerate()`
+        // (mempool.py:257-260 `ORDER BY fee_per_cost DESC, seq ASC`), NOT the virtual-cost
+        // priority order assembly/eviction use. A malformed filter decodes to None and we serve
+        // unfiltered — over-announcing is the safe superset (the peer's own dedup absorbs it).
         let decoded = dg_xch_core::consensus::block_filter::decode_chia_block_filter(&filter);
         let mp = self.mempool.lock().await;
         let mut out = Vec::new();
-        for (checked, item) in mp.items_by_fee().into_iter().enumerate() {
+        for (checked, item) in mp.items_by_feerate().into_iter().enumerate() {
             if out.len() >= 100 || checked >= 5000 {
                 break;
             }
