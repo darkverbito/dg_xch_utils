@@ -379,6 +379,13 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
         u32::try_from(self.trust.max_subscribe_response_items(peer, host)).unwrap_or(u32::MAX)
     }
 
+    // chia 0046a3a4e (CHIA-3995): inbound TIMELORD from localhost or an exempt network only.
+    // Our trusted-CIDR list is the operational analog of chia's `exempt_peer_networks` (both
+    // default empty ⇒ localhost only). Host-based only — node-id trust does not apply here.
+    fn accept_inbound_timelord(&self, host: Option<IpAddr>) -> bool {
+        self.trust.host_trusted(host)
+    }
+
     async fn gossip_peers(&self) -> Vec<TimestampedPeerInfo> {
         self.known_peers.read().await.clone()
     }

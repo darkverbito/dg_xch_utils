@@ -95,6 +95,15 @@ pub trait FullNodeApi: Send + Sync {
     fn max_subscribe_response_items(&self, _peer: &Bytes32, _host: Option<IpAddr>) -> u32 {
         100_000
     }
+    // chia 0046a3a4e (CHIA-3995): an inbound TIMELORD connection is accepted only from
+    // localhost or an exempt peer network (`ChiaServer.should_accept_inbound`; the
+    // `max_inbound_timelord` config limit was removed outright). The store-blind default is
+    // chia's default posture — `exempt_peer_networks` ships empty, so localhost only. The
+    // daemon widens it with the trusted-CIDR list (our operational analog of chia's exempt
+    // networks). An unresolved host cannot be localhost — refuse.
+    fn accept_inbound_timelord(&self, host: Option<IpAddr>) -> bool {
+        matches!(host, Some(h) if h.is_loopback())
+    }
     async fn gossip_peers(&self) -> Vec<TimestampedPeerInfo>;
     async fn on_new_peak(&self, _peer: Bytes32, _peak: NewPeak) {}
     // A NewTransaction announcement; return the action the dispatch layer takes (pull the bundle,
@@ -744,6 +753,39 @@ async fn peer_host(peers: &PeerMap, peer_id: &Bytes32) -> Option<IpAddr> {
     peers.read().await.get(peer_id).and_then(|peer| peer.host)
 }
 
+// The peer's handshake-recorded node type (chia `WSChiaConnection.connection_type`). `Unknown`
+// when the peer is gone from the map or never completed a handshake.
+async fn peer_node_type(peers: &PeerMap, peer_id: &Bytes32) -> NodeType {
+    if let Some(peer) = peers.read().await.get(peer_id) {
+        *peer.node_type.read().await
+    } else {
+        NodeType::Unknown
+    }
+}
+
+/// Enforce chia's sender-type rule for the timelord-class inbound messages
+/// (`protocol_message_type_to_node_type.py`: new_infusion_point_vdf / new_signage_point_vdf /
+/// new_end_of_sub_slot_vdf / respond_compact_proof_of_time are sent only by
+/// `{NodeType.TIMELORD}`). A mismatch is chia `_api_call`'s
+/// `ProtocolError(INVALID_PROTOCOL_MESSAGE)` → close with the short (10 s) protocol ban. The
+/// check runs BEFORE the body is decoded, exactly where chia checks `allowed_senders`.
+/// Returns `true` when the sender is a timelord and dispatch may proceed.
+async fn require_timelord_sender(
+    peers: &PeerMap,
+    peer_id: &Bytes32,
+    msg_type: ProtocolMessageTypes,
+) -> Result<bool, Error> {
+    if peer_node_type(peers, peer_id).await == NodeType::Timelord {
+        return Ok(true);
+    }
+    log::warn!(
+        "API call type mismatch: peer {peer_id} is not a TIMELORD but sent {msg_type:?}; \
+         closing with the short protocol ban (chia allowed_senders check)"
+    );
+    close_peer(peers, peer_id, Some(BanCause::InvalidProtocol)).await?;
+    Ok(false)
+}
+
 async fn send<T: ChiaSerialize>(
     counters: &NetCounters,
     peers: &PeerMap,
@@ -861,6 +903,21 @@ impl FullNodeHandler {
                     negotiated,
                 )
                 .await?;
+                // chia 0046a3a4e (CHIA-3995): an inbound TIMELORD is accepted only from
+                // localhost / an exempt network. The refusal happens right after the handshake
+                // completes and BEFORE any greeting, and closes WITHOUT banning — chia's
+                // `should_accept_inbound` failure path logs "Inbound limit reached" and calls
+                // `connection.close()`, never `ban_peer`.
+                if NodeType::from(hs.node_type) == NodeType::Timelord {
+                    let host = peer_host(peers, peer_id).await;
+                    if !self.api.accept_inbound_timelord(host) {
+                        log::info!(
+                            "Not accepting inbound TIMELORD connection from {host:?}: \
+                             localhost/exempt networks only (chia CHIA-3995)"
+                        );
+                        return close_peer(peers, peer_id, None).await;
+                    }
+                }
                 // chia full_node.py on_connect (:967-1010): greet the new peer by type the moment
                 // its handshake completes. No peak (empty store / blind api) sends nothing —
                 // chia's `peak_full is None` posture.
@@ -1324,6 +1381,10 @@ impl FullNodeHandler {
             ProtocolMessageTypes::RespondCompactProofOfTime => {
                 // The bluebox timelord's answer to our RequestCompactProofOfTime solicitation; queue
                 // it for the same off-read-path validate + swap + re-gossip as RespondCompactVdf.
+                // Timelord-sender-only (chia protocol_message_type_to_node_type).
+                if !require_timelord_sender(peers, peer_id, msg.msg_type).await? {
+                    return Ok(());
+                }
                 self.api
                     .on_respond_compact_proof_of_time(*peer_id, decode(msg, version)?)
                     .await;
@@ -1418,19 +1479,30 @@ impl FullNodeHandler {
             // TIMELORD→NODE infusion-return surface (chia full_node_api new_infusion_point_vdf /
             // new_signage_point_vdf / new_end_of_sub_slot_vdf). Queue-only: each api implementation gates on
             // sync and hands off to the driver — assembly + slot-state validation never run on the read loop.
+            // All three are timelord-sender-only (chia protocol_message_type_to_node_type):
+            // a non-timelord peer feeding VDF inboxes is a sender-type violation, not free CPU.
             ProtocolMessageTypes::NewInfusionPointVdf => {
+                if !require_timelord_sender(peers, peer_id, msg.msg_type).await? {
+                    return Ok(());
+                }
                 self.api
                     .on_new_infusion_point_vdf(*peer_id, decode(msg, version)?)
                     .await;
                 Ok(())
             }
             ProtocolMessageTypes::NewSignagePointVdf => {
+                if !require_timelord_sender(peers, peer_id, msg.msg_type).await? {
+                    return Ok(());
+                }
                 self.api
                     .on_new_signage_point_vdf(*peer_id, decode(msg, version)?)
                     .await;
                 Ok(())
             }
             ProtocolMessageTypes::NewEndOfSubSlotVdf => {
+                if !require_timelord_sender(peers, peer_id, msg.msg_type).await? {
+                    return Ok(());
+                }
                 self.api
                     .on_new_end_of_sub_slot_vdf(*peer_id, decode(msg, version)?)
                     .await;

@@ -157,6 +157,15 @@ impl TrustPolicy {
         self.trusted_cidrs.iter().any(|net| net.contains(&host))
     }
 
+    /// Host-only trust: localhost or a trusted-CIDR member — the shape of chia's
+    /// `is_localhost(host) or is_in_network(host, exempt_peer_networks)` gates (inbound
+    /// timelord acceptance, chia 0046a3a4e). Node-id trust deliberately does NOT apply: those
+    /// gates key on the source address, never on the cert identity.
+    #[must_use]
+    pub fn host_trusted(&self, host: Option<IpAddr>) -> bool {
+        matches!(host, Some(ip) if Self::is_localhost(ip) || self.host_in_trusted_cidrs(ip))
+    }
+
     /// Whether `peer` is trusted — chia `is_trusted_peer` (chia/util/network.py):
     /// `is_localhost(host) || node_id.hex() in trusted_peers || is_trusted_cidr(host, trusted_cidrs)`.
     /// `host` is the peer's remote IP (`SocketPeer.host`); `None` (an outbound dial to an unresolved
