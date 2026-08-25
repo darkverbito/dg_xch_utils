@@ -1471,7 +1471,18 @@ struct NamesReq {
 
 #[derive(Deserialize)]
 struct NameReq {
-    name: Bytes32,
+    name: String,
+}
+
+// A coin id must be exactly 32 bytes; chia's bytes32 constructor rejects anything else with this
+// message, which wallets match to surface a "bad coin id".
+fn coin_id_from_hex(s: &str) -> Result<Bytes32, RpcError> {
+    use std::str::FromStr;
+    let hex = s.strip_prefix("0x").unwrap_or(s);
+    if hex.len() != 64 {
+        return Err(RpcError::BadRequest("bad bytes32 initializer".to_string()));
+    }
+    Bytes32::from_str(s).map_err(|_| RpcError::BadRequest("bad bytes32 initializer".to_string()))
 }
 
 #[cfg(feature = "coin-index")]
@@ -1797,9 +1808,10 @@ where
             }
             "/get_coin_record_by_name" => {
                 let req: NameReq = parse(body)?;
+                let name = coin_id_from_hex(&req.name)?;
                 envelope(
                     "coin_record",
-                    &self.rpc.get_coin_record_by_name(&req.name).await?,
+                    &self.rpc.get_coin_record_by_name(&name).await?,
                 )?
             }
             #[cfg(feature = "coin-index")]
