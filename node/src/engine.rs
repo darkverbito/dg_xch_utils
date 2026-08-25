@@ -993,6 +993,30 @@ where
                 ));
             }
         }
+        // chia block_header_validation.py check 26a (2.7.1): a transaction block's timestamp must not
+        // be more than MAX_FUTURE_TIME2 seconds beyond wall-clock now
+        // (`ftb.timestamp > int(time.time() + constants.MAX_FUTURE_TIME2)`). This is a
+        // NON-DETERMINISTIC wall-clock gate, deliberately excluded from the deterministic header
+        // validator (`core/src/consensus/block_header_validation.rs` notes it "is wall-clock and
+        // non-deterministic, so it is not part of recent-chain header validation") and enforced HERE
+        // at ingest instead. Historical sync blocks carry past timestamps, so the accept path (corpus
+        // replay, real gossip) is unaffected; only a block claiming a far-future timestamp is refused.
+        // chia 2.7.1 uses MAX_FUTURE_TIME2 unconditionally at 26a (the pre-soft-fork2 MAX_FUTURE_TIME
+        // is dead on mainnet, where soft_fork2_height == 0). Placed before body/record work so it wins
+        // over the timestamp-dependent foliage-hash checks a forged timestamp would also trip.
+        if let Some(ftb) = block.foliage_transaction_block.as_ref() {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs());
+            if ftb.timestamp > now.saturating_add(self.constants.max_future_time2) {
+                return Err(NodeError::Invalid(format!(
+                    "TIMESTAMP_TOO_FAR_IN_FUTURE at height {}: {} > now {now} + {}",
+                    block.height(),
+                    ftb.timestamp,
+                    self.constants.max_future_time2
+                )));
+            }
+        }
         // Body validation: the pure half (generator/sig/roots-of-generator identity) in
         // `validate_body`, then the coin-store-backed half (chia block_body_validation rules
         // 3, 5, 10-21) — both BEFORE record derivation, mirroring the engine's established

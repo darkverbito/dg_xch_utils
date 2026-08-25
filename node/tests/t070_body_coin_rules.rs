@@ -46,6 +46,7 @@ use dg_xch_node::engine::BlockDelta;
 use dg_xch_node::{AddBlockOutcome, Engine, NativePrimitives, NodeError};
 use dg_xch_stores::{BlockStore, CoinStore, SqliteStore};
 use std::collections::HashMap;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 fn consensus_err(err: NodeError) -> ChiaError {
     match err {
@@ -215,6 +216,65 @@ async fn honest_mainnet_block_passes_full_coin_validation() {
         .expect("removed coin present");
     assert!(rec.spent, "removal marked spent");
     assert_eq!(rec.spent_block_index, H);
+}
+
+// F1 (DIVERGENCE / correctness hole this campaign closed): chia block_header_validation.py check
+// 26a rejects a transaction block whose timestamp is more than MAX_FUTURE_TIME2 (120 s) beyond
+// wall-clock now (Err.TIMESTAMP_TOO_FAR_IN_FUTURE). Before this fix the engine read
+// `max_future_time2` NOWHERE — a block claiming an arbitrary far-future timestamp was accepted. The
+// same seeded engine that accepts the honest block4 above must now REJECT it once its timestamp is
+// pushed far into the future. The guard sits before the body/record work, so it wins over the
+// foliage-hash checks the mutated timestamp would otherwise trip — the rejection is specifically the
+// future-timestamp code.
+#[tokio::test]
+async fn future_dated_transaction_block_is_rejected() {
+    let store = seeded_store(None, None).await;
+    let mut engine = engine_at_5000003(store).await.with_enforced_coin_rules();
+    let mut block4 = common::load_full_block(H);
+    let far_future = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+        + 100_000;
+    block4
+        .foliage_transaction_block
+        .as_mut()
+        .expect("block 5,000,004 is a transaction block")
+        .timestamp = far_future;
+    let err = engine
+        .add_block(&block4)
+        .await
+        .expect_err("a far-future-dated block must be rejected");
+    assert!(
+        err.to_string().contains("TIMESTAMP_TOO_FAR_IN_FUTURE"),
+        "expected TIMESTAMP_TOO_FAR_IN_FUTURE, got {err:?}"
+    );
+}
+
+// Guard boundary / false-positive control: a timestamp only 60 s ahead is INSIDE the 120 s window,
+// so the future-timestamp guard must NOT fire. The block's outcome is otherwise unchanged from the
+// pre-fix behavior (this node does not separately bind the ftb timestamp on this path — a secondary
+// gap the future guard does not itself close), so we assert only that WHATEVER the outcome, it is not
+// a future-timestamp rejection — proving the guard does not over-reject within the allowed skew.
+#[tokio::test]
+async fn timestamp_within_future_window_is_not_rejected_as_future() {
+    let store = seeded_store(None, None).await;
+    let mut engine = engine_at_5000003(store).await.with_enforced_coin_rules();
+    let mut block4 = common::load_full_block(H);
+    let near = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+        + 60;
+    block4
+        .foliage_transaction_block
+        .as_mut()
+        .expect("tx block")
+        .timestamp = near;
+    if let Err(err) = engine.add_block(&block4).await {
+        assert!(
+            !err.to_string().contains("TIMESTAMP_TOO_FAR_IN_FUTURE"),
+            "a timestamp inside the 120s window must not be rejected as future, got {err:?}"
+        );
+    }
 }
 
 /// The first removal created strictly below the confirmed base — a coin whose row is entirely
