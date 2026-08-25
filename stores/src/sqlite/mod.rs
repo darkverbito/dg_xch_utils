@@ -38,6 +38,19 @@ impl Drop for SqliteStore {
     }
 }
 
+/// Size trigger for the off-writer WAL drain (see `spawn_checkpointer`): when the `-wal` file
+/// crosses this many bytes the checkpointer drains NOW, regardless of the bulk-phase cadence,
+/// escalating from PASSIVE to TRUNCATE until the file is back under the trigger. 128 MiB sits
+/// far above a healthy confirm's WAL (the largest single confirm window measured ~240 MiB is
+/// checkpointed across passes; steady per-block WAL is a few MB) yet ~8x below the ~1 GiB
+/// in-writer `wal_autocheckpoint` failsafe — so the failsafe, whose blocking copy-into-DB
+/// stalls confirm COMMITs for minutes on slow storage, can never be reached while the
+/// checkpointer task is alive. Measured on the live SQLite leg BEFORE this trigger existed:
+/// wal_bytes 1.44 GB with zero completed checkpointer passes, the failsafe firing inside
+/// confirm COMMITs (70-80% of commit time in <9% of commits, 5-120 s stalls), peak frozen,
+/// liveness exit 137 x13.
+const WAL_DRAIN_TRIGGER_BYTES: u64 = 128 * 1024 * 1024;
+
 impl SqliteStore {
     /// Open (creating if missing) a WAL-mode store at `path` and apply the migrations for the enabled
     /// feature tier.
@@ -45,6 +58,20 @@ impl SqliteStore {
     /// # Errors
     /// Returns [`StoreError::Backend`] if the database cannot be opened or migrated.
     pub async fn open(path: &Path) -> Result<Self, StoreError> {
+        Self::open_with_wal_drain_trigger(path, WAL_DRAIN_TRIGGER_BYTES).await
+    }
+
+    /// [`Self::open`] with an explicit WAL drain trigger (bytes) — the size at which the
+    /// background checkpointer drains immediately instead of waiting for the bulk cadence.
+    /// Production uses [`WAL_DRAIN_TRIGGER_BYTES`]; tests shrink it to exercise the drain
+    /// without writing 128 MiB.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::Backend`] if the database cannot be opened or migrated.
+    pub async fn open_with_wal_drain_trigger(
+        path: &Path,
+        wal_drain_trigger_bytes: u64,
+    ) -> Result<Self, StoreError> {
         let opts = SqliteConnectOptions::new()
             .filename(path)
             .create_if_missing(true)
@@ -69,28 +96,39 @@ impl SqliteStore {
             .pragma("wal_autocheckpoint", "262144");
         let mut writer = opts.clone().connect().await?;
         migrate(&mut writer).await?;
+        // Read-pool connections are RECYCLED (idle_timeout + max_lifetime): a pooled WAL reader
+        // that sits on an old read mark pins the checkpoint reset point — PASSIVE can copy
+        // frames into the DB but never reset the write pointer, so the `-wal` file grows
+        // without bound (measured live: 1.44 GB, past the in-writer failsafe, with the
+        // read-pool-idle gauge as the witness). Bounding every reader's lifetime bounds any pin
+        // to at most idle_timeout, letting the reset (and the size-triggered TRUNCATE) succeed.
         let read = SqlitePoolOptions::new()
             .max_connections(4)
+            .idle_timeout(Duration::from_secs(60))
+            .max_lifetime(Duration::from_secs(600))
             .connect_with(opts.clone().read_only(true))
             .await?;
         let near_tip = Arc::new(AtomicBool::new(false));
         let telemetry = StoreTelemetry::new();
+        // SQLite's WAL file always lives at `<db>-wal` (same directory, suffix appended).
+        let mut wal_os = path.as_os_str().to_os_string();
+        wal_os.push("-wal");
+        let wal_path = PathBuf::from(wal_os);
         let checkpointer = spawn_checkpointer(
             opts.connect().await?,
             near_tip.clone(),
             telemetry.clone(),
             read.clone(),
+            wal_path.clone(),
+            wal_drain_trigger_bytes,
         );
-        // SQLite's WAL file always lives at `<db>-wal` (same directory, suffix appended).
-        let mut wal_os = path.as_os_str().to_os_string();
-        wal_os.push("-wal");
         Ok(Self {
             read,
             writer: Arc::new(Mutex::new(writer)),
             near_tip,
             checkpointer,
             telemetry,
-            wal_path: PathBuf::from(wal_os),
+            wal_path,
         })
     }
 
@@ -117,11 +155,19 @@ impl SqliteStore {
 /// PASSIVE does not shrink the WAL *file*: it stays at the high-water of the largest single
 /// transaction (one batch-confirm window today; a few MB once confirms commit per block). That is a
 /// bounded, reused file — harmless for reads now that the coin multi-get point-gets rather than scans.
+/// PASSIVE also cannot RESET a WAL some reader still holds a read mark into — which is exactly how
+/// the file grows without bound when a pooled reader wedges (the live 1.44 GB WAL): the
+/// size-triggered escalation below therefore finishes with TRUNCATE, which (on its own dedicated
+/// connection, bounded by `busy_timeout`, retried next tick on SQLITE_BUSY) waits the readers out,
+/// resets the log, and shrinks the file to zero — never on the writer's connection, so a busy
+/// writer degrades the escalation to "try again next second", not to a confirm stall.
 fn spawn_checkpointer(
     mut conn: SqliteConnection,
     near_tip: Arc<AtomicBool>,
     telemetry: Arc<StoreTelemetry>,
     read: SqlitePool,
+    wal_path: PathBuf,
+    wal_drain_trigger_bytes: u64,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(1));
@@ -151,61 +197,87 @@ fn spawn_checkpointer(
             telemetry
                 .read_pool_size
                 .store(u64::from(read.size()), Ordering::Relaxed);
+            // The SIZE trigger, checked every tick in every phase (one file-metadata stat): a WAL
+            // past the trigger is drained NOW. The cadence alone proved insufficient live — a
+            // wedged reader let the file grow monotonically to the in-writer failsafe with the
+            // checkpointer completing zero effective passes.
+            let over_trigger =
+                std::fs::metadata(&wal_path).map_or(0, |m| m.len()) > wal_drain_trigger_bytes;
             // Best-effort: a busy/failed checkpoint is retried on the next tick.
             // Phase-aware cadence: near the tip drain every tick; during bulk drain on the slow cadence
-            // above — enough to bound the WAL below the failsafe while leaving the write budget to catch-up.
+            // above — enough to bound the WAL below the failsafe while leaving the write budget to
+            // catch-up — unless the size trigger fired.
             if !near_tip.load(Ordering::Relaxed) {
                 bulk_tick = bulk_tick.wrapping_add(1);
-                if !bulk_tick.is_multiple_of(BULK_CHECKPOINT_TICKS) {
+                if !over_trigger && !bulk_tick.is_multiple_of(BULK_CHECKPOINT_TICKS) {
                     continue;
                 }
             } else {
                 bulk_tick = 0;
             }
-            // Telemetry hook: the SAME pragma as before, but its result row — (busy, log,
-            // checkpointed) per SQLite's wal_checkpoint docs — is captured instead of discarded, and
-            // the call is timed. This is the "is the checkpointer keeping up" instrument: duration
-            // histogram, frames drained, WAL length in frames, busy passes, outright errors.
-            let started = std::time::Instant::now();
-            let result = sqlx::query("PRAGMA wal_checkpoint(PASSIVE)")
-                .fetch_one(&mut conn)
-                .await;
-            match result {
-                Ok(row) => {
-                    telemetry.checkpoint.record(started.elapsed().as_secs_f64());
-                    let busy: i64 = row.try_get(0).unwrap_or(0);
-                    let log: i64 = row.try_get(1).unwrap_or(-1);
-                    let checkpointed: i64 = row.try_get(2).unwrap_or(-1);
-                    if busy != 0 {
-                        telemetry
-                            .checkpoint_busy_total
-                            .fetch_add(1, Ordering::Relaxed);
-                    }
-                    if log >= 0 {
-                        #[allow(clippy::cast_sign_loss)]
-                        telemetry.wal_frames.store(log as u64, Ordering::Relaxed);
-                    }
-                    if checkpointed >= 0 {
-                        let advance = if checkpointed >= prev_checkpointed {
-                            checkpointed - prev_checkpointed
-                        } else {
-                            checkpointed // WAL reset: the new position IS this pass's work
-                        };
-                        prev_checkpointed = checkpointed;
-                        #[allow(clippy::cast_sign_loss)]
-                        telemetry
-                            .wal_frames_checkpointed_total
-                            .fetch_add(advance as u64, Ordering::Relaxed);
-                    }
-                }
-                Err(_) => {
-                    telemetry
-                        .checkpoint_errors_total
-                        .fetch_add(1, Ordering::Relaxed);
-                }
+            checkpoint_pass(&mut conn, &telemetry, &mut prev_checkpointed, "PASSIVE").await;
+            // Escalation: PASSIVE copies frames but neither resets a reader-pinned log nor ever
+            // shrinks the file. If the file is STILL past the trigger after the PASSIVE copy,
+            // TRUNCATE it — waits out the (recycled, so bounded) readers, resets the log, and
+            // truncates the file to zero. Bounded by the connection's busy_timeout; SQLITE_BUSY
+            // lands in checkpoint_busy/errors telemetry and the next tick retries.
+            if over_trigger
+                && std::fs::metadata(&wal_path).map_or(0, |m| m.len()) > wal_drain_trigger_bytes
+            {
+                checkpoint_pass(&mut conn, &telemetry, &mut prev_checkpointed, "TRUNCATE").await;
             }
         }
     })
+}
+
+/// One timed `PRAGMA wal_checkpoint(mode)` on the dedicated checkpointer connection, its result
+/// row — (busy, log, checkpointed) per SQLite's wal_checkpoint docs — captured into the
+/// telemetry: duration histogram, frames drained, WAL length in frames, busy passes, outright
+/// errors. This is the "is the checkpointer keeping up" instrument.
+async fn checkpoint_pass(
+    conn: &mut SqliteConnection,
+    telemetry: &StoreTelemetry,
+    prev_checkpointed: &mut i64,
+    mode: &str,
+) {
+    let started = std::time::Instant::now();
+    let result = sqlx::query(&format!("PRAGMA wal_checkpoint({mode})"))
+        .fetch_one(&mut *conn)
+        .await;
+    match result {
+        Ok(row) => {
+            telemetry.checkpoint.record(started.elapsed().as_secs_f64());
+            let busy: i64 = row.try_get(0).unwrap_or(0);
+            let log: i64 = row.try_get(1).unwrap_or(-1);
+            let checkpointed: i64 = row.try_get(2).unwrap_or(-1);
+            if busy != 0 {
+                telemetry
+                    .checkpoint_busy_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            if log >= 0 {
+                #[allow(clippy::cast_sign_loss)]
+                telemetry.wal_frames.store(log as u64, Ordering::Relaxed);
+            }
+            if checkpointed >= 0 {
+                let advance = if checkpointed >= *prev_checkpointed {
+                    checkpointed - *prev_checkpointed
+                } else {
+                    checkpointed // WAL reset: the new position IS this pass's work
+                };
+                *prev_checkpointed = checkpointed;
+                #[allow(clippy::cast_sign_loss)]
+                telemetry
+                    .wal_frames_checkpointed_total
+                    .fetch_add(advance as u64, Ordering::Relaxed);
+            }
+        }
+        Err(_) => {
+            telemetry
+                .checkpoint_errors_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
 }
 
 async fn migrate(conn: &mut SqliteConnection) -> Result<(), StoreError> {

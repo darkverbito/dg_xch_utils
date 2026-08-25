@@ -97,3 +97,67 @@ async fn checkpointer_is_quiet_during_catch_up() {
         "catch-up band must not checkpoint"
     );
 }
+
+// The pr-verify killer, inverted into a test: during bulk sync the WAL must be drained by SIZE,
+// not only by the slow 20-tick cadence. Live, the checkpointer completed zero passes while the
+// WAL grew to 1.44 GB — past the ~1 GB in-writer wal_autocheckpoint failsafe, whose blocking
+// copy-into-DB then fired INSIDE confirm COMMITs (70-80% of all commit time concentrated in <9%
+// of commits, 5-120 s stalls -> frozen peak -> liveness exit 137). With a size-triggered drain
+// the crossing itself forces an off-writer checkpoint pass within a tick or two, escalating from
+// PASSIVE (copy) to TRUNCATE (reset + shrink) so the file provably comes back under the
+// threshold — long before the 20 s cadence, and orders of magnitude before the failsafe.
+#[tokio::test]
+async fn bulk_wal_past_the_drain_trigger_is_checkpointed_by_size_not_cadence() {
+    use dg_xch_stores::CoinStore;
+
+    const TRIGGER: u64 = 64 * 1024; // tiny in-test stand-in for the 128 MiB production trigger
+    let path = common::unique_db_path();
+    let store = dg_xch_stores::SqliteStore::open_with_wal_drain_trigger(&path, TRIGGER)
+        .await
+        .expect("open store");
+    let t = store.telemetry().expect("sqlite records telemetry");
+    assert!(!store.near_tip(), "bulk phase is the default");
+
+    // Grow the WAL past the trigger with real coin applies (each lands in `-wal` first).
+    let (adds, _) = common::load_adds_rems(5_000_000);
+    let mut height = 10u32;
+    while store.wal_bytes() <= TRIGGER {
+        store
+            .apply_block(height, 0, &adds, &[])
+            .await
+            .expect("apply");
+        // Re-key the batch per height so every pass writes fresh rows, not no-op upserts.
+        height += 1;
+        assert!(height < 200, "the WAL must grow past the trigger");
+    }
+    let peak_wal = store.wal_bytes();
+    assert!(peak_wal > TRIGGER);
+
+    // Within a few 1 s ticks — far below the 20-tick bulk cadence — the size trigger must have
+    // drained AND reset the WAL file back under the threshold, off the writer.
+    let mut drained = false;
+    for _ in 0..60 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if store.wal_bytes() < TRIGGER {
+            drained = true;
+            break;
+        }
+    }
+    assert!(
+        drained,
+        "size-triggered drain must bring the WAL under the trigger within ~6 s \
+         (still {} bytes, was {peak_wal})",
+        store.wal_bytes()
+    );
+    assert!(
+        t.checkpoint.count.load(Ordering::Relaxed) >= 1,
+        "the drain must be a completed off-writer checkpoint pass"
+    );
+    assert_eq!(t.checkpoint_errors_total.load(Ordering::Relaxed), 0);
+
+    // The writer stays free: a follow-up commit succeeds immediately on the drained store.
+    store
+        .apply_block(height, 0, &adds[..8], &[])
+        .await
+        .expect("post-drain apply");
+}
