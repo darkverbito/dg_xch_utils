@@ -162,3 +162,38 @@ subgroup-checked. (Crypto *validity* correctness = knuth's call, not audited her
   decodes `ff`×N + `80` and drops it, observing SIGABRT/stack overflow.
 - **SCA coverage gap:** no committed `Cargo.lock` → no reproducible dependency-CVE gate. Add a
   locked `cargo audit`/`trivy` step in CI (SSDF PW.7 / A03:2025).
+
+---
+
+## F1 remediation — SHIPPED in this PR (config option, CNI-compatible)
+
+Grant reviewed F1 and directed a CNI-parity fix exposed as a config option. Implemented and verified
+on this branch:
+
+- **New `--rpc-tls <cni|local>` flag** (`full-node/src/main.rs`, `full-node/src/config.rs`
+  `RpcTlsMode`), default **`cni`**:
+  - **`cni`** — CNI-compatible mutual TLS. The RPC client-cert verifier is rooted at a **per-install
+    private CA** (chia `private_ssl_ca`, `chia/rpc/rpc_server.py:179-182`), taken from
+    `PRIVATE_CA_CRT`/`PRIVATE_CA_KEY` if set, else loaded from — or generated once and persisted into
+    — `<--ssl-dir>/ca/private_ca.{crt,key}` (key chmod 600). The served cert is signed by it. The
+    world-public Chia CA is **rejected outright** as a client-auth anchor (explicit guard in
+    `build_cni_rpc_tls`), so F1 cannot recur even if someone points `PRIVATE_CA_CRT` at it.
+  - **`local`** — for operators running privately who "don't want these certs in the mix": server-only
+    TLS with an ephemeral in-memory cert and **no client-cert requirement**, permitted on a
+    **loopback `--rpc` bind only** — `build_local_rpc_tls` returns an error (fail closed) on a routable
+    address, so an unauthenticated RPC can never be network-exposed.
+- **Removed** the public-CA fallback and the `DG_XCH_RPC_ALLOW_ANY_CLIENT_CERT` accept-anything env
+  toggle (H2) — both folded into the two explicit, safe modes.
+- The world-public `CHIA_CA_*` remains the correct anchor for the **P2P** listener (8444) only.
+
+**Verification** [DERIVED] (builder-0, `cargo test -p full-node`): `rpc_http` 17/17 green, including
+`tls_public_chia_ca_client_is_an_auth_bypass` (the F1 attacker cert is now REFUSED — the ex-red test,
+now a regression guard), `tls_private_ca_client_is_accepted` + `tls_e2e_chia_client_four_endpoints`
+(private-CA mTLS round-trips every endpoint incl. `push_tx`), `tls_local_mode_allows_no_client_cert_on_loopback`,
+and `tls_local_mode_refuses_non_loopback_bind` (fail-closed). `integration` 1/1 green (full daemon
+boot + RPC over Local-mode TLS). `cargo clippy -p full-node` clean.
+
+**Operator migration note:** nodes now start in `cni` mode by default and will auto-generate a private
+CA under `<--ssl-dir>/ca` on first run; RPC tooling must present a cert signed by that private CA
+(distribute `private_ca.crt`, sign client certs with the key) — the old public-CA client certs are
+rejected (by design). A purely local node can instead run `--rpc 127.0.0.1:8555 --rpc-tls local`.

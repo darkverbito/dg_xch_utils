@@ -31,12 +31,54 @@ impl Backend {
     }
 }
 
+/// How the local RPC listener (`--rpc`) authenticates clients.
+///
+/// - `Cni`: CNI-compatible mutual TLS against a per-install PRIVATE certificate authority — chia's
+///   `private_ssl_ca` posture (chia/rpc/rpc_server.py:179-182). The client MUST present a cert that
+///   chains to the private CA (`CERT_REQUIRED`); the served cert is signed by it. The private CA is
+///   taken from `PRIVATE_CA_CRT`/`PRIVATE_CA_KEY` (inline PEM) when both are set, else loaded from —
+///   or generated once and persisted into — `<ssl_dir>/ca/private_ca.{crt,key}`. The world-public
+///   Chia CA is NEVER a client-auth anchor here (it gates only the public P2P listener, whose key
+///   ships in-repo and authenticates nothing).
+/// - `Local`: for an operator running privately who does not want the cert machinery — server-only
+///   TLS with an ephemeral self-signed cert and NO client-certificate requirement. Permitted only on
+///   a LOOPBACK `--rpc` bind; the daemon refuses to start an unauthenticated RPC on a routable
+///   address (fail closed), so this mode can never become a network-reachable open door.
+#[derive(Clone, Debug)]
+pub enum RpcTlsMode {
+    Cni { ssl_dir: PathBuf },
+    Local,
+}
+
+impl RpcTlsMode {
+    /// Parse `--rpc-tls`: `cni` (default) or `local`. `ssl_dir` is only consulted by `cni`.
+    ///
+    /// # Errors
+    /// Returns an error string for an unrecognized mode.
+    pub fn parse(mode: &str, ssl_dir: &str) -> Result<Self, String> {
+        match mode.trim().to_ascii_lowercase().as_str() {
+            "" | "cni" | "private" | "private-ca" => {
+                Ok(RpcTlsMode::Cni { ssl_dir: PathBuf::from(ssl_dir) })
+            }
+            "local" | "none" | "loopback" => Ok(RpcTlsMode::Local),
+            other => Err(format!("bad --rpc-tls {other:?} (expected `cni` or `local`)")),
+        }
+    }
+}
+
+impl Default for RpcTlsMode {
+    fn default() -> Self {
+        RpcTlsMode::Cni { ssl_dir: PathBuf::from("ssl") }
+    }
+}
+
 // The daemon's runtime configuration, honoring the documented CLI flags: --listen (P2P peer server), --rpc
 // (local RPC), --introducer (seed bootstrap), --advertise (WAN address for gossip behind NAT), --db (backend).
 #[derive(Clone, Debug)]
 pub struct Config {
     pub listen: SocketAddr,
     pub rpc: SocketAddr,
+    pub rpc_tls: RpcTlsMode,
     pub introducer: Option<(String, u16)>,
     // Manual peers dialed directly at startup (host:port each), in addition to any introducer-seeded
     // addresses. Persistent: a dropped manual peer is reclaimed to the address book and re-dialed. A node
@@ -148,6 +190,7 @@ impl Config {
             prefetch_max_inflight,
             trusted_peers: trusted_peers.to_vec(),
             trusted_cidrs: trusted_cidrs.to_vec(),
+            rpc_tls: RpcTlsMode::default(),
         })
     }
 }

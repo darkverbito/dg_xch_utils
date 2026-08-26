@@ -39,6 +39,7 @@ fn config(listen: SocketAddr, rpc: SocketAddr) -> Config {
         prefetch_max_inflight: None,
         trusted_peers: Vec::new(),
         trusted_cidrs: Vec::new(),
+        rpc_tls: full_node::RpcTlsMode::Local,
     }
 }
 

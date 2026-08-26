@@ -3205,7 +3205,7 @@ where
     /// # Errors
     /// Returns an I/O error if the TLS config or socket cannot be initialized.
     pub fn spawn_rpc_server(&self) -> Result<Arc<AtomicBool>, Error> {
-        let tls = crate::rpc::build_rpc_tls_context()?;
+        let tls = crate::rpc::build_rpc_tls_context(&self.config.rpc_tls, self.config.rpc)?;
         self.rpc.attach_live(crate::rpc::NodeRpcLive {
             node_id: tls.node_id,
             network_id: self.config.network_id.clone(),
@@ -7763,6 +7763,7 @@ mod tests {
             prefetch_max_inflight: None,
             trusted_peers: Vec::new(),
             trusted_cidrs: Vec::new(),
+            rpc_tls: crate::config::RpcTlsMode::Local,
         })
         .await
         .expect("boot");
@@ -8421,6 +8422,7 @@ mod tests {
             prefetch_max_inflight: None,
             trusted_peers: Vec::new(),
             trusted_cidrs: Vec::new(),
+            rpc_tls: crate::config::RpcTlsMode::Local,
         };
         let node = Node::boot(config).await.expect("boot");
 
@@ -9071,6 +9073,7 @@ mod tests {
                 prefetch_max_inflight: None,
                 trusted_peers: Vec::new(),
                 trusted_cidrs: Vec::new(),
+                rpc_tls: crate::config::RpcTlsMode::Local,
             })
             .await
             .expect("boot node"),
@@ -9519,6 +9522,7 @@ mod tests {
                     prefetch_max_inflight: None,
                     trusted_peers: Vec::new(),
                     trusted_cidrs: Vec::new(),
+                    rpc_tls: crate::config::RpcTlsMode::Local,
                 },
                 store,
             )
@@ -9660,6 +9664,7 @@ mod tests {
                     prefetch_max_inflight: None,
                     trusted_peers: Vec::new(),
                     trusted_cidrs: Vec::new(),
+                    rpc_tls: crate::config::RpcTlsMode::Local,
                 },
                 store.clone(),
             )
@@ -11980,6 +11985,7 @@ mod ub_relay_gate_tests {
                     prefetch_max_inflight: None,
                     trusted_peers: Vec::new(),
                     trusted_cidrs: Vec::new(),
+                    rpc_tls: crate::config::RpcTlsMode::Local,
                 },
                 store,
             )

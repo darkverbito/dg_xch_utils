@@ -23,6 +23,15 @@ struct Cli {
     /// Local RPC listen address.
     #[arg(long, default_value = "0.0.0.0:8555")]
     rpc: String,
+    /// RPC client-auth posture: `cni` (default) = CNI-compatible mutual TLS against a per-install
+    /// private CA (auto-generated under --ssl-dir if absent); `local` = no client certs, loopback
+    /// bind only. The world-public Chia CA is never trusted for RPC client-auth in either mode.
+    #[arg(long = "rpc-tls", default_value = "cni")]
+    rpc_tls: String,
+    /// Directory holding the RPC private CA for `--rpc-tls cni` (`<ssl-dir>/ca/private_ca.{crt,key}`,
+    /// generated once and persisted). Distribute the crt to RPC tooling; keep the key node-private.
+    #[arg(long = "ssl-dir", default_value = "ssl")]
+    ssl_dir: String,
     /// Seed introducer host:port for peer bootstrap.
     #[arg(long)]
     introducer: Option<String>,
@@ -97,7 +106,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let cli = Cli::parse();
-    let config = Config::build(
+    let mut config = Config::build(
         &cli.listen,
         &cli.rpc,
         cli.introducer.as_deref(),
@@ -116,6 +125,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &cli.trusted_cidr,
     )
     .map_err(std::io::Error::other)?;
+
+    // Finding F1 remediation: the RPC client-auth trust anchor is chosen here (default CNI
+    // private-CA mTLS), never the world-public Chia CA.
+    config.rpc_tls = full_node::RpcTlsMode::parse(&cli.rpc_tls, &cli.ssl_dir)
+        .map_err(std::io::Error::other)?;
 
     match config.backend.clone() {
         full_node::config::Backend::Sqlite(_) => {

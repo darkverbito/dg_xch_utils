@@ -10,7 +10,7 @@ mod tx_admission;
 pub mod tx_queue;
 pub mod wallet;
 
-pub use config::{Backend, Config};
+pub use config::{Backend, Config, RpcTlsMode};
 pub use daemon::{Node, OutboundPeers, open_backend, outbound_on_connect};
 pub use rpc::{
     BlockchainStateSummary, CoinQueryWindow, NodeRpc, NodeRpcHandler, NodeRpcLive, RpcError,

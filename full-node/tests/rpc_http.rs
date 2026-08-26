@@ -294,9 +294,37 @@ fn free_port() -> u16 {
         .port()
 }
 
+// Per-process test SSL dir holding the RPC PRIVATE CA (chia `private_ssl_ca`). Generated ONCE
+// (race-free across the parallel test threads) so every Cni-mode server shares one private CA and
+// `write_client_certs` can sign client certs against it — the CNI-compatible posture the fix ships.
+fn test_ssl_dir() -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("rpc_http_ssl_{}", std::process::id()))
+}
+
+fn ensure_test_private_ca() -> std::path::PathBuf {
+    use std::sync::OnceLock;
+    static ONCE: OnceLock<std::path::PathBuf> = OnceLock::new();
+    ONCE.get_or_init(|| {
+        let dir = test_ssl_dir();
+        let ca_dir = dir.join("ca");
+        std::fs::create_dir_all(&ca_dir).expect("mk ssl dir");
+        let crt = ca_dir.join("private_ca.crt");
+        let key = ca_dir.join("private_ca.key");
+        if !(crt.exists() && key.exists()) {
+            dg_xch_core::ssl::make_ca_cert(&crt, &key).expect("generate private CA");
+        }
+        dir
+    })
+    .clone()
+}
+
 fn write_client_certs(tag: &str) -> ClientSSLConfig {
-    let (crt, key) = generate_ca_signed_cert_data(CHIA_CA_CRT.as_bytes(), CHIA_CA_KEY.as_bytes())
-        .expect("client cert");
+    // Sign the client cert with the node's per-install PRIVATE CA (NOT the world-public Chia CA) —
+    // exactly what legitimate RPC tooling does once the operator distributes private_ca.crt.
+    let ca_dir = ensure_test_private_ca().join("ca");
+    let ca_crt = std::fs::read(ca_dir.join("private_ca.crt")).expect("private CA crt");
+    let ca_key = std::fs::read(ca_dir.join("private_ca.key")).expect("private CA key");
+    let (crt, key) = generate_ca_signed_cert_data(&ca_crt, &ca_key).expect("client cert");
     let dir = std::env::temp_dir();
     let crt_path = dir.join(format!("rpc_http_{}_{tag}.crt", std::process::id()));
     let key_path = dir.join(format!("rpc_http_{}_{tag}.key", std::process::id()));
@@ -315,10 +343,25 @@ async fn spawn_tls_server() -> (
     Arc<Mutex<Mempool>>,
     Arc<NodeRpc<SqliteStore>>,
 ) {
+    spawn_tls_server_mode(full_node::RpcTlsMode::Cni {
+        ssl_dir: ensure_test_private_ca(),
+    })
+    .await
+}
+
+async fn spawn_tls_server_mode(
+    mode: full_node::RpcTlsMode,
+) -> (
+    u16,
+    Arc<AtomicBool>,
+    Arc<Mutex<Mempool>>,
+    Arc<NodeRpc<SqliteStore>>,
+) {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let (rpc, mempool) = seeded_rpc().await;
-    let tls = build_rpc_tls_context().expect("tls context");
     let port = free_port();
+    let bind: SocketAddr = format!("127.0.0.1:{port}").parse().expect("bind addr");
+    let tls = build_rpc_tls_context(&mode, bind).expect("tls context");
     let handler = Arc::new(NodeRpcHandler::new(rpc.clone()));
     let server = RpcServer::new_with_server_config(
         &RpcServerConfig {
@@ -441,8 +484,10 @@ async fn tls_wrong_ca_client_cert_is_refused() {
 async fn tls_raw_client_with_valid_cert_succeeds() {
     use dg_xch_core::ssl::{load_certs_from_bytes, load_private_key_from_bytes};
     let (port, run, _mp, _rpc) = spawn_tls_server().await;
-    let (crt, key_bytes) =
-        generate_ca_signed_cert_data(CHIA_CA_CRT.as_bytes(), CHIA_CA_KEY.as_bytes()).expect("cert");
+    let ca_dir = ensure_test_private_ca().join("ca");
+    let ca_crt = std::fs::read(ca_dir.join("private_ca.crt")).expect("private CA crt");
+    let ca_key = std::fs::read(ca_dir.join("private_ca.key")).expect("private CA key");
+    let (crt, key_bytes) = generate_ca_signed_cert_data(&ca_crt, &ca_key).expect("cert");
     let certs = load_certs_from_bytes(&crt).expect("certs");
     let key = load_private_key_from_bytes(&key_bytes).expect("key");
     let verifier = Arc::new(dg_xch_core::protocols::shared::NoCertificateVerification);
@@ -483,40 +528,25 @@ async fn raw_request_fails(port: u16, cfg: Arc<rustls::ClientConfig>) -> bool {
     !String::from_utf8_lossy(&buf).starts_with("HTTP/1.1 200")
 }
 
-// ===== PR #52 SECURITY RED TEST — RPC authentication bypass via the world-public Chia CA =========
+// ===== PR #52 SECURITY — F1 regression guard: the world-public Chia CA is NOT a client-auth anchor
 //
-// FINDING (pr-52, F1): in the DEFAULT configuration (no `PRIVATE_CA_CRT` / `PRIVATE_CA_KEY` env
-// vars set), `build_rpc_tls_context` (full-node/src/rpc.rs:1353-1363) roots the RPC client-cert
-// verifier at the embedded, world-PUBLIC `CHIA_CA_CRT`, whose matching private key `CHIA_CA_KEY`
-// is committed in this repo (core/src/constants.rs:163-190) and published in chia-blockchain. The
-// production `--rpc` default binds `0.0.0.0:8555` (full-node/src/main.rs:24) and the RPC server is
-// started unconditionally (full-node/src/daemon.rs:4387 -> spawn_rpc_server). Because the CA
-// private key is public, ANY network-reachable attacker can mint a client cert that chains to it
-// (precisely what the "legitimate" `write_client_certs` helper above does) and satisfy the mTLS
-// client-auth — so the whole RPC surface (`/push_tx`, `/get_all_mempool_items`, `/get_connections`,
-// coin & block queries) is effectively UNAUTHENTICATED despite presenting client-cert mTLS.
-//
-// This test states the SECURE property: a client presenting a cert that merely chains to the
-// world-public Chia CA (an unauthenticated stranger, byte-indistinguishable from the current
-// "chia client") MUST be refused by the default RPC listener. It FAILS on #51 HEAD — the stranger
-// is accepted, exactly as the sibling `tls_e2e_chia_client_four_endpoints` round-trips real
-// endpoints with the very same public-CA cert. Turning it green is a TLS trust-model decision
-// (require an explicit private CA for RPC client-auth, refuse to start client-auth against the
-// public CA, and/or bind the RPC to loopback by default) — routed to Grant, not fixed here.
-// CWE-321 (hard-coded cryptographic key) + CWE-295 (improper certificate validation).
+// Finding F1: before the fix, `build_rpc_tls_context` rooted the DEFAULT RPC client-cert verifier at
+// the embedded, world-PUBLIC `CHIA_CA_CRT` (key `CHIA_CA_KEY` in core/src/constants.rs), so ANY
+// attacker could mint a chaining client cert and satisfy the mTLS client-auth — the RPC was
+// effectively unauthenticated. The fix roots Cni-mode client-auth at a per-install PRIVATE CA and
+// refuses the public CA outright. This test presents a cert signed by the world-public Chia CA (an
+// unauthenticated stranger) and requires it to be REFUSED. It FAILED on #51 HEAD (the stranger was
+// accepted); it is GREEN after the fix. CWE-321 (hard-coded key) + CWE-295 (improper cert validation).
 #[tokio::test]
 async fn tls_public_chia_ca_client_is_an_auth_bypass() {
     use dg_xch_core::ssl::{load_certs_from_bytes, load_private_key_from_bytes};
     let (port, run, _mp, _rpc) = spawn_tls_server().await;
     // The attacker's entire capability: sign a client cert with the PUBLIC, in-repo Chia CA key.
-    // No secret is required — `CHIA_CA_KEY` ships in this source tree and in chia-blockchain.
     let (crt, key_bytes) =
         generate_ca_signed_cert_data(CHIA_CA_CRT.as_bytes(), CHIA_CA_KEY.as_bytes())
             .expect("attacker cert signed by the world-public Chia CA");
     let certs = load_certs_from_bytes(&crt).expect("certs");
     let key = load_private_key_from_bytes(&key_bytes).expect("key");
-    // Client-side server verification is intentionally disabled: this test exercises the SERVER's
-    // client-cert verification, not the client's trust in the server.
     let verifier = Arc::new(dg_xch_core::protocols::shared::NoCertificateVerification);
     let cfg = rustls::ClientConfig::builder()
         .dangerous()
@@ -526,9 +556,62 @@ async fn tls_public_chia_ca_client_is_an_auth_bypass() {
     let refused = raw_request_fails(port, Arc::new(cfg)).await;
     assert!(
         refused,
-        "SECURITY (CWE-321/CWE-295): an unauthenticated client whose cert merely chains to the \
-         WORLD-PUBLIC Chia CA must not reach the RPC — trusting a CA whose private key is public \
-         is no authentication at all. This assertion FAILS on #51 HEAD, proving the bypass."
+        "SECURITY (CWE-321/CWE-295): a client whose cert merely chains to the WORLD-PUBLIC Chia CA \
+         must NOT reach the RPC. Green here means the Cni private-CA fix rejects it; a failure here \
+         means the F1 public-CA bypass has regressed."
     );
     run.store(false, Ordering::Relaxed);
+}
+
+// pr-52 fix, positive: a client cert signed by the node's PRIVATE CA IS accepted in Cni mode —
+// the CNI-compatible authenticated path still works (this is the same cert `write_client_certs`
+// mints, exercised end-to-end by `tls_e2e_chia_client_four_endpoints`).
+#[tokio::test]
+async fn tls_private_ca_client_is_accepted() {
+    use dg_xch_core::ssl::{load_certs_from_bytes, load_private_key_from_bytes};
+    let (port, run, _mp, _rpc) = spawn_tls_server().await;
+    let ca_dir = ensure_test_private_ca().join("ca");
+    let ca_crt = std::fs::read(ca_dir.join("private_ca.crt")).expect("private CA crt");
+    let ca_key = std::fs::read(ca_dir.join("private_ca.key")).expect("private CA key");
+    let (crt, key_bytes) = generate_ca_signed_cert_data(&ca_crt, &ca_key).expect("client cert");
+    let certs = load_certs_from_bytes(&crt).expect("certs");
+    let key = load_private_key_from_bytes(&key_bytes).expect("key");
+    let verifier = Arc::new(dg_xch_core::protocols::shared::NoCertificateVerification);
+    let cfg = rustls::ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(verifier)
+        .with_client_auth_cert(certs, key)
+        .expect("client auth");
+    let refused = raw_request_fails(port, Arc::new(cfg)).await;
+    assert!(!refused, "a client cert chained to the node's PRIVATE CA must be accepted in Cni mode");
+    run.store(false, Ordering::Relaxed);
+}
+
+// pr-52 fix, positive: `--rpc-tls local` on a loopback bind requires NO client cert — the
+// private/local operator posture ("some won't want these certs in the mix").
+#[tokio::test]
+async fn tls_local_mode_allows_no_client_cert_on_loopback() {
+    let (port, run, _mp, _rpc) = spawn_tls_server_mode(full_node::RpcTlsMode::Local).await;
+    let verifier = Arc::new(dg_xch_core::protocols::shared::NoCertificateVerification);
+    let cfg = rustls::ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(verifier)
+        .with_no_client_auth();
+    let refused = raw_request_fails(port, Arc::new(cfg)).await;
+    assert!(!refused, "local mode on loopback must serve a cert-less client");
+    run.store(false, Ordering::Relaxed);
+}
+
+// pr-52 fix, fail-closed: `--rpc-tls local` is unauthenticated, so it must REFUSE to build on a
+// routable (non-loopback) bind — an unauthenticated RPC can never be exposed to the network.
+#[test]
+fn tls_local_mode_refuses_non_loopback_bind() {
+    let bind: SocketAddr = "0.0.0.0:8555".parse().expect("addr");
+    match build_rpc_tls_context(&full_node::RpcTlsMode::Local, bind) {
+        Ok(_) => panic!("local mode on a 0.0.0.0 bind must fail closed"),
+        Err(err) => assert!(
+            err.to_string().contains("loopback"),
+            "the error must name the loopback requirement, got: {err}"
+        ),
+    }
 }

@@ -34,11 +34,12 @@ use dg_xch_core::consensus::block_generator::{
     coin_spends_with_conditions_from_generator, conditions_from_spend_bundle,
 };
 use dg_xch_core::consensus::constants::{ConsensusConstants, MAINNET};
-use dg_xch_core::constants::{CHIA_CA_CRT, CHIA_CA_KEY};
+use dg_xch_core::constants::CHIA_CA_CRT;
 use dg_xch_core::protocols::PeerMap;
 use dg_xch_core::protocols::full_node::NewTransaction;
 use dg_xch_core::ssl::{
-    AllowAny, generate_ca_signed_cert_data, load_certs_from_bytes, load_private_key_from_bytes,
+    generate_ca_signed_cert_data, load_certs_from_bytes, load_private_key_from_bytes, make_ca_cert,
+    make_ca_cert_data,
 };
 use dg_xch_core::traits::SizedBytes;
 use dg_xch_core::utils::hash_256;
@@ -60,6 +61,8 @@ use std::error::Error;
 use std::fmt;
 use std::io::Error as IoError;
 use std::net::SocketAddr;
+use std::path::Path;
+use crate::config::RpcTlsMode;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, OnceLock};
 use tokio::sync::Mutex;
@@ -1340,27 +1343,44 @@ pub struct RpcTlsContext {
     pub node_id: Bytes32,
 }
 
-/// Build the RPC listener's TLS config with chia's 8555 posture (chia server.py
-/// `ssl_context_for_server`, :54-71): the server cert is generated from the private CA
-/// (`PRIVATE_CA_CRT`/`PRIVATE_CA_KEY` env override, else the embedded public chia CA — the same
-/// fallback chain the P2P listener uses), and the client must present a certificate that chains
-/// to that CA (`verify_mode = CERT_REQUIRED`). Setting `DG_XCH_RPC_ALLOW_ANY_CLIENT_CERT=1`
-/// relaxes client verification to the legacy accept-anything posture for bare local
-/// tooling (curl without certs).
+/// Build the RPC listener's TLS config for the selected [`RpcTlsMode`].
+///
+/// `Cni` mirrors chia `ssl_context_for_server` rooted at the PRIVATE `private_ssl_ca`
+/// (chia/rpc/rpc_server.py:179-182): the served cert is signed by a per-install private CA and the
+/// client MUST present a cert chaining to that CA (`verify_mode = CERT_REQUIRED`). The private CA
+/// comes from `PRIVATE_CA_CRT`/`PRIVATE_CA_KEY` (inline PEM) if both are set, else it is loaded
+/// from — or generated once and persisted into — `<ssl_dir>/ca/private_ca.{crt,key}`. The
+/// world-public Chia CA (`CHIA_CA_*`, whose key ships in-repo) is NEVER the client-auth anchor —
+/// trusting it authenticates nobody, since anyone can sign a chaining cert (finding F1).
+///
+/// `Local` is server-only TLS with an ephemeral self-signed cert and NO client-cert requirement,
+/// for private/loopback operation; it is refused on a non-loopback `--rpc` bind (fail closed).
+///
+/// TLS 1.3 floor either way — chia CHIA-2102 (e57358aea).
 ///
 /// # Errors
-/// Returns an I/O error if cert generation, parsing, or verifier construction fails.
-pub fn build_rpc_tls_context() -> Result<RpcTlsContext, IoError> {
-    let (ca_crt, ca_key) = match (
-        std::env::var("PRIVATE_CA_CRT").ok(),
-        std::env::var("PRIVATE_CA_KEY").ok(),
-    ) {
-        (Some(crt), Some(key)) => (crt.into_bytes(), key.into_bytes()),
-        _ => (
-            CHIA_CA_CRT.as_bytes().to_vec(),
-            CHIA_CA_KEY.as_bytes().to_vec(),
-        ),
-    };
+/// Returns an I/O error on cert generation/parsing/verifier failure, if `Local` is selected for a
+/// routable bind, or if the resolved private CA is the world-public Chia CA.
+pub fn build_rpc_tls_context(mode: &RpcTlsMode, bind: SocketAddr) -> Result<RpcTlsContext, IoError> {
+    match mode {
+        RpcTlsMode::Cni { ssl_dir } => build_cni_rpc_tls(ssl_dir),
+        RpcTlsMode::Local => build_local_rpc_tls(bind),
+    }
+}
+
+// CNI-compatible mutual TLS: server cert signed by the private CA, client cert REQUIRED and
+// verified against it.
+fn build_cni_rpc_tls(ssl_dir: &Path) -> Result<RpcTlsContext, IoError> {
+    let (ca_crt, ca_key) = resolve_private_ca(ssl_dir)?;
+    // Defense in depth for F1: the world-public Chia CA must never back RPC client-auth — its
+    // private key ships in-repo, so a verifier rooted at it authenticates no one. Refuse it even if
+    // an operator points PRIVATE_CA_CRT at it.
+    if ca_crt == CHIA_CA_CRT.as_bytes() {
+        return Err(IoError::other(
+            "refusing to root RPC client-auth at the world-public Chia CA (its key is public); \
+             supply a private CA (PRIVATE_CA_CRT/KEY or <ssl_dir>/ca) or use --rpc-tls local",
+        ));
+    }
     let (cert_bytes, key_bytes) = generate_ca_signed_cert_data(&ca_crt, &ca_key)?;
     let certs = load_certs_from_bytes(&cert_bytes)?;
     let key = load_private_key_from_bytes(&key_bytes)?;
@@ -1373,17 +1393,9 @@ pub fn build_rpc_tls_context() -> Result<RpcTlsContext, IoError> {
             .add(cert)
             .map_err(|e| IoError::other(format!("invalid RPC root cert: {e:?}")))?;
     }
-    let allow_any = std::env::var("DG_XCH_RPC_ALLOW_ANY_CLIENT_CERT")
-        .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
-    let verifier = if allow_any {
-        AllowAny::new() as Arc<dyn rustls::server::danger::ClientCertVerifier>
-    } else {
-        WebPkiClientVerifier::builder(Arc::new(roots))
-            .build()
-            .map_err(|e| IoError::other(format!("client verifier: {e:?}")))?
-    };
-    // TLS 1.3 floor — chia CHIA-2102 (e57358aea): server-side sockets refuse TLS 1.2. Chia's
-    // 8555 RPC context comes from the same `ssl_context_for_server` rules.
+    let verifier = WebPkiClientVerifier::builder(Arc::new(roots))
+        .build()
+        .map_err(|e| IoError::other(format!("client verifier: {e:?}")))?;
     let server_config = ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
         .with_client_cert_verifier(verifier)
         .with_single_cert(certs, key)
@@ -1392,6 +1404,59 @@ pub fn build_rpc_tls_context() -> Result<RpcTlsContext, IoError> {
         server_config: Arc::new(server_config),
         node_id,
     })
+}
+
+// Local/private: transport TLS only, no client-cert requirement — permitted on loopback alone.
+fn build_local_rpc_tls(bind: SocketAddr) -> Result<RpcTlsContext, IoError> {
+    if !bind.ip().is_loopback() {
+        return Err(IoError::other(format!(
+            "--rpc-tls local is unauthenticated and only allowed on a loopback --rpc bind; got \
+             {bind}. Use --rpc-tls cni for a routable RPC address."
+        )));
+    }
+    // Ephemeral in-memory CA + server leaf: encrypt the loopback transport without a persisted
+    // identity or any client-cert machinery.
+    let (ca_crt, ca_key) = make_ca_cert_data()?;
+    let (cert_bytes, key_bytes) = generate_ca_signed_cert_data(&ca_crt, &ca_key)?;
+    let certs = load_certs_from_bytes(&cert_bytes)?;
+    let key = load_private_key_from_bytes(&key_bytes)?;
+    let node_id = Bytes32::new(hash_256(
+        certs.first().map(AsRef::as_ref).unwrap_or_default(),
+    ));
+    let server_config = ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .map_err(|e| IoError::other(format!("invalid RPC server cert: {e:?}")))?;
+    Ok(RpcTlsContext {
+        server_config: Arc::new(server_config),
+        node_id,
+    })
+}
+
+/// Resolve the RPC private CA: inline-PEM env override, else load-or-generate under `<ssl_dir>/ca`.
+fn resolve_private_ca(ssl_dir: &Path) -> Result<(Vec<u8>, Vec<u8>), IoError> {
+    if let (Ok(crt), Ok(key)) = (
+        std::env::var("PRIVATE_CA_CRT"),
+        std::env::var("PRIVATE_CA_KEY"),
+    ) {
+        return Ok((crt.into_bytes(), key.into_bytes()));
+    }
+    let ca_dir = ssl_dir.join("ca");
+    let crt_path = ca_dir.join("private_ca.crt");
+    let key_path = ca_dir.join("private_ca.key");
+    if crt_path.exists() && key_path.exists() {
+        return Ok((std::fs::read(&crt_path)?, std::fs::read(&key_path)?));
+    }
+    std::fs::create_dir_all(&ca_dir)?;
+    // Generate a unique private CA ONCE and persist it (chia `create_ssl` / `chia init`). Distribute
+    // <ssl_dir>/ca/private_ca.crt to RPC tooling and sign client certs with the paired key.
+    let (crt, key) = make_ca_cert(&crt_path, &key_path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok((crt, key))
 }
 
 // ---- HTTP adapter over dg_xch_servers::RpcServer ----------------------------------------------
