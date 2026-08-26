@@ -583,7 +583,10 @@ async fn tls_private_ca_client_is_accepted() {
         .with_client_auth_cert(certs, key)
         .expect("client auth");
     let refused = raw_request_fails(port, Arc::new(cfg)).await;
-    assert!(!refused, "a client cert chained to the node's PRIVATE CA must be accepted in Cni mode");
+    assert!(
+        !refused,
+        "a client cert chained to the node's PRIVATE CA must be accepted in Cni mode"
+    );
     run.store(false, Ordering::Relaxed);
 }
 
@@ -598,7 +601,10 @@ async fn tls_local_mode_allows_no_client_cert_on_loopback() {
         .with_custom_certificate_verifier(verifier)
         .with_no_client_auth();
     let refused = raw_request_fails(port, Arc::new(cfg)).await;
-    assert!(!refused, "local mode on loopback must serve a cert-less client");
+    assert!(
+        !refused,
+        "local mode on loopback must serve a cert-less client"
+    );
     run.store(false, Ordering::Relaxed);
 }
 
@@ -625,7 +631,10 @@ fn local_mode_downgrades_routable_bind_to_loopback() {
     use full_node::RpcTlsMode;
     let routable: SocketAddr = "0.0.0.0:8555".parse().unwrap();
     let (bind, downgraded) = RpcTlsMode::Local.resolve_bind(routable);
-    assert!(downgraded, "a routable local-mode bind must be flagged downgraded");
+    assert!(
+        downgraded,
+        "a routable local-mode bind must be flagged downgraded"
+    );
     assert!(bind.ip().is_loopback(), "downgraded bind must be loopback");
     assert_eq!(bind.port(), 8555, "port is preserved");
     // A loopback bind is left untouched.
@@ -633,7 +642,9 @@ fn local_mode_downgrades_routable_bind_to_loopback() {
     let (b2, d2) = RpcTlsMode::Local.resolve_bind(loop_in);
     assert!(!d2 && b2 == loop_in, "loopback local bind is untouched");
     // Cni is authenticated, so a routable bind is served as configured (no downgrade).
-    let (b3, d3) =
-        RpcTlsMode::Cni { ssl_dir: std::path::PathBuf::from("ssl") }.resolve_bind(routable);
+    let (b3, d3) = RpcTlsMode::Cni {
+        ssl_dir: std::path::PathBuf::from("ssl"),
+    }
+    .resolve_bind(routable);
     assert!(!d3 && b3 == routable, "cni binds exactly as configured");
 }

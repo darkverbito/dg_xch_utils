@@ -13,6 +13,7 @@
 // the private CA, client certificate REQUIRED and verified against that CA) — see
 // [`build_rpc_tls_context`]. Plain-HTTP liveness/metrics stay on the separate `--metrics` port.
 
+use crate::config::RpcTlsMode;
 use async_trait::async_trait;
 use bytes::Bytes;
 use dg_xch_core::blockchain::block_record::BlockRecord;
@@ -62,7 +63,6 @@ use std::fmt;
 use std::io::Error as IoError;
 use std::net::SocketAddr;
 use std::path::Path;
-use crate::config::RpcTlsMode;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, OnceLock};
 use tokio::sync::Mutex;
@@ -1361,7 +1361,10 @@ pub struct RpcTlsContext {
 /// # Errors
 /// Returns an I/O error on cert generation/parsing/verifier failure, if `Local` is selected for a
 /// routable bind, or if the resolved private CA is the world-public Chia CA.
-pub fn build_rpc_tls_context(mode: &RpcTlsMode, bind: SocketAddr) -> Result<RpcTlsContext, IoError> {
+pub fn build_rpc_tls_context(
+    mode: &RpcTlsMode,
+    bind: SocketAddr,
+) -> Result<RpcTlsContext, IoError> {
     match mode {
         RpcTlsMode::Cni { ssl_dir } => build_cni_rpc_tls(ssl_dir),
         RpcTlsMode::Local => build_local_rpc_tls(bind),

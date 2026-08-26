@@ -133,8 +133,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Finding F1 remediation: the RPC client-auth trust anchor is chosen here (default CNI
     // private-CA mTLS), never the world-public Chia CA.
-    config.rpc_tls = full_node::RpcTlsMode::parse(&cli.rpc_tls, &cli.ssl_dir)
-        .map_err(std::io::Error::other)?;
+    config.rpc_tls =
+        full_node::RpcTlsMode::parse(&cli.rpc_tls, &cli.ssl_dir).map_err(std::io::Error::other)?;
     config.debug_endpoints = cli.debug_endpoints;
 
     match config.backend.clone() {

@@ -46,7 +46,9 @@ impl Backend {
 ///   address (fail closed), so this mode can never become a network-reachable open door.
 #[derive(Clone, Debug, Default)]
 pub enum RpcTlsMode {
-    Cni { ssl_dir: PathBuf },
+    Cni {
+        ssl_dir: PathBuf,
+    },
     #[default]
     Local,
 }
@@ -58,11 +60,13 @@ impl RpcTlsMode {
     /// Returns an error string for an unrecognized mode.
     pub fn parse(mode: &str, ssl_dir: &str) -> Result<Self, String> {
         match mode.trim().to_ascii_lowercase().as_str() {
-            "cni" | "private" | "private-ca" => {
-                Ok(RpcTlsMode::Cni { ssl_dir: PathBuf::from(ssl_dir) })
-            }
+            "cni" | "private" | "private-ca" => Ok(RpcTlsMode::Cni {
+                ssl_dir: PathBuf::from(ssl_dir),
+            }),
             "" | "local" | "none" | "loopback" => Ok(RpcTlsMode::Local),
-            other => Err(format!("bad --rpc-tls {other:?} (expected `cni` or `local`)")),
+            other => Err(format!(
+                "bad --rpc-tls {other:?} (expected `cni` or `local`)"
+            )),
         }
     }
 }
