@@ -482,3 +482,53 @@ async fn raw_request_fails(port: u16, cfg: Arc<rustls::ClientConfig>) -> bool {
     }
     !String::from_utf8_lossy(&buf).starts_with("HTTP/1.1 200")
 }
+
+// ===== PR #52 SECURITY RED TEST — RPC authentication bypass via the world-public Chia CA =========
+//
+// FINDING (pr-52, F1): in the DEFAULT configuration (no `PRIVATE_CA_CRT` / `PRIVATE_CA_KEY` env
+// vars set), `build_rpc_tls_context` (full-node/src/rpc.rs:1353-1363) roots the RPC client-cert
+// verifier at the embedded, world-PUBLIC `CHIA_CA_CRT`, whose matching private key `CHIA_CA_KEY`
+// is committed in this repo (core/src/constants.rs:163-190) and published in chia-blockchain. The
+// production `--rpc` default binds `0.0.0.0:8555` (full-node/src/main.rs:24) and the RPC server is
+// started unconditionally (full-node/src/daemon.rs:4387 -> spawn_rpc_server). Because the CA
+// private key is public, ANY network-reachable attacker can mint a client cert that chains to it
+// (precisely what the "legitimate" `write_client_certs` helper above does) and satisfy the mTLS
+// client-auth — so the whole RPC surface (`/push_tx`, `/get_all_mempool_items`, `/get_connections`,
+// coin & block queries) is effectively UNAUTHENTICATED despite presenting client-cert mTLS.
+//
+// This test states the SECURE property: a client presenting a cert that merely chains to the
+// world-public Chia CA (an unauthenticated stranger, byte-indistinguishable from the current
+// "chia client") MUST be refused by the default RPC listener. It FAILS on #51 HEAD — the stranger
+// is accepted, exactly as the sibling `tls_e2e_chia_client_four_endpoints` round-trips real
+// endpoints with the very same public-CA cert. Turning it green is a TLS trust-model decision
+// (require an explicit private CA for RPC client-auth, refuse to start client-auth against the
+// public CA, and/or bind the RPC to loopback by default) — routed to Grant, not fixed here.
+// CWE-321 (hard-coded cryptographic key) + CWE-295 (improper certificate validation).
+#[tokio::test]
+async fn tls_public_chia_ca_client_is_an_auth_bypass() {
+    use dg_xch_core::ssl::{load_certs_from_bytes, load_private_key_from_bytes};
+    let (port, run, _mp, _rpc) = spawn_tls_server().await;
+    // The attacker's entire capability: sign a client cert with the PUBLIC, in-repo Chia CA key.
+    // No secret is required — `CHIA_CA_KEY` ships in this source tree and in chia-blockchain.
+    let (crt, key_bytes) =
+        generate_ca_signed_cert_data(CHIA_CA_CRT.as_bytes(), CHIA_CA_KEY.as_bytes())
+            .expect("attacker cert signed by the world-public Chia CA");
+    let certs = load_certs_from_bytes(&crt).expect("certs");
+    let key = load_private_key_from_bytes(&key_bytes).expect("key");
+    // Client-side server verification is intentionally disabled: this test exercises the SERVER's
+    // client-cert verification, not the client's trust in the server.
+    let verifier = Arc::new(dg_xch_core::protocols::shared::NoCertificateVerification);
+    let cfg = rustls::ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(verifier)
+        .with_client_auth_cert(certs, key)
+        .expect("client auth");
+    let refused = raw_request_fails(port, Arc::new(cfg)).await;
+    assert!(
+        refused,
+        "SECURITY (CWE-321/CWE-295): an unauthenticated client whose cert merely chains to the \
+         WORLD-PUBLIC Chia CA must not reach the RPC — trusting a CA whose private key is public \
+         is no authentication at all. This assertion FAILS on #51 HEAD, proving the bypass."
+    );
+    run.store(false, Ordering::Relaxed);
+}
