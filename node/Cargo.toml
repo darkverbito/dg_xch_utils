@@ -47,3 +47,8 @@ drain-probe = []
 # Hint (puzzle-hash) index tier: forwards to the store so the reorg mock CoinStore surface matches
 # the hint-gated trait method whenever a hint-enabled backend is unified into the build graph.
 hint = ["dg_xch_stores/hint"]
+# Postgres-backed at-scale reorg suites (tests/long_reorg_scale.rs, tests/reorg_while_shed.rs,
+# tests/deep_fork_bulk_entry.rs): enables the PostgresStore backend in the dependency graph. The
+# tests themselves are additionally #[ignore]d and env-gated on DGXCH_PG_URL (a dedicated,
+# truncatable test database), matching stores/tests/postgres_contract.rs.
+postgres = ["dg_xch_stores/postgres"]

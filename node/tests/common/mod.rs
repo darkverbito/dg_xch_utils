@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+pub mod fault;
+pub mod lineage;
 pub mod sweep;
 
 use async_trait::async_trait;

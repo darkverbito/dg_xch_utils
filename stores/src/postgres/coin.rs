@@ -423,6 +423,64 @@ impl CoinStore for PostgresStore {
     }
 }
 
+// The synchronous-commit reorg posture, proven against a live server. The pool-wide session
+// default is `synchronous_commit = off` (mod.rs — fsync-free per-block applies, resyncable
+// data); `rollback_to_in` overrides it with `SET LOCAL synchronous_commit = on` so THE REORG
+// TRANSACTION alone commits durably (losing an acknowledged reorg after a crash silently
+// resurrects the abandoned branch). This test pins both halves of that scoping: inside the
+// reorg batch after `rollback_to_in` the setting is `on`; on the pool (every other
+// transaction) it stays `off` — including after the reorg batch commits. Unit-level (not
+// stores/tests) because the proof needs the batch's raw connection (`BatchHandle::pg_conn`,
+// pub(crate)). Env-gated on a dedicated test database like stores/tests/postgres_contract.rs:
+//   DGXCH_PG_URL=... cargo test -p dg_xch_stores --features postgres \
+//     reorg_transaction_commits_synchronously -- --ignored
+#[cfg(test)]
+mod sync_commit_tests {
+    use crate::{BlockStore, CoinStore, PostgresStore};
+
+    async fn setting_on_pool(store: &PostgresStore) -> String {
+        let (v,): (String,) = sqlx::query_as("SHOW synchronous_commit")
+            .fetch_one(&store.pool)
+            .await
+            .expect("read pool setting");
+        v
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a dedicated Postgres test database (DGXCH_PG_URL)"]
+    async fn reorg_transaction_commits_synchronously() {
+        let url =
+            std::env::var("DGXCH_PG_URL").expect("set DGXCH_PG_URL to a dedicated test database");
+        let store = PostgresStore::open(&url).await.expect("open postgres");
+        assert_eq!(
+            setting_on_pool(&store).await,
+            "off",
+            "the per-block posture: pool-wide synchronous_commit stays off"
+        );
+
+        let mut batch = store.begin().await.expect("begin the reorg batch");
+        store
+            .rollback_to_in(&mut batch, 0)
+            .await
+            .expect("the reorg's first statement");
+        let (in_tx,): (String,) = sqlx::query_as("SHOW synchronous_commit")
+            .fetch_one(&mut *batch.pg_conn().expect("pg batch"))
+            .await
+            .expect("read in-transaction setting");
+        assert_eq!(
+            in_tx, "on",
+            "SET LOCAL scopes the durable commit to the reorg transaction itself"
+        );
+        store.commit(batch).await.expect("commit the reorg batch");
+
+        assert_eq!(
+            setting_on_pool(&store).await,
+            "off",
+            "SET LOCAL dies with the transaction — the per-block posture is untouched"
+        );
+    }
+}
+
 // One block's create-coin hints, parameterized over the connection: joined onto the block's open
 // batch from `apply_hints_in`, or its own transaction from `apply_hints`. `ON CONFLICT DO NOTHING`
 // keeps re-apply/replay idempotent against the `(hint, coin_name)` primary key.
