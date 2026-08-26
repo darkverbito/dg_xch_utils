@@ -1522,6 +1522,7 @@ struct HintReq {
     window: CoinQueryWindow,
 }
 
+#[cfg(feature = "hint")]
 #[derive(Deserialize)]
 struct HintsReq {
     hints: Vec<Bytes32>,
