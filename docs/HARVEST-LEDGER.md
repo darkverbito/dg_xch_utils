@@ -101,23 +101,25 @@ test as such.
 | `test_aggsig_garbage` (garbage trailing args per agg-sig opcode) | 1 | PARTIAL | infinity-pubkey rejection is ported (`agg_sig_infinity_pubkey_rejected_for_every_agg_sig_opcode`); the garbage-extra-arg parametrization per opcode is not |
 | `test_max_coin_amount_fee` | 1 | PARTIAL | fee overflow at the coin-amount bound not separately pinned |
 
-**`TestReorgs` (9): COVERED 5, PARTIAL 3, GAP 1.**
+**`TestReorgs` (9): COVERED 6, PARTIAL 3.**
 COVERED: `test_basic_reorg` (`node/tests/reorg.rs::heavier_branch_reorg_coin_store_equals_replay`),
 `test_reorg_transaction` (single-tx reorg on all three backends — DIVERGENCE-29),
 `test_get_blocks_at` (`stores/tests/block_store.rs::get_by_height_returns_the_confirmed_record`),
 `test_get_header_blocks_in_range_tx_filter` (daemon `request_block_headers` filter tests,
 `full-node/src/daemon.rs` unit "request_block_headers(return_filter=true) serves the same filter"),
 `test_overlong_generator_encoding` (`core/tests/clvm_ported.rs::serialized_atom_overflow` +
-strict-decode wire tests).
+strict-decode wire tests),
+`test_long_reorg` (Q5 — `node/tests/long_reorg_scale.rs`: depths 100 and 1000 against a
+pre-built heavier branch on SQLite, mmap, AND Postgres — weight-only flip with the whole branch
+parked as orphans, exact per-height coin unwind byte-equal to a winning-chain replay,
+single-transaction atomicity + cold-reopen recoverability under an injected peak-flip fault,
+post-commit-only reorg reporting; the confirm-pipeline arm at bulk-entry depth is
+`node/tests/deep_fork_bulk_entry.rs`).
 PARTIAL: `test_reorg_from_genesis` (torn-peak/backtrack cover shallow shapes;
 genesis-depth reorg not pinned), `test_get_tx_peak_reorg` (tx-peak tracked and consumed by the
 mempool frame but its reorg transition is not asserted), `test_long_compact_blockchain`
 (compact-proof validation is pinned in `full-node/tests/compact_vdf.rs`; a long fully-compact
 chain replay is not).
-GAP: `test_long_reorg` — a reorg thousands of blocks deep against a pre-built heavier branch.
-Our deepest pinned reorg is the multi-block store-rebuilt branch in
-`node/tests/reorg_fork_view_from_store.rs::deep_reorg_reconstructs_a_multi_block_branch_from_the_store_across_a_restart`.
-A harvest would pin a reorg at test-chain scale (hundreds+) through the confirm pipeline.
 
 **Module-level (9): COVERED 5, PARTIAL 4.**
 COVERED: `test_reorg_new_ref` (generator refs across a reorg —
@@ -203,7 +205,7 @@ path is: `full-node/tests/puzzle_state.rs::mismatched_previous_header_hash_rejec
 | Group | n | C/P/G/N-A | Notes |
 |---|---|---|---|
 | wire shapes (`pre_validation_result`, `spendbundle_serialization`) | 2 | C2 | `node/tests/wire_roundtrip.rs` (corpus round-trip + hostile decode) |
-| sync/reorg orchestration (`sync_no_farmer`, `basic_chain`, `new_peak`, `shallow_reorg_nodes`, `corrupt_blockchain`, `node_start_with_existing_blocks`, `add_block_missing_prev_record`, `long_reorg`, `long_reorg_nodes`, 2× `sync_from_fork_point_logs_*`, 2× `wallet_sync_task_failure*`) | 13 | C7 G2 N/A4 | COVERED: t053/t054/t056 sync suite, `full-node/tests/peer_loss_recovery.rs`, `node/tests/restart_resume.rs`, `node/tests/add_block.rs`, reorg suites. GAP: `long_reorg`/`long_reorg_nodes` (scale — see ranked gaps). N/A: log-assertion plumbing + wallet-sync-task python task management. |
+| sync/reorg orchestration (`sync_no_farmer`, `basic_chain`, `new_peak`, `shallow_reorg_nodes`, `corrupt_blockchain`, `node_start_with_existing_blocks`, `add_block_missing_prev_record`, `long_reorg`, `long_reorg_nodes`, 2× `sync_from_fork_point_logs_*`, 2× `wallet_sync_task_failure*`) | 13 | C8 P1 N/A4 | COVERED: t053/t054/t056 sync suite, `full-node/tests/peer_loss_recovery.rs`, `node/tests/restart_resume.rs`, `node/tests/add_block.rs`, reorg suites; `long_reorg` at scale — `node/tests/long_reorg_scale.rs` (depths 100/1000, three backends) + `node/tests/deep_fork_bulk_entry.rs` (the batch-path convergence arm). PARTIAL: `long_reorg_nodes` — the single-node convergence arms (backtrack, bulk entry, reland) are pinned in-process; the two-live-node p2p sim is not. N/A: log-assertion plumbing + wallet-sync-task python task management. |
 | connection/infra (`inbound_connection_limit`, `timelord_inbound_connection`, `request_peers`, `malformed_peer_version_on_connect`, `invalid_capability_can_connect`, `node_type_message_typechecking`, `node_types_inbound_connections_limit`) | 7 | C5 P2 | `p2p/tests/t040_handlers.rs` (type checking), `t041_sessions.rs` (handshake), `t043_resilience.rs`/`t044_defense.rs` (limits), `t047_on_connect.rs`, address-manager fetch. PARTIAL: per-node-type inbound limit matrix; invalid-capability tolerance arm. |
 | sub-slot / signage points (`respond_end_of_sub_slot` ×3 variants, `new_signage_point_or_end_of_sub_slot`, `new_signage_point_caching`, `slot_catch_up_genesis`, `sp_catchup_*` ×4) | 10 | C4 P6 | `node/tests/slot_state.rs` (12 structural rules), the slot corpus gate (live-arrival predicate over real mainnet VDFs), `full-node/tests/announce_pull.rs::client_link_pulls_announced_signage_point`. PARTIAL: the EOS race/no-reorg arms and the 4-step SP-catchup recovery ladder (semaphore-full, invalid response, diverged peer, loop exhausted). |
 | unfinished blocks (`respond_unfinished`, `new_unfinished_block`(2), `forward_limit`, `replaced_generator`, `double_blocks_same_pospace`, `request_unfinished_block`(2), `add_unfinished_block_with_generator_refs`, `farmed_behind_current_head`) | 10 | C2 P8 | COVERED: the generator-must-run gate (`node/tests/unfinished_body.rs` — DIVERGENCE-27) and generator-ref resolution. PARTIAL: unfinished-block store semantics (rank/better-block replacement, dedup of same-pospace doubles, forward limit, request/serve arms) live in `full-node/src/daemon.rs` unit tests but the chia arms are not mirrored 1:1 — see the FullNodeStore gap. |
@@ -470,10 +472,15 @@ Of the 688 applicable tests (excluding N/A): **71% COVERED, 22% PARTIAL, 8% GAP*
    generators engineered for validation-cost blowup (duplicate large-integer ladders, duplicate
    announces, many-create-coin). Untrusted-input robustness of the mempool/validation path;
    vectors are directly portable.
-3. **Long-reorg at scale — 3 tests** (`test_long_reorg`, `test_long_reorg_nodes`,
-   `TestReorgs::test_long_reorg`) plus the tracked **deep-fork (> backtrack cap, < recent-chain)
-   bulk-entry** path, which has no test at any scale. Our pinned reorgs are ≤ a handful of
-   blocks; chia proves 1500-block reorgs including the node-vs-node convergence arm.
+3. **Long-reorg at scale — CLOSED (Q5)** (`test_long_reorg`, `test_long_reorg_nodes`,
+   `TestReorgs::test_long_reorg`, plus the tracked **deep-fork bulk-entry** path):
+   `node/tests/long_reorg_scale.rs` (depths 100/1000 on SQLite, mmap, Postgres — weight-only
+   flip, exact coin unwind, one-transaction atomicity + crash/reopen recoverability),
+   `node/tests/deep_fork_bulk_entry.rs` (the > backtrack-cap batch-path entry: escalation,
+   pipeline reorg at depth 26, crash-at-flip + store-rebuilt recovery across a restart),
+   `node/tests/reorg_while_shed.rs` (reorg with the service indexes shed, beside a live
+   writer). Residual: the two-live-node `long_reorg_nodes` p2p sim (in-process convergence
+   arms are pinned).
 4. **FullNodeStore unfinished-block rank/eviction + future-cache bounds — 8 tests**
    (`test_full_node_store.py`). Bounded caches for unfinished blocks / future SP/IP/EOS exist in
    the daemon but their bounds and the chia rank/replacement order are unpinned — a

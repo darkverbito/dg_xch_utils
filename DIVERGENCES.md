@@ -87,6 +87,24 @@ migration, no resync — legacy blobs age out on rewrite; new writes are always 
 Proven by `stores/src/record_compat.rs::tests` (legacy layout pinned structurally in-test) and
 the restart-resume-class `stores/tests/legacy_record_store.rs` (a downgraded store opens, serves,
 and follows under the new code).
+**Deep-fork bulk entry + long-reorg at scale (Q5, the DIV-50 test holes)** — CLOSED with
+evidence. The band between the backtrack floor (`BACKTRACK_MAX_DEPTH` = 5) and the WP long-sync
+band, previously untested at any scale, is pinned end-to-end by
+`node/tests/deep_fork_bulk_entry.rs`: the mid-band escalation (a 20-deep fork with a real shared
+ancestor signals `DeepFork`, store untouched), the BULK entry itself (branch candidates at
+duplicate heights + reservation-window write-through + per-block confirm → orphan parks → ONE
+atomic reorg at depth 26, `Chaser::sync_range` — the `Node::bulk_sync` path), and the crash
+contract at the peak-flip seam (pre-reorg state exact, cold reopen, recovery follow rebuilds the
+whole branch from the durable store via `delta_from_store` across a restart) — SQLite + Postgres.
+DIV-50's no-reorg-depth-cap contract is pinned AT SCALE by `node/tests/long_reorg_scale.rs`:
+depths 100 and 1000 on SQLite, mmap, and Postgres — weight-only fork choice (the full branch
+parks as orphans, one flip), exact coin unwind (per-height spend/create lineage byte-equals a
+winning-chain replay), single-transaction atomicity + reopen recoverability under an injected
+peak-flip fault, and post-commit-only `ReorgReport`s. The reorg-while-shed interaction (idxphase
+falling edge): `node/tests/reorg_while_shed.rs` — `ensure_reorg_indexes` rebuilds the reorg tier
+on demand beside a live archive writer, service tier stays shed, both SQL backends. The Postgres
+synchronous-commit reorg posture (`SET LOCAL` scoping) is pinned by
+`stores/src/postgres/coin.rs::sync_commit_tests::reorg_transaction_commits_synchronously`.
 
 ## Documented-intentional deltas carried in code (no number minted)
 
@@ -102,7 +120,6 @@ and follows under the new code).
 
 | Item | What | Where tracked / evidence |
 |---|---|---|
-| **Deep-fork (> backtrack cap, < recent-chain) bulk entry untested** | The band between the short-sync backtrack floor (`node/src/sync/mod.rs` `BACKTRACK_MAX_DEPTH`) and the WP-anchored long-sync band (DIVERGENCE-35) has no test at any scale; chia proves 1500-block reorgs (`test_long_reorg*`). Ranked gap #3 in `docs/HARVEST-LEDGER.md`. | harvest ledger; `node/tests/backtrack.rs::fork_deeper_than_the_backtrack_cap_signals_long_sync` covers the *escalation*, not the entry |
 | **`puzzle_state` default-features failure** | `full-node` integration test `tests/puzzle_state.rs` reported failing under a non-default feature combination (default-features build matrix). Not re-verified in this session (builds are cluster-only); needs a feature-matrix CI leg to pin. | campaign tracker |
 | **Produce→broadcast e2e is stubbed at four seams** | The emission-contract table (`full-node/tests/emission_contract.rs`) carries four explicit `Ignored` entries: (1) in-process UB acceptance needs a real plot proof + VDF-populated SlotState; (2) `broadcast_new_peak` construction needs a stored FullBlock + outbound-peer capture harness (proven live by the sync sentinel only); (3) the tx-announce queue drain needs the in-process mempool-admit harness; (4) `process_compact_vdf_inbox` consume/swap runs live-only. The assembly halves are pinned (`producer_differential`, `declare_proof_of_space`, `unfinished_to_full_block_reconstruct`); the broadcast halves are not. | `full-node/tests/emission_contract.rs` (`Status::Ignored` entries) |
 | **chia_rs `challenge_merkle_root` (6th `SubEpochSummary` field) not adopted node-wide** | Core's `SubEpochSummary` is deliberately the 5-field mainnet-active form (`core/src/consensus/make_sub_epoch_summary.rs:19` — "do not add the 6th field until it activates"), while the weight-proof summary reconstruction needed the 6-field hash form to match mainnet `ses_hash` (`weight-proof/src/lib.rs` phase-2 anchor test note). Adopting the field consistently requires an activation-gated design, not a blind add. | both anchors above |
