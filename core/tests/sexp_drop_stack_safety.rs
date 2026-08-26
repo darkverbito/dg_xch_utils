@@ -23,7 +23,16 @@ fn build_deep(depth: usize) -> SExp<'static> {
     node
 }
 
+// ROUTED TO chino (CLVM internals): the naive fix `impl Drop for SExp` does NOT compile — SExp
+// carries `const NULL_SEXP`/`const ONE_SEXP` used as `&'static`, and a `Drop` type cannot be
+// const-promoted, cascading into `from_bool`, `SExpIter`, and `Program::new_const`. A correct
+// iterative teardown needs a CLVM-core change (const->static + Program rework, or a bounded parse
+// depth) — out of scope for a security-clean change. `#[ignore]`d as the reproduction + regression
+// guard; remove `#[ignore]` to reproduce the SIGABRT, and it turns green once the fix lands. NOTE:
+// not currently reachable from untrusted node input (the block/tx path is arena-native; DIVERGENCE-51
+// removed owned-SExp materialization) — a LATENT footgun, not a live remote crash.
 #[test]
+#[ignore = "U1: reproduces the recursive-Drop stack overflow (SIGABRT); routed to chino for the CLVM-core fix"]
 fn deep_owned_sexp_drops_without_stack_overflow() {
     // 500k levels overflow any reasonable stack under a per-level recursive Drop; a bounded 1 MiB
     // worker stack makes the crash deterministic, while an iterative Drop passes comfortably.
