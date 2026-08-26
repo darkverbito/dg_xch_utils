@@ -21,12 +21,13 @@ struct Cli {
     #[arg(long, default_value = "0.0.0.0:8444")]
     listen: String,
     /// Local RPC listen address.
-    #[arg(long, default_value = "0.0.0.0:8555")]
+    #[arg(long, default_value = "127.0.0.1:8555")]
     rpc: String,
-    /// RPC client-auth posture: `cni` (default) = CNI-compatible mutual TLS against a per-install
-    /// private CA (auto-generated under --ssl-dir if absent); `local` = no client certs, loopback
-    /// bind only. The world-public Chia CA is never trusted for RPC client-auth in either mode.
-    #[arg(long = "rpc-tls", default_value = "cni")]
+    /// RPC client-auth posture: `local` (default) = no client certs, loopback-only (a routable
+    /// --rpc bind is downgraded to loopback with a warning); `cni` = CNI-compatible mutual TLS
+    /// against a per-install private CA (auto-generated under --ssl-dir if absent) for an
+    /// authenticated network RPC. The world-public Chia CA is never a client-auth anchor in either.
+    #[arg(long = "rpc-tls", default_value = "local")]
     rpc_tls: String,
     /// Directory holding the RPC private CA for `--rpc-tls cni` (`<ssl-dir>/ca/private_ca.{crt,key}`,
     /// generated once and persisted). Distribute the crt to RPC tooling; keep the key node-private.

@@ -44,9 +44,10 @@ impl Backend {
 ///   TLS with an ephemeral self-signed cert and NO client-certificate requirement. Permitted only on
 ///   a LOOPBACK `--rpc` bind; the daemon refuses to start an unauthenticated RPC on a routable
 ///   address (fail closed), so this mode can never become a network-reachable open door.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub enum RpcTlsMode {
     Cni { ssl_dir: PathBuf },
+    #[default]
     Local,
 }
 
@@ -57,18 +58,33 @@ impl RpcTlsMode {
     /// Returns an error string for an unrecognized mode.
     pub fn parse(mode: &str, ssl_dir: &str) -> Result<Self, String> {
         match mode.trim().to_ascii_lowercase().as_str() {
-            "" | "cni" | "private" | "private-ca" => {
+            "cni" | "private" | "private-ca" => {
                 Ok(RpcTlsMode::Cni { ssl_dir: PathBuf::from(ssl_dir) })
             }
-            "local" | "none" | "loopback" => Ok(RpcTlsMode::Local),
+            "" | "local" | "none" | "loopback" => Ok(RpcTlsMode::Local),
             other => Err(format!("bad --rpc-tls {other:?} (expected `cni` or `local`)")),
         }
     }
 }
 
-impl Default for RpcTlsMode {
-    fn default() -> Self {
-        RpcTlsMode::Cni { ssl_dir: PathBuf::from("ssl") }
+impl RpcTlsMode {
+    /// The effective RPC socket bind for this mode. `Local` is UNAUTHENTICATED, so a routable
+    /// configured bind is DOWNGRADED to loopback (returning `true`) — this neither crashes a
+    /// previously-working node that passes `--rpc 0.0.0.0` NOR network-exposes an unauthenticated
+    /// RPC; the caller logs a loud warning and the operator opts into `--rpc-tls cni` for an
+    /// authenticated network RPC. `Cni` is authenticated and binds exactly as configured.
+    #[must_use]
+    pub fn resolve_bind(&self, configured: SocketAddr) -> (SocketAddr, bool) {
+        match self {
+            RpcTlsMode::Local if !configured.ip().is_loopback() => (
+                SocketAddr::new(
+                    std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                    configured.port(),
+                ),
+                true,
+            ),
+            _ => (configured, false),
+        }
     }
 }
 

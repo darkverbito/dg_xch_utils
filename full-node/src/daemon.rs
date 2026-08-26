@@ -3205,7 +3205,20 @@ where
     /// # Errors
     /// Returns an I/O error if the TLS config or socket cannot be initialized.
     pub fn spawn_rpc_server(&self) -> Result<Arc<AtomicBool>, Error> {
-        let tls = crate::rpc::build_rpc_tls_context(&self.config.rpc_tls, self.config.rpc)?;
+        // Non-breaking bind resolution (finding F1): `--rpc-tls local` is unauthenticated, so a
+        // routable --rpc bind is downgraded to loopback with a loud warning rather than crashing a
+        // node that passes `--rpc 0.0.0.0` or network-exposing an unauth RPC (`--rpc-tls cni` for
+        // an authenticated network RPC).
+        let (rpc_bind, downgraded) = self.config.rpc_tls.resolve_bind(self.config.rpc);
+        if downgraded {
+            tracing::warn!(
+                configured = %self.config.rpc,
+                effective = %rpc_bind,
+                "--rpc-tls local is unauthenticated; refusing to bind the RPC to a routable address \
+                 — serving on loopback instead. Use --rpc-tls cni for an authenticated network RPC."
+            );
+        }
+        let tls = crate::rpc::build_rpc_tls_context(&self.config.rpc_tls, rpc_bind)?;
         self.rpc.attach_live(crate::rpc::NodeRpcLive {
             node_id: tls.node_id,
             network_id: self.config.network_id.clone(),
@@ -3218,8 +3231,8 @@ where
         let handler = Arc::new(NodeRpcHandler::new(self.rpc.clone()));
         let server = RpcServer::new_with_server_config(
             &RpcServerConfig {
-                host: self.config.rpc.ip().to_string(),
-                port: self.config.rpc.port(),
+                host: rpc_bind.ip().to_string(),
+                port: rpc_bind.port(),
                 ssl_info: None,
             },
             tls.server_config,

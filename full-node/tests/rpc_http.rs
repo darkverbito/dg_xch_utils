@@ -615,3 +615,25 @@ fn tls_local_mode_refuses_non_loopback_bind() {
         ),
     }
 }
+
+// pr-52: the `--rpc-tls local` DEFAULT is non-breaking. A node that passes `--rpc 0.0.0.0` (as our
+// fleet manifests do) must NOT crash and must NOT network-expose an unauthenticated RPC — the bind
+// is downgraded to loopback (port preserved) with a warning. Cni, being authenticated, binds as
+// configured. This is the invariant that lets `local` be the default without breaking existing deploys.
+#[test]
+fn local_mode_downgrades_routable_bind_to_loopback() {
+    use full_node::RpcTlsMode;
+    let routable: SocketAddr = "0.0.0.0:8555".parse().unwrap();
+    let (bind, downgraded) = RpcTlsMode::Local.resolve_bind(routable);
+    assert!(downgraded, "a routable local-mode bind must be flagged downgraded");
+    assert!(bind.ip().is_loopback(), "downgraded bind must be loopback");
+    assert_eq!(bind.port(), 8555, "port is preserved");
+    // A loopback bind is left untouched.
+    let loop_in: SocketAddr = "127.0.0.1:8555".parse().unwrap();
+    let (b2, d2) = RpcTlsMode::Local.resolve_bind(loop_in);
+    assert!(!d2 && b2 == loop_in, "loopback local bind is untouched");
+    // Cni is authenticated, so a routable bind is served as configured (no downgrade).
+    let (b3, d3) =
+        RpcTlsMode::Cni { ssl_dir: std::path::PathBuf::from("ssl") }.resolve_bind(routable);
+    assert!(!d3 && b3 == routable, "cni binds exactly as configured");
+}
