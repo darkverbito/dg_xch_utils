@@ -4500,7 +4500,7 @@ where
             // start), so the boot grace window opens here.
             health: HealthState::new(),
         };
-        match spawn_metrics_server(addr, sources) {
+        match spawn_metrics_server(addr, sources, self.config.debug_endpoints) {
             Ok(run) => {
                 info!(%addr, "metrics server listening");
                 Some(run)
@@ -7777,6 +7777,7 @@ mod tests {
             trusted_peers: Vec::new(),
             trusted_cidrs: Vec::new(),
             rpc_tls: crate::config::RpcTlsMode::Local,
+            debug_endpoints: false,
         })
         .await
         .expect("boot");
@@ -8436,6 +8437,7 @@ mod tests {
             trusted_peers: Vec::new(),
             trusted_cidrs: Vec::new(),
             rpc_tls: crate::config::RpcTlsMode::Local,
+            debug_endpoints: false,
         };
         let node = Node::boot(config).await.expect("boot");
 
@@ -9087,6 +9089,7 @@ mod tests {
                 trusted_peers: Vec::new(),
                 trusted_cidrs: Vec::new(),
                 rpc_tls: crate::config::RpcTlsMode::Local,
+                debug_endpoints: false,
             })
             .await
             .expect("boot node"),
@@ -9536,6 +9539,7 @@ mod tests {
                     trusted_peers: Vec::new(),
                     trusted_cidrs: Vec::new(),
                     rpc_tls: crate::config::RpcTlsMode::Local,
+                    debug_endpoints: false,
                 },
                 store,
             )
@@ -9678,6 +9682,7 @@ mod tests {
                     trusted_peers: Vec::new(),
                     trusted_cidrs: Vec::new(),
                     rpc_tls: crate::config::RpcTlsMode::Local,
+                    debug_endpoints: false,
                 },
                 store.clone(),
             )
@@ -11999,6 +12004,7 @@ mod ub_relay_gate_tests {
                     trusted_peers: Vec::new(),
                     trusted_cidrs: Vec::new(),
                     rpc_tls: crate::config::RpcTlsMode::Local,
+                    debug_endpoints: false,
                 },
                 store,
             )

@@ -50,7 +50,7 @@ struct Cli {
     #[arg(long, default_value = "mainnet")]
     network: String,
     /// Prometheus /metrics listen address, or `off` to disable. Default on.
-    #[arg(long, default_value = "0.0.0.0:9100")]
+    #[arg(long, default_value = "127.0.0.1:9100")]
     metrics: String,
     /// Debug: directory to capture real sync data into (weight proof + downloaded block ranges) for
     /// offline replay/profiling. Off unless set.
@@ -92,6 +92,10 @@ struct Cli {
     /// auto-trusted regardless.)
     #[arg(long = "trusted-cidr")]
     trusted_cidr: Vec<String>,
+    /// Expose /debug/heap (jemalloc heap dump) on the metrics port. OFF by default — it can leak
+    /// in-memory data and writes a file to disk. /metrics and /health are always served.
+    #[arg(long = "debug-endpoints", default_value_t = false)]
+    debug_endpoints: bool,
 }
 
 #[tokio::main]
@@ -131,6 +135,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // private-CA mTLS), never the world-public Chia CA.
     config.rpc_tls = full_node::RpcTlsMode::parse(&cli.rpc_tls, &cli.ssl_dir)
         .map_err(std::io::Error::other)?;
+    config.debug_endpoints = cli.debug_endpoints;
 
     match config.backend.clone() {
         full_node::config::Backend::Sqlite(_) => {

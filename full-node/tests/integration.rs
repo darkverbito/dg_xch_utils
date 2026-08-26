@@ -40,6 +40,7 @@ fn config(listen: SocketAddr, rpc: SocketAddr) -> Config {
         trusted_peers: Vec::new(),
         trusted_cidrs: Vec::new(),
         rpc_tls: full_node::RpcTlsMode::Local,
+        debug_endpoints: false,
     }
 }
 

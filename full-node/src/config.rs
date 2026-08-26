@@ -95,6 +95,9 @@ pub struct Config {
     pub listen: SocketAddr,
     pub rpc: SocketAddr,
     pub rpc_tls: RpcTlsMode,
+    /// `--debug-endpoints`: expose the sensitive /debug/heap jemalloc dump on the metrics port.
+    /// OFF by default — the heap dump can leak in-memory data and writes a file to disk.
+    pub debug_endpoints: bool,
     pub introducer: Option<(String, u16)>,
     // Manual peers dialed directly at startup (host:port each), in addition to any introducer-seeded
     // addresses. Persistent: a dropped manual peer is reclaimed to the address book and re-dialed. A node
@@ -207,6 +210,7 @@ impl Config {
             trusted_peers: trusted_peers.to_vec(),
             trusted_cidrs: trusted_cidrs.to_vec(),
             rpc_tls: RpcTlsMode::default(),
+            debug_endpoints: false,
         })
     }
 }

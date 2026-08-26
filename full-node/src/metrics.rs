@@ -1237,6 +1237,7 @@ fn process_rss_bytes() -> u64 {
 pub fn spawn_metrics_server<S: BlockStore + Send + Sync + 'static>(
     addr: SocketAddr,
     sources: MetricsSources<S>,
+    debug_endpoints: bool,
 ) -> Result<Arc<AtomicBool>, Error> {
     let std_listener = std::net::TcpListener::bind(addr)?;
     std_listener.set_nonblocking(true)?;
@@ -1244,7 +1245,7 @@ pub fn spawn_metrics_server<S: BlockStore + Send + Sync + 'static>(
     let run = Arc::new(AtomicBool::new(true));
     let run_c = run.clone();
     tokio::spawn(async move {
-        serve(listener, sources, run_c).await;
+        serve(listener, sources, run_c, debug_endpoints).await;
     });
     Ok(run)
 }
@@ -1258,6 +1259,7 @@ async fn serve<S: BlockStore + Send + Sync + 'static>(
     listener: TcpListener,
     sources: MetricsSources<S>,
     run: Arc<AtomicBool>,
+    debug_endpoints: bool,
 ) {
     let profiling = Arc::new(AtomicBool::new(false));
     while run.load(Ordering::Relaxed) {
@@ -1329,6 +1331,16 @@ async fn serve<S: BlockStore + Send + Sync + 'static>(
             continue;
         }
         if path.starts_with("/debug/heap") {
+            // H1: the heap dump can leak in-memory data and writes a file — opt-in only.
+            if !debug_endpoints {
+                let _ = write_simple(
+                    &mut stream,
+                    "404 Not Found",
+                    "/debug/heap is disabled; start the node with --debug-endpoints to enable it",
+                )
+                .await;
+                continue;
+            }
             // Same one-at-a-time guard as the flamegraph: a second profile request is refused, not queued.
             if profiling.swap(true, Ordering::SeqCst) {
                 let _ = write_simple(
