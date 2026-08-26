@@ -197,3 +197,98 @@ boot + RPC over Local-mode TLS). `cargo clippy -p full-node` clean.
 CA under `<--ssl-dir>/ca` on first run; RPC tooling must present a cert signed by that private CA
 (distribute `private_ca.crt`, sign client certs with the key) — the old public-CA client certs are
 rejected (by design). A purely local node can instead run `--rpc 127.0.0.1:8555 --rpc-tls local`.
+
+---
+
+# pr-52 follow-on hardening (Grant-directed)
+
+## Local-default RPC TLS (non-breaking)
+`--rpc-tls` defaults to **`local`** (cni is the explicit opt-in), so existing public-CA RPC clients
+are not broken. Non-breaking on nodes that pass `--rpc 0.0.0.0`: `--rpc` bind default flips to
+`127.0.0.1:8555`, and `RpcTlsMode::resolve_bind` **downgrades** a routable local-mode bind to
+loopback (port preserved) with a loud WARN — chosen over a hard-fail because it (a) never
+network-exposes an unauthenticated RPC and (b) never crashes a previously-working node. `cni` stays
+the CNI-parity authenticated path. Commit `e621576`. Tests: `local_mode_downgrades_routable_bind_to_loopback`
++ the full `rpc_http` suite green.
+
+## H1 — metrics loopback default + /debug/heap gate (commit `f97dbf7`)
+`--metrics` default `0.0.0.0:9100` → `127.0.0.1:9100`; new `--debug-endpoints` (off) gates the
+`/debug/heap` jemalloc dump (can leak in-memory data + writes a file) — 404 unless enabled. CWE-200.
+
+## H3 — coverage artifact removed (commit `4f8e6e8`)
+`tarpaulin-report.html` (10 MB, embedded the public CA key twice) removed from VCS; coverage outputs
+`.gitignore`d.
+
+## U2 — Cargo.lock + cargo audit gate (commit `c01cac3`)
+`Cargo.lock` committed (734 deps); a `Dependency Audit` CI job runs `cargo audit` (RustSec), failing
+on any NEW advisory. `.cargo/audit.toml` documents the reviewed baseline. Beyond ~19
+unmaintained/unsound INFORMATIONAL advisories in GUI (gtk-rs/glib via Tauri), i18n (unic-*), and
+build-macro transitive deps, three REAL advisories surfaced — all risk-accepted with reachability
+justifications (below), none reachable from the node's untrusted attack surface:
+
+### [LOW · dep] F2 — `rsa` Marvin timing attack
+- [CITED: RUSTSEC-2026-0195] · [CITED: CWE-208 Observable Timing Discrepancy]
+- `rsa` (`core/src/ssl.rs`) is used ONLY for offline, startup-time CA/leaf cert GENERATION and
+  PKCS#1v1.5 SIGNING — no attacker-facing RSA decryption/signing oracle whose timing is measurable
+  (TLS crypto is rustls/ring, not `rsa`) [DERIVED: `grep rsa:: → ssl.rs only`]. No upstream fix.
+  Action: bump `rsa` and drop the ignore when a fix ships.
+
+### [LOW · dep] F3 — `protobuf` uncontrolled-recursion crash
+- [CITED: RUSTSEC-2024-0437] · [CITED: CWE-674 Uncontrolled Recursion]
+- Transitive `prometheus → portfu → dg_xch_core` [DERIVED: `cargo tree -i`]. Used only to ENCODE the
+  `/metrics` exposition format; the vulnerable protobuf DECODE path is never fed untrusted input.
+  Fix (protobuf ≥3.7.2) needs a `prometheus` major bump (upstream). Action: modernize the metrics dep.
+
+### [MEDIUM · dep, not reachable] F4 — `quick-xml` quadratic-parse DoS
+- [CITED: RUSTSEC-2026-0194, base 7.5] · [CITED: CWE-1333 Inefficient Regular/Parse Complexity]
+- Transitive `pprof → inferno → full-node` [DERIVED: `cargo tree -i`]. Used only to WRITE the
+  flamegraph SVG; the vulnerable XML PARSE path is never fed untrusted input. Fix (quick-xml ≥0.41)
+  needs an `inferno`/`pprof` bump (upstream). Action: modernize the profiler dep.
+
+## U1 — owned `SExp` recursive `Drop` stack overflow (LATENT; routed to chino)
+- Class: [CITED: CWE-674 Uncontrolled Recursion] (remote-DoS shape). **Latent** — NOT reachable from
+  untrusted node input today: the block/tx path is arena-native (`SerializedProgram` → arena VM) and
+  DIVERGENCE-51 removed owned-`SExp` materialization. Rated informational-until-reachable.
+- Proof [DERIVED]: `core/tests/sexp_drop_stack_safety.rs::deep_owned_sexp_drops_without_stack_overflow`
+  builds a 500k-deep `PairBuf::Owned(Arc<SExp>)` chain and drops it on a 1 MiB stack → **SIGABRT
+  "stack overflow, aborting"** on pr-52 HEAD (verified builder-0). `#[ignore]`d as the reproduction +
+  regression guard (commits `ff56a35`, `75e547a`).
+- **Parity verdict — DIVERGENCE from chia/clvm_rs, confirmed by source AND the iriga oracle:**
+  - Source: clvm_rs represents CLVM values as `NodePtr` indices into a flat arena
+    (`Allocator { u8_vec, atom_vec, pair_vec }`); our `core/src/clvm/arena.rs` is the cited port of
+    clvm_rs 0.17.7. There is no deep owned recursive value — deserialize/tree-hash are iterative and
+    teardown is a flat `Vec` free (O(1) stack). The owned `SExp`/`PairBuf::Owned(Arc<SExp>)` is a
+    dg_xch-specific SECOND representation whose `Drop` recurses — the divergence.
+  - iriga oracle [DERIVED]: on `iriga/chia-mainnet-0` (official chia, `chia-enhanced-node`), chia's
+    `chia_rs.Program.from_bytes` deserialized the SAME valid 500k-deep structure, ran `get_tree_hash`,
+    and dropped it — all without a stack overflow ("PROBE_COMPLETE: chia handled the deep CLVM without
+    SIGABRT"); the node pod stayed `2/2 Running`. The probe ran in a throwaway subprocess, never the
+    live node process or chain state.
+- **Fix routed to chino** (CLVM-core): the naive `impl Drop for SExp` does NOT compile — `SExp`
+  carries `const NULL_SEXP`/`ONE_SEXP` used as `&'static`, and a `Drop` type cannot be const-promoted,
+  cascading into `from_bool`, `SExpIter`, and `Program::new_const` (E0509/E0515/E0716). A correct
+  iterative teardown needs a CLVM-core change (const→static + `Program` rework, or a bounded parse
+  depth matching clvm_rs) — outside a security-clean change. The `#[ignore]`d red test turns green
+  when it lands.
+
+## Fleet manifests for Grant's GitOps follow-up (NOT changed here)
+Default changes don't touch nodes that set these flags explicitly, so these keep working — but they
+now warrant follow-up:
+
+**Pass `--rpc 0.0.0.0:8555` (RPC on all interfaces).** Under the new `local` default these keep an
+authenticated posture ONLY if switched to `--rpc-tls cni` (else the RPC downgrades to loopback with a
+WARN and cross-pod RPC clients lose access). Add `--rpc-tls cni` (+ distribute the private CA) where
+network RPC is needed:
+- `applications/mke/dg-xch-node/statefulset.yaml:41`
+- `applications/mke/dg-xch-node-pg/statefulset.yaml:59`
+- `applications/mke/dg-xch-node-pg/statefulset-b.yaml:50`
+- `applications/mke/dg-xch-node-pg/statefulset-epyc.yaml:87`
+- `applications/mke/dg-xch-node-pg/statefulset-mm.yaml:46`
+
+**Pass `--metrics=0.0.0.0:9100` (metrics on all interfaces).** Unaffected by the default flip; for
+defense-in-depth pair with a pod-IP bind + NetworkPolicy (and keep `--debug-endpoints` OFF):
+- `applications/mke/dg-xch-node/statefulset.yaml:64`
+- `applications/mke/dg-xch-node-pg/statefulset.yaml:71`
+- `applications/mke/dg-xch-node-pg/statefulset-b.yaml:62`
+- `applications/mke/dg-xch-node-pg/statefulset-epyc.yaml:98`
+- `applications/mke/dg-xch-node-pg/statefulset-mm.yaml:58`
