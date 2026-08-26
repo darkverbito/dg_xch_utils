@@ -12,3 +12,9 @@ perf.data
 perf.data.old
 # macOS Finder metadata
 .DS_Store
+
+# Coverage artifacts (do not commit — regenerate locally)
+tarpaulin-report.html
+cobertura.xml
+tarpaulin/
+*.profraw
