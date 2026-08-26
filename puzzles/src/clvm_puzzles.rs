@@ -571,7 +571,6 @@ pub fn pool_state_from_extra_data(extra_data: Program) -> Result<Option<PoolStat
 }
 
 pub fn solution_to_pool_state(coin_solution: &CoinSpend) -> Result<Option<PoolState>, ClvmError> {
-    let extra_data: Program;
     if coin_solution.coin.puzzle_hash == SINGLETON_LAUNCHER_TREE_HASH {
         //Launcher spend
         let as_program = coin_solution.solution.to_program()?;
@@ -593,7 +592,7 @@ pub fn solution_to_pool_state(coin_solution: &CoinSpend) -> Result<Option<PoolSt
             // pool member
             return Ok(None);
         }
-        extra_data = inner_solution.first()?;
+        let extra_data = inner_solution.first()?;
         if extra_data.is_atom() {
             // Absorbing
             return Ok(None);
@@ -606,7 +605,7 @@ pub fn solution_to_pool_state(coin_solution: &CoinSpend) -> Result<Option<PoolSt
             // pool waitingroom
             return Ok(None);
         }
-        extra_data = rest.first()?;
+        let extra_data = rest.first()?;
         pool_state_from_extra_data(extra_data)
     } else {
         Err(ClvmError::InvalidArgCount(format!(
