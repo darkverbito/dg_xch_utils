@@ -20,6 +20,7 @@ use dg_xch_serialize::{ChiaProtocolVersion, ChiaSerialize};
 use hex::encode;
 use num_bigint::{BigInt, Sign};
 use num_traits::Zero;
+use once_cell::sync::Lazy;
 use serde::de::{SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashMap;
@@ -641,6 +642,63 @@ impl<'a> PairBuf<'a> {
         match self {
             PairBuf::Owned((_, rest)) => rest.as_ref(),
             PairBuf::Borrowed((_, rest)) => rest,
+        }
+    }
+}
+
+/// A process-wide `()` atom behind an `Arc`, used as an O(1) sentinel when emptying an owned
+/// `PairBuf` link during the iterative teardown in `impl Drop for PairBuf`. Cloning it is a
+/// refcount bump, so unwinding a spine allocates no per-node placeholder.
+#[inline]
+fn nil_arc() -> Arc<SExp<'static>> {
+    static NIL_ARC: Lazy<Arc<SExp<'static>>> = Lazy::new(|| Arc::new(NULL_SEXP));
+    (*NIL_ARC).clone()
+}
+
+/// Stack-safe teardown of an owned cons spine (security finding U1).
+///
+/// `SExp::Pair(PairBuf::Owned((Arc<SExp>, Arc<SExp>)))` forms an owned tree, and the compiler's
+/// default drop glue walks it recursively — one native stack frame per level. A deeply
+/// right-nested owned structure (e.g. a `run` result exported from the arena as a 500k-deep
+/// condition list) therefore overflows the native stack when freed (SIGABRT). clvm_rs is immune
+/// by design: results live in a flat `Allocator` and teardown is a single arena free
+/// (`clvmr::allocator`), never a deep owned tree. Our owned `SExp` is a divergence from that
+/// arena model, so this `Drop` restores the same stack-safety by unwinding the owned spine with
+/// an explicit heap worklist instead of the call stack.
+///
+/// The `Drop` lives on `PairBuf` (the field type of `SExp::Pair`), NOT on `SExp` itself: an
+/// explicit `Drop` on `SExp` would make it non-const-promotable, breaking `const NULL_SEXP`/
+/// `ONE_SEXP`, the `&'static` promotion in `SExp::from_bool` and `SExpIter`, and
+/// `Program::new_const` / `NULL_PROGRAM`. A `Drop` on a *field* type carries no such
+/// restriction, keeping the change fully contained. This is deallocation only — it changes no
+/// CLVM value, cost, tree hash, or serialization.
+///
+/// Shared ownership is preserved exactly: an `Arc` link is dismantled only when this teardown is
+/// its sole owner (`Arc::try_unwrap` succeeds). A link still referenced elsewhere is merely
+/// released — its strong count decremented — leaving the shared subtree wholly intact.
+impl<'a> Drop for PairBuf<'a> {
+    fn drop(&mut self) {
+        // Borrowed pairs own nothing; only Owned spines need unwinding.
+        let PairBuf::Owned((first, rest)) = self else {
+            return;
+        };
+        // Cannot move fields out of a `Drop` type, so replace each child in place with the nil
+        // sentinel and take ownership of the real children onto the heap worklist.
+        let mut stack: Vec<Arc<SExp<'static>>> = Vec::new();
+        stack.push(replace(first, nil_arc()));
+        stack.push(replace(rest, nil_arc()));
+        while let Some(link) = stack.pop() {
+            // Only tear apart links we solely own; a shared link is just released here — dropping
+            // the `Err(Arc)` decrements the strong count and leaves the shared subtree intact.
+            let Ok(mut node) = Arc::try_unwrap(link) else {
+                continue;
+            };
+            if let SExp::Pair(PairBuf::Owned((first, rest))) = &mut node {
+                stack.push(replace(first, nil_arc()));
+                stack.push(replace(rest, nil_arc()));
+            }
+            // `node` drops here: an Atom (trivial) or an already-emptied Pair whose children are
+            // the shared nil sentinel — a shallow, non-recursive free.
         }
     }
 }

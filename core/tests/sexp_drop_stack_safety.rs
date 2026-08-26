@@ -23,16 +23,14 @@ fn build_deep(depth: usize) -> SExp<'static> {
     node
 }
 
-// ROUTED TO chino (CLVM internals): the naive fix `impl Drop for SExp` does NOT compile — SExp
-// carries `const NULL_SEXP`/`const ONE_SEXP` used as `&'static`, and a `Drop` type cannot be
-// const-promoted, cascading into `from_bool`, `SExpIter`, and `Program::new_const`. A correct
-// iterative teardown needs a CLVM-core change (const->static + Program rework, or a bounded parse
-// depth) — out of scope for a security-clean change. `#[ignore]`d as the reproduction + regression
-// guard; remove `#[ignore]` to reproduce the SIGABRT, and it turns green once the fix lands. NOTE:
-// not currently reachable from untrusted node input (the block/tx path is arena-native; DIVERGENCE-51
-// removed owned-SExp materialization) — a LATENT footgun, not a live remote crash.
+// FIXED (chino, CLVM-core): the teardown is now iterative. The naive `impl Drop for SExp` does not
+// compile — `SExp` carries `const NULL_SEXP`/`const ONE_SEXP` used as `&'static`, and a type with an
+// explicit `Drop` impl is not const-promotable, cascading into `from_bool`, `SExpIter`, and
+// `Program::new_const`. Instead the `Drop` lives on `PairBuf` (the field type of `SExp::Pair`), which
+// leaves `SExp` const-promotable, so none of that surface changes. The `Drop` unwinds the owned
+// `Arc<SExp>` spine with an explicit heap worklist (no recursion) and only dismantles links it solely
+// owns (`Arc::try_unwrap`), leaving shared subtrees intact. See `core/src/clvm/sexp.rs`.
 #[test]
-#[ignore = "U1: reproduces the recursive-Drop stack overflow (SIGABRT); routed to chino for the CLVM-core fix"]
 fn deep_owned_sexp_drops_without_stack_overflow() {
     // 500k levels overflow any reasonable stack under a per-level recursive Drop; a bounded 1 MiB
     // worker stack makes the crash deterministic, while an iterative Drop passes comfortably.
@@ -49,4 +47,69 @@ fn deep_owned_sexp_drops_without_stack_overflow() {
         .join()
         .expect("the deep owned SExp must drop without overflowing the stack");
     assert_eq!(n, DEPTH);
+}
+
+// SHARED-OWNERSHIP CORRECTNESS: the iterative teardown must dismantle only the links it SOLELY owns
+// and stop at any `Arc` that is shared with another holder, leaving that shared subtree wholly
+// intact. This builds a deep sole-owned prefix whose tail is a small subtree held alive by an
+// independent `Arc` clone, drops the prefix (which exercises the iterative unwind), and then proves
+// the clone is still a fully-walkable, correct structure — i.e. `Arc::try_unwrap` correctly refused
+// to tear the shared tail apart.
+#[test]
+fn shared_arc_tail_survives_iterative_drop_of_sole_owned_prefix() {
+    // A small, distinctly-shaped shared tail: (1 2 3), i.e. three-deep right-nested owned pairs.
+    fn small_list() -> SExp<'static> {
+        let mut node = SExp::Atom(AtomBuf::new(Vec::new()));
+        for v in [3u8, 2, 1] {
+            node = SExp::Pair(PairBuf::Owned((
+                Arc::new(SExp::Atom(AtomBuf::new(vec![v]))),
+                Arc::new(node),
+            )));
+        }
+        node
+    }
+    // Depth of the shared tail as an independent measurement, so the assertion below is self-checking.
+    fn owned_pair_depth(mut node: &SExp<'static>) -> usize {
+        let mut d = 0;
+        while let SExp::Pair(PairBuf::Owned((_, rest))) = node {
+            d += 1;
+            node = rest.as_ref();
+        }
+        d
+    }
+
+    let shared_tail: Arc<SExp<'static>> = Arc::new(small_list());
+    let keep = shared_tail.clone(); // second, independent owner of the tail
+    assert_eq!(Arc::strong_count(&keep), 2);
+    let expected_depth = owned_pair_depth(&keep);
+    assert_eq!(expected_depth, 3);
+
+    // Build a deep sole-owned prefix that ends in the shared tail (deep enough to demand the
+    // iterative unwind, on a bounded worker stack so a recursive teardown would abort).
+    const PREFIX: usize = 200_000;
+    let handle = std::thread::Builder::new()
+        .stack_size(1024 * 1024)
+        .spawn(move || {
+            let mut node: Arc<SExp<'static>> = shared_tail; // strong_count now 2 (chain + keep)
+            for _ in 0..PREFIX {
+                node = Arc::new(SExp::Pair(PairBuf::Owned((
+                    Arc::new(SExp::Atom(AtomBuf::new(Vec::new()))),
+                    node,
+                ))));
+            }
+            // Move the prefix out of its Arc (sole owner) and drop it: the iterative teardown walks
+            // down the prefix, reaches the shared tail (strong_count 2), and must NOT dismantle it.
+            let prefix = Arc::try_unwrap(node).unwrap_or_else(|a| (*a).clone());
+            drop(prefix);
+        })
+        .expect("spawn worker");
+    handle
+        .join()
+        .expect("dropping the sole-owned prefix must not overflow the stack");
+
+    // The shared tail is now solely owned by `keep` and must be byte-identical to a fresh build.
+    assert_eq!(Arc::strong_count(&keep), 1);
+    assert_eq!(owned_pair_depth(&keep), expected_depth);
+    assert_eq!(*keep, small_list());
+    assert_eq!(keep.tree_hash(), small_list().tree_hash());
 }

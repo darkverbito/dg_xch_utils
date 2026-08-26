@@ -63,9 +63,11 @@ impl ClvmRuntime {
     /// [`Self::run`] exports the result; that is unsafe for an adversarial block generator
     /// whose output the caller streams. `export` (`Arena::export`) deep-copies each atom by
     /// reference — a `concat`/`substr` ladder that emits one shared ~268 MB integer `num`
-    /// times is copied `num` times (a 280,000-arg vector OOM-killed a 24 GiB pod) — and the
-    /// exported owned `SExp` is a `PairBuf::Owned(Arc<..>)` spine whose `Drop` recurses, so a
-    /// 600,000-deep condition list overflows the native stack. clvmr never materializes the
+    /// times is copied `num` times (a 280,000-arg vector OOM-killed a 24 GiB pod). The exported
+    /// owned `SExp` is a `PairBuf::Owned(Arc<..>)` spine; its `Drop` is iterative (finding U1,
+    /// `impl Drop for PairBuf` in `sexp.rs`), so freeing a 600,000-deep condition list no longer
+    /// overflows the native stack, but the export copy cost above still applies. clvmr never
+    /// materializes the
     /// result: `run_program` leaves it in the flat `Allocator` and `parse_spends` walks
     /// `NodePtr`s, charging condition cost incrementally and bailing at the first duplicate /
     /// `MAX_BLOCK_COST_CLVM` (chia_rs chia-consensus 0.42.1 `conditions.rs::parse_conditions`
