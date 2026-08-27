@@ -5086,7 +5086,23 @@ async fn follow_fill_claimed<S: BlockStore + CoinStore + Send + Sync + 'static>(
     if in_near_tip_band(local, claimed, has_peak) {
         return None; // the event-driven tip_follower owns the near-tip band
     }
-    Some(claimed)
+    // Clamp the fetch frontier to what our fetch sources (outbound peers) actually advertise. The
+    // weight-heaviest target can ride an inbound/unfetchable claim past the servable tip; requesting
+    // past it is a beyond-tip range every peer rejects, spun every tick (the producer's `from >
+    // claimed` guard then idles at the tip while the validator drains the resident backlog). No
+    // outbound claim yet -> leave it unclamped, as before.
+    Some(
+        node.peak_book
+            .outbound_tip()
+            .map_or(claimed, |tip| claimed.min(tip)),
+    )
+}
+
+// A frozen fetch frontier is a genuine reservation wedge only when fetchable work remains BELOW the
+// servable tip (windows nothing is requesting). Frozen AT the tip (`from == claimed`, `claimed`
+// already clamped to the servable outbound tip) is the benign drain-the-backlog state, not a wedge.
+fn frozen_frontier_is_wedge(from: u32, claimed: u32) -> bool {
+    from < claimed
 }
 
 /// Component 2 — the detached fetch producer (phase 3). Owns the readahead engine and the peer
@@ -5145,12 +5161,16 @@ async fn fetch_scheduler<S: BlockStore + CoinStore + Send + Sync + 'static>(
             last_gen = dispatch_gen;
         }
         let from = queue.next_fetch_height();
-        // Sync-stall diagnostics: a fetch frontier frozen across ticks WHILE work remains (from <= claimed)
-        // is the decoupled-prefetch wedge. Name the full reservation-vs-confirm state so it self-
-        // diagnoses which cursor is stuck — the frontier, the generation, or the readahead windows.
+        // Sync-stall diagnostics. A frozen fetch frontier is only a real wedge when fetchable work
+        // remains BELOW the servable tip (`from < claimed`): windows exist that nothing is
+        // requesting. A frontier frozen AT the tip (`from == claimed`, `claimed` already clamped to
+        // the servable outbound tip) is benign — nothing higher is fetchable and the validator is
+        // draining the resident backlog — so it must not raise the scary WARN.
         if from == last_from && from <= claimed {
             frozen_from_ticks += 1;
-            if frozen_from_ticks == 3 || frozen_from_ticks.is_multiple_of(16) {
+            if frozen_frontier_is_wedge(from, claimed)
+                && (frozen_from_ticks == 3 || frozen_from_ticks.is_multiple_of(16))
+            {
                 warn!(
                     from,
                     claimed,
@@ -5160,7 +5180,14 @@ async fn fetch_scheduler<S: BlockStore + CoinStore + Send + Sync + 'static>(
                     resident_windows = queue.len(),
                     readahead_inflight =
                         node.sync_metrics.readahead_inflight.load(Ordering::Relaxed),
-                    "fetch frontier frozen while work remains — decoupled prefetch reservation wedge"
+                    "fetch frontier frozen below the tip while work remains — decoupled prefetch reservation wedge"
+                );
+            } else if !frozen_frontier_is_wedge(from, claimed) && frozen_from_ticks == 3 {
+                debug!(
+                    from,
+                    claimed,
+                    resident_windows = queue.len(),
+                    "fetch frontier at the servable tip; validator draining resident backlog"
                 );
             }
         } else {
@@ -8493,6 +8520,95 @@ mod tests {
             node.sync_target().await,
             None,
             "a quarantined peak must not be re-selected while quarantined"
+        );
+    }
+
+    // Red-first (beyond-tip reservation wedge, idxphase pg leg): the FOLLOW producer must clamp its
+    // fetch frontier to the SERVABLE outbound tip, not to the weight-heaviest claim. An inbound peer
+    // over-announcing past the real tip becomes the weight-heaviest target, but no peer we fetch from
+    // serves that range — driving the producer to it is a beyond-tip rejection spin (`claimed=9208323
+    // > tip=9208311`) that also emits a false "reservation wedge" WARN. Before the clamp,
+    // follow_fill_claimed returned the over-claim height; after, it clamps to the outbound tip.
+    #[tokio::test]
+    async fn follow_fill_clamps_the_frontier_to_the_servable_outbound_tip() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let db = std::env::temp_dir().join(format!(
+            "fn_clampfrontier_{}_{nanos}.sqlite",
+            std::process::id()
+        ));
+        let config = Config {
+            listen: "127.0.0.1:0".parse().unwrap(),
+            rpc: "127.0.0.1:0".parse().unwrap(),
+            introducer: None,
+            manual_peers: Vec::new(),
+            advertise: None,
+            backend: Backend::Sqlite(db),
+            network_id: "mainnet".to_string(),
+            metrics: None,
+            capture_dir: None,
+            // genesis-sync so the FOLLOW band owns the fill (no weight-proof long-sync detour).
+            genesis_sync: true,
+            sync_from: 0,
+            uncompact: false,
+            prefetch_memory_mb: None,
+            prefetch_max_inflight: None,
+            trusted_peers: Vec::new(),
+            trusted_cidrs: Vec::new(),
+            rpc_tls: crate::config::RpcTlsMode::Local,
+            debug_endpoints: false,
+        };
+        let node = Arc::new(Node::boot(config).await.expect("boot"));
+
+        // An INBOUND peer over-claims 12 past the real tip with the heaviest weight -> the
+        // weight-heaviest sync target, but a peer we never fetch from.
+        node.peak_book.record(
+            Bytes32::const_new([1; 32]),
+            true,
+            PeakClaim {
+                header_hash: Bytes32::const_new([0xEE; 32]),
+                height: 9_208_323,
+                weight: u128::MAX,
+            },
+        );
+        // The OUTBOUND peer we actually fetch from tops out at the real tip. Keep the guard alive so
+        // the claim is not retracted before the assertion.
+        let out_guard = node.peak_book.outbound_guard();
+        node.peak_book.record(
+            out_guard.key(),
+            false,
+            PeakClaim {
+                header_hash: Bytes32::const_new([0xAA; 32]),
+                height: 9_208_311,
+                weight: 9_000,
+            },
+        );
+
+        assert_eq!(
+            node.sync_target().await.map(|t| t.height),
+            Some(9_208_323),
+            "the inbound over-claim is the weight-heaviest target",
+        );
+        assert_eq!(
+            follow_fill_claimed(&node).await,
+            Some(9_208_311),
+            "the producer clamps the fetch frontier to the servable outbound tip, not the over-claim",
+        );
+    }
+
+    // The wedge detector distinguishes the benign at-tip drain from the real pathology: frozen BELOW
+    // the servable tip (fetchable work nothing is requesting) is a wedge; frozen AT the tip is not.
+    #[test]
+    fn frozen_frontier_is_wedge_only_below_the_tip() {
+        assert!(
+            frozen_frontier_is_wedge(9_169_638, 9_208_311),
+            "work below the tip left unrequested is a real wedge",
+        );
+        assert!(
+            !frozen_frontier_is_wedge(9_208_311, 9_208_311),
+            "frozen AT the servable tip is the benign drain-the-backlog state, not a wedge",
         );
     }
 

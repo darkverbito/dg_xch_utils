@@ -212,6 +212,24 @@ impl PeakBook {
             .copied()
     }
 
+    /// The highest peak height claimed by an OUTBOUND peer — the peers the fetch producer actually
+    /// requests blocks from. The weight-heaviest target ([`PeakBook::heaviest`]) can ride an INBOUND
+    /// claim (a peer that dialed US, which we never fetch from) past this servable tip; the producer
+    /// clamps its fetch frontier here so it never requests a range no fetch source can serve — a
+    /// beyond-tip range every peer rejects, spun every tick. `None` when no live outbound peer has
+    /// announced a peak yet (startup), where the caller leaves the frontier unclamped.
+    #[must_use]
+    pub fn outbound_tip(&self) -> Option<u32> {
+        let g = self.lock();
+        let now = Instant::now();
+        g.claims
+            .values()
+            .filter(|e| !e.inbound && now.duration_since(e.recorded_at) <= STALE_CLAIM_TTL)
+            .filter(|e| !g.bad.iter().any(|(h, _)| *h == e.claim.header_hash))
+            .map(|e| e.claim.height)
+            .max()
+    }
+
     // Recompute + publish the heaviest claim; report whether it changed.
     fn republish(&self, g: &mut Inner) -> bool {
         let heaviest = Self::heaviest_of(g, Instant::now());
@@ -381,6 +399,48 @@ mod tests {
             b.record(Bytes32::const_new(k), true, claim([0x11; 32], 1, 1));
         }
         assert_eq!(b.lock().claims.len(), MAX_TRACKED_CLAIMS);
+    }
+
+    // outbound_tip is the SERVABLE frontier: the highest OUTBOUND claim (the peers we fetch from),
+    // NOT the weight-heaviest claim. An inbound peer over-announcing 12 past the real tip becomes the
+    // weight-heaviest target but must not lift the fetch frontier past what our fetch sources serve.
+    #[test]
+    fn outbound_tip_ignores_a_heavier_inbound_over_claim() {
+        let (b, _) = book();
+        // Inbound peer over-claims beyond the real tip with a heavier weight.
+        b.record(
+            Bytes32::const_new([1; 32]),
+            true,
+            claim([0xEE; 32], 9_208_323, u128::MAX),
+        );
+        // The outbound peers we actually fetch from top out at the real tip.
+        let out = b.outbound_guard();
+        b.record(out.key(), false, claim([0xAA; 32], 9_208_311, 9_000));
+        assert_eq!(
+            b.heaviest().map(|c| c.height),
+            Some(9_208_323),
+            "the inbound over-claim is still the weight-heaviest target"
+        );
+        assert_eq!(
+            b.outbound_tip(),
+            Some(9_208_311),
+            "but the servable outbound tip is the real tip"
+        );
+    }
+
+    // No outbound claim yet (startup) -> None, so the caller leaves the frontier unclamped. A stale
+    // outbound claim (past the TTL) is not servable either.
+    #[test]
+    fn outbound_tip_is_none_without_a_live_outbound_claim() {
+        let (b, _) = book();
+        assert_eq!(b.outbound_tip(), None);
+        // An inbound-only book still yields no servable outbound frontier.
+        b.record(
+            Bytes32::const_new([1; 32]),
+            true,
+            claim([0xEE; 32], 100, 1_000),
+        );
+        assert_eq!(b.outbound_tip(), None);
     }
 
     // retract_hash drops EVERY claimant of a never-served tip (the all-peers weight-proof-fetch
