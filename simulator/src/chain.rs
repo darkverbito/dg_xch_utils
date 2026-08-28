@@ -21,6 +21,10 @@ use dg_xch_core::consensus::block_generator::conditions_from_spend_bundle;
 use dg_xch_core::consensus::block_rewards::{calculate_base_farmer_reward, calculate_pool_reward};
 use dg_xch_core::consensus::constants::ConsensusConstants;
 use dg_xch_core::consensus::deficit::calculate_deficit;
+use dg_xch_core::consensus::difficulty_adjustment::{
+    can_finish_sub_and_full_epoch, get_next_sub_slot_iters_and_difficulty,
+};
+use dg_xch_core::consensus::make_sub_epoch_summary::make_sub_epoch_summary;
 use dg_xch_core::consensus::pot_iterations::{
     calculate_ip_iters, calculate_iterations_quality_for_proof, calculate_sp_interval_iters,
     calculate_sp_iters, is_overflow_block,
@@ -179,6 +183,13 @@ impl<S: BlockStore + CoinStore + Sync> ChainBuilder<S> {
             .and_then(|v| v.last())
             .copied()
             .ok_or_else(|| SimError::Invariant("no finished challenge slot".to_string()))
+    }
+
+    /// The sub-slot iterations and difficulty the block after `prev` runs at. The validator derives
+    /// the same pair for that position, so an epoch turn has to carry forward on both sides.
+    fn retarget(&self, prev: &BlockRecord, new_slot: bool) -> Result<(u64, u64), SimError> {
+        get_next_sub_slot_iters_and_difficulty(&self.constants, new_slot, Some(prev), &self.records)
+            .map_err(SimError::Io)
     }
 
     /// The record at `height` on the current tip's chain.
@@ -442,6 +453,38 @@ impl<S: BlockStore + CoinStore + Sync> ChainBuilder<S> {
 
         // The deficit resets to the maximum after a challenge block (deficit 0), else carries over.
         let deficit = if prev.deficit == 0 { min } else { prev.deficit };
+
+        // The sub-epoch summary the next block includes, when this crossing is the one that finishes
+        // the sub-epoch. Only the first closed slot may carry it, and it carries the new epoch values
+        // exactly when the epoch turns too.
+        let (can_finish_se, can_finish_epoch) = can_finish_sub_and_full_epoch(
+            c,
+            &self.records,
+            prev.height,
+            prev.prev_hash,
+            prev.deficit,
+            prev.sub_epoch_summary_included.is_some(),
+        )
+        .map_err(SimError::Io)?;
+        let (new_ssi, new_difficulty) = self.retarget(prev, true)?;
+        let ses_hash = if can_finish_se {
+            let prev_prev = self.records.get(&prev.prev_hash).ok_or_else(|| {
+                SimError::Invariant("sub-epoch summary walk missing ancestor".to_string())
+            })?;
+            let ses = make_sub_epoch_summary(
+                c,
+                &self.records,
+                prev.height + 1,
+                prev_prev,
+                can_finish_epoch.then_some(new_difficulty),
+                can_finish_epoch.then_some(new_ssi),
+            )
+            .map_err(SimError::Io)?;
+            Some(ses.hash().map_err(SimError::Io)?)
+        } else {
+            None
+        };
+
         let cc = ChallengeChainSubSlot {
             challenge_chain_end_of_slot_vdf: cc_eos_vdf,
             infused_challenge_chain_sub_slot_hash: if deficit == min {
@@ -449,9 +492,9 @@ impl<S: BlockStore + CoinStore + Sync> ChainBuilder<S> {
             } else {
                 None
             },
-            subepoch_summary_hash: None,
-            new_sub_slot_iters: None,
-            new_difficulty: None,
+            subepoch_summary_hash: ses_hash,
+            new_sub_slot_iters: can_finish_epoch.then_some(new_ssi),
+            new_difficulty: can_finish_epoch.then_some(new_difficulty),
         };
         let cc_hash = cc.hash().map_err(SimError::Io)?;
         let rc = RewardChainSubSlot {
@@ -484,8 +527,12 @@ impl<S: BlockStore + CoinStore + Sync> ChainBuilder<S> {
             .tip_record()
             .cloned()
             .ok_or_else(|| SimError::Invariant("farm genesis before farm_next".to_string()))?;
+        // An epoch turn changes the difficulty and the sub-slot iterations; the block runs at the
+        // retargeted values or the engine derives a different record than the one farmed.
+        let (ssi, difficulty) = self.retarget(&prev, cross.is_some())?;
+        self.sub_slot_iters = ssi;
+        self.difficulty = difficulty;
         let c = &self.constants;
-        let ssi = self.sub_slot_iters;
         // A within-slot successor keeps the sub-slot challenge and advances from the tip's own
         // signage point; the first block of a new sub-slot takes the new challenge, restarts its
         // base at the slot boundary, and scans from signage point zero.
@@ -1035,6 +1082,170 @@ mod tests {
         assert_eq!(
             height, 9,
             "expected four crossings each followed by a successor"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Sub-epoch boundaries at 16 and 32, with the epoch turn out at 64. min_blocks_per_challenge_block
+    // is 16, so the deficit reaches zero at heights 15 and 31 — the two positions a sub-epoch can
+    // finish once the next block starts a sub-slot.
+    fn sub_epoch_constants() -> ConsensusConstants {
+        apply_overrides(
+            constants(),
+            &ConsensusOverrides {
+                sub_epoch_blocks: Some(16),
+                epoch_blocks: Some(64),
+                max_sub_slot_blocks: Some(8),
+                ..Default::default()
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn a_chain_farms_through_two_sub_epoch_boundaries() {
+        use dg_xch_stores::traits::BlockStore;
+        let dir = std::env::temp_dir().join("dgxch_sim_subepoch");
+        let _ = std::fs::remove_dir_all(&dir);
+        let c = sub_epoch_constants();
+        let plots = PlotSet::setup(&dir, 23, 12, K, STRENGTH, false).expect("plots");
+        let mut chain = ChainBuilder::new(store().await, c, plots, Bytes32::from([0xAB; 32]));
+        chain.farm_genesis().await.expect("genesis");
+
+        // Cross a sub-slot every fourth block, so a crossing lands on each height the deficit has
+        // run down to zero — the summary positions.
+        let target = c.sub_epoch_blocks * 2 + 4;
+        for next in 1..=target {
+            let outcome = if next.is_multiple_of(4) {
+                chain.farm_next_slot().await
+            } else {
+                match chain.farm_next().await {
+                    Err(SimError::SubSlotExhausted) => chain.farm_next_slot().await,
+                    other => other,
+                }
+            }
+            .unwrap_or_else(|e| panic!("block {next}: {e}"));
+            let height = match outcome {
+                AddBlockOutcome::NewPeak { height } | AddBlockOutcome::Extended { height } => {
+                    height
+                }
+                other => panic!("block {next} was not confirmed onto the peak: {other:?}"),
+            };
+            assert_eq!(height, next, "block confirmed at the wrong height");
+        }
+
+        let mut summaries = Vec::new();
+        for height in 0..=target {
+            let record = chain
+                .engine()
+                .store()
+                .get_block_record_by_height(height)
+                .await
+                .expect("store")
+                .expect("record");
+            if record.sub_epoch_summary_included.is_some() {
+                summaries.push(height);
+            }
+        }
+        assert_eq!(
+            summaries,
+            vec![c.sub_epoch_blocks, c.sub_epoch_blocks * 2],
+            "the chain did not include a summary at each sub-epoch boundary"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The epoch turn at height 64. sub_slot_time_target and slot_blocks_target are set against the
+    // sim's own cadence — a block every 20 seconds, four to a sub-slot — so the retarget lands at a
+    // workable multiple of the starting values instead of collapsing the sub-slot.
+    fn epoch_constants() -> ConsensusConstants {
+        apply_overrides(
+            sub_epoch_constants(),
+            &ConsensusOverrides {
+                sub_slot_time_target: Some(num_bigint::BigInt::from(120)),
+                slot_blocks_target: Some(4),
+                ..Default::default()
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn an_epoch_turn_retargets_the_difficulty_and_sub_slot_iters() {
+        use dg_xch_stores::traits::BlockStore;
+        let dir = std::env::temp_dir().join("dgxch_sim_epoch");
+        let _ = std::fs::remove_dir_all(&dir);
+        let c = epoch_constants();
+        let plots = PlotSet::setup(&dir, 29, 12, K, STRENGTH, false).expect("plots");
+        let mut chain = ChainBuilder::new(store().await, c, plots, Bytes32::from([0xAB; 32]));
+        chain.farm_genesis().await.expect("genesis");
+
+        // The epoch retarget reads timestamps and weights off transaction blocks, so the chain has
+        // to carry them: every other block within a sub-slot is a transaction block.
+        let target = c.epoch_blocks + 4;
+        for next in 1..=target {
+            let outcome = if next.is_multiple_of(4) {
+                chain.farm_next_slot().await
+            } else if next.is_multiple_of(2) {
+                chain.farm_next_tx().await
+            } else {
+                chain.farm_next().await
+            }
+            .unwrap_or_else(|e| panic!("block {next}: {e}"));
+            let height = match outcome {
+                AddBlockOutcome::NewPeak { height } | AddBlockOutcome::Extended { height } => {
+                    height
+                }
+                other => panic!("block {next} was not confirmed onto the peak: {other:?}"),
+            };
+            assert_eq!(height, next, "block confirmed at the wrong height");
+        }
+
+        // The summary at the epoch boundary carries the new epoch values, and the chain runs at them
+        // afterwards.
+        let turn = chain
+            .engine()
+            .store()
+            .get_block_record_by_height(c.epoch_blocks)
+            .await
+            .expect("store")
+            .expect("epoch record");
+        let ses = turn
+            .sub_epoch_summary_included
+            .expect("the epoch boundary block includes a sub-epoch summary");
+        assert_eq!(ses.new_sub_slot_iters, Some(turn.sub_slot_iters));
+        assert_ne!(
+            turn.sub_slot_iters, c.sub_slot_iters_starting,
+            "the epoch turn did not retarget the sub-slot iterations"
+        );
+        let new_difficulty = ses
+            .new_difficulty
+            .expect("the epoch summary carries a new difficulty");
+        assert_ne!(
+            new_difficulty, c.difficulty_starting,
+            "the epoch turn did not retarget the difficulty"
+        );
+
+        let tip = chain
+            .engine()
+            .store()
+            .get_block_record_by_height(target)
+            .await
+            .expect("store")
+            .expect("tip record");
+        assert_eq!(
+            tip.sub_slot_iters, turn.sub_slot_iters,
+            "the new sub-slot iterations did not carry forward"
+        );
+        let prev = chain
+            .engine()
+            .store()
+            .get_block_record_by_height(target - 1)
+            .await
+            .expect("store")
+            .expect("record below the tip");
+        assert_eq!(
+            tip.weight - prev.weight,
+            u128::from(new_difficulty),
+            "the new difficulty did not carry forward"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
