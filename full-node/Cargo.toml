@@ -15,18 +15,9 @@ path = "src/main.rs"
 # Leak measurement/regression tool — fetches a real generator from a Postgres node and loops
 # the CLVM parse/execute path while reading jemalloc `allocated`. Gated on `postgres` so the mmap
 # image build (FEATURES=mmap) skips it instead of failing on the PostgresStore import.
-[[bin]]
-name = "leak_probe"
-path = "src/bin/leak_probe.rs"
-required-features = ["postgres"]
-
 # Prerequisite-validation harness (synthetic timelord + farmer peers): connects to a running
 # node p2p WebSocket, captures inbound frames, and asserts the node gossips NewPeakTimelord and
 # NewSignagePoint. Operational probe; no store backend, so it builds in every profile.
-[[bin]]
-name = "validate_node_ws"
-path = "src/bin/validate_node_ws.rs"
-
 [lib]
 name = "full_node"
 path = "src/lib.rs"
