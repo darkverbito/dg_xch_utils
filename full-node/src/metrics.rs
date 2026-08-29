@@ -1553,7 +1553,7 @@ mod profiling {
 mod tests {
     use super::{
         BOOT_GRACE_SECS, CONFIRM_MAX_SECS, HealthState, MetricsSnapshot, STALL_SECS, StoreSnapshot,
-        jemalloc_prof_dump, render_metrics,
+        render_metrics,
     };
     use dg_xch_stores::HistogramSnapshot;
 

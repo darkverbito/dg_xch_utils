@@ -305,7 +305,7 @@ where
 /// A skip past the buffer end is tolerated: the outer full-consumption check then reads an empty
 /// remainder, so a message whose CLAIMED count overstates the bytes actually present is accepted
 /// with the truncated head once the claim is past the limit. The cursor is clamped to the buffer
-/// end so [`ChiaSerialize::from_bytes_full`]'s consumed check cannot underflow; trailing garbage
+/// end so [`ChiaSerialize::from_bytes_exact`]'s consumed check cannot underflow; trailing garbage
 /// after a skip that lands INSIDE the buffer is still rejected there.
 ///
 /// The memory half of the same bound: this decoder, like `Vec<T>::from_bytes`, never

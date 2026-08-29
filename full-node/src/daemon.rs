@@ -8488,6 +8488,8 @@ mod tests {
             std::process::id()
         ));
         let config = Config {
+            target_outbound: None,
+            target_peer_count: None,
             listen: "127.0.0.1:0".parse().unwrap(),
             rpc: "127.0.0.1:0".parse().unwrap(),
             introducer: None,
@@ -9730,6 +9732,8 @@ mod tests {
         let node = Arc::new(
             Node::boot_with_store(
                 Config {
+                    target_outbound: None,
+                    target_peer_count: None,
                     listen: "127.0.0.1:0".parse().unwrap(),
                     rpc: "127.0.0.1:0".parse().unwrap(),
                     introducer: None,
