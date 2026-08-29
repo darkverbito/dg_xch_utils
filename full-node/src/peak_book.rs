@@ -1,23 +1,16 @@
-//! Per-peer peak-claim book — the chia `sync_store.py` analog.
+//! Per-peer peak-claim book. Tracks every peer's announced peak per connection, selects the
+//! long-sync target as the HEAVIEST collected claim (weight, not height, is the fork-choice
+//! ordering key), retracts a peer's claim when its connection dies, and quarantines a peak hash
+//! whose weight proof failed so it is never re-selected. The daemon's `sync_target` layers the
+//! not-interested-in-lighter-peaks gate on top.
 //!
-//! chia tracks every peer's announced peak per connection (`sync_store.peer_to_peak`, written by
-//! `full_node.py::new_peak` via `peer_has_block`), selects the long-sync target as the HEAVIEST
-//! collected claim (`sync_store.get_heaviest_peak` — weight, not height, is the fork-choice ordering
-//! key), retracts a peer's claim when its connection dies (`full_node.py::on_disconnect` →
-//! `sync_store.peer_disconnected`), and quarantines a peak hash whose weight proof failed so it is
-//! never re-selected (`full_node.bad_peak_cache`, `full_node.py::in_bad_peak_cache` /
-//! `add_to_bad_peak_cache`). This module is those four mechanisms in one bounded structure; the
-//! daemon's `sync_target` layers chia's "not interested in less heavy peaks" gate
-//! (`full_node.py::new_peak` weight drop + `request_validate_wp`'s already-caught-up refusal) on top.
-//!
-//! Bounds: claims are one entry per live connection, hard-capped at [`MAX_TRACKED_CLAIMS`] (chia caps
-//! `peak_to_peer` at 256); the quarantine cache is capped at [`BAD_PEAK_CACHE_SIZE`] evicting the
-//! lowest height (chia `bad_peak_cache_size: 100`, min-height eviction). Claims additionally expire
-//! after [`STALE_CLAIM_TTL`] without a re-announcement — a liveness backstop chia gets from its
-//! explicit disconnect callback: our outbound retraction rides the per-connection handler map's
-//! `Drop` ([`ClaimGuard`]), whose timing follows the last `Arc` release rather than the socket close,
-//! so a claim nobody refreshes must eventually stop steering the sync band on its own. An honest
-//! peer re-announces on every network peak (~18.75 s mainnet cadence), so live claims never expire.
+//! Bounds: claims are one entry per live connection, hard-capped at [`MAX_TRACKED_CLAIMS`]; the
+//! quarantine cache is capped at [`BAD_PEAK_CACHE_SIZE`] evicting the lowest height. Claims
+//! additionally expire after [`STALE_CLAIM_TTL`] without a re-announcement — a liveness backstop:
+//! our outbound retraction rides the per-connection handler map's `Drop` ([`ClaimGuard`]), whose
+//! timing follows the last `Arc` release rather than the socket close, so a claim nobody
+//! refreshes must eventually stop steering the sync band on its own. An honest peer re-announces
+//! on every network peak (~18.75 s mainnet cadence), so live claims never expire.
 
 use dg_xch_core::blockchain::sized_bytes::Bytes32;
 use std::collections::HashMap;
@@ -25,14 +18,14 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// chia `sync_store.peak_to_peer` cap ("256  # nice power of two").
+/// Cap on tracked claims.
 pub const MAX_TRACKED_CLAIMS: usize = 256;
-/// chia `bad_peak_cache_size` config default.
+/// Cap on the quarantine cache.
 pub const BAD_PEAK_CACHE_SIZE: usize = 100;
 /// Claim-liveness backstop: a claim not re-announced within this window stops being selectable.
 pub const STALE_CLAIM_TTL: Duration = Duration::from_secs(300);
 
-/// One peer's announced peak — chia `sync_store.Peak` (`header_hash`, `height`, `weight`).
+/// One peer's announced peak (`header_hash`, `height`, `weight`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct PeakClaim {
     pub header_hash: Bytes32,
@@ -51,7 +44,7 @@ struct Entry {
 
 struct Inner {
     claims: HashMap<Bytes32, Entry>,
-    /// Quarantined peak hashes with the height they claimed — chia `bad_peak_cache`.
+    /// Quarantined peak hashes with the height they claimed.
     bad: Vec<(Bytes32, u32)>,
     /// The last published heaviest claim, for change detection (the tip-follower wake signal).
     published: Option<PeakClaim>,
@@ -87,9 +80,9 @@ impl PeakBook {
     }
 
     /// Mint the claim key + RAII retraction for one OUTBOUND connection. The outbound dispatch path
-    /// hands every connection our own cert hash as the peer id (the dial's `peer_id` is derived from
-    /// the client cert), so per-connection identity must be minted here instead; the guard's `Drop`
-    /// is the `sync_store.peer_disconnected` retraction, fired when the connection's handler map goes.
+    /// hands every connection our own cert hash as the peer id (the dial's `peer_id` is derived
+    /// from the client cert), so per-connection identity must be minted here instead; the guard's
+    /// `Drop` is the disconnect retraction, fired when the connection's handler map goes.
     #[must_use]
     pub fn outbound_guard(self: &Arc<Self>) -> ClaimGuard {
         let n = self.next_outbound_key.fetch_add(1, Ordering::Relaxed);
@@ -103,15 +96,15 @@ impl PeakBook {
         }
     }
 
-    /// Record `key`'s announced peak, replacing its previous claim — chia
-    /// `sync_store.peer_has_block(new_peak=True)`: one claim per peer, newest announcement wins
-    /// (which is also how an honest peer WITHDRAWS an over-claim: its next announcement replaces it).
-    /// Returns `true` when the published heaviest claim changed (the tip-follower wake condition).
+    /// Record `key`'s announced peak, replacing its previous claim: one claim per peer, newest
+    /// announcement wins (which is also how an honest peer WITHDRAWS an over-claim: its next
+    /// announcement replaces it). Returns `true` when the published heaviest claim changed (the
+    /// tip-follower wake condition).
     pub fn record(&self, key: Bytes32, inbound: bool, claim: PeakClaim) -> bool {
         let mut g = self.lock();
         let now = Instant::now();
         if g.claims.len() >= MAX_TRACKED_CLAIMS && !g.claims.contains_key(&key) {
-            // At the cap, evict the stalest entry (chia pops the oldest `peak_to_peer` entry).
+            // At the cap, evict the stalest entry.
             if let Some(oldest) = g
                 .claims
                 .iter()
@@ -132,7 +125,7 @@ impl PeakBook {
         self.republish(&mut g)
     }
 
-    /// Retract `key`'s claim — chia `sync_store.peer_disconnected`.
+    /// Retract `key`'s claim (the disconnect path).
     pub fn retract(&self, key: &Bytes32) {
         let mut g = self.lock();
         if g.claims.remove(key).is_some() {
@@ -142,8 +135,7 @@ impl PeakBook {
 
     /// Retract every claim on `header_hash`, whoever made it. Driven when no peer will actually
     /// serve the claimed tip (the weight-proof fetch failed from every peer): an honest claimant
-    /// re-announces within a block cadence, a phantom claim stays gone — the soft analog of chia
-    /// closing the peer that failed to serve the proof (`request_validate_wp` → `peer.close`).
+    /// re-announces within a block cadence, a phantom claim stays gone.
     pub fn retract_hash(&self, header_hash: &Bytes32) {
         let mut g = self.lock();
         let before = g.claims.len();
@@ -153,9 +145,9 @@ impl PeakBook {
         }
     }
 
-    /// Per-tick reconcile: drop inbound claims whose peer left the live inbound map (chia
-    /// `on_disconnect` → `peer_disconnected`) and every claim past [`STALE_CLAIM_TTL`], then
-    /// republish so a retraction rolls the claimed gauge back within one driver tick.
+    /// Per-tick reconcile: drop inbound claims whose peer left the live inbound map and every
+    /// claim past [`STALE_CLAIM_TTL`], then republish so a retraction rolls the claimed gauge
+    /// back within one driver tick.
     pub fn reconcile(&self, live_inbound: &std::collections::HashSet<Bytes32>) {
         let mut g = self.lock();
         let now = Instant::now();
@@ -166,15 +158,15 @@ impl PeakBook {
         self.republish(&mut g);
     }
 
-    /// Quarantine a peak hash whose weight proof failed to attest it — chia `add_to_bad_peak_cache`.
-    /// A quarantined hash is never selectable again (until evicted by the cache bound), so a
-    /// poisoned peak cannot be re-selected every tick.
+    /// Quarantine a peak hash whose weight proof failed to attest it. A quarantined hash is never
+    /// selectable again (until evicted by the cache bound), so a poisoned peak cannot be
+    /// re-selected every tick.
     pub fn quarantine(&self, header_hash: Bytes32, height: u32) {
         let mut g = self.lock();
         if !g.bad.iter().any(|(h, _)| *h == header_hash) {
             g.bad.push((header_hash, height));
             if g.bad.len() > BAD_PEAK_CACHE_SIZE {
-                // chia evicts the minimum-height entry when over the cap.
+                // Evict the minimum-height entry when over the cap.
                 if let Some(min_idx) = g
                     .bad
                     .iter()
@@ -194,8 +186,8 @@ impl PeakBook {
         self.lock().bad.iter().any(|(h, _)| h == header_hash)
     }
 
-    /// The heaviest selectable claim — chia `sync_store.get_heaviest_peak`, minus quarantined
-    /// hashes and stale entries. Ties break to the taller claim for determinism.
+    /// The heaviest selectable claim, minus quarantined hashes and stale entries. Ties break to
+    /// the taller claim for determinism.
     #[must_use]
     pub fn heaviest(&self) -> Option<PeakClaim> {
         let g = self.lock();
@@ -223,8 +215,8 @@ impl PeakBook {
     }
 }
 
-/// RAII retraction for one outbound connection's claim: dropped with the connection's handler map,
-/// it retracts the claim exactly as chia's `peer_disconnected` does.
+/// RAII retraction for one outbound connection's claim: dropped with the connection's handler
+/// map, it retracts the claim.
 pub struct ClaimGuard {
     book: Arc<PeakBook>,
     key: Bytes32,
@@ -260,7 +252,7 @@ mod tests {
         (Arc::new(PeakBook::new(published.clone())), published)
     }
 
-    // chia sync_store.get_heaviest_peak: weight orders the target; height only breaks ties.
+    // Weight orders the target; height only breaks ties.
     #[test]
     fn heaviest_is_by_weight_not_height() {
         let (b, published) = book();
@@ -278,7 +270,7 @@ mod tests {
         assert_eq!(published.load(Ordering::Relaxed), 100);
     }
 
-    // chia sync_store.peer_has_block(new_peak=True): a peer's newest announcement REPLACES its claim
+    // A peer's newest announcement REPLACES its claim
     // — the withdrawal path for an over-claim.
     #[test]
     fn a_peers_new_announcement_replaces_its_claim() {
@@ -290,7 +282,7 @@ mod tests {
         assert_eq!(published.load(Ordering::Relaxed), 100);
     }
 
-    // chia sync_store.peer_disconnected: retraction rolls the published claim BACK (the fetch_max
+    // Retraction rolls the published claim BACK (the fetch_max
     // slot this replaces could never regress).
     #[test]
     fn retract_rolls_the_published_claim_back() {
@@ -320,7 +312,7 @@ mod tests {
         assert_eq!(published.load(Ordering::Relaxed), 0);
     }
 
-    // chia on_disconnect reconcile for the shared inbound handler: claims of departed inbound peers
+    // Inbound reconcile: claims of departed inbound peers
     // are dropped; outbound (guard-keyed) claims are untouched by the inbound reconcile.
     #[test]
     fn reconcile_drops_departed_inbound_claims_only() {
@@ -334,7 +326,7 @@ mod tests {
         assert_eq!(published.load(Ordering::Relaxed), 100);
     }
 
-    // chia bad_peak_cache: a quarantined hash is never re-selected; the next-heaviest claim is.
+    // A quarantined hash is never re-selected; the next-heaviest claim is.
     #[test]
     fn quarantined_peak_is_not_reselected() {
         let (b, published) = book();
@@ -361,8 +353,8 @@ mod tests {
         assert_eq!(b.heaviest(), Some(claim([0xAA; 32], 100, 1_000)));
     }
 
-    // Bounds: the quarantine cache caps at BAD_PEAK_CACHE_SIZE evicting the lowest height (chia
-    // add_to_bad_peak_cache), and the claim map caps at MAX_TRACKED_CLAIMS.
+    // Bounds: the quarantine cache caps at BAD_PEAK_CACHE_SIZE evicting the lowest height, and
+    // the claim map caps at MAX_TRACKED_CLAIMS.
     #[test]
     fn quarantine_cache_and_claim_map_are_bounded() {
         let (b, _) = book();

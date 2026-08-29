@@ -65,8 +65,8 @@ impl PeerRegistry {
         self.inner.write().await.selfs.insert(ep);
     }
 
-    // libbitcoin session_inbound: admit only while total < target_peer_count, and
-    // reject a duplicate endpoint or a dial that resolves to our own authority.
+    // Admit only while total < target_peer_count, and reject a duplicate endpoint or a dial
+    // that resolves to our own authority.
     pub async fn admit_inbound(&self, ep: &Endpoint) -> Result<(), AdmitError> {
         let mut g = self.inner.write().await;
         if g.selfs.contains(ep) {
@@ -182,9 +182,9 @@ pub async fn dial(
         software_version: None,
         protocol_version: ChiaProtocolVersion::default(),
         additional_headers: None,
-        // Outbound full-node link: police what the peer sends us (chia's `inbound_rate_limiter`),
-        // so a peer we dial to sync from cannot flood us and our own solicited RespondBlocks bursts
-        // are accounted at the read loop.
+        // Outbound full-node link: police what the peer sends us, so a peer we dial to sync from
+        // cannot flood us and our own solicited RespondBlocks bursts are accounted at the read
+        // loop.
         rate_limited: true,
     });
     WsClient::with_ca(

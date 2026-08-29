@@ -1,13 +1,12 @@
 mod common;
 
-// CHIA-4203 (chia b483e59f22, #20829) — the CPU half of list-limited deserialization.
+// The CPU half of list-limited deserialization.
 //
-// chia's fix: a handler-declared per-field list limit is applied DURING decode
-// (`Streamable.parse(list_limits=...)` → `parse_list_limited`), so a request whose list claims
+// A handler-declared per-field list limit is applied DURING decode, so a request whose list claims
 // far more items than the handler will ever use is truncated while parsing — the remaining
-// fixed-size elements are skipped in O(1) with a seek, never materialized. Before the fix the
-// full node parsed every element (1.2M coin_ids ≈ 6 s on a Pi4) and only then let the handler
-// slice the list. The four wired handlers and their limits (full_node_api.py):
+// fixed-size elements are skipped in O(1) with a seek, never materialized. Parsing every element
+// first and letting the handler slice afterwards burns seconds of CPU on a large claim. The four
+// wired handlers and their limits:
 //   register_for_ph_updates   → puzzle_hashes capped at max_subscriptions(peer)
 //   register_for_coin_updates → coin_ids      capped at max_subscriptions(peer)
 //   request_puzzle_state      → puzzle_hashes capped at CoinStore.MAX_PUZZLE_HASH_BATCH_SIZE
@@ -32,13 +31,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-// chia initial-config.yaml `max_subscriptions: 200000` — the untrusted default the store-blind
-// handler layer must enforce at decode time (full_node_api.py `max_subscriptions(peer)`).
+// The untrusted `max_subscriptions` default the store-blind handler layer must enforce at decode
+// time.
 const UNTRUSTED_MAX_SUBSCRIPTIONS: usize = 200_000;
 
 fn ids(n: usize) -> Vec<Bytes32> {
-    // Distinct leading bytes so a truncation keeps the FIRST `cap` items (chia parses the head
-    // of the list and skips the tail — order must be preserved).
+    // Distinct leading bytes so a truncation keeps the FIRST `cap` items: the decode parses the
+    // head of the list and skips the tail, so order must be preserved.
     (0..n)
         .map(|i| {
             let mut b = [0u8; 32];
@@ -58,7 +57,7 @@ fn blind_api() -> Arc<MemApi> {
 
 // An over-cap RegisterForPhUpdates must be truncated to max_subscriptions DURING decode: the
 // echoed puzzle_hashes carry exactly the first `cap` items, proving the tail was skipped, not
-// parsed (chia b483e59f22: "Parsing stops early and seeks past remaining fixed-size elements").
+// parsed: parsing stops early and seeks past the remaining fixed-size elements.
 #[tokio::test]
 async fn register_ph_updates_decode_truncates_at_max_subscriptions() {
     let server = spawn_full_node(blind_api()).await;
@@ -102,8 +101,7 @@ async fn register_ph_updates_decode_truncates_at_max_subscriptions() {
     );
 }
 
-// Same bound on the coin-id register arm (chia register_for_coin_updates → coin_ids capped at
-// max_subscriptions).
+// Same bound on the coin-id register arm: coin_ids capped at max_subscriptions.
 #[tokio::test]
 async fn register_coin_updates_decode_truncates_at_max_subscriptions() {
     let server = spawn_full_node(blind_api()).await;
@@ -141,7 +139,7 @@ async fn register_coin_updates_decode_truncates_at_max_subscriptions() {
 }
 
 // An under-cap registration is untouched — the limit only truncates, it never rejects or alters
-// a conforming request (chia parse_list_limited: `items_to_parse = min(list_size, max_items)`).
+// a conforming request, since only `min(list_size, max_items)` items are ever parsed.
 #[tokio::test]
 async fn under_cap_registration_is_unchanged() {
     let server = spawn_full_node(blind_api()).await;

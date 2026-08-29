@@ -1,7 +1,6 @@
-//! Store-telemetry behavior: the instruments must record as a side effect of real store work
-//! — a COMMIT files its latency under the band the store was in, the WAL file gauge sees the WAL,
-//! and the near-tip checkpointer records its passes. These are the queries the Grafana panels run,
-//! proven against a real SQLite store.
+//! Store-telemetry behavior against a real SQLite store: a COMMIT files its latency under the
+//! band the store was in, the WAL file gauge sees the WAL, and the near-tip checkpointer records
+//! its passes.
 
 mod common;
 
@@ -10,8 +9,8 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 // A writer COMMIT is filed under the CURRENT phase: catch-up commits into commit_catch_up,
-// near-tip commits into commit_near_tip — the label the regression query pivots on. The WAL file
-// gauge must also see a non-empty `-wal` after WAL-mode commits.
+// near-tip commits into commit_near_tip. The WAL file gauge must also see a non-empty `-wal`
+// after WAL-mode commits.
 #[tokio::test]
 async fn commit_latency_is_filed_under_the_current_phase() {
     let store = common::new_store().await;
@@ -58,8 +57,8 @@ async fn commit_latency_is_filed_under_the_current_phase() {
 }
 
 // The near-tip-gated checkpointer records its passes: with near_tip=true its 1s tick runs the
-// PASSIVE checkpoint and the telemetry must show completed passes and no errors. (2.5s wait for a
-// 1s tick — generous against a slow CI runner.)
+// PASSIVE checkpoint and the telemetry must show completed passes and no errors. The 2.5s wait
+// leaves margin for a slow CI runner.
 #[tokio::test]
 async fn checkpointer_records_passes_when_near_tip() {
     let store = common::new_store().await;
@@ -98,14 +97,11 @@ async fn checkpointer_is_quiet_during_catch_up() {
     );
 }
 
-// The pr-verify killer, inverted into a test: during bulk sync the WAL must be drained by SIZE,
-// not only by the slow 20-tick cadence. Live, the checkpointer completed zero passes while the
-// WAL grew to 1.44 GB — past the ~1 GB in-writer wal_autocheckpoint failsafe, whose blocking
-// copy-into-DB then fired INSIDE confirm COMMITs (70-80% of all commit time concentrated in <9%
-// of commits, 5-120 s stalls -> frozen peak -> liveness exit 137). With a size-triggered drain
-// the crossing itself forces an off-writer checkpoint pass within a tick or two, escalating from
-// PASSIVE (copy) to TRUNCATE (reset + shrink) so the file provably comes back under the
-// threshold — long before the 20 s cadence, and orders of magnitude before the failsafe.
+// During bulk sync the WAL must be drained by SIZE, not only by the slow 20-tick cadence:
+// otherwise it can grow past the in-writer wal_autocheckpoint failsafe, whose blocking
+// copy-into-DB then fires inside a confirm COMMIT. Crossing the trigger forces an off-writer
+// checkpoint pass within a tick or two, escalating from PASSIVE (copy) to TRUNCATE (reset +
+// shrink) so the file comes back under the threshold.
 #[tokio::test]
 async fn bulk_wal_past_the_drain_trigger_is_checkpointed_by_size_not_cadence() {
     use dg_xch_stores::CoinStore;
@@ -133,7 +129,7 @@ async fn bulk_wal_past_the_drain_trigger_is_checkpointed_by_size_not_cadence() {
     let peak_wal = store.wal_bytes();
     assert!(peak_wal > TRIGGER);
 
-    // Within a few 1 s ticks — far below the 20-tick bulk cadence — the size trigger must have
+    // Within a few 1 s ticks, far below the 20-tick bulk cadence, the size trigger must have
     // drained AND reset the WAL file back under the threshold, off the writer.
     let mut drained = false;
     for _ in 0..60 {
@@ -162,11 +158,10 @@ async fn bulk_wal_past_the_drain_trigger_is_checkpointed_by_size_not_cadence() {
         .expect("post-drain apply");
 }
 
-// The writer's page-cache profile follows the sync phase: 256 MiB during bulk catch-up (the
-// dirty set of a cross-window batch commit — the largest measured confirm window spilled
-// ~240 MiB to the WAL, i.e. the 64 MiB cache was the spill), dropping back to 64 MiB at the
-// tip where a single block's dirty set fits. Writer-only: the read pool and checkpointer keep
-// the small default, so the bulk profile costs one connection's cache, released at tip.
+// The writer's page-cache profile follows the sync phase: 256 MiB during bulk catch-up, sized to
+// hold the dirty set of a cross-window batch commit without spilling it to the WAL, dropping back
+// to 64 MiB at the tip where a single block's dirty set fits. Writer-only: the read pool and
+// checkpointer keep the small default, so the bulk profile costs one connection's cache.
 #[tokio::test]
 async fn writer_cache_profile_follows_the_sync_phase() {
     let store = common::new_store().await;

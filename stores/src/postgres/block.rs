@@ -21,7 +21,7 @@ const UPSERT_RECORD: &str = "INSERT INTO block_record \
     is_transaction_block = excluded.is_transaction_block, sub_epoch_summary = excluded.sub_epoch_summary, \
     record = excluded.record";
 
-// Legacy-tolerant (pre-#155 blobs decode via the fallback walk; see record_compat.rs).
+// Legacy-tolerant: older blobs decode via the fallback walk; see record_compat.rs.
 use crate::record_compat::decode_record;
 
 fn wrong_backend() -> StoreError {
@@ -382,8 +382,7 @@ impl BlockStore for PostgresStore {
         &self,
         ses_hash: &Bytes32,
     ) -> Result<Option<Vec<u8>>, StoreError> {
-        // chia BlockStore.get_sub_epoch_challenge_segments (block_store.py:173-192), minus the
-        // decode: the store hands back the opaque SubEpochSegments bytes.
+        // No decode here: the store hands back the opaque SubEpochSegments bytes.
         let row = sqlx::query(
             "SELECT challenge_segments FROM sub_epoch_segments_v3 WHERE ses_block_hash = $1",
         )
@@ -401,8 +400,7 @@ impl BlockStore for PostgresStore {
         ses_hash: &Bytes32,
         bytes: &[u8],
     ) -> Result<(), StoreError> {
-        // chia BlockStore.persist_sub_epoch_challenge_segments (block_store.py:164-171) as an
-        // upsert. Fixed-arity single-row statement — the default persistent prepared statement
+        // Fixed-arity single-row upsert — the default persistent prepared statement
         // is correct here; do NOT copy the `.persistent(false)` pattern from coin.rs, which
         // exists only because variable-arity multi-row SQL churned sqlx's prepare cache.
         sqlx::query(
@@ -456,9 +454,9 @@ impl BlockStore for PostgresStore {
     async fn shed_service_indexes(&self) -> Result<(), StoreError> {
         // The falling-edge counterpart of `build_indexes` for a deep re-catch-up: drop the
         // service tier AND the spent_index reorg btree. Shedding spent_index (and the partial
-        // unspent_by_ph) is what re-enables HOT spend-updates — an UPDATE touching an indexed
-        // column can never be HOT, and the measured HOT rate at tip is 0% — so index-lean
-        // re-catch-up saves both the per-coin index maintenance and the vacuum debt.
+        // unspent_by_ph) is what re-enables HOT spend-updates: an UPDATE touching an indexed
+        // column can never be HOT, so index-lean re-catch-up saves both the per-coin index
+        // maintenance and the vacuum debt.
         // confirmed_index is KEPT: as a BRIN it is near-free to maintain and still serves the
         // rollback DELETE range cheaply. Deep catch-up applies settled history (reorgs are a
         // tip phenomenon); if a reorg is nonetheless requested while shed,

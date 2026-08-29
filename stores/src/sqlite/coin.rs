@@ -55,8 +55,7 @@ async fn apply_block_on(
 
 // The fork revert, parameterized over the connection: a self-contained transaction from
 // `rollback_to`, or the FIRST statements of the engine's single-transaction reorg from
-// `rollback_to_in` (rollback + branch re-applies + peak flip commit as one unit — chia
-// blockchain.py `add_block`'s `async with self.block_store.transaction():`).
+// `rollback_to_in`, where rollback + branch re-applies + peak flip commit as one unit.
 async fn rollback_to_on(
     conn: &mut sqlx::SqliteConnection,
     fork_height: u32,
@@ -95,15 +94,12 @@ impl CoinStore for SqliteStore {
         // Point-get each name over the primary key rather than one `coin_name IN (...)` statement.
         //
         // A dynamic `IN (...)` list defeats the query planner once it grows past SQLite's
-        // search-vs-scan cost crossover: measured on the live mainnet store (WITHOUT ROWID,
-        // coin_name PRIMARY KEY), a 2-name list plans as `SEARCH USING PRIMARY KEY` but a 100-name
-        // list collapses to a full `SCAN coin_record` — every element compared against every one of
-        // millions of rows. On the near-tip mempool/confirm path (`Mempool::check`, one call per
-        // spend set) that scan degraded to tens of seconds per call, pinned a WAL read snapshot for
-        // its whole duration (blocking checkpoint reset, unbounding the WAL), and froze the confirmed
-        // peak until the liveness probe restarted the pod. A single `= ?` lookup can never regress to
-        // a scan, so this is stable regardless of table size or planner statistics. All lookups share
-        // one pooled read connection: one snapshot, held only for the (now sub-millisecond) batch.
+        // search-vs-scan cost crossover: on the WITHOUT ROWID `coin_name` primary key a short list
+        // plans as `SEARCH USING PRIMARY KEY` but a long one collapses to a full `SCAN
+        // coin_record`. That scan also pins a WAL read snapshot for its whole duration, blocking
+        // the checkpoint reset. A single `= ?` lookup can never regress to a scan, so this is
+        // stable regardless of table size or planner statistics. All lookups share one pooled read
+        // connection: one snapshot, held only for the batch.
         let mut conn = self.read.acquire().await?;
         let mut out = Vec::with_capacity(names.len());
         for name in names {
@@ -242,8 +238,7 @@ impl CoinStore for SqliteStore {
         }
         // Per-puzzle-hash point query over the `coin_puzzle_hash` index (the same scan-avoidance
         // discipline as get_coin_records), with a running LIMIT budget so the whole reply stays bounded
-        // by the caller's `max_items` (chia's max_items parameter, coin_store.py:486-509 — the same
-        // decremented-LIMIT-per-batch shape).
+        // by the caller's `max_items`, decrementing the LIMIT per batch.
         let spent_clause = if include_spent {
             ""
         } else {
@@ -283,13 +278,13 @@ impl CoinStore for SqliteStore {
         filters: &CoinStateFilters,
         max_items: usize,
     ) -> Result<(Vec<CoinState>, Option<u32>), StoreError> {
-        // chia coin_store.py:610-633: nothing requested, or filters that admit nothing, finish empty.
+        // Nothing requested, or filters that admit nothing, finishes empty.
         if puzzle_hashes.is_empty() || (!filters.include_spent && !filters.include_unspent) {
             return Ok((Vec::new(), None));
         }
-        // chia's spent/unspent predicates (coin_store.py:621-630) and the >= min_amount filter
-        // (:623, amount stored as an 8-byte big-endian blob, so bytewise >= IS numeric >= — the
-        // zero blob makes the predicate a no-op exactly like chia's omitted filter).
+        // The spent/unspent predicates and the >= min_amount filter. Amount is stored as an
+        // 8-byte big-endian blob, so a bytewise >= IS a numeric >=, and the zero blob makes the
+        // predicate a no-op.
         let height_filter = match (filters.include_spent, filters.include_unspent) {
             (true, true) => "",
             (true, false) => " AND spent_index > 0",
@@ -298,18 +293,16 @@ impl CoinStore for SqliteStore {
         };
         // Per-puzzle-hash point probes over the coin_puzzle_hash index (the same scan-avoidance
         // discipline as get_coin_records: a long dynamic IN-list collapses the planner to a full
-        // scan). Each probe is ORDERED by activity height and LIMITed to max_items + 1 IN SQL —
-        // chia's single-query `ORDER BY MAX(confirmed_index, spent_index) ASC LIMIT max_items + 1`
-        // (coin_store.py:635-648) applied per hash, with the bounded merge keeping only the
-        // smallest max_items + 1 overall.
+        // scan). Each probe is ORDERED by activity height and LIMITed to max_items + 1 IN SQL,
+        // with the bounded merge keeping only the smallest max_items + 1 overall.
         let sql = format!(
             "SELECT confirmed_index, spent_index, coinbase, puzzle_hash, coin_parent, amount, \
              timestamp FROM coin_record WHERE puzzle_hash = ? \
              AND (confirmed_index >= ? OR spent_index >= ?){height_filter} AND amount >= ? \
              ORDER BY MAX(confirmed_index, spent_index) ASC LIMIT ?"
         );
-        // The hint join (chia coin_store.py:655-671): coins whose HINT is one of the requested
-        // hashes — the CAT/NFT discovery read. Same ordering + limit + filters.
+        // The hint join: coins whose HINT is one of the requested hashes — the CAT/NFT discovery
+        // read. Same ordering + limit + filters.
         #[cfg(feature = "hint")]
         let hint_sql = format!(
             "SELECT confirmed_index, spent_index, coinbase, puzzle_hash, coin_parent, amount, \
@@ -363,7 +356,7 @@ impl CoinStore for SqliteStore {
         max_items: usize,
     ) -> Result<Vec<Bytes32>, StoreError> {
         use sqlx::Row;
-        // LIMIT in the query, like chia's hint store (hint_store.py:26/42) — never fetch-then-truncate.
+        // LIMIT in the query — never fetch-then-truncate.
         let rows = sqlx::query("SELECT coin_name FROM coin_hint WHERE hint = ? LIMIT ?")
             .bind(*hint)
             .bind(i64::try_from(max_items).unwrap_or(i64::MAX))

@@ -3,7 +3,7 @@
 // prev-block context)` a farmer + timelord would have held, then re-finish it through
 // `producer::unfinished_block_to_full_block` and assert the reconstruction is BYTE-IDENTICAL to the
 // captured mainnet block. If the field derivation (reward-chain infusion, foliage relink, height/weight,
-// non-tx nulling) diverged from chia by a single field, the block id would change and this test would go
+// non-tx nulling) diverged by a single field, the block id would change and this test would go
 // red. The blocks are the same `respond_blocks_mainnet_9138873_9138904.bin` capture the wire tests use.
 //
 // This is fixture-driven, not a live timelord round trip: the infusion VDFs are the ones already inside

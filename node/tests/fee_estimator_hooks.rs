@@ -173,7 +173,7 @@ async fn fresh_mempool_estimates_floor_zero() {
 
 // Sustained confirmed pressure, driven through the mempool's own estimator handle, converges on a
 // positive fee-rate — and higher fee-per-cost yields a strictly higher estimate. Uses the block
-// ingestion API directly (chia's test_steady_fee_pressure shape) to keep the harness bounded.
+// ingestion API directly to keep the harness bounded.
 #[tokio::test]
 async fn steady_pressure_through_mempool_estimator_is_positive_and_ordered() {
     let mut low = Mempool::new(&MAINNET);

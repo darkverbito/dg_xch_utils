@@ -38,7 +38,7 @@ fn record(c: Coin, height: u32) -> CoinRecord {
     }
 }
 
-// Positional shorthand for the chia-shaped WalletUpdate (full_node.py:117-121) these tests push.
+// Positional shorthand for the WalletUpdate these tests push.
 fn upd<'a>(
     peak_hash: Bytes32,
     height: u32,
@@ -135,9 +135,9 @@ async fn subscribed_coin_id_receives_update() {
     assert_eq!(update.items[0].created_height, Some(300));
 }
 
-// A coin whose HINT equals a subscribed puzzle hash matches on the live push — chia
+// A coin whose HINT equals a subscribed puzzle hash matches on the live push — the
 // `update_wallets` joins `peers_for_puzzle_hash(hint)` alongside the coin's own puzzle hash and
-// id (full_node.py:1544-1546). This is how a wallet subscribed to a CAT/DID/NFT outer puzzle
+// id. This is how a wallet subscribed to a CAT/DID/NFT outer puzzle
 // hash sees the inner-puzzle coin land WITHOUT polling. The pairs arrive as the engine's
 // `BlockDelta::hints` (hint, created_coin_id).
 #[tokio::test]
@@ -184,7 +184,7 @@ async fn hinted_puzzle_hash_subscription_receives_create_and_same_block_spend() 
 
     let update = tokio::time::timeout(Duration::from_secs(5), rx.recv())
         .await
-        .expect("a hint-matched CoinStateUpdate must be pushed (chia full_node.py:1544-1546)")
+        .expect("a hint-matched CoinStateUpdate must be pushed")
         .expect("delivery channel open");
     assert_eq!(update.height, 500);
     assert!(
@@ -202,7 +202,7 @@ async fn hinted_puzzle_hash_subscription_receives_create_and_same_block_spend() 
         "a coin hinted in this block and spent in it is pushed too"
     );
 
-    // chia's hint map covers only THIS peak's create-coin hints (full_node.py:2101-2103): a later
+    // The hint map covers only THIS peak's create-coin hints: a later
     // spend of `created` (whose hint is not re-declared) does not hint-match.
     store
         .apply_block(501, 501, &[], &[created.name()])
@@ -214,7 +214,7 @@ async fn hinted_puzzle_hash_subscription_receives_create_and_same_block_spend() 
         .unwrap();
     assert!(
         rx.try_recv().is_err(),
-        "no hint re-declaration, no coin-id subscription => no push (chia parity)"
+        "no hint re-declaration, no coin-id subscription => no push"
     );
 }
 
@@ -267,10 +267,8 @@ async fn second_registration_returns_no_new_receiver() {
     assert_eq!(notifier.subscriber_count().await, 0);
 }
 
-// The per-peer combined subscription cap for an UNTRUSTED peer must match chia's
-// `max_subscribe_items` = 200,000 (initial-config.yaml:437, full_node_api.py:2219). The default
-// notifier trusts no one, so every peer resolves untrusted — the regression guard for the additive
-// default.
+// The per-peer combined subscription cap for an UNTRUSTED peer is 200,000. The default notifier
+// trusts no one, so every peer resolves untrusted.
 #[tokio::test]
 async fn subscription_cap_matches_chia_untrusted_max_subscribe_items() {
     assert_eq!(
@@ -279,8 +277,8 @@ async fn subscription_cap_matches_chia_untrusted_max_subscribe_items() {
     );
 }
 
-// Subscription-cap gate (chia parity): a peer whose cert-hash node id is in the trusted
-// set resolves to chia's `trusted_max_subscribe_items` = 2,000,000 (initial-config.yaml:444), a
+// Subscription-cap gate: a peer whose cert-hash node id is in the trusted
+// set resolves to `trusted_max_subscribe_items` = 2,000,000 (initial-config.yaml:444), a
 // non-member to the untrusted 200,000. This is RED before the trusted tier (max_subscriptions was a
 // no-arg constant fixed at the untrusted number) and GREEN once the cap resolves per-peer from trust.
 #[tokio::test]
@@ -325,9 +323,9 @@ async fn trusted_peer_registers_past_the_untrusted_cap() {
     );
 }
 
-// chia `add_puzzle_subscriptions` returns ONLY the newly-added subscriptions — in-request duplicates,
+// `add_puzzle_subscriptions` returns ONLY the newly-added subscriptions — in-request duplicates,
 // already-subscribed hashes, and the over-cap overflow are all filtered from the returned set
-// (subscriptions.py:87-119). The register handler feeds that set (not the raw request) to the
+//. The register handler feeds that set (not the raw request) to the
 // initial-state query.
 #[tokio::test]
 async fn register_reports_only_newly_added_subscriptions() {
@@ -355,8 +353,8 @@ async fn register_reports_only_newly_added_subscriptions() {
     );
 }
 
-// chia request_remove_puzzle_subscriptions / request_remove_coin_subscriptions semantics on the
-// registry (full_node_api.py:1961-1995 + subscriptions.py:155-199): Some(list) removes the listed
+// `request_remove_puzzle_subscriptions` / request_remove_coin_subscriptions semantics on the
+// registry (+ ): Some(list) removes the listed
 // subset returning only what was actually subscribed (duplicates and never-subscribed items
 // filtered), None clears ALL returning the prior set — and the reverse index is scrubbed, so a
 // removed subscription delivers nothing on the next peak while the peer's channel stays alive
@@ -413,7 +411,7 @@ async fn remove_subscriptions_subset_and_all_scrub_delivery() {
     );
     assert_eq!(update.items[0].coin.name(), live.name());
 
-    // None = remove ALL (chia clear_*), returning the prior set; both legs.
+    // None = remove ALL, returning the prior set; both legs.
     let mut removed_all = notifier.remove_ph_subscriptions(&peer, None).await;
     removed_all.sort_by_key(|b| b.bytes());
     assert_eq!(removed_all, vec![h(0x02), h(0x03)]);
@@ -431,7 +429,7 @@ async fn remove_subscriptions_subset_and_all_scrub_delivery() {
     );
 
     // Nothing subscribed → the next peak delivers nothing, but the channel is still open
-    // (chia keeps the connection; a re-subscribe reuses it — no new receiver).
+    // (the connection is kept; a re-subscribe reuses it — no new receiver).
     notifier
         .on_new_peak(
             &store,
@@ -448,7 +446,7 @@ async fn remove_subscriptions_subset_and_all_scrub_delivery() {
     assert_eq!(added, vec![h(0x02)]);
 }
 
-// chia LimitedSemaphore (limited_semaphore.py): `active_limit` concurrent holders + `waiting_limit`
+// LimitedSemaphore: `active_limit` concurrent holders + `waiting_limit`
 // queued waiters; one more acquire fails IMMEDIATELY (LimitedSemaphoreFullError) instead of queueing.
 #[tokio::test]
 async fn limited_semaphore_rejects_beyond_active_plus_waiting() {
@@ -487,15 +485,14 @@ async fn limited_semaphore_rejects_beyond_active_plus_waiting() {
     assert!(sem.acquire().await.is_ok());
 }
 
-// CHIA-4203 cross-crate pin: the store-blind copy of chia's
-// `CoinStore.MAX_PUZZLE_HASH_BATCH_SIZE` in the p2p handler layer (the decode-time list cap on
-// `request_puzzle_state.puzzle_hashes`) must equal the store layer's authoritative constant —
-// the two crates cannot depend on each other, so this test is the tie.
+// Cross-crate pin: the store-blind copy of `MAX_PUZZLE_HASH_BATCH_SIZE` in the p2p handler layer
+// (the decode-time list cap on `request_puzzle_state.puzzle_hashes`) must equal the store layer's
+// authoritative constant. The two crates cannot depend on each other, so this test is the tie.
 #[test]
 fn p2p_puzzle_hash_batch_cap_matches_the_store_constant() {
     assert_eq!(
         dg_xch_p2p::handlers::MAX_PUZZLE_HASH_BATCH_SIZE as usize,
         dg_xch_stores::traits::MAX_PUZZLE_HASH_BATCH_SIZE,
-        "p2p decode cap and store batch bound must stay in lockstep (chia coin_store.py:588)"
+        "p2p decode cap and store batch bound must stay in lockstep"
     );
 }

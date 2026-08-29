@@ -1,16 +1,14 @@
 mod common;
 
-// Timelord gating — two chia rules, both enforced at the p2p layer:
+// Timelord gating — two rules, both enforced at the p2p layer:
 //
-// 1. chia 0046a3a4e (CHIA-3995): an inbound TIMELORD connection is accepted only from
-//    localhost or an exempt peer network (`ChiaServer.should_accept_inbound`; the
-//    `max_inbound_timelord` config limit was removed outright). A VDF-producing timelord is
-//    node-local infrastructure — a remote "timelord" is free verify-CPU for an attacker.
-// 2. chia's sender-type map (`protocol_message_type_to_node_type.py`): the timelord-class
-//    messages (new_infusion_point_vdf / new_signage_point_vdf / new_end_of_sub_slot_vdf /
-//    respond_compact_proof_of_time) are accepted only from a TIMELORD-typed connection —
-//    `_api_call` raises `ProtocolError(INVALID_PROTOCOL_MESSAGE)` on a type mismatch, which
-//    closes the connection with the short (10 s) ban.
+// 1. An inbound TIMELORD connection is accepted only from localhost or an exempt peer network.
+//    A VDF-producing timelord is node-local infrastructure; a remote "timelord" is free
+//    verify-CPU for an attacker.
+// 2. The timelord-class messages (new_infusion_point_vdf / new_signage_point_vdf /
+//    new_end_of_sub_slot_vdf / respond_compact_proof_of_time) are accepted only from a
+//    TIMELORD-typed connection. A type mismatch is an invalid protocol message and closes the
+//    connection with the short (10 s) ban.
 
 use async_trait::async_trait;
 use common::{MemApi, connect, spawn_full_node, wait_until};
@@ -77,9 +75,7 @@ async fn timelord_client(port: u16) -> Result<WsClient, std::io::Error> {
 }
 
 // An inbound TIMELORD handshake from an ineligible host must be refused — the peer is dropped
-// right after the handshake completes, before any greeting (chia `should_accept_inbound`:
-// "Not accepting inbound connection ... Inbound limit reached", then `connection.close()` —
-// no ban).
+// right after the handshake completes, before any greeting, and without a ban.
 #[tokio::test]
 async fn remote_timelord_handshake_is_refused() {
     let server = spawn_full_node(Arc::new(RemoteTimelordApi)).await;
@@ -99,12 +95,12 @@ async fn remote_timelord_handshake_is_refused() {
     );
     assert!(
         server.bans.is_empty(),
-        "the inbound-limit refusal closes without banning (chia does not ban here)"
+        "the inbound refusal closes without banning"
     );
 }
 
-// The default predicate accepts a LOCALHOST timelord (chia: `is_localhost(peer_host)`) — the
-// loopback client really is 127.0.0.1, so the stock MemApi keeps it connected.
+// The default predicate accepts a LOCALHOST timelord, and the loopback client really is
+// 127.0.0.1, so the stock MemApi keeps it connected.
 #[tokio::test]
 async fn localhost_timelord_handshake_is_accepted() {
     let server = spawn_full_node(blind_api()).await;
@@ -115,14 +111,13 @@ async fn localhost_timelord_handshake_is_accepted() {
     assert_eq!(
         server.peers.read().await.len(),
         1,
-        "a localhost timelord stays connected (chia's is_localhost carve-out)"
+        "a localhost timelord stays connected"
     );
 }
 
-// A timelord-class frame from a FULL_NODE-typed connection is a sender-type violation: chia's
-// `_api_call` raises ProtocolError(INVALID_PROTOCOL_MESSAGE) → close + short ban. Sent with an
-// empty body: the sender-type check fires BEFORE decode, exactly as chia checks
-// `allowed_senders` before invoking the handler.
+// A timelord-class frame from a FULL_NODE-typed connection is a sender-type violation: an invalid
+// protocol message, so close plus the short ban. Sent with an empty body, since the sender-type
+// check fires BEFORE decode.
 #[tokio::test]
 async fn vdf_frame_from_a_full_node_peer_disconnects_and_bans() {
     let server = spawn_full_node(blind_api()).await;
@@ -162,6 +157,6 @@ async fn vdf_frame_from_a_full_node_peer_disconnects_and_bans() {
         server
             .bans
             .is_banned(&"127.0.0.1".parse::<IpAddr>().unwrap()),
-        "the sender-type violation carries chia's short protocol ban"
+        "the sender-type violation carries the short protocol ban"
     );
 }

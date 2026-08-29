@@ -101,7 +101,7 @@ pub struct ConsensusConstants {
     pub hard_fork_height: u32,
     pub hard_fork_fix_height: u32,
 
-    // The soft fork staged by the 2.6/2.7 releases (chia_rs get_flags_for_height_and_constants):
+    // The soft fork staged by the 2.6/2.7 releases:
     // DISABLE_OP (modpow disabled until hard fork 2) + LIMITS (division-family operand-size caps).
     pub soft_fork8_height: u32,
     // Same release train: SIMPLE_GENERATOR + CANONICAL_INTS + LIMIT_SPENDS.

@@ -1,11 +1,10 @@
-// Peer-loss recovery, end-to-end over real sockets — the chia `on_connect` symmetry that lets a
+// Peer-loss recovery, end-to-end over real sockets — the `on_connect` symmetry that lets a
 // node re-acquire its sync target after a peer drops.
 //
-// chia has NO active peak solicitation (there is no RequestPeak message). Recovery works because
-// `FullNode.on_connect` (chia/full_node/full_node.py:952-1010) fires on EVERY new connection in
-// BOTH directions and each side sends its own `full_node_protocol.NewPeak` greeting: the acceptor
-// greets the dialer (:989-998) and the dialer greets the acceptor (chia server `start_client` ->
-// `on_connect`). So after any drop + redial, the reconnected peer's greeting re-records the claim,
+// There is NO active peak solicitation (no RequestPeak message). Recovery works because
+// `on_connect` fires on EVERY new connection in BOTH directions and each side sends its own
+// `full_node_protocol.NewPeak` greeting: the acceptor greets the dialer and the dialer greets
+// the acceptor. So after any drop + redial, the reconnected peer's greeting re-records the claim,
 // and `claimed_peak` (the sync-target gauge) climbs back to the tip.
 //
 // Our node implements both halves of that symmetry:
@@ -17,13 +16,13 @@
 //     (daemon.rs:364, the only claim-recording path) into the `PeakBook`.
 //
 // This test drives the WHOLE loop against a REAL peer over a REAL mTLS socket (no mock of the seam
-// under test): baseline claim, hard drop (retraction to 0 — chia `sync_store.peer_disconnected`),
+// under test): baseline claim, hard drop (retraction to 0 — `sync_store.peer_disconnected`),
 // then a fresh reconnect whose greeting must re-record the claim. It guards the live-regression
 // class where a lost peer collapses `claimed_peak` to 0 and the node never re-acquires a target.
 //
 // Observability: `Node::claimed_peak` is private; it is read through the public RPC
 // (`get_blockchain_state().state.sync.sync_tip_height`). With an EMPTY node store (no local peak)
-// and `synced == false`, that field mirrors the raw `claimed_peak` gauge exactly — chia's display
+// and `synced == false`, that field mirrors the raw `claimed_peak` gauge exactly — the display
 // substitution `sync_tip_height = peak_height when (sync_mode && claimed == 0)` degrades to `0`
 // because `peak_height == 0` here (rpc.rs get_blockchain_state), and returns `claimed` verbatim
 // when `claimed > 0`.
@@ -58,6 +57,8 @@ fn config(listen: SocketAddr, rpc: SocketAddr) -> Config {
         std::process::id()
     ));
     Config {
+        target_outbound: None,
+        target_peer_count: None,
         listen,
         rpc,
         introducer: None,
@@ -82,10 +83,9 @@ fn free_addr() -> SocketAddr {
     l.local_addr().expect("addr")
 }
 
-// A real full-node peer that greets EVERY dialing node with its peak — chia full_node.py on_connect
-// :989-998 (`full_node_peak`), sent unconditionally on every new connection. This is what makes a
-// drop + redial recoverable: the reconnected peer re-announces its tip with no solicitation, exactly
-// as a real chia peer does.
+// A real full-node peer that greets EVERY dialing node with its peak, sent unconditionally on
+// every new connection. This is what makes a drop + redial recoverable: the reconnected peer
+// re-announces its tip with no solicitation, exactly as a real network peer does.
 struct GreetingPeer {
     peak: NewPeak,
 }
@@ -197,7 +197,7 @@ async fn dial_as_outbound_slot(
 }
 
 // A lost peer must not permanently collapse the sync target: after the drop retracts the claim, a
-// redial's greeting re-records it (chia on_connect symmetry, full_node.py:952-1010).
+// redial's greeting re-records it (`on_connect` symmetry, ).
 #[tokio::test]
 async fn claimed_peak_recovers_after_a_peer_drop_and_redial() {
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -228,22 +228,21 @@ async fn claimed_peak_recovers_after_a_peer_drop_and_redial() {
     );
 
     // ---- (b) drop the peer connection: the claim retracts, claimed_peak collapses to 0 ----------
-    // Stop the read loop and release every Arc holding the connection's ClaimGuard (chia
-    // sync_store.peer_disconnected). This collapse is CORRECT — recovery must follow it.
+    // Stop the read loop and release every Arc holding the connection's ClaimGuard (the
+    // disconnect retraction). This collapse is CORRECT — recovery must follow it.
     run1.store(false, Ordering::Relaxed);
     drop(client1);
     drop(handlers1);
     let collapsed = wait_claimed(&node, 0, Duration::from_secs(5)).await;
     assert_eq!(
         collapsed, 0,
-        "drop retracts the only claim; claimed_peak rolls back to 0 \
-         (chia sync_store.peer_disconnected — the ClaimGuard Drop)"
+        "drop retracts the only claim; claimed_peak rolls back to 0 (the ClaimGuard Drop)"
     );
 
     // ---- (c) reconnect: the redial's greeting re-records the claim ------------------------------
     // A fresh dial (the reclaim-on-drop redial, p2p/src/sessions/mod.rs) plus the production
     // on-connect hook `outbound_on_connect`. The greeting peer re-announces its peak on the new
-    // connection (chia on_connect, no solicitation), and the node re-records the claim.
+    // connection (`on_connect`, no solicitation), and the node re-records the claim.
     let (client2, _handlers2, run2) = dial_as_outbound_slot(&node, peer_port, &settings).await;
     let peer2 = Arc::new(OutboundPeer {
         endpoint: ("127.0.0.1".to_string(), peer_port),
@@ -256,7 +255,7 @@ async fn claimed_peak_recovers_after_a_peer_drop_and_redial() {
     assert_eq!(
         recovered, PEAK_H,
         "after a peer drop + redial the reconnected peer's greeting must re-acquire the sync \
-         target (claimed_peak returns to H) — chia on_connect symmetry, full_node.py:952-1010"
+         target (claimed_peak returns to H) — the on-connect symmetry"
     );
 
     peer_run.store(false, Ordering::Relaxed);

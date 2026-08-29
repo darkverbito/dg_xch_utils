@@ -1,14 +1,13 @@
 // Deep-fork BULK ENTRY — the band between the short-sync backtrack floor
-// (`BACKTRACK_MAX_DEPTH` = 5; chia full_node.py:738) and the WP-anchored long-sync band: a fork
-// ~6-50 below our confirmed peak. chia's `new_peak` ladder answers it by falling through the
-// failed backtrack to batch sync and `_sync()` (chia full_node.py:845-873), whose downloads then
-// re-enter `Blockchain.add_block`'s weight-only fork choice. Ours mirrors it: the backtrack
+// (`BACKTRACK_MAX_DEPTH` = 5) and the WP-anchored long-sync band: a fork ~6-50 below our
+// confirmed peak. A failed backtrack falls through to batch sync, whose downloads then re-enter
+// the weight-only fork choice. The backtrack
 // signals `SyncError::DeepFork` (the escalation, pinned in backtrack.rs), and the daemon's
 // deep-fork arm re-enters through the BULK pipeline — headers-first candidates + the
 // reservation-window out-of-order body download + per-block confirm (`Chaser::sync_range`, the
 // exact path `Node::bulk_sync`'s `fast_sync_with_summaries` drives) — where the engine's
-// single-transaction reorg (T0-4) flips the chain the moment the branch outweighs the peak.
-// That entry had NO test at any scale (DIVERGENCES.md OPEN row); these pin it:
+// single-transaction reorg flips the chain the moment the branch outweighs the peak. These pin
+// that entry:
 //
 //   1. the mid-band escalation: a fork with a REAL shared ancestor 20 back (not a disjoint
 //      chain) still signals DeepFork after a bounded backward probe, store untouched;
@@ -21,8 +20,8 @@
 //      the fork rollback and the pointer flip — both inside the ONE reorg transaction) leaves
 //      the store exactly at the pre-reorg state; the KILLED process's store reopens cold, and
 //      the recovery follow reconstructs the whole 26-deep branch FROM THE DURABLE STORE
-//      (`delta_from_store` — the DIVERGENCE-50 store-backed fork walk, across a restart, at
-//      bulk-entry depth) and lands the reorg with the wallet-facing rollback deltas attached.
+//      (`delta_from_store`, the store-backed fork walk, across a restart, at bulk-entry depth)
+//      and lands the reorg with the wallet-facing rollback deltas attached.
 //
 // Fixture conventions follow backtrack.rs / long_sync_reland.rs: re-stamped real mainnet bodies
 // on synthetic (height, weight, prev) links; assume_valid above every synthetic height.

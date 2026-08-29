@@ -23,6 +23,8 @@ fn config(listen: SocketAddr, rpc: SocketAddr) -> Config {
         std::process::id()
     ));
     Config {
+        target_outbound: None,
+        target_peer_count: None,
         listen,
         rpc,
         introducer: None,

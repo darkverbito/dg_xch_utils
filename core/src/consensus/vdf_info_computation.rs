@@ -1,5 +1,4 @@
 // Reconstructing a block's signage-point VDF inputs and challenges.
-// Ports chia/consensus/vdf_info_computation.py (no chia_rs port exists).
 
 use crate::blockchain::block_record::BlockRecord;
 use crate::blockchain::class_group_element::ClassgroupElement;
@@ -10,8 +9,8 @@ use crate::consensus::{missing, rejected};
 use std::collections::HashMap;
 use std::io::Error;
 
-// chia get_signage_point_vdf_info. Returns
-// (cc_vdf_challenge, rc_vdf_challenge, cc_vdf_input, rc_vdf_input, cc_vdf_iters, rc_vdf_iters);
+// Returns (cc_vdf_challenge, rc_vdf_challenge, cc_vdf_input, rc_vdf_input, cc_vdf_iters,
+// rc_vdf_iters);
 // rc_vdf_input is always the identity element and cc_vdf_iters == rc_vdf_iters == sp_vdf_iters.
 #[allow(clippy::type_complexity)]
 pub fn get_signage_point_vdf_info(

@@ -363,9 +363,8 @@ impl RpcServer {
             })?;
         }
         Ok(Arc::new(
-            // TLS 1.3 floor — chia CHIA-2102 (e57358aea); the RPC listener uses the same
-            // server-side context rules as the p2p listener (chia's RPC server builds its
-            // context via `ssl_context_for_server`).
+            // TLS 1.3 floor: the RPC listener uses the same server-side context rules as the
+            // p2p listener.
             ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
                 .with_client_cert_verifier(AllowAny::new())
                 .with_single_cert(certs, key)

@@ -19,15 +19,12 @@ pub fn verify_n_wesolowski(
     verify_n_wesolowski_result(discriminant, x_s, proof, num_iterations, recursion).is_ok()
 }
 
-/// Whole-proof verification memo — the port of the reference node's `@lru_cache(maxsize=1000)`
-/// on `verify_vdf` (chia-blockchain `chia/types/blockchain_format/vdf.py`). The recurrence is
-/// real and measured on OUR sync path (a tx-dense window replay, window-drain probe): ~9–12% of a
-/// 32-block window's queued proofs are exact repeats — blocks sharing a signage point carry
-/// byte-identical sp VDF proofs — and the live tip re-verifies the same proofs again across the
-/// unfinished/finished/gossip paths. The key is the EXACT argument bytes, each variable-length
-/// field length-prefixed (injective — no hash-collision surface on a consensus gate); the value
-/// is the deterministic pure-function result, `true` and `false` alike, exactly as the
-/// reference node caches it.
+/// Whole-proof verification memo; capacity matches the reference node's verify_vdf lru_cache.
+/// Blocks sharing a signage point carry byte-identical sp VDF proofs, and the live tip
+/// re-verifies the same proofs across the unfinished/finished/gossip paths. The key is the EXACT
+/// argument bytes, each variable-length field length-prefixed (injective — no hash-collision
+/// surface on a consensus gate); the value is the deterministic pure-function result, `true` and
+/// `false` alike.
 const VERIFY_MEMO_CAPACITY: usize = 1000;
 
 struct VerifyMemo {
@@ -115,10 +112,9 @@ pub fn verify_vdf(
 
 /// [`verify_vdf`] without the two-thread split inside each segment exponentiation. Same result,
 /// same memo — group arithmetic is scheduling-independent. For SATURATED batch drains: when a
-/// window drain already runs one proof per core, the inner spawn adds a second thread per worker
-/// (2× oversubscription) and a thread spawn/join per segment while buying no wall — measured
-/// +17% process CPU over the same work verified serially (a tx-dense window drain probe, 12-CPU cgroup).
-/// The parallel variant remains right for latency-bound single proofs (the live tip).
+/// window drain already runs one proof per core, the inner spawn adds oversubscription and a
+/// thread spawn/join per segment while buying no wall. The parallel variant remains right for
+/// latency-bound single proofs (the live tip).
 pub fn verify_vdf_serial(
     challenge: &[u8],
     x_s: &[u8],

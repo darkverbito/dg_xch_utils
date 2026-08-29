@@ -100,12 +100,12 @@ async fn fast_sync_from_empty_advances_peak_over_real_p2p() {
 
 // Regression guard: confirming a body at a weight-proof checkpoint (prev record absent — the
 // exact from-empty anchor entry point above) must KEEP the headers-first candidate record's attested
-// sub_slot_iters, never fabricate `sub_slot_iters_starting` into the confirmed record. Chia feeds every
-// block_to_block_record from get_next_sub_slot_iters_and_difficulty (blockchain.py add_block) and
-// substitutes the proof's summaries when the deep ancestry is absent (pre_validate_blocks_multiprocessing
-// wp_summaries); the candidate record carries that attested epoch value here. The old fabrication poisoned
-// the anchor record with the genesis constant and every descendant inherited it — surfacing live as
-// sporadic `Required iters N is not below the sp interval` rejections just after sub-epoch boundaries
+// sub_slot_iters, never fabricate `sub_slot_iters_starting` into the confirmed record. Records
+// are epoch-adjusted at creation, and when the deep ancestry is absent the proof's summaries
+// substitute; the candidate record carries that attested epoch value here. Fabrication would
+// poison the anchor record with the genesis constant and every descendant would inherit it —
+// sporadic `Required iters N is not below the sp interval` rejections just after sub-epoch
+// boundaries
 // (mainnet 9,141,129 and 9,143,058: true bound ssi/64 = 8,912,896 vs poisoned bound 2,097,152).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn anchor_confirm_keeps_the_candidate_epoch_sub_slot_iters() {
@@ -177,10 +177,10 @@ async fn unservable_range_fails_fast_and_does_not_advance() {
     let mut chaser = Chaser::new(engine, one_peer_cfg());
 
     let source = dial_source(port).await;
-    // Bounded wall clock chosen BELOW one request_timeout (20s): with the reject handling a reject resolves in
-    // milliseconds, so the whole failure budget (5 attempts * 250ms backoff) finishes in ~1.5s. The pre-fix
-    // code waited for the per-request timeout on every attempt (a reject never matched the RespondBlocks-only
-    // waiter), so it could not finish inside this bound — this is the red/green line for the reject fix.
+    // Bounded wall clock chosen BELOW one request_timeout (20s): a reject resolves in
+    // milliseconds, so the whole failure budget (5 attempts * 250ms backoff) finishes in ~1.5s.
+    // Waiting for the per-request timeout on every attempt (a reject never matching a
+    // RespondBlocks-only waiter) could not finish inside this bound.
     let result = tokio::time::timeout(
         Duration::from_secs(8),
         chaser.sync_range(std::slice::from_ref(&source)),

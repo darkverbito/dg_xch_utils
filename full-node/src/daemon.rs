@@ -114,9 +114,9 @@ use tracing::{Instrument, debug, info, info_span, warn};
 // One outbound peer's block-range fetch deadline (mirrors SyncConfig default).
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-// An in-flight gossip-transaction fetch (chia full_node_store `pending_tx_request`): WHEN we asked
-// (for age-expiry) plus the ADVERTISED fee + cost from the peer's `NewTransaction` (chia's
-// `PeerWithTx`), carried to the untrusted tx-queue lane so it can order by fee-per-cost. The
+// An in-flight gossip-transaction fetch (`full_node_store` `pending_tx_request`): WHEN we asked
+// (for age-expiry) plus the ADVERTISED fee + cost from the peer's `NewTransaction`, carried to
+// the untrusted tx-queue lane so it can order by fee-per-cost. The
 // advertised values steer queue order only — admission always re-validates at the bundle's true fee.
 #[derive(Clone, Copy)]
 struct PendingTx {
@@ -131,21 +131,17 @@ const FOLLOW_BATCH: u32 = 32;
 // (FOLLOW_BATCH/step) would never converge — drive the weight-proof bulk sync instead. `local < GAP`
 // gates the RECENT-CHAIN JUMP to a fresh/near-empty store (a mid-chain node long-syncs the gap through
 // the batch pipeline instead — see `wants_long_sync`). The value doubles as the weight-proof anchor
-// floor: chia WEIGHT_PROOF_RECENT_BLOCKS (chia default_constants.py:72 = 1000, ours
-// core/src/consensus/constants.rs) — a tip below it cannot be WP-anchored, chia batch-syncs from zero
-// there (chia full_node.py:850-854).
+// floor: WEIGHT_PROOF_RECENT_BLOCKS (1000, core/src/consensus/constants.rs) — a tip below it
+// cannot be WP-anchored; from-zero batch sync covers that band.
 const FAST_SYNC_GAP: u32 = 1000;
-// chia config `sync_blocks_behind_threshold` (chia initial-config.yaml:360 = 300): a peer's claimed
-// tip more than this many blocks ahead of the local peak enters the WP-anchored long-sync band —
-// chia new_peak's short-batch rung (`request.height < curr_peak_height + sync_blocks_behind_threshold`,
-// full_node.py:856-861) falls through to `_sync()` past it, REGARDLESS of local height
-// (full_node.py:862-873).
+// `sync_blocks_behind_threshold` (300): a peer's claimed tip more than this many blocks ahead of
+// the local peak enters the WP-anchored long-sync band, regardless of local height.
 const SYNC_BLOCKS_BEHIND_THRESHOLD: u32 = 300;
-// chia short_sync_blocks_behind_threshold (initial-config.yaml: 20): within this many blocks of a
-// peer announced peak, chia follows block-by-block off the NewPeak event via short_sync_backtrack
-// (full_node.py:840-848, the normal case of receiving the next block) rather than batch-syncing, so
+// `short_sync_blocks_behind_threshold` (20): within this many blocks of a peer-announced peak the
+// node follows block-by-block off the NewPeak event (the normal case of receiving the next
+// block) rather than batch-syncing, so
 // the confirmed peak tracks the tip within 0-1. The tip_follower owns this band; FOLLOW_BATCH catch-up
-// and bulk_sync own the wider bands (chia full_node.py:856-873).
+// and bulk_sync own the wider bands.
 const SHORT_SYNC_BLOCKS_BEHIND_THRESHOLD: u32 = 20;
 // Falling-edge hysteresis for the secondary-index shed (`update_synced`): shed only when the node
 // is more than this many blocks behind the claimed network tip. The shed pays for itself only if
@@ -209,19 +205,19 @@ struct StoreApi<S> {
     mempool: Arc<Mutex<Mempool>>,
     constants: ConsensusConstants,
     claimed_peak: Arc<AtomicU32>,
-    // The per-peer peak-claim book (chia sync_store): on_new_peak records the announcing peer's
+    // The per-peer peak-claim book (`sync_store`): on_new_peak records the announcing peer's
     // (hash, height, weight) claim here; the sync bands select the heaviest verified-selectable claim.
     peak_book: Arc<PeakBook>,
     // OUTBOUND connections only: the minted per-connection claim key whose Drop retracts the claim
-    // (chia sync_store.peer_disconnected). `None` on the shared inbound server api, which keys claims
+    // (`sync_store.peer_disconnected`). `None` on the shared inbound server api, which keys claims
     // by the real inbound peer id and reconciles them against the live inbound map each driver tick.
     claim_guard: Option<Arc<ClaimGuard>>,
     // Fired by on_new_peak when a peer's announcement changes the heaviest claim, waking the
-    // event-driven tip_follower to close the gap block-by-block (chia new_peak short_sync_backtrack rung).
+    // event-driven tip_follower to close the gap block-by-block (the short-sync-backtrack rung).
     new_peak_signal: Arc<Notify>,
     // Live outbound peers as TimestampedPeerInfo — the RequestPeers gossip answer, refreshed by the driver.
     known_peers: Arc<RwLock<Vec<TimestampedPeerInfo>>>,
-    // chia full_node_store.pending_tx_request: transaction ids with a RequestTransaction in
+    // `full_node_store.pending_tx_request`: transaction ids with a RequestTransaction in
     // flight, mapped to the instant we asked. Two jobs: (1) dedup — eight peers announcing the
     // same tx cost one fetch, not eight (the bitcoin inv/getdata discipline); (2) the
     // solicited-body gate — respond_transaction admits a body only if its id is a pending entry.
@@ -229,28 +225,28 @@ struct StoreApi<S> {
     // by a blanket per-tick clear: a clear would wipe a just-issued request before its body could
     // arrive and make a legitimate response look unsolicited.
     tx_requested: Arc<Mutex<HashMap<Bytes32, PendingTx>>>,
-    // Phase 2.1: the slot state machine — handlers read it to answer/filter SP gossip; only the
+    // The slot state machine — handlers read it to answer/filter SP gossip; only the
     // driver writes it (validation needs the record ancestry + next-SSI context).
     slot_state: Arc<Mutex<SlotState>>,
     // Received signage points / EOS bundles awaiting driver-side validation into the slot state.
     sp_inbox: Arc<Mutex<Vec<SpEvent>>>,
-    // Phase 2.2: the unfinished-block cache (announce dedup + request tracking + serve path) and
+    // The unfinished-block cache (announce dedup + request tracking + serve path) and
     // the received-block inbox the driver validates through validate_unfinished_header_block.
     unfinished: Arc<Mutex<UnfinishedCache>>,
     ub_inbox: Arc<Mutex<Vec<UnfinishedBlock>>>,
-    // Timelord infusion-return inbox (chia new_infusion_point_vdf): the infusion-point VDFs that finish
+    // Timelord infusion-return inbox (`new_infusion_point_vdf`): the infusion-point VDFs that finish
     // one of OUR cached unfinished blocks into a FullBlock. Queued off the read loop; the driver
     // (process_ip_inbox) assembles the FullBlock, runs it through the engine, and sets the new peak.
     ip_inbox: Arc<Mutex<Vec<NewInfusionPointVDF>>>,
     // The sync-status flag: slot/unfinished gossip is tip-context, so a deep-syncing node pulls
-    // nothing it cannot validate (chia's "Ignore if syncing" guard on these handlers).
+    // nothing it cannot validate (the ignore-while-syncing guard on these handlers).
     synced: Arc<AtomicBool>,
     // Received bundles awaiting the validator worker (never validated on the read loop). A trusted
-    // peer's bundle takes the high-priority lane (chia TransactionQueue high_priority).
+    // peer's bundle takes the high-priority lane (the high-priority lane).
     tx_inbox: Arc<Mutex<TxQueue>>,
     // Accepted transactions queued for NewTransaction re-broadcast — shared with the Node/rpc so a
     // wallet's p2p SendTransaction admission announces through the SAME seam as push_tx and the
-    // gossip worker (chia broadcast_added_tx fires for every successful add_transaction).
+    // gossip worker (the announce fires for every successful admission).
     tx_announce: Arc<Mutex<Vec<NewTransaction>>>,
     // txid -> (origin identity, when recorded): the peer a gossiped bundle arrived FROM, recorded at
     // receipt (`on_respond_transaction`) with its remote host so the announce drain can exclude an
@@ -259,14 +255,14 @@ struct StoreApi<S> {
     tx_origin: Arc<Mutex<HashMap<Bytes32, (TxOrigin, Instant)>>>,
     // RequestProofOfWeight requests awaiting the weight-proof worker (built off the read path).
     wp_inbox: Arc<Mutex<Vec<WpRequest>>>,
-    // Phase 1.5 compact-VDF consume: pulled RespondCompactVDF proofs awaiting the driver's
+    // Compact-VDF consume: pulled RespondCompactVDF proofs awaiting the driver's
     // validate + swap + re-gossip pass (a VDF verify never runs on the websocket read loop).
     compact_vdf_inbox: Arc<Mutex<Vec<RespondCompactVDF>>>,
-    // Phase 3 farmer interface: accepted DeclareProofOfSpace declarations, held as block candidates
-    // until Phase 4 assembly consumes them. Bounded FIFO — evicting a stale candidate is harmless.
+    // Farmer interface: accepted DeclareProofOfSpace declarations, held as block candidates
+    // until assembly consumes them. Bounded FIFO — evicting a stale candidate is harmless.
     proof_candidates: Arc<Mutex<ProofCandidateStore>>,
-    // Phase 4 increment 5: candidate unfinished blocks awaiting the farmer's foliage signatures,
-    // keyed by quality string (chia full_node_store candidate blocks). declare builds + stores here;
+    // Candidate unfinished blocks awaiting the farmer's foliage signatures, keyed by quality
+    // string. declare builds + stores here;
     // signed_values retrieves, splices the real signatures, and emits.
     candidates: Arc<Mutex<CandidateBlockStore>>,
     // Block-producer pipeline counters (the first-block funnel) — shared with Node + the
@@ -284,15 +280,14 @@ struct StoreApi<S> {
     // greeting (`timelord_peak`) can run the same build as `broadcast_new_peak_timelord`.
     record_window: Arc<Mutex<BlockRecordCache>>,
     sync_metrics: Arc<SyncMetrics>,
-    // The shared trusted-peer policy — resolves the register initial-state response budget (chia
-    // `max_subscribe_response_items(peer)`, full_node_api.py:2221-2225) per-peer: the UNTRUSTED
-    // 100,000 (initial-config.yaml:441) by default, the TRUSTED 500,000 (yaml:448) for a configured
-    // trusted peer. One budget is DECREMENTED across the puzzle-hash query and then the hint query of
+    // The shared trusted-peer policy — resolves the register initial-state response budget
+    // (`max_subscribe_response_items(peer)`) per-peer: the untrusted 100,000 by default, the
+    // trusted 500,000 for a configured trusted peer. One budget is DECREMENTED across the puzzle-hash query and then the hint query of
     // a single RegisterForPhUpdates, and caps the RegisterForCoinUpdates initial read — so one
     // dust-storm puzzle hash cannot materialize an unbounded CoinState set into a single reply. Also
     // decides tx-queue priority (on_transaction) — the SAME `Arc` the WalletNotifier holds.
     trust: Arc<TrustPolicy>,
-    // Bounds CONCURRENT heavy wallet-serve DB work (chia `wallet_sync_api_sem`, full_node_api.py:166):
+    // Bounds CONCURRENT heavy wallet-serve DB work (`wallet_sync_api_sem`):
     // shared node-wide across every peer's handler map; additions/removals acquire it and REJECT on
     // overflow. The read-loop rate limiter bounds message rate; this bounds the
     // concurrent block-delta scans those messages fan out into. Only the coin-index tier serves
@@ -301,10 +296,10 @@ struct StoreApi<S> {
     wallet_sync_sem: Arc<LimitedSemaphore>,
 }
 
-// chia config `max_duplicate_unfinished_blocks`: variants of one reward hash worth fetching.
+// `max_duplicate_unfinished_blocks`: variants of one reward hash worth fetching.
 const MAX_DUPLICATE_UNFINISHED_BLOCKS: usize = 3;
 
-// Transaction-inbox bounds (chia TransactionQueue: per-peer queues under an aggregate cap).
+// Transaction-inbox bounds (per-peer queues under an aggregate cap).
 const TX_INBOX_CAP: usize = 256;
 const TX_INBOX_PER_PEER: usize = 32;
 
@@ -313,7 +308,7 @@ const TX_INBOX_PER_PEER: usize = 32;
 const FARMED_HEADER_CAP: usize = 256;
 
 // The wall-clock budget for assembling a block generator from the mempool on a winning declare —
-// chia's `block_creation_timeout` config default (2.0s, chia/full_node/full_node_api.py:953).
+// `block_creation_timeout` config default (2.0s).
 const BLOCK_CREATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 // One received slot-gossip payload, queued for the driver's validation pass.
@@ -339,9 +334,8 @@ struct WpRequest {
     id: Option<u16>,
 }
 
-// The weight-proof request inbox cap. Building a proof walks sub-epochs of store history; chia
-// bounds its own concurrent-creation cache to 4 tips (full_node_api.py pow_creation) — a handful of
-// queued requests is plenty, the rest drop (the peer retries or asks another node).
+// The weight-proof request inbox cap. Building a proof walks sub-epochs of store history — a
+// handful of queued requests is plenty, the rest drop (the peer retries or asks another node).
 const WP_INBOX_CAP: usize = 8;
 
 #[async_trait]
@@ -361,17 +355,15 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
             .map(Box::new)
     }
 
-    // chia full_node_api.py:427 — the RequestBlocks serving cap comes from the network's consensus
-    // constants (default_constants.py:77 MAX_BLOCK_COUNT_PER_REQUESTS = 32, override-tunable),
+    // — the RequestBlocks serving cap comes from the network's consensus
+    // constants (MAX_BLOCK_COUNT_PER_REQUESTS = 32, override-tunable),
     // exactly like the request_header_blocks cap this daemon already enforces.
     fn max_block_count_per_requests(&self) -> u32 {
         self.constants.max_block_count_per_requests
     }
 
-    // CHIA-4203 (chia b483e59f22): the decode-time list caps resolve from the trusted-peer policy
-    // — the SAME values the handlers enforce post-parse (chia's `list_limits` lambdas call
-    // `self.max_subscriptions(peer)` / `self.max_subscribe_response_items(peer)`), so decode
-    // truncation and handler truncation can never disagree.
+    // The decode-time list caps resolve from the trusted-peer policy — the SAME values the
+    // handlers enforce post-parse, so decode truncation and handler truncation can never disagree.
     fn max_subscriptions(&self, peer: &Bytes32, host: Option<IpAddr>) -> u32 {
         u32::try_from(self.wallet.max_subscriptions(peer, host)).unwrap_or(u32::MAX)
     }
@@ -379,9 +371,8 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
         u32::try_from(self.trust.max_subscribe_response_items(peer, host)).unwrap_or(u32::MAX)
     }
 
-    // chia 0046a3a4e (CHIA-3995): inbound TIMELORD from localhost or an exempt network only.
-    // Our trusted-CIDR list is the operational analog of chia's `exempt_peer_networks` (both
-    // default empty ⇒ localhost only). Host-based only — node-id trust does not apply here.
+    // Inbound TIMELORD from localhost or an exempt network only; the trusted-CIDR list defaults
+    // empty, so the default is localhost only. Host-based only — node-id trust does not apply.
     fn accept_inbound_timelord(&self, host: Option<IpAddr>) -> bool {
         self.trust.host_trusted(host)
     }
@@ -391,7 +382,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
     }
 
     async fn on_new_peak(&self, peer: Bytes32, peak: NewPeak) {
-        // chia full_node.new_peak: record this peer's claim FIRST (sync_store.peer_has_block), weight
+        // `full_node.new_peak`: record this peer's claim FIRST (sync_store.peer_has_block), weight
         // included — WEIGHT is the fork-choice ordering key, and the newest announcement REPLACES the
         // peer's previous claim (which is also how an over-claim is withdrawn). Outbound connections
         // key by the minted per-connection guard (the dispatch peer id there is our own cert hash);
@@ -409,7 +400,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
                 weight: peak.weight,
             },
         );
-        // Event-driven near-tip follow (chia new_peak, full_node.py:840-848): a change of the
+        // Event-driven near-tip follow: a change of the
         // heaviest claim wakes the tip_follower to close the gap block-by-block. notify_one stores a
         // permit if the follower is busy, so an advance is never missed.
         if changed {
@@ -426,30 +417,30 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
         _peer: Bytes32,
         tx: NewTransaction,
     ) -> TransactionAnnounceAction {
-        // Behavior (a) — chia full_node_api.py new_transaction ("Ignore if syncing", :229-233):
+        // Behavior (a) — new_transaction ("Ignore if syncing"):
         // a syncing node must not pull gossiped transactions — it cannot admit them (the mempool
         // keys on the live peak) and each pull costs a full CLVM + BLS run at mainnet gossip
         // rate. Without this gate, deep-syncing legs spent >98% CPU
         // validating doomed mainnet gossip (and the per-bundle CLVM runs are the fleet-wide burst
-        // source). chia's two gates (sync_store.get_sync_mode AND synced()) collapse to our one
-        // `synced` atomic, which already carries the at-tip-and-current semantic.
+        // source). The sync-mode and synced gates collapse to our one `synced` atomic, which
+        // already carries the at-tip-and-current semantic.
         if !self.synced.load(Ordering::Relaxed) {
             return TransactionAnnounceAction::Ignore;
         }
-        // Behavior (b) — chia :235-241: "It's not reasonable to advertise a transaction with zero
+        // Behavior (b) — "It's not reasonable to advertise a transaction with zero
         // cost." A zero-cost announcement is a protocol violation; ban the peer.
         if tx.cost == 0 {
             warn!(id = %tx.transaction_id, "banning peer: zero-cost transaction announcement");
             return TransactionAnnounceAction::Ban;
         }
-        // Our pre-filter (not in chia): an announcement above the block cost ceiling can never be
-        // admitted, so it is not worth a round trip. Ignore (not a ban — a mis-costed advert is
-        // not the zero-cost violation chia singles out).
+        // Pre-filter: an announcement above the block cost ceiling can never be admitted, so it
+        // is not worth a round trip. Ignore (not a ban — a mis-costed advert is not the
+        // zero-cost violation).
         if tx.cost > self.constants.max_block_cost_clvm {
             return TransactionAnnounceAction::Ignore;
         }
-        // Behavior (c) — chia :243-259: if we already hold a VALIDATED mempool item for this id,
-        // the announced cost/fee must match our own validation. chia tolerates one specific diff:
+        // Behavior (c) — if we already hold a VALIDATED mempool item for this id,
+        // the announced cost/fee must match our own validation. One specific diff is tolerated:
         // pre-2.4.3 peers fold the quote's byte+execution cost into the advertised cost, so
         // `mempool_item.cost + (QUOTE_BYTES * COST_PER_BYTE + QUOTE_EXECUTION_COST)` is also
         // accepted. Any other cost, or any fee mismatch, is a ban.
@@ -473,10 +464,10 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
                 );
                 return TransactionAnnounceAction::Ban;
             }
-            // Already seen and consistent (chia's `return None` after the match check).
+            // Already seen and consistent (`return None` after the match check).
             return TransactionAnnounceAction::Ignore;
         }
-        // Behavior (d) — chia full_node_api.py:261 `is_fee_enough`: the whole request path is
+        // Behavior (d) — `is_fee_enough`: the whole request path is
         // gated on the ADVERTISED fee being able to get in. With room in the pool anything
         // passes; at capacity the fee must clear the nonzero floor (5 fpc) and strictly beat the
         // pool's min fee rate — otherwise the bundle is never fetched (spam CLVM protection).
@@ -484,7 +475,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
             return TransactionAnnounceAction::Ignore;
         }
         // New to us. A live (non-expired) entry means a fetch for this id is already in flight
-        // from another peer (chia's pending_tx_request dedup): ignore the duplicate advert.
+        // from another peer: ignore the duplicate advert.
         // Otherwise record the request instant and pull.
         {
             let mut pending = self.tx_requested.lock().await;
@@ -495,9 +486,9 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
                 return TransactionAnnounceAction::Ignore;
             }
             // Record the request instant AND this peer's advertised fee/cost — the untrusted
-            // tx-queue lane orders on them (chia's PeerWithTx fee-per-cost nicing). A later
-            // announcer for this id is deduped above, so the first announcer's advertised values
-            // steer the order; chia instead maxes the fpc across announcers — a documented delta.
+            // tx-queue lane orders on them. A later announcer for this id is deduped above, so the
+            // first announcer's advertised values steer the order (not the max fpc across
+            // announcers — a documented delta).
             pending.insert(
                 tx.transaction_id,
                 PendingTx {
@@ -514,17 +505,16 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
 
     async fn on_respond_transaction(&self, peer: Bytes32, host: Option<IpAddr>, tx: SpendBundle) {
         // Late arrival past the synced gate (a request issued before the flag dropped, or a
-        // stale peer push): chia drops these in add_transaction with
-        // NO_TRANSACTIONS_WHILE_SYNCING (full_node.py:2882-2885) before any CLVM. Drop at the
+        // stale peer push): dropped (NO_TRANSACTIONS_WHILE_SYNCING) before any CLVM. Drop at the
         // door; the validator worker re-checks for bundles that race the transition.
         if !self.synced.load(Ordering::Relaxed) {
             return;
         }
-        // Behavior (d) — chia :332-343 respond_transaction: a body is accepted only if it answers
+        // Behavior (d) — respond_transaction: a body is accepted only if it answers
         // a pull WE issued. `tx_requested` is our `pending_tx_request` set (a RequestTransaction
         // was sent for this id). An unsolicited body — no matching pending entry — is dropped
-        // before it can reach the validator. `remove` consumes the entry (chia's
-        // `pending_tx_request.pop`), so a second copy of the same id is then unsolicited too.
+        // before it can reach the validator. `remove` consumes the entry, so a second copy of the
+        // same id is then unsolicited too.
         let Ok(name) = tx.name() else {
             return;
         };
@@ -534,7 +524,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
         };
         // Record the origin (peer id + remote host) BEFORE queueing so the announce drain, which may
         // run concurrently with the validator worker's admission, can exclude the peer this bundle
-        // arrived from (chia broadcast_added_tx's current_peer). The host is what makes an OUTBOUND
+        // arrived from. The host is what makes an OUTBOUND
         // origin excludable — its dispatch peer id is our shared client-cert hash. A bundle that
         // later fails admission produces no announcement, so its origin
         // is never consumed and simply ages out (bounded — see record_tx_origin).
@@ -548,9 +538,9 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
         )
         .await;
         // The CLVM run does NOT happen here — the websocket read loop must never carry
-        // validation work (chia's TransactionQueue). Bundles queue into the bounded inbox the
+        // validation work. Bundles queue into the bounded inbox the
         // validator worker drains. A trusted peer's bundle takes the unbounded high-priority lane
-        // (chia `TransactionQueue.put(high_priority=is_trusted(peer))`); an untrusted
+        // (`TransactionQueue.put(high_priority=is_trusted(peer))`); an untrusted
         // bundle is admitted to the capped lane only within this peer's share, else dropped, and the
         // lane orders by the advertised fee-per-cost carried on the pending request.
         let high_priority = self.trust.is_trusted(&peer, host);
@@ -568,15 +558,14 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
         _peer: Bytes32,
         ann: NewSignagePointOrEndOfSubSlot,
     ) -> Option<RequestSignagePointOrEndOfSubSlot> {
-        // chia gates this handler on sync mode: a syncing node's slot list anchors at its local
+        // Gated on sync mode: a syncing node's slot list anchors at its local
         // peak, so tip-context objects can never validate — skip the round trip.
         if !self.synced.load(Ordering::Relaxed) {
             return None;
         }
-        // Pull only what the slot state does not hold and is not outdated — chia's
-        // new_signage_point_or_end_of_sub_slot admission checks. (chia additionally walks up
-        // to 30 EOS backwards to catch up a diverged slot list; that catch-up loop is a noted
-        // follow-up — a missed slot here self-heals at the next confirmed peak.)
+        // Pull only what the slot state does not hold and is not outdated. (A walk-up-to-30-EOS
+        // backwards catch-up for a diverged slot list is a noted follow-up — a missed slot here
+        // self-heals at the next confirmed peak.)
         let state = self.slot_state.lock().await;
         if ann.index_from_challenge == 0 {
             if state.get_sub_slot(&ann.challenge_hash).is_some() {
@@ -610,7 +599,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
         &self,
         req: RequestSignagePointOrEndOfSubSlot,
     ) -> Option<SignagePointResponse> {
-        // chia's request_signage_point_or_end_of_sub_slot: index 0 serves the EOS bundle
+        // request_signage_point_or_end_of_sub_slot: index 0 serves the EOS bundle
         // itself, any other index the cached signage point built on the requested infusion.
         let state = self.slot_state.lock().await;
         if req.index_from_challenge == 0 {
@@ -627,7 +616,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
             &req.last_rc_infusion,
         )?;
         // index > 0 (guaranteed by the branch above) always resolves a stored SP with real VDFs;
-        // RespondSignagePoint carries non-optional VDFs (chia's request_signage_point response), so the
+        // RespondSignagePoint carries non-optional VDFs, so the
         // `?` here only guards a malformed all-None SP, which get_signage_point_by_index never returns.
         Some(SignagePointResponse::SignagePoint(Box::new(
             RespondSignagePoint {
@@ -663,7 +652,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
             return None;
         }
         // The v1 announce carries no foliage hash — pull only when we hold and request nothing
-        // for this reward hash (chia new_unfinished_block).
+        // for this reward hash.
         let mut cache = self.unfinished.lock().await;
         if cache.get_block(&ann.unfinished_reward_hash).is_some() {
             return None;
@@ -686,7 +675,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
         if !self.synced.load(Ordering::Relaxed) {
             return None;
         }
-        // chia new_unfinished_block2's admission ladder: already held, a better variant held,
+        // `new_unfinished_block2`'s admission ladder: already held, a better variant held,
         // too many variants held, already fetching, or too many fetches in flight — all ignore.
         let mut cache = self.unfinished.lock().await;
         let (entry, count, have_better) =
@@ -737,10 +726,10 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
     }
 
     async fn mempool_items(&self, filter: Vec<u8>) -> Vec<NewTransaction> {
-        // chia mempool_manager.get_items_not_in_filter (:1066-1082): decode the peer's BIP158
+        // `mempool_manager.get_items_not_in_filter`: decode the peer's BIP158
         // filter and serve up to `limit` (100) items NOT in it, scanning at most `max_checked`
-        // (5000) in RAW fee-per-cost order — chia iterates `items_by_feerate()`
-        // (mempool.py:257-260 `ORDER BY fee_per_cost DESC, seq ASC`), NOT the virtual-cost
+        // (5000) in RAW fee-per-cost order — `items_by_feerate()`
+        // (`fee_per_cost DESC, seq ASC`), NOT the virtual-cost
         // priority order assembly/eviction use. A malformed filter decodes to None and we serve
         // unfiltered — over-announcing is the safe superset (the peer's own dedup absorbs it).
         let decoded = dg_xch_core::consensus::block_filter::decode_chia_block_filter(&filter);
@@ -776,8 +765,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
         peers: PeerMap,
     ) {
         // Queue-only, off the read path: the wp worker builds (single-flight per tip inside the
-        // WeightProofServer's lock, mirroring chia's weight_proof.py:90 handler lock + the
-        // full_node_api.py pow_creation event) and responds. Bounded + deduped — a repeat
+        // WeightProofServer's lock) and responds. Bounded + deduped — a repeat
         // {peer, tip} would be one build + one response anyway.
         let mut inbox = self.wp_inbox.lock().await;
         if inbox.len() >= WP_INBOX_CAP {
@@ -795,7 +783,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
     }
 
     async fn compact_vdf(&self, req: RequestCompactVDF) -> Option<RespondCompactVDF> {
-        // SERVE (chia full_node.request_compact_vdf): the height's main-chain block whose header
+        // SERVE (`full_node.request_compact_vdf`): the height's main-chain block whose header
         // hash the requester named; answer only when OUR proof for that field is already compact.
         let block = self.block_by_height(req.height).await?;
         if block.header_hash().ok()? != req.header_hash {
@@ -816,7 +804,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
         _peer: Bytes32,
         ann: NewCompactVDF,
     ) -> Option<RequestCompactVDF> {
-        // chia new_compact_vdf: ignore while syncing (tip-context), ignore blocks within 5 of our
+        // `new_compact_vdf`: ignore while syncing (tip-context), ignore blocks within 5 of our
         // peak ("will not compactify recent block"), and pull only when we still hold that exact
         // field/VdfInfo bulky (needs_compact_proof). Otherwise stay silent.
         if !self.synced.load(Ordering::Relaxed) {
@@ -858,7 +846,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
         // A bluebox timelord's answer to our solicitation. It carries the same five fields as a
         // RespondCompactVDF, so map it and feed the identical consume inbox — the driver's
         // process_compact_vdf_inbox validates + swaps under the same-header-hash guard + re-gossips
-        // NewCompactVDF (chia add_compact_proof_of_time). No new validate/replace surface.
+        // NewCompactVDF. No new validate/replace surface.
         let mapped = RespondCompactVDF {
             height: resp.height,
             header_hash: resp.header_hash,
@@ -887,7 +875,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
             cc_sp = %declare.challenge_chain_sp,
             "declare_proof_of_space received"
         );
-        // chia full_node_api.declare_proof_of_space:881 — declare validation is tip-context; a
+        // `full_node_api.declare_proof_of_space` — declare validation is tip-context; a
         // syncing node has no consistent slot state to check against, so it drops the message.
         if !self.synced.load(Ordering::Relaxed) {
             // Promoted trace!->info! for bring-up: at default level the operator must
@@ -906,7 +894,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
         // The two slot-state lookups run synchronously under one guard — the proof verify itself is
         // CPU-only (no I/O), so holding the slot lock across it is bounded and avoids a TOCTOU on the
         // SP set. This is the read loop, but a single PoSpace verify is cheap (unlike a VDF verify,
-        // which we always defer); chia validates it inline here too.
+        // which we always defer).
         let verdict = {
             let slot = self.slot_state.lock().await;
             validate_declared_proof(
@@ -920,7 +908,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
         match verdict {
             DeclareVerdict::Accepted(quality_string) => {
                 self.producer.validated("accepted");
-                // An accepted proof is always held as a candidate proof (Phase 3), independent of
+                // An accepted proof is always held as a candidate proof, independent of
                 // whether we can assemble a full block from it yet.
                 self.proof_candidates.lock().await.insert(AcceptedProof {
                     declare: declare.clone(),
@@ -932,7 +920,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
                     qs = %quality_string,
                     "accepted proof of space, held as candidate"
                 );
-                // Phase 4 increment 5: assemble the candidate unfinished block (placeholder foliage
+                // Assemble the candidate unfinished block (placeholder foliage
                 // signatures + the SP signatures from THIS declare message), store it keyed by the
                 // quality string, and return the RequestSignedValues for the farmer to sign the two
                 // foliage hashes. Returns None (no emit) when the candidate cannot yet be assembled
@@ -964,9 +952,9 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
     }
 
     async fn on_signed_values(&self, peer: Bytes32, signed: SignedValues) {
-        // FARMER→NODE (chia full_node_api.signed_values): the farmer's real foliage signatures for a
+        // FARMER→NODE (`full_node_api.signed_values`): the farmer's real foliage signatures for a
         // candidate we asked it to sign. Retrieve the candidate, verify the foliage_block_data
-        // signature against the plot key (chia's AugSchemeMPL.verify guard — a mismatch means a plot
+        // signature against the plot key (a mismatch means a plot
         // collision), splice both signatures into the foliage, and propagate the finished block.
         // S5 — the farmer signed back.
         self.producer.signed_values();
@@ -986,7 +974,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
             );
             return;
         };
-        // chia: AugSchemeMPL.verify(plot_public_key, foliage_block_data.get_hash(), fbd_signature).
+        // Verify(plot_public_key, foliage_block_data.get_hash(), fbd_signature).
         let plot_pk = candidate.reward_chain_block.proof_of_space.plot_public_key;
         let Ok(fbd_hash) = candidate.foliage.foliage_block_data.hash() else {
             self.producer.candidate_dropped("foliage_hash_fail");
@@ -1009,14 +997,14 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
             );
             return;
         }
-        // chia: candidate.foliage.replace(foliage_block_data_signature=...); and, for a tx block,
-        // .replace(foliage_transaction_block_signature=...).
+        // Splice the foliage_block_data signature and, for a tx block, the
+        // foliage_transaction_block signature.
         splice_farmer_foliage_signatures(
             &mut candidate,
             signed.foliage_block_data_signature,
             signed.foliage_transaction_block_signature,
         );
-        // chia add_unfinished_block latency guard (post-CHIA-4170, commit 216331028): drop the block
+        // The add-unfinished-block latency guard: drop the block
         // if it would be infused before the current finished head (block.total_iters < peak.total_iters).
         if let Ok(Some((peak_hash, _))) = self.store.get_peak().await
             && let Ok(Some(peak_rec)) = self.store.get_block_record(&peak_hash).await
@@ -1059,9 +1047,9 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
         // Propagate to ourselves: route through the same received-unfinished-block inbox a peer's
         // block takes, so the driver validates it (validate_unfinished_header_block) and — on success
         // — caches it and queues the NewUnfinishedBlock / NewUnfinishedBlock2 broadcast. This mirrors
-        // chia's `add_unfinished_block(new_candidate, None, farmed_block=True)`: validate first, then
+        // `add_unfinished_block(new_candidate, None, farmed_block=True)`: validate first, then
         // send_to_all v1/v2 to full-node peers (the origin exclusion is moot — we are the origin).
-        // The timelord half of chia's broadcast (NewUnfinishedBlockTimelord to NodeType.TIMELORD) is
+        // The timelord half of the broadcast (NewUnfinishedBlockTimelord to the timelord) is
         // built and queued by process_ub_inbox and drained by broadcast_ub_timelord_announcements.
         let mut inbox = self.ub_inbox.lock().await;
         if inbox.len() < SP_INBOX_CAP {
@@ -1078,14 +1066,13 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
     }
 
     async fn on_new_infusion_point_vdf(&self, peer: Bytes32, req: NewInfusionPointVDF) {
-        // chia full_node_api.new_infusion_point_vdf:1275 — `if sync_store.get_sync_mode(): return None`.
+        // `full_node_api.new_infusion_point_vdf` — `if sync_store.get_sync_mode(): return None`.
         // A syncing node has no consistent slot/unfinished state to finish a block against.
         if !self.synced.load(Ordering::Relaxed) {
             return;
         }
         // Queue only — the assembly (unfinished-block lookup + reward-chain backtrack + finished-sub-slot
-        // walk + engine add_block/set-peak) runs on the driver, never the websocket read loop. chia
-        // defers the same work to full_node.new_infusion_point_vdf under the timelord lock.
+        // walk + engine add_block/set-peak) runs on the driver, never the websocket read loop.
         let mut inbox = self.ip_inbox.lock().await;
         if inbox.len() < IP_INBOX_CAP {
             inbox.push(req);
@@ -1095,7 +1082,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
     }
 
     async fn on_new_signage_point_vdf(&self, peer: Bytes32, req: NewSignagePointVDF) {
-        // chia full_node_api.new_signage_point_vdf:1285 — sync gate, then rewrap as RespondSignagePoint
+        // `full_node_api.new_signage_point_vdf` — sync gate, then rewrap as RespondSignagePoint
         // and run respond_signage_point. dg_xch's respond-signage-point path queues into sp_inbox for the
         // driver's slot-state validation, so route there with the identical field mapping.
         if !self.synced.load(Ordering::Relaxed) {
@@ -1112,8 +1099,8 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
     }
 
     async fn on_new_end_of_sub_slot_vdf(&self, peer: Bytes32, req: NewEndOfSubSlotVDF) {
-        // chia full_node_api.new_end_of_sub_slot_vdf:1298 — sync gate; ignore when the sub-slot is already
-        // in the slot state (chia's `get_sub_slot(...) is not None: return None`); else run
+        // `full_node_api.new_end_of_sub_slot_vdf` — sync gate; ignore when the sub-slot is already
+        // in the slot state (`get_sub_slot(...) is not None: return None`); else run
         // add_end_of_sub_slot. dg_xch's respond-end-of-sub-slot path queues into sp_inbox for the driver's
         // new_finished_sub_slot validation, so mirror the dedup check then route there.
         if !self.synced.load(Ordering::Relaxed) {
@@ -1140,9 +1127,9 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
         .await;
     }
 
-    // ---- light-wallet query surface (chia full_node_api.py wallet handlers) ---------------------------
+    // ---- light-wallet query surface (wallet handlers) ---------------------------
 
-    // chia request_puzzle_solution (full_node_api.py:1571): the (puzzle, solution) of a coin spent at
+    // `request_puzzle_solution`: the (puzzle, solution) of a coin spent at
     // `height`, recovered by re-running that block's generator. Reuses the ONE tested extraction path
     // shared with the HTTP RPC (never a second VM); any miss maps to a RejectPuzzleSolution on the wire.
     async fn puzzle_solution(
@@ -1166,14 +1153,11 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
         })
     }
 
-    // chia send_transaction (full_node_api.py:1535-1569) + add_transaction (full_node.py:2872-2988):
-    // the wallet's spend submit, ALWAYS acked. Gate on sync BEFORE any CLVM (chia :2882-2885 —
-    // FAILED, Err.NO_TRANSACTIONS_WHILE_SYNCING), then run the shared admission seam (the same
+    // `send_transaction`: the wallet's spend submit, ALWAYS acked. Gate on sync BEFORE any CLVM
+    // (FAILED, NO_TRANSACTIONS_WHILE_SYNCING), then run the shared admission seam (the same
     // validate → Mempool::admit → announce path as push_tx and the gossip worker) and map the
-    // outcome to chia's (MempoolInclusionStatus, Err.name). Two deltas from chia: no trusted tier
-    // here (chia queues trusted peers high-priority), and no 45s TransactionQueue wait (admission
-    // is synchronous here, so the
-    // timeout→PENDING(error=None) path cannot arise; every ack carries the definitive result).
+    // outcome to the `(status, error name)` ack. No trusted tier here, and no queue wait
+    // (admission is synchronous, so every ack carries the definitive result).
     // Runs on the per-message dispatch task (core protocols mod.rs spawns each matched handler),
     // bounded by the read loop's inbound rate limiter (SendTransaction: 5000/min).
     async fn send_transaction(&self, _peer: Bytes32, tx: SendTransaction) -> TransactionAck {
@@ -1194,7 +1178,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
         )
         .await
         {
-            // chia acks SUCCESS with error=None (full_node_api.py:1541, :1560-1562).
+            // SUCCESS acks with error=None.
             Ok(name) => TransactionAck {
                 txid: name,
                 status: TXStatus::SUCCESS,
@@ -1212,9 +1196,8 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
         }
     }
 
-    // chia request_block_header (full_node_api.py:1322): the HeaderBlock at a height. An unknown height
-    // rejects (chia height_to_hash is None); a record with no stored body stays silent (chia return None,
-    // and a coin-store failure raises → no reply). The header carries the REAL BIP158
+    // `request_block_header`: the HeaderBlock at a height. An unknown height
+    // rejects; a record with no stored body stays silent. The header carries the REAL BIP158
     // transactions_filter (G3 closed — see served_header_block).
     async fn block_header(&self, height: u32) -> BlockHeaderReply {
         let record = match self.store.get_block_record_by_height(height).await {
@@ -1230,10 +1213,9 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
         }
     }
 
-    // chia request_header_blocks (full_node_api.py:1670, DEPRECATED, code 60): header blocks in
-    // [start, end]. A bad/oversized range is silent (chia return None); an unknown height in range
-    // rejects. Headers carry the real filter (chia builds it from the coin store per block,
-    // full_node_api.py:1693-1700).
+    // `request_header_blocks` (DEPRECATED, code 60): header blocks in
+    // [start, end]. A bad/oversized range is silent; an unknown height in range rejects.
+    // Headers carry the real filter, built from the coin store per block.
     async fn header_blocks(&self, start_height: u32, end_height: u32) -> HeaderBlocksReply {
         if end_height < start_height
             || end_height - start_height > self.constants.max_block_count_per_requests
@@ -1266,11 +1248,10 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
         }))
     }
 
-    // chia request_block_headers (full_node_api.py:1617, the streamed shape, code 86): header blocks in
+    // `request_block_headers` (the streamed shape, code 86): header blocks in
     // [start, end], capped at 128. A bad range or a missing block rejects. return_filter is honored:
-    // false serves the encoded-empty filter b"\x00" (chia header_block_from_block,
-    // full_block_utils.py:311/:320), true serves the real per-block filter from the coin store
-    // (full_node_api.py:1644-1652).
+    // false serves the encoded-empty filter b"\x00", true serves the real per-block filter from
+    // the coin store.
     async fn block_headers(
         &self,
         start_height: u32,
@@ -1306,11 +1287,11 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
         }))
     }
 
-    // chia request_additions (full_node_api.py:1372): coins created at a block, grouped by puzzle hash.
+    // `request_additions`: coins created at a block, grouped by puzzle hash.
     // puzzle_hashes = None → all additions, proofs = None (the trusted-wallet path);
     // puzzle_hashes = Some → per-hash coins plus MerkleSet INCLUSION/EXCLUSION proofs against the
-    // foliage additions_root (leaf pairs [puzzle_hash, hash_coin_ids(coin names)],
-    // full_node_api.py:1424-1448), which an untrusted wallet verifies against the block header.
+    // foliage additions_root (leaf pairs [puzzle_hash, hash_coin_ids(coin names)]), which an
+    // untrusted wallet verifies against the block header.
     // coin-index tier only.
     #[cfg(feature = "coin-index")]
     async fn additions(&self, req: RequestAdditions) -> AdditionsReply {
@@ -1327,7 +1308,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
         {
             return reject(req.header_hash.unwrap_or_default());
         }
-        // Resolve + fork-check the header hash (chia height_to_hash(height) == header_hash).
+        // Resolve + fork-check the header hash (height_to_hash(height) == header_hash).
         let Ok(Some(confirmed)) = self.store.get_block_record_by_height(req.height).await else {
             return reject(req.header_hash.unwrap_or_default());
         };
@@ -1335,8 +1316,8 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
         if header_hash != confirmed.header_hash {
             return reject(header_hash);
         }
-        // Empty proof request: no DB + Merkle work — chia answers coins=[] with proofs=[]
-        // (Some-empty, NOT None: full_node_api.py:1392-1394 passes [] for both).
+        // Empty proof request: no DB + Merkle work — answer coins=[] with proofs=[]
+        // (Some-empty, NOT None).
         if req.puzzle_hashes.as_ref().is_some_and(Vec::is_empty) {
             return AdditionsReply::Respond(Box::new(RespondAdditions {
                 height: req.height,
@@ -1345,22 +1326,21 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
                 proofs: Some(Vec::new()),
             }));
         }
-        // chia guards the block-delta scan with wallet_sync_api_sem (active=2, waiting=20) and REJECTS
-        // on overflow (full_node_api.py:1396-1397, 1450-1452) — concurrent heavy wallet serves are
-        // bounded, never queued without limit.
+        // The block-delta scan is guarded by wallet_sync_sem (active=2, waiting=20) and REJECTS
+        // on overflow — concurrent heavy wallet serves are bounded, never queued without limit.
         let Ok(_permit) = self.wallet_sync_sem.acquire().await else {
             return reject(header_hash);
         };
         let Ok(added) = self.store.get_coins_added_at_height(req.height).await else {
             return reject(header_hash);
         };
-        // Reorg guard: the DB read may straddle a reorg — re-check height→hash (chia :1402-1404).
+        // Reorg guard: the DB read may straddle a reorg — re-check height→hash.
         match self.store.get_block_record_by_height(req.height).await {
             Ok(Some(r)) if r.header_hash == header_hash => {}
             _ => return reject(header_hash),
         }
-        // puzzle hash → coins, in additions insertion order (chia's dict preserves it, and the
-        // trusted-path response + the proof leaf pairs both iterate it).
+        // puzzle hash → coins, in additions insertion order (the trusted-path response + the
+        // proof leaf pairs both iterate it).
         let mut order: Vec<Bytes32> = Vec::new();
         let mut map: HashMap<Bytes32, Vec<Coin>> = HashMap::new();
         for cr in added {
@@ -1372,7 +1352,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
         }
         match req.puzzle_hashes {
             None => {
-                // chia bounds only the serve-everything map (full_node_api.py:1417-1419).
+                // Only the serve-everything map is bounded.
                 if map.len() > MAX_COINS_MAP_SIZE {
                     return reject(header_hash);
                 }
@@ -1389,7 +1369,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
             }
             Some(ref puzzle_hashes) => {
                 // The addition merkle set: [puzzle_hash, hash_coin_ids(coin names)] leaf pairs —
-                // its root IS the foliage additions_root (chia :1424-1431).
+                // its root IS the foliage additions_root.
                 let mut leafs: Vec<[u8; 32]> = Vec::with_capacity(2 * order.len());
                 for ph in &order {
                     leafs.push(ph.bytes());
@@ -1401,7 +1381,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
                 let mut proofs_map: Vec<(Bytes32, Vec<u8>, Option<Vec<u8>>)> =
                     Vec::with_capacity(puzzle_hashes.len());
                 for ph in puzzle_hashes {
-                    // INCLUSION if the hash is in the set, EXCLUSION otherwise (chia :1433-1447;
+                    // INCLUSION if the hash is in the set, EXCLUSION otherwise (
                     // its asserts hold structurally here — the set is built from the same map —
                     // so a mismatch is a corrupt read: reject, never a panic).
                     let Ok((included, proof)) = addition_merkle_set.generate_proof(&ph.bytes())
@@ -1439,10 +1419,10 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
         }
     }
 
-    // chia request_removals (full_node_api.py:1455): coins spent at a block. coin_names = None (or
-    // Some-empty, chia :1505) → all removals, proofs = None; coin_names = Some → per-name coins plus
+    // `request_removals`: coins spent at a block. coin_names = None (or
+    // Some-empty, ) → all removals, proofs = None; coin_names = Some → per-name coins plus
     // MerkleSet INCLUSION/EXCLUSION proofs over the removal names, whose root is asserted equal to
-    // the foliage removals_root before serving (chia :1511-1526). coin-index tier only.
+    // the foliage removals_root before serving. coin-index tier only.
     #[cfg(feature = "coin-index")]
     async fn removals(&self, req: RequestRemovals) -> RemovalsReply {
         let reject = || {
@@ -1458,8 +1438,8 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
         {
             return reject();
         }
-        // chia wraps the whole block-fetch + removal scan in wallet_sync_api_sem and REJECTS on
-        // overflow (full_node_api.py:1460-1461, 1529-1531).
+        // The whole block-fetch + removal scan is guarded by wallet_sync_sem and REJECTS on
+        // overflow.
         let Ok(_permit) = self.wallet_sync_sem.acquire().await else {
             return reject();
         };
@@ -1474,7 +1454,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
             .ok()
             .flatten()
             .map(|r| r.header_hash);
-        // chia's four reject conditions: not a tx block, height mismatch, above peak, or a fork.
+        // The four reject conditions: not a tx block, height mismatch, above peak, or a fork.
         if !block.is_transaction_block()
             || block.height() != req.height
             || peak_height.is_some_and(|ph| block.height() > ph)
@@ -1482,8 +1462,8 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
         {
             return reject();
         }
-        // No generator = reward-only tx block: empty removals (chia :1498-1504 — proofs None for a
-        // None request, Some-empty when coin names were asked).
+        // No generator = reward-only tx block: empty removals (proofs None for a None request,
+        // Some-empty when coin names were asked).
         if block.transactions_generator.is_none() {
             let proofs = if req.coin_names.is_none() {
                 None
@@ -1500,13 +1480,13 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
         let Ok(removed) = self.store.get_coins_removed_at_height(block.height()).await else {
             return reject();
         };
-        // Reorg guard: the DB read may straddle a reorg — re-check height→hash (chia :1485-1488).
+        // Reorg guard: the DB read may straddle a reorg — re-check height→hash.
         match self.store.get_block_record_by_height(block.height()).await {
             Ok(Some(r)) if r.header_hash == req.header_hash => {}
             _ => return reject(),
         }
         match req.coin_names.as_deref() {
-            // Trusted path — Some-empty behaves exactly like None (chia :1505).
+            // Trusted path — Some-empty behaves exactly like None.
             None | Some([]) => {
                 let coins: Vec<NamedCoin> = removed
                     .into_iter()
@@ -1520,7 +1500,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
                 }))
             }
             Some(coin_names) => {
-                // name → coin in removals order (chia's all_removals_dict, :1490-1492).
+                // name → coin in removals order.
                 let mut order: Vec<Bytes32> = Vec::with_capacity(removed.len());
                 let mut by_name: HashMap<Bytes32, Coin> = HashMap::with_capacity(removed.len());
                 for cr in removed {
@@ -1530,7 +1510,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
                     }
                 }
                 // The removal merkle set is the removal names; its root must BE the foliage
-                // removals_root (chia asserts, :1514-1515) — a mismatch means the served delta
+                // removals_root — a mismatch means the served delta
                 // would not verify against the header: reject, never serve unprovable data.
                 let mut leafs: Vec<[u8; 32]> = order.iter().map(|n| n.bytes()).collect();
                 let removal_merkle_set = MerkleSet::from_leafs(&mut leafs);
@@ -1576,7 +1556,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
         }
     }
 
-    // chia request_children (full_node_api.py:1894): coin states of every child (spent + unspent) of a
+    // `request_children`: coin states of every child (spent + unspent) of a
     // coin, read from the parent secondary index. coin-index tier only.
     #[cfg(feature = "coin-index")]
     async fn children(&self, coin_name: Bytes32) -> Vec<CoinState> {
@@ -1586,7 +1566,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
         }
     }
 
-    // chia register_for_ph_updates (full_node_api.py:1805): subscribe the peer to puzzle-hash coin
+    // `register_for_ph_updates`: subscribe the peer to puzzle-hash coin
     // updates in the shared WalletNotifier AND return the initial matching CoinState set. The receiver is
     // handed back only on the peer's FIRST registration; the dispatch layer bridges it to the socket.
     async fn register_for_ph_updates(
@@ -1597,7 +1577,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
     ) -> PhRegistration {
         // Subscribe FIRST — the returned set is the hashes ACTUALLY subscribed (in-request duplicates,
         // already-subscribed hashes, and the per-peer-cap overflow all filtered out) — and feed ONLY
-        // that set to the initial-state read (chia api.py:1811-1830: the query runs on
+        // that set to the initial-state read (the query runs on
         // add_puzzle_subscriptions' return, never the raw request list). A registry-capacity failure
         // subscribes nothing, so it also reads nothing.
         let (receiver, subscribed) = self
@@ -1605,15 +1585,15 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
             .register_for_ph_updates(peer, host, &req.puzzle_hashes)
             .await
             .unwrap_or_else(|_| (None, Vec::new()));
-        // The response budget resolves from trust (chia max_subscribe_response_items(peer)).
+        // The response budget resolves from trust (`max_subscribe_response_items(peer)`).
         let max_items = self.trust.max_subscribe_response_items(&peer, host);
         let coin_states = self
             .ph_initial_states(&subscribed, req.min_height, max_items)
             .await;
         PhRegistration {
             response: RespondToPhUpdates {
-                // chia echoes the REQUESTED hashes (api.py:1863), not the subscribed subset — and
-                // signals nothing on truncation (log-only, api.py:1848).
+                // The reply echoes the REQUESTED hashes, not the subscribed subset — and
+                // signals nothing on truncation (log-only).
                 puzzle_hashes: req.puzzle_hashes,
                 min_height: req.min_height,
                 coin_states,
@@ -1622,7 +1602,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
         }
     }
 
-    // chia register_for_coin_updates (full_node_api.py:1871): subscribe the peer to coin-id updates AND
+    // `register_for_coin_updates`: subscribe the peer to coin-id updates AND
     // return the initial matching CoinState set. The initial read uses get_coin_states_by_ids — a
     // provided default over point-gets, so it works on every backend without the service tier.
     async fn register_for_coin_updates(
@@ -1631,9 +1611,9 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
         host: Option<IpAddr>,
         req: RegisterForCoinUpdates,
     ) -> CoinRegistration {
-        // chia truncates the REQUEST list to max_subscriptions, subscribes + queries the SLICED list,
-        // and echoes the sliced list back (api.py:1879-1889). Unlike the ph path, in-request
-        // duplicates stay queryable (the api.py:1876 TODO) — chia queries set(coin_ids), so dedup
+        // The REQUEST list truncates to max_subscriptions; the SLICED list is subscribed + queried,
+        // and echoes the sliced list back. Unlike the ph path, in-request
+        // duplicates stay queryable — the query runs on the deduped set, so dedup
         // happens at the query, not the echo.
         let mut coin_ids = req.coin_ids;
         coin_ids.truncate(self.wallet.max_subscriptions(&peer, host));
@@ -1649,7 +1629,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
             .copied()
             .filter(|id| seen.insert(*id))
             .collect();
-        // Bounded by the response budget (chia api.py:1874/1885: get_coin_states_by_ids with
+        // Bounded by the response budget (get_coin_states_by_ids with
         // max_items = max_subscribe_response_items), resolved per-peer from trust.
         let coin_states = self
             .store
@@ -1671,10 +1651,10 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
         }
     }
 
-    // chia request_puzzle_state (full_node_api.py:2002-2078, code 98) — the Sage sync loop's paged
+    // `request_puzzle_state` (code 98) — the Sage sync loop's paged
     // puzzle-hash read. Truncate + dedup the request list, check the requester's previous peak
     // against our chain (REORG reject on mismatch), check the subscription cap before AND after
-    // the store read (chia's await-race double check), run the paged batch query, resolve the
+    // the store read (the await-race double check), run the paged batch query, resolve the
     // page's (height, header_hash), and subscribe-on-finish. coin-index tier only (the batch
     // query reads the puzzle-hash secondary index); the validator tier keeps the store-blind
     // REORG-reject default.
@@ -1685,12 +1665,12 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
         host: Option<IpAddr>,
         req: RequestPuzzleState,
     ) -> PuzzleStateReply {
-        // chia :2009-2012 — the list_limits truncation + order-preserving dedup.
+        // — the list_limits truncation + order-preserving dedup.
         let mut puzzle_hashes = req.puzzle_hashes;
         puzzle_hashes.truncate(dg_xch_stores::traits::MAX_PUZZLE_HASH_BATCH_SIZE);
         let mut seen = HashSet::new();
         puzzle_hashes.retain(|ph| seen.insert(*ph));
-        // chia :2014-2023 — previous_height=None compares against the GENESIS_CHALLENGE; an
+        // — previous_height=None compares against the GENESIS_CHALLENGE; an
         // unknown height or a mismatched hash means the requester's chain forked from ours.
         let previous_hash = match req.previous_height {
             Some(h) => self.height_to_hash(h).await,
@@ -1699,7 +1679,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
         if previous_hash != Some(req.header_hash) {
             return PuzzleStateReply::Reject(RejectStateReason::REORG);
         }
-        // chia :2026-2040 — would this subscribe blow the per-peer cap? (trust-resolved)
+        // — would this subscribe blow the per-peer cap? (trust-resolved)
         let max_subscriptions = self.wallet.max_subscriptions(&peer, host);
         if req.subscribe_when_finished
             && puzzle_hashes.len() + self.wallet.peer_subscription_count(&peer).await
@@ -1707,8 +1687,8 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
         {
             return PuzzleStateReply::Reject(RejectStateReason::ExceededSubscriptionLimit);
         }
-        // chia :2042-2052 — the page floor and the paged store read (batch_coin_states_by_
-        // puzzle_hashes, coin_store.py:590), bounded by the trust-resolved response budget.
+        // — the page floor and the paged store read (batch_coin_states_by_
+        // puzzle_hashes), bounded by the trust-resolved response budget.
         let max_items = self.trust.max_subscribe_response_items(&peer, host);
         let min_height = req.previous_height.map_or(0, |h| h.saturating_add(1));
         let Ok((coin_states, next_min_height)) = self
@@ -1717,11 +1697,11 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
             .await
         else {
             // A store failure cannot produce a consistent page — the REORG reject is the
-            // always-answer analog of chia's raised exception (which would leave Sage timing out).
+            // always-answer posture (an exception would leave the wallet timing out).
             return PuzzleStateReply::Reject(RejectStateReason::REORG);
         };
         let is_finished = next_min_height.is_none();
-        // chia :2055-2064 — the page's (height, header_hash): the block BEFORE the next page's
+        // — the page's (height, header_hash): the block BEFORE the next page's
         // floor, or the peak when finished; no peak / unresolvable height rejects REORG.
         let Ok(Some((_, peak_height))) = self.store.get_peak().await else {
             return PuzzleStateReply::Reject(RejectStateReason::REORG);
@@ -1730,16 +1710,16 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
         let Some(header_hash) = self.height_to_hash(height).await else {
             return PuzzleStateReply::Reject(RejectStateReason::REORG);
         };
-        // chia :2066-2070 — re-check the cap across the await point.
+        // — re-check the cap across the await point.
         if req.subscribe_when_finished
             && puzzle_hashes.len() + self.wallet.peer_subscription_count(&peer).await
                 > max_subscriptions
         {
             return PuzzleStateReply::Reject(RejectStateReason::ExceededSubscriptionLimit);
         }
-        // chia :2072-2074 — subscribe only once the LAST page is served. (The MEMPOOL_UPDATES
-        // initial push is skipped: we do not advertise Capability.MEMPOOL_UPDATES, and chia gates
-        // mempool_updates_for_puzzle_hashes on the peer capability, :2160-2161.)
+        // — subscribe only once the LAST page is served. (The MEMPOOL_UPDATES
+        // initial push is skipped: we do not advertise Capability.MEMPOOL_UPDATES, and peers gate
+        // mempool_updates_for_puzzle_hashes on the peer capability,.)
         let mut receiver = None;
         if is_finished && req.subscribe_when_finished {
             match self
@@ -1748,7 +1728,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
                 .await
             {
                 Ok((rx, _added)) => receiver = rx,
-                // The registry itself is at capacity (a structural bound chia lacks): the honest
+                // The registry itself is at capacity (a structural bound): the honest
                 // answer is the subscription-limit reject, not a silently unsubscribed respond.
                 Err(_) => {
                     return PuzzleStateReply::Reject(RejectStateReason::ExceededSubscriptionLimit);
@@ -1767,11 +1747,11 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
         )
     }
 
-    // chia request_coin_state (full_node_api.py:2085-2141, code 101): the coin states of a set of
+    // `request_coin_state` (code 101): the coin states of a set of
     // ids above the requester's previous peak. Same reorg-consistency check and subscription-cap
     // discipline as puzzle_state; the read is get_coin_states_by_ids (include_spent=True,
-    // :2125-2127) — a point-get composition available on every backend, so no coin-index gate.
-    // No paging: the response has no is_finished (the id list is the bound), and chia never
+    //) — a point-get composition available on every backend, so no coin-index gate.
+    // No paging: the response has no is_finished (the id list is the bound), and the reply never
     // consults the peak here — an empty chain serves an empty answer.
     async fn coin_state(
         &self,
@@ -1779,13 +1759,13 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
         host: Option<IpAddr>,
         req: RequestCoinState,
     ) -> CoinStateReply {
-        // chia :2090-2093 — truncate to max_subscribe_response_items (trust-resolved), then dedup.
+        // — truncate to max_subscribe_response_items (trust-resolved), then dedup.
         let max_items = self.trust.max_subscribe_response_items(&peer, host);
         let mut coin_ids = req.coin_ids;
         coin_ids.truncate(max_items);
         let mut seen = HashSet::new();
         coin_ids.retain(|id| seen.insert(*id));
-        // chia :2095-2104 — the previous-peak consistency check.
+        // — the previous-peak consistency check.
         let previous_hash = match req.previous_height {
             Some(h) => self.height_to_hash(h).await,
             None => Some(self.constants.genesis_challenge),
@@ -1793,14 +1773,14 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
         if previous_hash != Some(req.header_hash) {
             return CoinStateReply::Reject(RejectStateReason::REORG);
         }
-        // chia :2106-2121 — the pre-read cap check (trust-resolved).
+        // — the pre-read cap check (trust-resolved).
         let max_subscriptions = self.wallet.max_subscriptions(&peer, host);
         if req.subscribe
             && coin_ids.len() + self.wallet.peer_subscription_count(&peer).await > max_subscriptions
         {
             return CoinStateReply::Reject(RejectStateReason::ExceededSubscriptionLimit);
         }
-        // chia :2123-2127 — include_spent=True, min_height = previous_height + 1.
+        // — include_spent=True, min_height = previous_height + 1.
         let min_height = req.previous_height.map_or(0, |h| h.saturating_add(1));
         let Ok(coin_states) = self
             .store
@@ -1809,13 +1789,13 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
         else {
             return CoinStateReply::Reject(RejectStateReason::REORG);
         };
-        // chia :2129-2133 — the await-race re-check.
+        // — the await-race re-check.
         if req.subscribe
             && coin_ids.len() + self.wallet.peer_subscription_count(&peer).await > max_subscriptions
         {
             return CoinStateReply::Reject(RejectStateReason::ExceededSubscriptionLimit);
         }
-        // chia :2135-2137 — subscribe unconditionally on request (unlike puzzle_state there is no
+        // — subscribe unconditionally on request (unlike puzzle_state there is no
         // is_finished gate). MEMPOOL_UPDATES push skipped (capability not advertised).
         let mut receiver = None;
         if req.subscribe {
@@ -1839,9 +1819,9 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
         )
     }
 
-    // chia request_fee_estimates (full_node_api.py:1940-1955): for each requested epoch time,
+    // `request_fee_estimates`: for each requested epoch time,
     // estimate the fee-rate to be confirmed within `max(0, target - now)` seconds, reading the
-    // mempool's fee estimator. chia rounds V2→V1 with `ceil` (fee_rate_v2_to_v1) and always
+    // mempool's fee estimator. V2→V1 rounds with `ceil` and always
     // answers one FeeEstimate per requested time (error=None; rate 0 when there is no history).
     async fn fee_estimates(&self, req: RequestFeeEstimates) -> FeeEstimateGroup {
         let now = std::time::SystemTime::now()
@@ -1853,7 +1833,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
             req.time_targets
                 .iter()
                 .map(|&target| {
-                    // chia: deltas = [max(0, req_ts - utc_now)]
+                    // deltas = [max(0, req_ts - utc_now)]
                     let delta = target.saturating_sub(now);
                     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                     let mojos = est.estimate_fee_rate(delta).ceil() as u64;
@@ -1873,7 +1853,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
         }
     }
 
-    // chia request_remove_puzzle_subscriptions (full_node_api.py:1961-1975): None = clear all
+    // `request_remove_puzzle_subscriptions`: None = clear all
     // (returning the prior set), Some = remove the listed subset (returning what was removed).
     async fn remove_puzzle_subscriptions(
         &self,
@@ -1885,7 +1865,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
             .await
     }
 
-    // chia request_remove_coin_subscriptions (full_node_api.py:1981-1995).
+    // `request_remove_coin_subscriptions`.
     async fn remove_coin_subscriptions(
         &self,
         peer: Bytes32,
@@ -1896,9 +1876,9 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
             .await
     }
 
-    // chia full_node.py on_connect (:1000-1008): the current peak as the wallet greeting —
+    // on_connect: the current peak as the wallet greeting —
     // fork_point_with_previous_peak is the peak HEIGHT on connect. None while the store has no
-    // peak (chia's `peak_full is None`).
+    // peak (`peak_full is None`).
     async fn wallet_peak(&self) -> Option<NewPeakWallet> {
         let (hash, height) = self.store.get_peak().await.ok().flatten()?;
         let rec = self.store.get_block_record(&hash).await.ok().flatten()?;
@@ -1910,15 +1890,15 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
         })
     }
 
-    // NODE→FULL_NODE greeting (chia full_node.py on_connect :991-998): the confirmed peak as
+    // NODE→FULL_NODE greeting (on_connect): the confirmed peak as
     // `NewPeak(header_hash, height, weight, peak.height, unfinished_reward_block_hash)` — fork
     // point = the peak height itself on connect, and the unfinished hash committed exactly as
-    // chia commits it (`reward_chain_block.get_unfinished().get_hash()`).
+    // the commitment is `reward_chain_block.get_unfinished().get_hash()`.
     async fn full_node_peak(&self) -> Option<NewPeak> {
         on_connect_new_peak(self.store.as_ref()).await
     }
 
-    // NODE→TIMELORD greeting (chia full_node.py on_connect :1009-1010, send_peak_to_timelords):
+    // NODE→TIMELORD greeting (on_connect send_peak_to_timelords):
     // the same construction the peak broadcast runs, over the shared record window. Fails closed
     // (None → nothing sent) when the peak's ancestry cannot ground the difficulty/challenge
     // walks — the timelord then syncs on the next peak advance instead of receiving an
@@ -1935,9 +1915,9 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
         .await
     }
 
-    // Mempool sync on connect (chia full_node.py on_connect :967-982): when synced, the BIP158
-    // filter over OUR mempool transaction ids (chia mempool_manager.get_filter :436-445) for the
-    // RequestMempoolTransactions greeting. `None` while unsynced — chia's `if synced and
+    // Mempool sync on connect (on_connect): when synced, the BIP158
+    // filter over OUR mempool transaction ids (`mempool_manager.get_filter`) for the
+    // RequestMempoolTransactions greeting. `None` while unsynced — `if synced and
     // peak_height is not None` gate (the synced flag subsumes the peak check: it is only ever
     // true with a current confirmed peak).
     async fn mempool_sync_filter(&self) -> Option<Vec<u8>> {
@@ -1945,7 +1925,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
     }
 }
 
-// The on-connect NewPeak greeting construction (chia full_node.py on_connect :991-998), shared by
+// The on-connect NewPeak greeting construction (on_connect), shared by
 // the inbound Handshake greeting ([`FullNodeApi::full_node_peak`]) and the outbound dial hook
 // ([`outbound_on_connect`]): fork point = the peak height itself, unfinished hash =
 // `reward_chain_block.get_unfinished().get_hash()`.
@@ -1963,8 +1943,8 @@ async fn on_connect_new_peak<S: BlockStore + Send + Sync>(store: &S) -> Option<N
     })
 }
 
-// The mempool-sync-on-connect filter (chia full_node.py on_connect :967-982 gate + chia
-// mempool_manager.get_filter :436-445): `None` while unsynced (nothing is requested), otherwise
+// The mempool-sync-on-connect filter (the on_connect gate +
+// mempool_manager.get_filter): `None` while unsynced (nothing is requested), otherwise
 // the BIP158 encoding over every mempool transaction id. Shared by the inbound greeting
 // ([`FullNodeApi::mempool_sync_filter`]) and the outbound dial hook ([`outbound_on_connect`]).
 async fn on_connect_mempool_filter(
@@ -1986,10 +1966,10 @@ async fn on_connect_mempool_filter(
     ))
 }
 
-/// The outbound half of chia's on-connect greetings: chia fires `on_connect` for OUTGOING
-/// connections too (chia/server/server.py `start_client` → `await on_connect(connection)` after
+/// The outbound half of the on-connect greetings: `on_connect` fires for OUTGOING
+/// connections too (after
 /// the handshake), and every peer we dial is a FULL_NODE link — so it gets the mempool-sync
-/// request when we are synced (chia full_node.py :967-982) and the NewPeak greeting (:991-998).
+/// request when we are synced  and the NewPeak greeting.
 /// Without this, a node never mempool-syncs from the peers IT dials — which on a fresh boot is
 /// every peer it has. Run by the supervisor's on-connect hook against each registered outbound
 /// dial; fire-and-forget (a send failure surfaces as the connection dropping).
@@ -1998,7 +1978,7 @@ pub async fn outbound_on_connect<S: BlockStore + CoinStore + Send + Sync + 'stat
     peer: &OutboundPeer,
 ) {
     let version = outbound_peer_version(peer);
-    // chia sends the mempool request first (:976-981), then the peak (:996-998).
+    // The mempool request goes first, then the peak.
     if let Some(filter) = on_connect_mempool_filter(&node.synced, &node.mempool).await {
         let req = dg_xch_core::protocols::full_node::RequestMempoolTransactions { filter };
         if let Ok(msg) = dg_xch_core::protocols::ChiaMessage::new(
@@ -2030,7 +2010,7 @@ pub async fn outbound_on_connect<S: BlockStore + CoinStore + Send + Sync + 'stat
     }
 }
 
-// chia additions/removals request caps (full_node_api.py:85-86): the max coin/puzzle hashes a single
+// additions/removals request caps: the max coin/puzzle hashes a single
 // proof request may carry, and the max distinct puzzle hashes the all-additions (no-proof) answer holds
 // before it rejects rather than build an oversized response.
 #[cfg(feature = "coin-index")]
@@ -2038,19 +2018,19 @@ const MAX_COIN_HASHES_PER_REQUEST: usize = 50;
 #[cfg(feature = "coin-index")]
 const MAX_COINS_MAP_SIZE: usize = 100;
 
-// chia `max_subscribe_response_items` for an UNTRUSTED peer (initial-config.yaml:441,
-// full_node_api.py:2225 default): the untrusted response budget. Production resolves it per-peer from
+// `max_subscribe_response_items` for an UNTRUSTED peer (initial-config.yaml:441,
+// default): the untrusted response budget. Production resolves it per-peer from
 // `TrustPolicy`; this named constant is the untrusted-tier value the coin-index wallet-query tests
 // inject via `api_tuned` (its only consumers live in the coin-index-gated `wallet_queries` module).
 #[cfg(all(test, feature = "coin-index"))]
 const MAX_SUBSCRIBE_RESPONSE_ITEMS: usize = 100_000;
 
-// chia `wallet_sync_api_sem = LimitedSemaphore.create(active_limit=2, waiting_limit=20)`
-// (full_node_api.py:166): the node-wide concurrency bound on the heavy wallet-serve handlers.
+// `wallet_sync_api_sem = LimitedSemaphore.create(active_limit=2, waiting_limit=20)`
+//: the node-wide concurrency bound on the heavy wallet-serve handlers.
 const WALLET_SYNC_ACTIVE_LIMIT: usize = 2;
 const WALLET_SYNC_WAITING_LIMIT: usize = 20;
 
-// A CoinRecord rendered as the wallet-protocol CoinState (chia CoinRecord.coin_state): both heights are
+// A CoinRecord rendered as the wallet-protocol CoinState: both heights are
 // carried, with an unspent coin's spent_height left None.
 #[cfg(feature = "coin-index")]
 fn coin_state_of(cr: &CoinRecord) -> CoinState {
@@ -2062,7 +2042,7 @@ fn coin_state_of(cr: &CoinRecord) -> CoinState {
 }
 
 impl<S: BlockStore + CoinStore + Send + Sync + 'static> StoreApi<S> {
-    // chia `blockchain.height_to_hash` as the wallet-sync handlers use it (full_node_api.py:2015,
+    // `blockchain.height_to_hash` as the wallet-sync handlers use it (
     // 2061, 2096): the MAIN-CHAIN header hash at a height, `None` when the height is above the
     // peak / unknown — which the callers turn into the REORG reject.
     async fn height_to_hash(&self, height: u32) -> Option<Bytes32> {
@@ -2074,13 +2054,13 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> StoreApi<S> {
             .map(|r| r.header_hash)
     }
 
-    // The served HeaderBlock — chia get_block_header / header_block_from_block: the real BIP158
+    // The served HeaderBlock: the real BIP158
     // transactions_filter for a transaction block (every added coin's puzzle hash — tx additions
     // plus reward claims, exactly the coin store's added-at-height rows — then every removed
-    // coin's name: generator_tools.py:26-35, full_block_utils.py:320-330), and the encoded-empty
+    // coin's name: ), and the encoded-empty
     // filter b"\x00" for a non-transaction block or when the wallet asked filters off
-    // (full_block_utils.py:311). `header_block_from_full_block` already carries b"\x00", so only
-    // the tx-block + want_filter case computes. None = a store failure (chia raises → no reply).
+    //. `header_block_from_full_block` already carries b"\x00", so only
+    // the tx-block + want_filter case computes. None = a store failure (no reply).
     // Coin-index tier: without the added/removed-at-height indexes the b"\x00" default stands
     // (that tier serves no wallet-sync surface at all).
     #[cfg(feature = "coin-index")]
@@ -2117,14 +2097,13 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> StoreApi<S> {
         Some(dg_xch_node::header_block_from_full_block(block))
     }
 
-    /// The initial `CoinState` set for a puzzle-hash subscription — chia `register_for_ph_updates`
-    /// (full_node_api.py:1827): spent + unspent coins carrying the SUBSCRIBED puzzle hashes from
-    /// `min_height`, UNIONed (deduped by coin id) with coins HINTED by those same 32-byte values (chia
-    /// passes the puzzle hashes as hint keys to `hint_store.get_coin_ids_multi`). ONE
-    /// `max_subscribe_response_items` budget bounds the whole reply (api.py:1809, 1826-1841): the ph
+    /// The initial `CoinState` set for a puzzle-hash subscription (`register_for_ph_updates`):
+    /// spent + unspent coins carrying the SUBSCRIBED puzzle hashes from `min_height`, UNIONed
+    /// (deduped by coin id) with coins HINTED by those same 32-byte values. ONE
+    /// `max_subscribe_response_items` budget bounds the whole reply: the ph
     /// query runs under it, `max_items -= len(states)`, and the hint-id lookup runs under the
     /// remainder — so a dust-storm puzzle hash cannot materialize an unbounded set into one message.
-    /// Truncation is SILENT to the wallet (chia logs and answers, api.py:1846-1861). Empty on a node
+    /// Truncation is SILENT to the wallet (logged, answered anyway). Empty on a node
     /// without the coin-index service tier (a non-wallet-serving node).
     #[cfg(feature = "coin-index")]
     async fn ph_initial_states(
@@ -2139,7 +2118,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> StoreApi<S> {
             .get_coin_states_by_puzzle_hashes(puzzle_hashes, min_height, true, max_items)
             .await
         {
-            // chia api.py:1829: the remaining budget after the ph query caps the hint side.
+            // The remaining budget after the ph query caps the hint side.
             max_items = max_items.saturating_sub(states.len());
             for s in states {
                 by_id.insert(s.coin.name(), s);
@@ -2147,8 +2126,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> StoreApi<S> {
         }
         #[cfg(feature = "hint")]
         {
-            // chia hint_store.get_coin_ids_multi(subscribed, max_items=remaining) (api.py:1831): the
-            // id lookup itself is budget-capped, decremented per hint (chia per batch).
+            // The hint-id lookup itself is budget-capped, decremented per hint.
             let mut hint_ids: Vec<Bytes32> = Vec::new();
             for ph in puzzle_hashes {
                 let remaining = max_items.saturating_sub(hint_ids.len());
@@ -2159,7 +2137,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> StoreApi<S> {
                     hint_ids.extend(ids);
                 }
             }
-            // chia reads the hinted states with max_items = len(hint_coin_ids) (api.py:1835-1841) —
+            // The hinted states read with max_items = len(hint_coin_ids) —
             // the budget was already applied at the id lookup. No empty-guard needed:
             // get_coin_states_by_ids early-returns on an empty id list.
             if let Ok(states) = self
@@ -2173,7 +2151,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> StoreApi<S> {
             }
         }
         if max_items == 0 {
-            // chia's truncation posture (api.py:1846-1861): log it, answer anyway, signal nothing.
+            // Truncation posture: log it, answer anyway, signal nothing.
             info!(
                 states = by_id.len(),
                 subscribed = puzzle_hashes.len(),
@@ -2194,49 +2172,49 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> StoreApi<S> {
     }
 
     /// Assemble the candidate unfinished block for an accepted proof and return the
-    /// `RequestSignedValues` for the farmer to sign — the produce→request-sign half of chia
-    /// `full_node_api.declare_proof_of_space` (the part after `verify_and_get_quality_string`,
-    /// chia/full_node/full_node_api.py:1043-1174 + `block_creation.create_unfinished_block`).
+    /// `RequestSignedValues` for the farmer to sign — the produce→request-sign half of
+    /// `declare_proof_of_space` (the part after `verify_and_get_quality_string`).
     ///
     /// The consensus arithmetic is REUSED from the validation side, never reimplemented:
     ///   * `required_iters` / `sp_iters` / `ip_iters` / `infusion_point_total_iters` via
     ///     `farmer::resolve_candidate_iters` (which calls the same `calculate_iterations_quality` /
     ///     `calculate_sp_iters` / `calculate_ip_iters` / `calculate_infusion_point_total_iters` the
     ///     header validator uses);
-    ///   * difficulty / sub-slot-iters via `farmer::candidate_difficulty_and_ssi` (chia declare:1057);
+    ///   * difficulty / sub-slot-iters via `farmer::candidate_difficulty_and_ssi`;
     ///   * the finished-sub-slot list + reward-chain backtrack via the new `SlotState` accessors;
     ///   * the candidate body via `create_unfinished_block_with_sigs` (the farmer-signature producer).
     ///
-    /// Steps (mirroring chia):
+    /// Steps:
     ///   1. slot inputs: SP VDFs, `cc_challenge_hash`, `total_iters_pos_slot`, the rc-challenge for the
-    ///      prev-block backtrack (chia declare:884-916, 991-1003);
-    ///   2. prev-block via the reward-chain backtrack through empty slots + the block-store walk
-    ///      (chia declare:987-1022); genesis (`prev == GENESIS_CHALLENGE`, no peak) ⇒ `prev_b = None`,
-    ///      height 0, genesis-pre-farm pool/farmer targets (Item F);
-    ///   3. finished sub-slots + the last-slot==pos-sub-slot guard (chia declare:1024-1039);
-    ///   4. difficulty/ssi, `required_iters`, `sp_iters`, `ip_iters`, `infusion_point_total_iters`
-    ///      (chia declare:1057-1105); bail if the proof fails the iters filter;
-    ///   5. latency drop (`infusion_point_total_iters < peak.total_iters`, chia declare:1090) and the
-    ///      empty-block coercion via the O(1) tx-peak link (Item B, chia declare:1104-1112);
+    ///      prev-block backtrack;
+    ///   2. prev-block via the reward-chain backtrack through empty slots + the block-store walk;
+    ///      genesis (`prev == GENESIS_CHALLENGE`, no peak) ⇒ `prev_b = None`,
+    ///      height 0, genesis-pre-farm pool/farmer targets;
+    ///   3. finished sub-slots + the last-slot==pos-sub-slot guard;
+    ///   4. difficulty/ssi, `required_iters`, `sp_iters`, `ip_iters`,
+    ///      `infusion_point_total_iters`; bail if the proof fails the iters filter;
+    ///   5. latency drop (`infusion_point_total_iters < peak.total_iters`) and the empty-block
+    ///      coercion via the O(1) tx-peak link;
     ///   6. `is_transaction_block` + reward-claim walk + `prev_transaction_block_hash` + timestamp
-    ///      (chia declare:1113-1121 + `create_foliage`);
+    ///      (+ `create_foliage`);
     ///   7. build with the two SP signatures VERBATIM from `declare` and `g2_infinity()` placeholders
     ///      for the two foliage signatures; store keyed by the quality string
-    ///      (chia `add_candidate_block`); return `RequestSignedValues`.
+    ///      (`add_candidate_block`); return `RequestSignedValues`.
     ///
     /// Returns `None` (proof stays held, no farmer signing wasted) on any consensus bail — unresolved
     /// SP, disconnected sub-slots, failed iters filter, latency drop, or a store gap in a walk.
     ///
     /// SIGNAGE-POINT INDEX 0 (the sub-slot start / genesis first SP): fully handled. `SlotState::
-    /// get_signage_point` now returns chia's `SignagePoint(None, None, None, None)` when the SP hash is
-    /// the genesis challenge or a finished sub-slot's cc hash (chia `get_signage_point`), so an index-0
-    /// declare is accepted at the Phase-3 gate and reaches here; the index-0 branches below resolve the
-    /// cc challenge from the SP hash and the rc challenge from the pos sub-slot (chia declare:900-904,
-    /// 991-1003), and `assemble_candidate` is handed `None` to null the signage VDFs (chia's index-0
-    /// null-out). Item C (`NO_OVERFLOWS_IN_FIRST_SUB_SLOT_NEW_EPOCH`) is honored downstream: the candidate
+    /// get_signage_point` now returns `SignagePoint(None, None, None, None)` when the SP hash is
+    /// the genesis challenge or a finished sub-slot's cc hash (`get_signage_point`), so an index-0
+    /// declare is accepted at the validation gate and reaches here; the index-0 branches below
+    /// resolve the cc challenge from the SP hash and the rc challenge from the pos sub-slot, and
+    /// `assemble_candidate` is handed `None` to null the signage VDFs (the index-0 null-out).
+    /// `NO_OVERFLOWS_IN_FIRST_SUB_SLOT_NEW_EPOCH` is honored downstream: the candidate
     /// is routed through `ub_inbox`, whose `validate_unfinished_header_block` enforces that rule
-    /// (`block_header_validation.rs`); dg_xch builds only empty candidates, so there is no transaction
-    /// candidate to retry from (chia's no-retry / backup-empty rule is satisfied by construction).
+    /// (`block_header_validation.rs`); dg_xch builds only empty candidates, so there is no
+    /// transaction candidate to retry from (the no-retry / backup-empty rule is satisfied by
+    /// construction).
     async fn try_build_candidate(
         &self,
         declare: &DeclareProofOfSpace,
@@ -2258,7 +2236,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> StoreApi<S> {
         &self,
         declare: &DeclareProofOfSpace,
         // Keys the candidate in `self.candidates` and rides in the `RequestSignedValues`
-        // (chia `add_candidate_block(quality_string, ...)`).
+        // (`add_candidate_block(quality_string, ...)`).
         quality_string: Bytes32,
     ) -> Option<RequestSignedValues> {
         let is_genesis_challenge = declare.challenge_hash == self.constants.genesis_challenge;
@@ -2266,7 +2244,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> StoreApi<S> {
         // ---- Phase A: reachable slot inputs (one slot lock; a single PoSpace/hash pass, no I/O) ----
         let (sp, cc_challenge_hash, total_iters_pos_slot, rc_challenge, pos_eos) = {
             let slot = self.slot_state.lock().await;
-            // chia declare:884-898 — the SP we accepted. At index 0 it is the all-None sub-slot-start
+            // the SP we accepted. At index 0 it is the all-None sub-slot-start
             // form; index > 0 carries real VDFs. Was a bare `?` (the #1 silent hole): an accepted proof
             // that no longer resolves here vanished with no trace. Now categorical.
             let Some(sp) = slot.get_signage_point(&declare.challenge_chain_sp) else {
@@ -2279,8 +2257,8 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> StoreApi<S> {
                 );
                 return None;
             };
-            // chia declare:900-904. At index 0 the SP is the sub-slot start (all-None); the cc challenge
-            // is the SP hash itself. At index > 0 the SP MUST carry a cc VDF (chia asserts this); a
+            // At index 0 the SP is the sub-slot start (all-None); the cc challenge
+            // is the SP hash itself. At index > 0 the SP MUST carry a cc VDF (guaranteed by admission); a
             // missing one is a malformed SP that slipped the accept ladder — was a bare `?`.
             let cc_challenge_hash = if declare.signage_point_index == 0 {
                 declare.challenge_chain_sp
@@ -2298,7 +2276,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> StoreApi<S> {
                     }
                 }
             };
-            // chia declare:906-915 — the pos sub-slot (start total-iters + its reward chain for the
+            // the pos sub-slot (start total-iters + its reward chain for the
             // backtrack); genesis has no stored sub-slot (total_iters_pos_slot = 0). Was a bare `?`
             // (the #2 silent hole).
             let (total_iters_pos_slot, pos_rc_end_challenge, pos_eos) = if is_genesis_challenge {
@@ -2320,7 +2298,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> StoreApi<S> {
                     Some(eos.clone()),
                 )
             };
-            // chia declare:991-1003 — the reward-chain challenge the prev block must carry: index 0 uses
+            // the reward-chain challenge the prev block must carry: index 0 uses
             // the pos sub-slot's reward chain, index > 0 the SP's rc-vdf challenge; then backtrack it
             // through the empty sub-slots we hold.
             let rc_challenge = if declare.signage_point_index == 0 {
@@ -2338,12 +2316,12 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> StoreApi<S> {
             )
         };
 
-        // chia declare:916 — the resolved cc challenge must equal the farmer's declared challenge.
+        // the resolved cc challenge must equal the farmer's declared challenge.
         if cc_challenge_hash != declare.challenge_hash {
             self.producer.candidate_dropped("cc_challenge_mismatch");
             warn!(event = "producer.build.dropped", reason = "cc_challenge_mismatch",
                 %cc_challenge_hash, declared = %declare.challenge_hash,
-                "candidate: resolved cc-challenge != declared challenge_hash (chia declare:916); dropping");
+                "candidate: resolved cc-challenge != declared challenge_hash; dropping");
             return None;
         }
 
@@ -2352,8 +2330,8 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> StoreApi<S> {
             Ok(Some((hash, _))) => self.store.get_block_record(&hash).await.ok().flatten(),
             _ => None,
         };
-        // chia declare:987-1022 — prev_b starts at the peak; the reward-chain backtrack finds the true
-        // previous block. No peak ⇒ genesis (Item F): prev_b = None, height 0.
+        // prev_b starts at the peak; the reward-chain backtrack finds the true
+        // previous block. No peak ⇒ genesis: prev_b = None, height 0.
         let prev_b: Option<BlockRecord> = if let Some(peak) = peak_rec.clone() {
             let Some(rc) = rc_challenge else {
                 self.producer.candidate_dropped("no_rc_challenge");
@@ -2371,8 +2349,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> StoreApi<S> {
                     warn!(
                         event = "producer.build.dropped",
                         reason = "prev_block_not_found",
-                        "candidate: no previous block with the correct reward chain hash \
-                        (chia declare:1020); dropping"
+                        "candidate: no previous block with the correct reward chain hash; dropping"
                     );
                     return None;
                 }
@@ -2386,7 +2363,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> StoreApi<S> {
         };
 
         // ---- Finished sub-slots (slot lock) + the pos-sub-slot guard ----
-        // chia declare:1024-1032 — challenge_in_chain is block-store-derived (GENESIS if no prev block,
+        // challenge_in_chain is block-store-derived (GENESIS if no prev block,
         // else prev_b's first-in-sub-slot ancestor's last finished challenge slot hash).
         let chain_challenge = match &prev_b {
             None => self.constants.genesis_challenge,
@@ -2413,10 +2390,10 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> StoreApi<S> {
                 .candidate_dropped("finished_sub_slots_disconnected");
             warn!(event = "producer.build.dropped", reason = "finished_sub_slots_disconnected",
                 challenge_in_chain = %chain_challenge, %cc_challenge_hash,
-                "candidate: finished sub-slots not connected (chia declare:1030); dropping");
+                "candidate: finished sub-slots not connected; dropping");
             return None;
         };
-        // chia declare:1033-1039 — the last finished sub-slot we would farm on must be the pos sub-slot.
+        // the last finished sub-slot we would farm on must be the pos sub-slot.
         if let (Some(pos_eos), Some(last)) = (pos_eos.as_ref(), finished_sub_slots.last())
             && last != pos_eos
         {
@@ -2424,15 +2401,14 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> StoreApi<S> {
             warn!(
                 event = "producer.build.dropped",
                 reason = "wrong_sub_slots_to_farm",
-                "candidate: have different sub-slots than required to farm this block \
-                (chia declare:1038); dropping"
+                "candidate: have different sub-slots than required to farm this block; dropping"
             );
             return None;
         }
 
-        // ---- Phase D: pool/farmer targets, difficulty/ssi (chia declare:1043-1067) ----
+        // ---- Phase D: pool/farmer targets, difficulty/ssi ----
         let (pool_target, farmer_ph) = match &prev_b {
-            // Item F — genesis pays the pre-farm puzzle hashes (chia declare:1043-1048).
+            // Genesis pays the pre-farm puzzle hashes.
             None => (
                 PoolTarget {
                     puzzle_hash: self.constants.genesis_pre_farm_pool_puzzle_hash,
@@ -2441,7 +2417,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> StoreApi<S> {
                 self.constants.genesis_pre_farm_farmer_puzzle_hash,
             ),
             Some(_) => {
-                // chia declare:1050-1055 — pool-contract plots pin the pool puzzle hash; OG plots carry
+                // pool-contract plots pin the pool puzzle hash; OG plots carry
                 // the farmer's pool_target.
                 let pt = if let Some(ph) = declare.proof_of_space.pool_contract_puzzle_hash {
                     PoolTarget {
@@ -2478,7 +2454,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> StoreApi<S> {
         let (difficulty, sub_slot_iters) =
             candidate_difficulty_and_ssi(&self.constants, peak_pair, &finished_sub_slots);
 
-        // ---- Phase E: iters + latency/empty-block guards (chia declare:1069-1112) ----
+        // ---- Phase E: iters + latency/empty-block guards ----
         let Some(iters) = resolve_candidate_iters(
             &self.constants,
             quality_string,
@@ -2499,7 +2475,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> StoreApi<S> {
             );
             return None;
         };
-        // chia declare:1090-1103 — a candidate that would infuse before the head is too late (latency).
+        // a candidate that would infuse before the head is too late (latency).
         if let Some(peak) = &peak_rec
             && iters.infusion_point_total_iters < peak.total_iters
         {
@@ -2511,10 +2487,10 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> StoreApi<S> {
                 "candidate: infusion point behind the current head (latency); dropping");
             return None;
         }
-        // Item B — empty-block coercion (chia declare:1104-1112): if the candidate's signage point
+        // Empty-block coercion: if the candidate's signage point
         // sits at/before the transaction peak's window, the last transaction block prevents a new
         // one — coerce the block generator to None. tx-peak resolves via the O(1)
-        // prev_transaction_block_hash link (chia get_tx_peak — NOT a peak backwalk).
+        // prev_transaction_block_hash link (the tx-peak link — NOT a peak backwalk).
         let mut coerce_empty = false;
         if let Some(peak) = &peak_rec {
             let tx_peak = if peak.is_transaction_block() {
@@ -2528,7 +2504,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> StoreApi<S> {
                 && iters.candidate_sp_total_iters <= tx_peak.total_iters
             {
                 debug!(
-                    "candidate: sp at/before the tx-peak window -> empty block (chia declare:1111)"
+                    "candidate: sp at/before the tx-peak window -> empty block"
                 );
                 coerce_empty = true;
             }
@@ -2537,7 +2513,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> StoreApi<S> {
         // ---- Phase F: prev linkage (is_tx + reward claims), timestamp, assemble, store ----
         let total_iters_sp = total_iters_pos_slot + u128::from(iters.sp_iters);
         let prev = match &prev_b {
-            // chia create_foliage — genesis is a transaction block with no reward claims (Item F).
+            // Genesis is a transaction block with no reward claims.
             None => CandidatePrev {
                 is_transaction_block: true,
                 prev_block_hash: self.constants.genesis_challenge,
@@ -2564,19 +2540,19 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> StoreApi<S> {
                 }
             }
         };
-        // chia declare:1113-1121 — timestamp strictly after the previous transaction block.
+        // timestamp strictly after the previous transaction block.
         let timestamp = match &prev_b {
             None => now_secs(),
             Some(pb) => candidate_timestamp(self.store.as_ref(), pb).await,
         };
 
-        // The mempool→block-generator path (chia declare:950-975 `create_block =
+        // The mempool→block-generator path (`create_block =
         // mempool_manager.create_block_generator2`, the block_creation=1 default of 2.7.1, +
         // mempool_manager's `peak.header_hash == last_tb_header_hash` gate): build the transactions
         // payload only when the candidate IS a transaction block, the empty-block coercion did not
         // fire, and the mempool's reference frame is exactly the candidate's previous transaction
         // block (a mismatched frame — mid-reorg, or a candidate on a non-tip ancestor — yields the
-        // conservative empty block, chia's `return None`). chia builds the payload before the
+        // conservative empty block, `return None`). The payload builds before the
         // latency/coercion checks and discards it; building after them only skips wasted work.
         let transactions = {
             let mp = self.mempool.lock().await;
@@ -2599,7 +2575,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> StoreApi<S> {
             }
         };
 
-        // chia declare:1123-1174 — index 0 passes SignagePoint(None, ...) (the sub-slot start has no
+        // index 0 passes SignagePoint(None, ...) (the sub-slot start has no
         // signage VDFs); index > 0 passes the real SP. `sp` at index 0 is already the all-None form, so
         // either the explicit None or Some(&sp) would null the VDFs; None keeps the contract unambiguous.
         let sp_for_block = if declare.signage_point_index == 0 {
@@ -2634,7 +2610,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> StoreApi<S> {
         // S3 success — the candidate exists. `partial` (the reward-chain-block hash) is the S6/S7 join
         // key; logging it here bridges the qs-keyed build events to the partial-keyed driver events.
         let partial = candidate.reward_chain_block.hash().ok();
-        // chia full_node_store.add_candidate_block(quality_string, height, unfinished_block).
+        // `full_node_store.add_candidate_block`(quality_string, height, unfinished_block).
         self.candidates
             .lock()
             .await
@@ -2654,11 +2630,11 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> StoreApi<S> {
 }
 
 // Whether the produce path may attach a mempool-built block generator to this candidate — the
-// combined chia gates: the candidate is a transaction block (a non-tx block cannot carry
-// transactions; chia strips the dangling generator at full-block time, dg_xch never attaches it),
-// the empty-block coercion did not fire (chia declare:1104-1112, `candidate_sp_total_iters <=
+// combined gates: the candidate is a transaction block (a non-tx block cannot carry
+// transactions; dg_xch never attaches a dangling generator),
+// the empty-block coercion did not fire (`candidate_sp_total_iters <=
 // tx_peak.total_iters → new_block_gen = None`), and the mempool's reference frame is exactly the
-// candidate's previous transaction block (chia `mempool_manager.create_block_generator2`'s
+// candidate's previous transaction block (`mempool_manager.create_block_generator2`'s
 // `peak.header_hash == last_tb_header_hash` gate, height-keyed here — see
 // `Mempool::create_block_generator`). Any failed gate ⇒ the conservative empty block.
 pub(crate) fn may_build_transactions(
@@ -2672,7 +2648,7 @@ pub(crate) fn may_build_transactions(
         && mempool_peak_height == Some(prev_transaction_block_height)
 }
 
-// Wall-clock seconds since the Unix epoch (chia `uint64(time.time())`), 0 on a pre-epoch clock.
+// Wall-clock seconds since the Unix epoch (`uint64(time.time())`), 0 on a pre-epoch clock.
 fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2684,11 +2660,11 @@ fn now_secs() -> u64 {
 // ancestry into a bounded bail instead of an unbounded loop on the produce path.
 const CANDIDATE_WALK_CAP: usize = 512;
 
-/// The reward-chain backtrack that finds the candidate's true previous block — chia
+/// The reward-chain backtrack that finds the candidate's true previous block —
 /// `declare_proof_of_space:1005-1022`. `rc_challenge` is already backtracked through empty sub-slots
-/// (`SlotState::backtrack_rc_challenge`). Returns `None` to BAIL (chia's "did not find" return), or
+/// (`SlotState::backtrack_rc_challenge`). Returns `None` to BAIL (the did-not-find return), or
 /// `Some(prev_b)` where `prev_b` may itself be `None` when the finished-reward-slot match steps back to
-/// the genesis boundary. Bounded to chia's 10 attempts.
+/// the genesis boundary. Bounded to 10 attempts.
 pub(crate) async fn backtrack_prev_block<S: BlockStore + Send + Sync>(
     store: &S,
     peak: BlockRecord,
@@ -2711,9 +2687,9 @@ pub(crate) async fn backtrack_prev_block<S: BlockStore + Send + Sync>(
     None
 }
 
-/// The `challenge_in_chain` for `get_finished_sub_slots` — chia's
+/// The `challenge_in_chain` for `get_finished_sub_slots` —
 /// `curr = prev_b; while not curr.first_in_sub_slot: curr = block_record(curr.prev_hash);
-/// curr.finished_challenge_slot_hashes[-1]` (chia `full_node_store.get_finished_sub_slots`). Bounded.
+/// curr.finished_challenge_slot_hashes[-1]` (`full_node_store.get_finished_sub_slots`). Bounded.
 pub(crate) async fn challenge_in_chain<S: BlockStore + Send + Sync>(
     store: &S,
     prev_b: &BlockRecord,
@@ -2733,8 +2709,8 @@ pub(crate) async fn challenge_in_chain<S: BlockStore + Send + Sync>(
 }
 
 /// `is_transaction_block` + the reward-claim walk + `prev_transaction_block_hash` for a non-genesis
-/// candidate — chia `get_prev_transaction_block` (chia/consensus/prev_transaction_block.py) +
-/// `create_foliage`'s reward-claim walk (chia/consensus/block_creation.py:150-189). `total_iters_sp`
+/// candidate — `get_prev_transaction_block` +
+/// `create_foliage`'s reward-claim walk. `total_iters_sp`
 /// is the candidate's signage-point total iters (`total_iters_pos_slot + sp_iters`). Returns `None` on a
 /// store gap. Walks are bounded by [`CANDIDATE_WALK_CAP`].
 pub(crate) async fn resolve_prev_linkage<S: BlockStore + Send + Sync>(
@@ -2743,7 +2719,7 @@ pub(crate) async fn resolve_prev_linkage<S: BlockStore + Send + Sync>(
     prev_b: &BlockRecord,
     total_iters_sp: u128,
 ) -> Option<CandidatePrev> {
-    // chia get_prev_transaction_block: walk prev_b back to the first transaction block.
+    // get_prev_transaction_block: walk prev_b back to the first transaction block.
     let mut cur = prev_b.clone();
     for _ in 0..CANDIDATE_WALK_CAP {
         if cur.is_transaction_block() {
@@ -2759,9 +2735,9 @@ pub(crate) async fn resolve_prev_linkage<S: BlockStore + Send + Sync>(
         return None; // walk cap hit without a transaction block — store gap.
     }
     let prev_transaction_block = cur;
-    // chia: is_transaction_block = total_iters_sp > prev_transaction_block.total_iters.
+    // is_transaction_block = total_iters_sp > prev_transaction_block.total_iters.
     let is_transaction_block = total_iters_sp > prev_transaction_block.total_iters;
-    // height > 0 here (prev_b exists), so prev_block_hash is prev_b.header_hash (chia create_foliage:130).
+    // height > 0 here (prev_b exists), so prev_block_hash is prev_b.header_hash .
     let prev_block_hash = prev_b.header_hash;
     if !is_transaction_block {
         // Non-tx candidate: create_foliage builds no foliage_transaction_block; the tx-hash/claims are
@@ -2775,7 +2751,7 @@ pub(crate) async fn resolve_prev_linkage<S: BlockStore + Send + Sync>(
             reward_claims: Vec::new(),
         });
     }
-    // chia create_foliage:150-189 reward-claim walk (height > 0): the prev transaction block WITH its
+    // The reward-claim walk (height > 0): the prev transaction block WITH its
     // fees, then every non-transaction block between it and the transaction block before it (fees = 0).
     let prev_transaction_block_hash = prev_transaction_block.header_hash;
     let mut reward_claims = vec![RewardBlockClaim {
@@ -2816,7 +2792,7 @@ pub(crate) async fn resolve_prev_linkage<S: BlockStore + Send + Sync>(
     })
 }
 
-/// The candidate timestamp — chia `declare_proof_of_space:1113-1121`: `max(now, prev_tx_block.timestamp
+/// The candidate timestamp — `declare_proof_of_space:1113-1121`: `max(now, prev_tx_block.timestamp
 /// + 1)`, walking `prev_b` back to the first transaction block (or genesis). Falls back to `now` on a
 /// store gap. Bounded by [`CANDIDATE_WALK_CAP`].
 pub(crate) async fn candidate_timestamp<S: BlockStore + Send + Sync>(
@@ -2848,11 +2824,11 @@ pub struct Node<S = SqliteStore> {
     pub store: Arc<S>,
     pub mempool: Arc<Mutex<Mempool>>,
     pub wallet: Arc<WalletNotifier>,
-    // The shared trusted-peer policy (chia trusted_peers): resolves per-peer subscription + response
+    // The shared trusted-peer policy (`trusted_peers`): resolves per-peer subscription + response
     // caps and tx-queue priority. Built once from `config.trusted_peers` at boot; the SAME `Arc` is
     // held by `wallet` and every StoreApi. Empty config → every peer untrusted.
     trust: Arc<TrustPolicy>,
-    // The node-wide wallet-serve concurrency bound (chia wallet_sync_api_sem) — one instance shared by
+    // The node-wide wallet-serve concurrency bound (`wallet_sync_sem`) — one instance shared by
     // the inbound server api and every outbound connection's api. See the StoreApi field.
     wallet_sync_sem: Arc<LimitedSemaphore>,
     pub rpc: Arc<NodeRpc<S>>,
@@ -2868,25 +2844,25 @@ pub struct Node<S = SqliteStore> {
     service_indexes_shed: Arc<AtomicBool>,
     constants: ConsensusConstants,
     claimed_peak: Arc<AtomicU32>,
-    // The per-peer peak-claim book (chia sync_store): per-connection claims, heaviest-claim selection,
+    // The per-peer peak-claim book (`sync_store`): per-connection claims, heaviest-claim selection,
     // disconnect retraction, and the bad-peak quarantine. Publishes the heaviest claim's height into
     // `claimed_peak` (the metrics gauge + declare plot-filter height), rolling it BACK on retraction.
     peak_book: Arc<PeakBook>,
-    // Wakes the tip_follower on a NewPeak announcement (shared with the StoreApi handler; chia new_peak).
+    // Wakes the tip_follower on a NewPeak announcement (shared with the StoreApi handler).
     new_peak_signal: Arc<Notify>,
     // The last weight proof we verified, keyed by the tip it attests. A body-download retry reuses this
     // instead of re-fetching + re-running the multi-minute proof verify every driver tick.
     validated_tip: Arc<RwLock<Option<ValidatedTip>>>,
     // The validated WP tip whose fork point has been resolved against our chain this landing
-    // (chia _sync computes the fork point once per sync, full_node.py:1104-1113). The producer's
+    // (the fork point is computed once per sync). The producer's
     // FOLLOW fill is gated on it while the mid-chain long-sync band is active, so the batch
-    // download never outruns the trust anchor (chia validates the proof before
+    // download never outruns the trust anchor (the proof validates before
     // sync_from_fork_point ever runs).
     long_sync_anchor: Arc<RwLock<Option<Bytes32>>>,
     known_peers: Arc<RwLock<Vec<TimestampedPeerInfo>>>,
     // The INBOUND peer sessions map, owned by the Node so the confirm path can reach wallet-type
     // peers directly: `notify_new_peak` broadcasts `NewPeakWallet` to every peer that handshook as
-    // NodeType::Wallet (chia full_node.update_wallets, full_node.py:1561-1571). spawn_peer_server
+    // NodeType::Wallet (`full_node.update_wallets`). spawn_peer_server
     // hands this same map to the WebsocketServer (which inserts/removes sessions) and returns it.
     inbound_peers: PeerMap,
     // Transactions admitted from gossip, push_tx, or a wallet's p2p SendTransaction, awaiting
@@ -2898,36 +2874,36 @@ pub struct Node<S = SqliteStore> {
     tx_requested: Arc<Mutex<HashMap<Bytes32, PendingTx>>>,
     // The header hash of the LAST confirmed delta notify_new_peak processed. A delta whose
     // prev_hash breaks this chain is a reorg landing (the engine may emit only the new tip's
-    // delta for a deep reorg) — the mempool then takes chia's slow path
+    // delta for a deep reorg) — the mempool then takes the slow path
     // (`Mempool::revalidate_for_reorg`) so items whose removals were rolled back
     // (UNKNOWN_UNSPENT) or spent on the winning branch are dropped, before the per-delta
     // fast path runs.
     last_delta_hash: Mutex<Option<Bytes32>>,
     // txid -> (origin identity, when recorded): the peer a gossiped bundle arrived FROM, so the
-    // NewTransaction re-broadcast can exclude it (chia broadcast_added_tx's `current_peer`,
-    // full_node.py:2991-3004). The identity carries BOTH the dispatch peer id AND the remote host:
+    // NewTransaction re-broadcast can exclude it. The identity carries BOTH the dispatch peer
+    // id AND the remote host:
     // an inbound link's peer id is the peer's true cert hash (exact), but every outbound DIAL shares
     // OUR client cert hash (clients websocket peer_id = hash of our own cert), so an outbound origin
     // is only distinguishable by its remote host. Entries are consumed by
     // the announce drain; unconsumed ones (failed admissions) age out. Bounded — see `note_tx_origin`.
     tx_origin: Arc<Mutex<HashMap<Bytes32, (TxOrigin, Instant)>>>,
-    // Phase 2.1 slot state + its driver-drained queues (received gossip in, relay announces out).
+    // Slot state + its driver-drained queues (received gossip in, relay announces out).
     slot_state: Arc<Mutex<SlotState>>,
     sp_inbox: Arc<Mutex<Vec<SpEvent>>>,
     sp_announce: Arc<Mutex<Vec<NewSignagePointOrEndOfSubSlot>>>,
-    // Phase 3: the farmer-form signage points queued at each accept site alongside sp_announce, and
-    // drained by the driver to inbound farmer peers (chia new_signage_point → farmer_protocol).
+    // The farmer-form signage points queued at each accept site alongside sp_announce, and
+    // drained by the driver to inbound farmer peers (new_signage_point → farmer_protocol).
     sp_farmer_announce: Arc<Mutex<Vec<NewSignagePoint>>>,
     // Peer-link traffic counters shared with every handler map and the broadcast paths.
     net: Arc<NetCounters>,
-    // Phase 2.2 unfinished-block cache + received-block inbox + relay announce queue.
+    // Unfinished-block cache + received-block inbox + relay announce queue.
     unfinished: Arc<Mutex<UnfinishedCache>>,
     ub_inbox: Arc<Mutex<Vec<UnfinishedBlock>>>,
-    // Timelord infusion-return inbox (chia new_infusion_point_vdf): drained by process_ip_inbox, which
+    // Timelord infusion-return inbox (`new_infusion_point_vdf`): drained by process_ip_inbox, which
     // finishes our cached unfinished block into a FullBlock and sets it as the new peak.
     ip_inbox: Arc<Mutex<Vec<NewInfusionPointVDF>>>,
     ub_announce: Arc<Mutex<Vec<NewUnfinishedBlock2>>>,
-    // Chia full_node.add_unfinished_block also sends NewUnfinishedBlockTimelord to NodeType.TIMELORD
+    // add_unfinished_block also sends NewUnfinishedBlockTimelord to the timelord
     // peers so a timelord can infuse the partial into a FullBlock. Queued here alongside ub_announce and
     // drained to inbound timelord peers by the driver.
     ub_timelord_announce: Arc<Mutex<Vec<NewUnfinishedBlockTimelord>>>,
@@ -2935,13 +2911,13 @@ pub struct Node<S = SqliteStore> {
     tx_inbox: Arc<Mutex<TxQueue>>,
     // The RequestProofOfWeight inbox drained by the weight-proof worker.
     wp_inbox: Arc<Mutex<Vec<WpRequest>>>,
-    // Phase 1.5 compact-VDF consume: the pulled-proof inbox the driver validates + swaps, and the
+    // Compact-VDF consume: the pulled-proof inbox the driver validates + swaps, and the
     // NewCompactVDF re-gossip queue it feeds (drained to peers like ub_announce).
     compact_vdf_inbox: Arc<Mutex<Vec<RespondCompactVDF>>>,
     compact_vdf_announce: Arc<Mutex<Vec<NewCompactVDF>>>,
-    // Phase 3 farmer interface: accepted proof-of-space declarations awaiting Phase 4 block assembly.
+    // Farmer interface: accepted proof-of-space declarations awaiting block assembly.
     proof_candidates: Arc<Mutex<ProofCandidateStore>>,
-    // Phase 4 increment 5: candidate unfinished blocks awaiting the farmer's SignedValues reply.
+    // Candidate unfinished blocks awaiting the farmer's SignedValues reply.
     candidates: Arc<Mutex<CandidateBlockStore>>,
     // Block-producer pipeline counters — the
     // first-block funnel, shared with the read-loop StoreApi and rendered on /metrics.
@@ -2949,7 +2925,7 @@ pub struct Node<S = SqliteStore> {
     // Header hashes of unfinished blocks WE farmed, recorded at splice time so the follow driver can
     // count our own block when it confirms (S8). Bounded FIFO shared with the read-loop StoreApi.
     farmed_headers: Arc<Mutex<VecDeque<Bytes32>>>,
-    // chia-exporter-style signage-point telemetry: latest accepted SP index + running total.
+    // Signage-point telemetry: latest accepted SP index + running total.
     sp_current_index: Arc<AtomicU32>,
     signage_points_total: Arc<std::sync::atomic::AtomicU64>,
     // Unix second the current follow/backtrack fetch+confirm went in flight (0 = idle) — read by the
@@ -2964,7 +2940,7 @@ pub struct Node<S = SqliteStore> {
     // peer. Bounded at SEED_REF_CACHE_CAP entries × the 1 MiB generator ceiling.
     seed_ref_cache: Mutex<VecDeque<(u32, dg_xch_core::clvm::program::SerializedProgram)>>,
     chaser: Mutex<Chaser<Arc<S>, NativePrimitives>>,
-    // The consensus-walk record window (record_window.rs): chia's Blockchain record cache
+    // The consensus-walk record window (record_window.rs): the in-memory record cache
     // equivalent, serving difficulty_records_map without per-call store walks. Arc-shared with
     // the inbound StoreApi so the on-connect TIMELORD greeting can build a NewPeakTimelord.
     record_window: Arc<Mutex<BlockRecordCache>>,
@@ -3016,7 +2992,7 @@ where
         let mempool = Arc::new(Mutex::new(Mempool::new(&constants)));
         // Resolve the trusted-peer policy from config ONCE (node ids + CIDRs, parsed here); the same
         // policy Arc backs the wallet (subscription caps) and every StoreApi (response-item cap + tx
-        // priority). Empty config → only localhost is trusted (chia `is_trusted_peer` default).
+        // priority). Empty config → only localhost is trusted (`is_trusted_peer` default).
         let trust = Arc::new(TrustPolicy::from_config(
             &config.trusted_peers,
             &config.trusted_cidrs,
@@ -3113,7 +3089,7 @@ where
             node.net.clone(),
             node.run.clone(),
         );
-        // Phase 1.5 compact-VDF solicitation scan — OFF unless `--uncompact` (chia default is off).
+        // Compact-VDF solicitation scan — OFF unless `--uncompact`.
         if node.config.uncompact {
             spawn_uncompact_scanner(
                 node.store.clone(),
@@ -3182,7 +3158,7 @@ where
             peers.clone(),
             Arc::new(RwLock::new(handlers)),
         )?;
-        // Police inbound peers against chia's composed rate limits: a compliant peer
+        // Police inbound peers against the composed rate limits: a compliant peer
         // stays within budget, a flooding/oversize peer is closed and evicted at the read loop.
         server.rate_limited = true;
         let run = Arc::new(AtomicBool::new(true));
@@ -3197,7 +3173,7 @@ where
         Ok((run, peers))
     }
 
-    /// Start the RPC server (`--rpc`): block/coin queries + push_tx over chia-posture TLS
+    /// Start the RPC server (`--rpc`): block/coin queries + push_tx over mutual TLS
     /// (server cert from the private CA chain, client cert required — `rpc::build_rpc_tls_context`).
     /// Attaches the daemon's live state (unfinished cache, slot state, inbound
     /// peers, cert-hash node id) so the live-state endpoints answer. Returns the server's run flag.
@@ -3266,7 +3242,7 @@ where
 
     // Typed core of [`Node::sync_follow`]: the driver loop keeps the [`SyncError`] shape so the
     // unknown-parent orphan stays matchable (`SyncError::is_orphan`) — the trigger for the mirrored
-    // short-sync backtrack, chia's new_peak dispatch ladder (chia full_node.py:845-873).
+    // short-sync backtrack (the new-peak dispatch ladder).
     async fn follow_step(
         &self,
         source: &Arc<dyn BlockRangeSource>,
@@ -3292,7 +3268,7 @@ where
         self.finish_follow_step(peak, &deltas).await
     }
 
-    /// The mirrored `short_sync_backtrack` step (chia full_node.py:715-774), driven when a follow
+    /// The mirrored `short_sync_backtrack` step, driven when a follow
     /// window fails with the unknown-parent orphan: the chain reorged at/below our stored tip, so
     /// the fork point is fetched backward from the same peer and the collected branch resubmitted
     /// through the ordinary follow pipeline (the engine's existing fork choice performs the reorg).
@@ -3301,7 +3277,7 @@ where
     ///
     /// # Errors
     /// [`SyncError::DeepFork`] when the fork is deeper than the backtrack cap — the caller must fall
-    /// back to the weight-proof long sync (chia full_node.py:869-873) instead of retrying; any
+    /// back to the weight-proof long sync instead of retrying; any
     /// fetch/validation/store error otherwise.
     pub async fn sync_backtrack(
         &self,
@@ -3326,7 +3302,7 @@ where
         self.finish_follow_step(peak, &deltas).await
     }
 
-    /// One near-tip follow step via chia's `new_peak` ladder: forward-extend first, backtrack only on
+    /// One near-tip follow step via `new_peak` ladder: forward-extend first, backtrack only on
     /// the unknown-parent orphan ([`Chaser::follow_tip_step_reporting`]). This is the near-tip band's
     /// entry — a direct child of the peak confirms with a single forward `[from, to]` fetch, so the
     /// confirmed peak pins the network tip at lag 0-1 instead of paying a backward peak-refetch per
@@ -3387,15 +3363,15 @@ where
         Ok(peak)
     }
 
-    /// Recompute the synced flag from the confirmed chain — chia `FullNode.synced`
-    /// (chia full_node.py:930-948): synced iff the last TRANSACTION block at-or-below the peak
+    /// Recompute the synced flag from the confirmed chain — `FullNode.synced`
+    ///: synced iff the last TRANSACTION block at-or-below the peak
     /// carries a timestamp within the last 7 minutes. Confirming a peak thousands of blocks below
     /// the network tip must NOT open the tip-context gossip gates (SP/EOS/unfinished admission,
-    /// chia's "Ignore if syncing"): a catching-up node would pull objects anchored at a slot its
+    /// the ignore-while-syncing guard): a catching-up node would pull objects anchored at a slot its
     /// slot state cannot reach, wasting a round trip per announcement and accepting none of them
     /// (the live 176-pulls / 0-accepts pattern at 8,338 blocks behind). The follow driver calls
     /// this on every confirmed step and every idle tick, so the flag also DECAYS back to false
-    /// when the tip goes stale (peers lost) — chia recomputes it on every gate check.
+    /// when the tip goes stale (peers lost) — it is recomputed on every gate check.
     pub async fn update_synced(&self) {
         let peak = self.store.get_peak().await.ok().flatten();
         let synced = match peak {
@@ -3433,17 +3409,15 @@ where
                 }
             });
         }
-        // The FALLING edge — the phase the rising-edge-only design left unhandled: a node that
-        // reached tip (full index set built) and then fell DEEP behind re-applies settled
-        // history while maintaining every secondary index — measured on a SAN-backed leg as
-        // 531.9 s of a 32-block window (98.8%) spent in coin_record index/heap random reads
-        // with 0% HOT spend-updates. Shed the secondary indexes once, off the follow path, and
-        // re-arm the build latch so the rising edge rebuilds them at the next sync->tip
-        // transition — BEFORE the node re-enters the reorg-exposed zone. Keyed on tip_lag
-        // depth, not the raw synced bit: `synced` flips on a 1-block dip and would churn a
-        // multi-GB drop/rebuild. The latch is armed by depth alone (not the synced
-        // transition), so a restart mid-deep-catch-up re-derives the shed from the live phase
-        // and re-enters it with a cheap idempotent re-drop instead of carrying stale state.
+        // The FALLING edge: a node that reached tip (full index set built) and then fell DEEP
+        // behind re-applies settled history while maintaining every secondary index, which turns
+        // the confirm window into coin_record index/heap random reads with no HOT spend-updates.
+        // Shed the secondary indexes once, off the follow path, and re-arm the build latch so the
+        // rising edge rebuilds them at the next sync->tip transition, BEFORE the node re-enters
+        // the reorg-exposed zone. Keyed on tip_lag depth, not the raw synced bit: `synced` flips
+        // on a 1-block dip and would churn a multi-GB drop/rebuild. Arming by depth alone means a
+        // restart mid-deep-catch-up re-derives the shed from the live phase and re-enters it with
+        // a cheap idempotent re-drop instead of carrying stale state.
         if !synced {
             let local = peak.map_or(0, |(_, h)| h);
             let tip_lag = self
@@ -3477,10 +3451,10 @@ where
         }
     }
 
-    // chia full_node.py:930-948 — walk from the peak to the last transaction block and compare its
+    // — walk from the peak to the last transaction block and compare its
     // timestamp against now - 7 minutes. The walk is bounded generously: mainnet guarantees a
     // transaction block within far fewer records, and a missing/older-than-window record is simply
-    // "not synced" (fail-closed, same verdict chia reaches on a stale chain).
+    // "not synced" (fail-closed).
     async fn chain_is_current(&self, peak_hash: &Bytes32) -> bool {
         let mut curr = self.store.get_block_record(peak_hash).await.ok().flatten();
         for _ in 0..512 {
@@ -3552,7 +3526,7 @@ where
                 claimed_peak: claimed_peak.clone(),
                 peak_book: peak_book.clone(),
                 // One factory invocation = one outbound dial: mint this connection's claim key. Its
-                // Drop (with the connection's handler map) retracts the claim — chia's
+                // Drop (with the connection's handler map) retracts the claim — the
                 // sync_store.peer_disconnected for the outbound side, where the dispatch peer id
                 // cannot distinguish connections (it is our own cert hash).
                 claim_guard: Some(Arc::new(peak_book.outbound_guard())),
@@ -3663,11 +3637,11 @@ where
         self.long_sync_anchor.read().await.is_some()
     }
 
-    /// Establish — once per landing — the chia `_sync` trust anchor for a MID-CHAIN deep gap
-    /// (chia full_node.py:1021-1121): a validated weight proof for the heaviest claim (cached
+    /// Establish — once per landing — the `_sync` trust anchor for a MID-CHAIN deep gap
+    ///: a validated weight proof for the heaviest claim (cached
     /// across ticks by [`Node::validated_proof`]), the fork point of its summaries against our
-    /// chain (chia `get_fork_point`, weight_proof.py:644-664), the `check_fork_next_block` peer
-    /// probe (chia/full_node/check_fork_next_block.py), and — when the fork point is below our
+    /// chain (`get_fork_point`), the `check_fork_next_block` peer
+    /// probe, and — when the fork point is below our
     /// peak (the offline period saw a reorg deeper than our tip) — the reland through the
     /// engine's atomic reorg. Returns `true` once anchored (the detached fetch/confirm pipeline
     /// then batch-syncs the gap), `false` to retry next tick (no claim, peers, proof, or peak
@@ -3703,7 +3677,7 @@ where
         )
         .await
         .map_err(|e| Error::other(e.to_string()))?;
-        // chia check_fork_next_block probes ONLY the no-fork case (fork point == the
+        // check_fork_next_block probes ONLY the no-fork case (fork point == the
         // no-divergence conservative value); a detected divergence keeps its fork point.
         let connects = match &fork {
             WpForkPoint::NoForkDetected { .. } => {
@@ -3737,7 +3711,7 @@ where
         Ok(true)
     }
 
-    // The reorg-across-the-gap reland (chia sync_from_fork_point below the peak): drive the
+    // The reorg-across-the-gap reland (the fork point below the peak): drive the
     // chaser's window re-follow from the fork point with the Node's per-peak side effects
     // (wallet coin-state + mempool revalidation fire for every reorg delta, exactly as in
     // [`Node::sync_backtrack`]).
@@ -3855,7 +3829,7 @@ where
         Ok(true)
     }
 
-    // The confirmed local peak's weight, for the chia "not interested in less heavy peaks" gate.
+    // The confirmed local peak's weight, for the not-interested-in-lighter-peaks gate.
     async fn local_peak_weight(&self) -> Option<u128> {
         let (hash, _) = self.store.get_peak().await.ok().flatten()?;
         self.store
@@ -3866,9 +3840,9 @@ where
             .map(|rec| rec.weight)
     }
 
-    /// The sync target: the HEAVIEST live peer claim (chia `sync_store.get_heaviest_peak`, already
+    /// The sync target: the HEAVIEST live peer claim (`sync_store.get_heaviest_peak`, already
     /// net of quarantined peaks and retracted/stale claims), gated to claims strictly heavier than
-    /// our confirmed peak — chia drops lighter announcements at `new_peak` ("Not interested in less
+    /// our confirmed peak — lighter announcements drop at `new_peak` ("Not interested in less
     /// heavy peaks") and `request_validate_wp` refuses a target not heavier than the local peak
     /// ("already caught up"). `None` means caught up or nothing (heavier) claimed: a longer-but-
     /// LIGHTER fork is not a target, and every consumer band (tip_follower / FOLLOW fill / bulk)
@@ -3908,7 +3882,7 @@ where
         // peer that is slow, swamped, or unwilling to serve a multi-MB proof must not stall the sync (one
         // laggy peer would otherwise eat the whole timeout every tick). The first valid proof wins; the
         // rest are aborted. The serving peer travels with the proof so a proof that fails the claim
-        // cross-check or validation can evict exactly that peer (chia request_validate_wp peer.close).
+        // cross-check or validation can evict exactly that peer (the failed-proof eviction).
         info!(
             tip_height,
             peers = peers.len(),
@@ -3945,16 +3919,16 @@ where
         let Some((wp_peer, proof)) = fetched else {
             // NO peer will serve a proof for this claimed tip: retract the claim (every claimant) so a
             // phantom peak cannot be re-selected tick after tick. Honest claimants re-announce within a
-            // block cadence and repopulate the book — the soft analog of chia closing the peer that
+            // block cadence and repopulate the book — the soft analog of closing the peer that
             // failed to serve the proof (request_validate_wp → peer.close).
             self.peak_book.retract_hash(&tip);
             return Err(Error::other(format!(
                 "weight-proof fetch failed from all {failures} peers; retracted claims on tip {tip}"
             )));
         };
-        // chia request_validate_wp: the proof must attest EXACTLY the claimed tip — its recent chain's
-        // last block carries the claimed height AND weight (full_node.py "Weight proof had the wrong
-        // height/weight"). A mismatch quarantines the claimed peak (never re-selected) and evicts the
+        // `request_validate_wp`: the proof must attest EXACTLY the claimed tip — its recent chain's
+        // last block carries the claimed height AND weight. A mismatch quarantines the claimed
+        // peak (never re-selected) and evicts the
         // serving peer.
         let attested = proof
             .recent_chain_data
@@ -3967,7 +3941,7 @@ where
                 "weight proof attests {attested:?}, claim was ({tip_height}, {tip_weight}); peak {tip} quarantined"
             )));
         }
-        // chia in_bad_peak_cache: refuse a proof whose recent chain rides through ANY quarantined peak
+        // Refuse a proof whose recent chain rides through ANY quarantined peak
         // (an extension of a poisoned chain re-offered under a fresh tip hash).
         for header in &proof.recent_chain_data {
             if let Ok(hash) = header.header_hash()
@@ -4011,9 +3985,9 @@ where
         .map_err(|e| Error::other(format!("weight-proof verify task: {e}")))?;
         let summaries = match verified {
             Ok((true, summaries)) => summaries,
-            // The proof does NOT prove the claimed peak: quarantine it (chia add_to_bad_peak_cache —
+            // The proof does NOT prove the claimed peak: quarantine it (
             // a poisoned peak is never re-selected) and evict the peer that served the bad proof
-            // (chia request_validate_wp → peer.close on a failed validation).
+            // (a peer eviction would be the harder posture).
             Ok((false, _)) => {
                 self.peak_book.quarantine(tip, tip_height);
                 wp_peer.stop();
@@ -4049,7 +4023,7 @@ where
     /// `epoch_backfill_low` (a two-transaction-block scan crossing a non-transaction run longer
     /// than `EPOCH_BACKFILL_SLACK` under the previous epoch surpass). In that case the backfill
     /// anchors at the walk's reach point — one full epoch below the standard floor — instead of
-    /// concluding "nothing to do" and re-warming the identical span forever (the old livelock).
+    /// concluding "nothing to do" and re-warming the identical span forever (a livelock).
     ///
     /// # Errors
     /// Returns an I/O error on a store failure or a failed proof fetch/validation.
@@ -4088,13 +4062,11 @@ where
             self.constants.epoch_blocks,
             self.constants.sub_epoch_blocks,
         );
-        // The record floor, measured by PREV-HASH WALK from the peak (crate::resume_floor) — not
-        // by height: by-height lookups are main-chain-only on every backend, so epoch-backfill
-        // CANDIDATE records are invisible to them (an anchored leg re-ran the full weight-proof
-        // fetch + multi-minute validation on EVERY restart while its backfilled span sat right
-        // there), and a by-height binary search assumes hole-free monotone presence (a mid-span
-        // record hole above the floor read as "nothing to repair" — the restart-resume livelock).
-        // The hash walk sees candidates and breaks exactly at a hole.
+        // The record floor is measured by PREV-HASH WALK from the peak (crate::resume_floor), not
+        // by height. By-height lookups are main-chain-only on every backend, so epoch-backfill
+        // CANDIDATE records are invisible to them, and a by-height binary search assumes hole-free
+        // monotone presence, so a mid-span record hole above the floor reads as "nothing to
+        // repair". The hash walk sees candidates and breaks exactly at a hole.
         let outcome = crate::resume_floor::measure_record_floor(
             self.store.as_ref(),
             peak_hash,
@@ -4142,8 +4114,8 @@ where
     }
 
     /// Record the peer a gossiped transaction arrived FROM — its dispatch peer id AND its remote
-    /// host — so the `NewTransaction` re-broadcast excludes it (chia `broadcast_added_tx`'s
-    /// `current_peer`, full_node.py:2991-3004). The host is what excludes an OUTBOUND origin, whose
+    /// host — so the `NewTransaction` re-broadcast excludes it (`broadcast_added_tx`'s
+    /// `current_peer`). The host is what excludes an OUTBOUND origin, whose
     /// dispatch id is our own shared client-cert hash. Bounded: entries
     /// older than 60s are pruned on insert and the map is capped — an unconsumed entry (failed
     /// admission) cannot accumulate.
@@ -4160,29 +4132,22 @@ where
     }
 
     /// Drain the queued `NewTransaction` announcements to every connected FULL_NODE peer —
-    /// inbound and outbound — excluding each transaction's origin peer (chia
-    /// `broadcast_added_tx`: `send_to_all([msg], NodeType.FULL_NODE, current_peer.peer_node_id)`,
-    /// full_node.py:2991-3004). Public so the integration suite can drive the drain the driver
-    /// loop normally runs.
+    /// inbound and outbound — excluding each transaction's origin peer. Public so
+    /// the integration suite can drive the drain the driver loop normally runs.
     pub async fn drain_tx_announcements(self: &Arc<Self>, registry: &Arc<dyn OutboundPeers>) {
         broadcast_transactions(self, registry).await;
     }
 
-    /// The sync-end transition — chia `_finish_sync` (full_node.py:1823-1853). After a bulk/
+    /// The sync-end transition — `_finish_sync`. After a bulk/
     /// fast-sync band lands its recent-chain peak and exits to the follow driver, fire peak-post-
-    /// processing ONCE against the final peak. chia builds
-    /// `StateChangeSummary(peak, fork_point, [], [], [], [])` — EMPTY coin deltas — so the
-    /// transition is exactly:
-    ///   - mempool revalidation against the new (transaction) peak — chia
-    ///     `mempool_manager.new_peak(get_tx_peak(), spent_coins=[])` (peak_post_processing:2033);
-    ///     the empty spent set expires time-locked items and re-admits parked ones without
-    ///     dropping for spends (the batch path already advanced the coin set);
-    ///   - NewPeak to full-node peers + slot-state advance + NewPeakTimelord to timelords — chia
-    ///     `peak_post_processing_2` `send_peak_to_timelords(block)` + the NewPeak broadcast
-    ///     (:2085-2100);
-    ///   - NewPeakWallet to wallet peers — chia `update_wallets` (:1561-1571).
+    /// processing ONCE against the final peak, with EMPTY coin deltas:
+    ///   - mempool revalidation against the new (transaction) peak — the empty spent set
+    ///     expires time-locked items and re-admits parked ones without dropping for spends (the
+    ///     batch path already advanced the coin set);
+    ///   - NewPeak to full-node peers + slot-state advance + NewPeakTimelord to timelords;
+    ///   - NewPeakWallet to wallet peers.
     ///
-    /// There is NO per-coin `CoinStateUpdate`: chia's `lookup_coin_ids` is EMPTY at `_finish_sync`
+    /// There is NO per-coin `CoinStateUpdate`: `lookup_coin_ids` is EMPTY at `_finish_sync`
     /// (the empty StateChangeSummary), so subscribers get only the peak announcement — the bounded
     /// push the sync-end owes, NEVER an unbounded per-block replay of the synced span. A wallet
     /// re-pages the coin state it missed via RequestPuzzleState/RequestCoinState anchored on the
@@ -4199,7 +4164,7 @@ where
         // The next follow block chains onto this landed peak as a plain extension — seed the
         // reorg-chain tracker so it is not mis-read as a hash-break reorg.
         *self.last_delta_hash.lock().await = Some(hash);
-        // Mempool revalidation against the transaction peak framing the new tip (chia get_tx_peak).
+        // Mempool revalidation against the transaction peak framing the new tip.
         if let Some((tx_height, tx_ts)) = self.tx_peak_frame(hash).await
             && let Err(e) = self
                 .mempool
@@ -4214,10 +4179,10 @@ where
         broadcast_new_peak(self, registry, hash, height).await;
         update_slot_state_on_peak(self, hash).await;
         broadcast_new_peak_timelord(self, inbound_peers, hash).await;
-        // NewPeakWallet to wallet peers (no per-coin CoinStateUpdate — chia's empty summary).
-        // fork_point = max(height - 1, 0): chia `_finish_sync` builds `StateChangeSummary(peak,
+        // NewPeakWallet to wallet peers (no per-coin CoinStateUpdate — an empty summary).
+        // fork_point = max(height - 1, 0): `_finish_sync` builds `StateChangeSummary(peak,
         // fork_point, …)` with `fork_point = max(peak.height - 1, 0)` and update_wallets carries
-        // that same fork height into NewPeakWallet (:1561-1571) — the height-1 default the
+        // that same fork height into NewPeakWallet — the height-1 default the
         // NewPeak broadcast above also uses, NOT the on-connect greeting's peak-height convention.
         let wallets = wallet_peers(inbound_peers).await;
         if !wallets.is_empty()
@@ -4233,12 +4198,12 @@ where
         }
         info!(
             height,
-            "sync-end transition fired (chia _finish_sync parity)"
+            "sync-end transition fired"
         );
     }
 
     // The transaction block framing a peak: walk from the peak to the nearest record carrying a
-    // timestamp (chia `get_tx_peak`). Bounded like `chain_is_current`; `None` if none within the
+    // timestamp (`get_tx_peak`). Bounded like `chain_is_current`; `None` if none within the
     // window (a from-genesis peak with no transaction block yet).
     async fn tx_peak_frame(&self, peak_hash: Bytes32) -> Option<(u32, u64)> {
         let mut curr = self
@@ -4273,8 +4238,8 @@ where
     ) -> Result<(), Error> {
         // Reorg detection by hash-chain break: the engine may surface a deep reorg as just the
         // new tip's delta, so height monotonicity can't be trusted — a delta whose prev_hash
-        // isn't the last delta we processed means blocks were rolled back. chia's mempool takes
-        // the slow path there (mempool_manager.py:988-1039, the full pool rebuild); ours is
+        // isn't the last delta we processed means blocks were rolled back. The mempool takes the
+        // slow path there (the full pool rebuild):
         // `Mempool::revalidate_for_reorg` — drop items whose removals ceased to exist
         // (UNKNOWN_UNSPENT) or were spent on the winning branch, rebase surviving FF spends.
         // The threaded reorg delta forces the same path even when the branch's first block
@@ -4298,7 +4263,7 @@ where
                 dropped, "reorg landing: mempool revalidated on the slow path"
             );
         }
-        // chia mempool_manager.new_peak: "we're only interested in transaction blocks" — the
+        // `mempool_manager.new_peak`: "we're only interested in transaction blocks" — the
         // mempool peak must always be the most recent TRANSACTION block, whose height + timestamp
         // are the reference frame every time-lock admission checks against. A non-transaction
         // delta (timestamp 0, no foliage_transaction_block, no coin activity) leaves the pool
@@ -4323,13 +4288,11 @@ where
                 }
             }
         }
-        // The true fork height when this delta lands a reorg (chia threads
-        // `state_change_summary.fork_height` into every wallet push); height-1 IS the fork point
-        // for every plain extension.
+        // The true fork height when this delta lands a reorg (threaded into every wallet
+        // push); height-1 IS the fork point for every plain extension.
         let fork_height = reorg.map_or_else(|| d.height.saturating_sub(1), |r| r.fork_height);
-        // Rolled-back states FIRST — chia's WalletUpdate carries `rolled_back_records +
-        // new_states` in one push (full_node.py:2101-2119, delivered by update_wallets
-        // :1535-1571); ours delivers the rollback then the branch's own delta, same final state.
+        // Rolled-back states FIRST, then the branch's own delta — the same final state as one
+        // combined `rolled_back_records + new_states` push.
         if let Some(r) = reorg
             && !r.rolled_back.is_empty()
         {
@@ -4347,19 +4310,18 @@ where
                     created: &d.additions,
                     spent_ids: &d.removals,
                     // The block's create-coin (hint, coin_id) pairs: a hint equal to a subscribed
-                    // puzzle hash matches like the puzzle hash itself (chia full_node.py:1544-1546).
+                    // puzzle hash matches like the puzzle hash itself.
                     hints: &d.hints,
                 },
             )
             .await
             .map_err(|e| Error::other(e.to_string()))?;
-        // chia update_wallets (full_node.py:1561-1571): AFTER the per-subscriber CoinStateUpdate
-        // deltas, EVERY wallet-type peer gets the peak as NewPeakWallet — subscribed or not (Sage
+        // AFTER the per-subscriber CoinStateUpdate deltas, EVERY wallet-type peer gets the peak
+        // as NewPeakWallet — subscribed or not (Sage
         // tracks the network peak from this push, and its delta sync anchors on it). Snapshot the
         // wallet peers first: with none connected (the common case, and every bulk-sync block)
         // this is one cheap read-lock and no store read. fork_point is the true fork height on a
-        // threaded reorg delta and height-1 for every plain extension (chia threads
-        // `state_change_summary.fork_height` here, full_node.py:1561-1571).
+        // threaded reorg delta and height-1 for every plain extension.
         let wallets = wallet_peers(&self.inbound_peers).await;
         if !wallets.is_empty()
             && let Ok(Some(rec)) = self.store.get_block_record(&d.header_hash).await
@@ -4386,11 +4348,17 @@ where
         let (peer_run, inbound_peers) = self.spawn_peer_server()?;
         let rpc_run = self.spawn_rpc_server()?;
 
-        let settings = P2pSettings::default();
+        let mut settings = P2pSettings::default();
+        if let Some(n) = self.config.target_outbound {
+            settings.target_outbound = n;
+        }
+        if let Some(n) = self.config.target_peer_count {
+            settings.target_peer_count = n;
+        }
         let mut supervisor = Supervisor::new(settings);
         // Register the full_node handler set on every outbound dial BEFORE the slots start.
         supervisor.set_handlers(self.outbound_handler_factory());
-        // On-connect greetings for OUTGOING connections (chia server.py start_client →
+        // On-connect greetings for OUTGOING connections (start_client →
         // on_connect): NewPeak + mempool-sync request to every peer we dial.
         {
             let hook_node = self.clone();
@@ -4419,11 +4387,10 @@ where
             let seeded = supervisor.seed_addresses(&manual).await;
             info!(seeded, configured = manual.len(), "seeded manual peers");
         }
-        // The RETRYING introducer session: the old one-shot `seed_once` here
-        // died on boot-time DNS-not-ready and the node stayed peer-poor forever. The supervisor
+        // The RETRYING introducer session: a one-shot seed dies on boot-time DNS-not-ready and
+        // the node stays peer-poor forever. The supervisor
         // session re-queries on a doubling backoff whenever the node is below its outbound target
-        // with an empty address book — chia FullNodeDiscovery's introducer cadence
-        // (chia/server/node_discovery.py:256-292).
+        // with an empty address book.
         if let Some((host, port)) = &self.config.introducer {
             supervisor.start_introducer(host, *port);
         }
@@ -4433,7 +4400,7 @@ where
         let metrics_run = self.start_metrics_server(registry.clone(), inbound_peers.clone());
         let driver_registry: Arc<dyn OutboundPeers> = registry;
         // The event-driven near-tip follower shares the registry + inbound peers with the batch driver;
-        // it owns the <=SHORT_SYNC_BLOCKS_BEHIND_THRESHOLD band (chia new_peak short_sync_backtrack rung).
+        // it owns the <=SHORT_SYNC_BLOCKS_BEHIND_THRESHOLD band (the short-sync-backtrack rung).
         let tip = tokio::spawn(tip_follower(
             self.clone(),
             driver_registry.clone(),
@@ -4509,7 +4476,7 @@ where
 // peer announced (bounded to FOLLOW_BATCH blocks per step) from a live outbound peer. Errors are logged and
 // retried next tick — a flaky peer never stalls the loop. The bulk from-zero long-sync (headers-first +
 // weight-proof fast-sync) is the live-deployment driver layered on top of this.
-// The near-tip rung of chia's new_peak ladder (full_node.py:840-848), driven off the NewPeak gossip
+// The near-tip rung of the new-peak ladder, driven off the NewPeak gossip
 // EVENT rather than the batch tick: within SHORT_SYNC_BLOCKS_BEHIND_THRESHOLD blocks of a peer's peak we
 // pull [local+1, claimed] and confirm it via sync_backtrack (the short_sync_backtrack mirror, which also
 // resolves a shallow reorg), so the confirmed peak tracks the network tip within 0-1 and never trails a
@@ -4553,7 +4520,7 @@ async fn tip_follower<S: BlockStore + CoinStore + Send + Sync + 'static>(
             // No confirmed peak yet: from-zero catch-up is the driver's bulk/batch job.
             continue;
         };
-        // The weight-gated heaviest claim (chia new_peak: lighter-than-local announcements are
+        // The weight-gated heaviest claim (lighter-than-local announcements are
         // dropped, so a longer-but-lighter fork never becomes the near-tip pull target).
         let Some(target) = node.sync_target().await else {
             continue;
@@ -4572,7 +4539,7 @@ async fn tip_follower<S: BlockStore + CoinStore + Send + Sync + 'static>(
         rotation = rotation.wrapping_add(1);
         let source: Arc<dyn BlockRangeSource> =
             Arc::new(OutboundPeerSource::new(peer, REQUEST_TIMEOUT));
-        // chia new_peak ladder: forward-extend [local+1, claimed] first (a direct child of the peak
+        // `new_peak` ladder: forward-extend [local+1, claimed] first (a direct child of the peak
         // is the common case and needs one forward fetch, no backward peak-refetch), and fall to
         // short_sync_backtrack only on the unknown-parent orphan — so the follower pins tip at lag 0-1.
         match node
@@ -4613,9 +4580,9 @@ const RECOVERY_CHANNEL_CAP: usize = 8;
 // so healthy — even slow — validation never trips it.
 const RECLAIM_TIMEOUT: Duration = Duration::from_secs(60);
 // Bound on how long the peer-free consumer parks on a recovery reply before giving up and retrying the
-// window, so a wedged driver loop can never hang the confirm consumer forever. Generous — above the worst
-// legitimate `handle_recovery` (MissingRecord's 8×DRIVER_TICK re-arm, a bounded backtrack's fetches) — so
-// it never abandons an in-progress recovery, only a truly stuck driver.
+// window, so a stuck driver loop can never hang the confirm consumer forever. Set above the worst
+// legitimate `handle_recovery` (MissingRecord's 8xDRIVER_TICK re-arm, a bounded backtrack's fetches)
+// so it never abandons an in-progress recovery.
 const RESET_REPLY_TIMEOUT: Duration = Duration::from_secs(120);
 
 fn unix_secs() -> u64 {
@@ -4626,13 +4593,13 @@ fn unix_secs() -> u64 {
 
 /// The consumer→driver recovery channel. The detached, peer-free
 /// [`block_processor`] emits one of these when a confirmed window needs a peer at confirm time and parks
-/// on the reply **holding no engine/`Chaser` lock** (RC-1). The thin driver services each by running the
-/// EXISTING, unmoved recovery routines with its rotation peer (→ `PeerManager::lease()` at phase 4), then
-/// rebases the queue to restore the head invariant (`queue.low_water == confirmed_peak + 1`). Because recovery
-/// orchestration never moves, the "moved, not modified" promise on the consensus path is honored trivially.
+/// on the reply **holding no engine/`Chaser` lock**. The thin driver services each by running the
+/// EXISTING, unmoved recovery routines with its rotation peer, then
+/// rebases the queue to restore the head invariant (`queue.low_water == confirmed_peak + 1`).
+/// Recovery orchestration itself never moves.
 enum RecoveryRequest {
     /// The window `[from, to]` returned the unknown-parent orphan — mainnet reorged at/below our tip. The
-    /// driver runs the chia ladder (`sync_backtrack` → deep-fork `bulk_sync`), then rebases to the
+    /// driver runs the recovery ladder (`sync_backtrack` → deep-fork `bulk_sync`), then rebases to the
     /// (possibly rewound) peak + 1.
     Orphan {
         from: u32,
@@ -4641,8 +4608,7 @@ enum RecoveryRequest {
     },
     /// `--sync-from` only: the window references out-of-span generator heights the engine lacks. The
     /// driver fetches those generators with its peer and returns them; the consumer seeds them into the
-    /// engine overlay and retries the confirm — all while holding no lock (RC-1). Folded into the producer
-    /// at phase 3, after which this variant never fires.
+    /// engine overlay and retries the confirm — all while holding no lock.
     SeedRefs {
         heights: Vec<u32>,
         reply: oneshot::Sender<Vec<(u32, dg_xch_core::clvm::program::SerializedProgram)>>,
@@ -4676,8 +4642,7 @@ async fn follow_head<S: BlockStore + CoinStore + Send + Sync + 'static>(
     }
 }
 
-// One rotation peer as a block-range source for driver-side recovery fetches. Phase 4 swaps this for
-// `PeerManager::lease()` (a lease reserved/preemptible for recovery) without touching the consumer.
+// One rotation peer as a block-range source for driver-side recovery fetches.
 async fn recovery_source(
     registry: &Arc<dyn OutboundPeers>,
     rotation: &mut usize,
@@ -4811,7 +4776,7 @@ async fn handle_recovery<S: BlockStore + CoinStore + Send + Sync + 'static>(
         }
         RecoveryRequest::MissingRecord { reply } => {
             // Re-arm resume repair until it completes (bounded): floor re-measure + epoch-depth backfill
-            // + cache re-warm, exactly as the old driver's `repaired = false` did across ticks.
+            // + cache re-warm.
             // `deepen = true`: the consumer PROVED a stage walk missed a record, so a clean floor
             // walk means the miss is below the standard backfill floor — anchor the backfill at
             // the walk's reach point instead of replying "nothing to do" forever.
@@ -4837,12 +4802,11 @@ async fn handle_recovery<S: BlockStore + CoinStore + Send + Sync + 'static>(
 
 // Emit a confirmed peak to the announcer WITHOUT ever blocking the confirm consumer. NewPeak is
 // best-effort gossip — a newer confirmed peak supersedes an older one — and, the load-bearing reason,
-// the peer-free consumer must NEVER park on the announcer: a stalled announcer that stopped draining this
-// channel used to back-pressure the consumer off the BlockQueue (`peak_tx.send().await` blocking on a
-// full buffer), which parked the producer on a full buffer — the permanent genesis-sync wedge. `try_send`
-// drops the announcement iff the 256-deep buffer is full (the announcer is genuinely wedged, not a
-// transient), and the next confirmed peak carries a fresher tip. Returns false only when the announcer is
-// GONE (receiver dropped) so the consumer can exit cleanly.
+// the peer-free consumer must NEVER park on the announcer: a blocking `peak_tx.send().await` on a full
+// buffer back-pressures the consumer off the BlockQueue, which in turn parks the producer on a full
+// buffer — a permanent sync stall. `try_send` drops the announcement iff the 256-deep buffer is full,
+// and the next confirmed peak carries a fresher tip. Returns false only when the announcer is GONE
+// (receiver dropped) so the consumer can exit cleanly.
 fn emit_confirmed_peak(peak_tx: &mpsc::Sender<ConfirmedPeak>, peak: ConfirmedPeak) -> bool {
     match peak_tx.try_send(peak) {
         Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => true,
@@ -4865,15 +4829,15 @@ async fn peak_announcer<S: BlockStore + CoinStore + Send + Sync + 'static>(
     }
 }
 
-/// Component 3 — the detached, peer-free block processor. Drains the landed
+/// The detached, peer-free block processor. Drains the landed
 /// [`BlockQueue`] in strict height order and runs the FROZEN validation/confirm core
 /// (`follow_step_blocks` → `follow_blocks_reporting`), never acquiring a peer, lease, or registry.
 /// Everything it needs from the network arrives through the queue or is delegated to the thin driver over
 /// the [`RecoveryRequest`] channel; confirmed peaks leave via the [`ConfirmedPeak`] channel to the
-/// announcer. RC-1 (no `Chaser` lock across a recovery send) holds by construction: `follow_step_blocks`
+/// announcer. No `Chaser` lock is held across a recovery send, by construction: `follow_step_blocks`
 /// scopes the `chaser.lock()` inside itself and has fully returned — guard dropped — before this loop
-/// inspects the `Err` and sends. RC-2 (the producer never locks the `Chaser`) holds because the producer
-/// only fetches and pushes to the queue.
+/// inspects the `Err` and sends. The producer never locks the `Chaser` either; it only fetches and
+/// pushes to the queue.
 async fn block_processor<S: BlockStore + CoinStore + Send + Sync + 'static>(
     node: Arc<Node<S>>,
     queue: Arc<BlockQueue>,
@@ -4902,7 +4866,7 @@ async fn block_processor<S: BlockStore + CoinStore + Send + Sync + 'static>(
         }
         let from = window.first().map_or(0, FullBlock::height);
         let to = window.last().map_or(0, FullBlock::height);
-        // --sync-from out-of-span ref pre-seed (peer-free; the driver fetches). RC-1: the Chaser lock is
+        // --sync-from out-of-span ref pre-seed (peer-free; the driver fetches). The Chaser lock is
         // dropped before the SeedRefs send and re-taken only to apply the returned generators.
         if node.config.sync_from > 0 {
             let missing = {
@@ -4937,10 +4901,10 @@ async fn block_processor<S: BlockStore + CoinStore + Send + Sync + 'static>(
         node.follow_inflight_since.store(0, Ordering::Relaxed);
         match step {
             Ok(Some((hash, height))) => {
-                // Height-monotone SPSC feed to the announcer. NON-BLOCKING: a wedged announcer must never
-                // stall the confirm consumer (that back-pressured it off the BlockQueue and wedged the whole
-                // pipeline). `emit_confirmed_peak` drops a best-effort announcement under a full buffer and
-                // only reports failure when the announcer is gone.
+                // Height-monotone SPSC feed to the announcer. NON-BLOCKING: a stalled announcer must
+                // never stall the confirm consumer, which would back-pressure it off the BlockQueue
+                // and stall the whole pipeline. `emit_confirmed_peak` drops a best-effort
+                // announcement under a full buffer and only reports failure when the announcer is gone.
                 if !emit_confirmed_peak(&peak_tx, ConfirmedPeak { hash, height }) {
                     break;
                 }
@@ -4995,7 +4959,7 @@ async fn block_processor<S: BlockStore + CoinStore + Send + Sync + 'static>(
     }
 }
 
-// Send a `()`-reply recovery request and park on its completion (RC-1: called only after the Chaser lock
+// Send a `()`-reply recovery request and park on its completion (called only after the Chaser lock
 // is dropped). Returns false if the driver channel is gone (shutdown) so the consumer can exit.
 async fn await_reset(
     recovery_tx: &mpsc::Sender<RecoveryRequest>,
@@ -5005,11 +4969,11 @@ async fn await_reset(
     if recovery_tx.send(make(tx)).await.is_err() {
         return false;
     }
-    // Bounded park: a wedged driver loop that never services this recovery must not hang the confirm
-    // consumer forever (that was a permanent-freeze vector — the consumer stops draining the queue, the
-    // producer parks on a full buffer). On a reply-timeout, PROCEED (retry the window next iteration)
-    // rather than exit — the driver's per-tick queue reconcile and the stall watchdog restore the head invariant
-    // independently, so retrying is safe and never a hang.
+    // Bounded park: a driver loop that never services this recovery must not hang the confirm
+    // consumer forever, which would stop the queue draining and park the producer on a full buffer.
+    // On a reply-timeout, PROCEED (retry the window next iteration) rather than exit — the driver's
+    // per-tick queue reconcile and the stall watchdog restore the head invariant independently, so
+    // retrying is safe.
     match tokio::time::timeout(RESET_REPLY_TIMEOUT, rx).await {
         Ok(r) => r.is_ok(),
         Err(_) => {
@@ -5047,7 +5011,7 @@ fn prefetch_config_for<S: BlockStore + CoinStore + Send + Sync + 'static>(
 async fn follow_fill_claimed<S: BlockStore + CoinStore + Send + Sync + 'static>(
     node: &Arc<Node<S>>,
 ) -> Option<u32> {
-    // The weight-gated heaviest claim (chia sync_store.get_heaviest_peak behind the new_peak weight
+    // The weight-gated heaviest claim (`sync_store.get_heaviest_peak` behind the new_peak weight
     // drop): `None` = caught up or nothing heavier claimed — a longer-but-lighter fork never
     // becomes the FOLLOW fill target.
     let target = node.sync_target().await?;
@@ -5063,8 +5027,7 @@ async fn follow_fill_claimed<S: BlockStore + CoinStore + Send + Sync + 'static>(
             return None; // the driver's from-zero weight-proof fast-sync owns the band
         }
         // Mid-chain deep gap: fill only once the driver has anchored the landing (weight proof
-        // validated + fork point resolved — chia validates the proof before sync_from_fork_point
-        // ever runs, full_node.py:1104-1113); an unanchored fill would batch-download toward an
+        // validated + fork point resolved); an unanchored fill would batch-download toward an
         // unproven heavy claim.
         if !node.long_sync_anchored().await {
             return None;
@@ -5076,10 +5039,10 @@ async fn follow_fill_claimed<S: BlockStore + CoinStore + Send + Sync + 'static>(
     Some(claimed)
 }
 
-/// Component 2 — the detached fetch producer (phase 3). Owns the readahead engine and the peer
-/// sources (rebuilt ONLY when the live set changes — the retired per-tick source churn, daemon.rs:3271),
+/// The detached fetch producer. Owns the readahead engine and the peer
+/// sources (rebuilt ONLY when the live set changes),
 /// and keeps the [`BlockQueue`] filled to its byte budget across peers, biased to over-fill so the
-/// detached consumer is never starved. It touches neither the `Chaser` (RC-2) nor the recovery/announce
+/// detached consumer is never starved. It touches neither the `Chaser` nor the recovery/announce
 /// paths — it only fetches and `complete`s into the queue.
 ///
 /// Reorg coordination is lock-free through the queue generation: a [`BlockQueue::rebase`] (driven by the
@@ -5275,9 +5238,9 @@ async fn sync_driver<S: BlockStore + CoinStore + Send + Sync + 'static>(
         queue.clone(),
     ));
     // Stall-reclaim watchdog for the decoupled pipeline (see RECLAIM_TIMEOUT). Tracks the confirmed
-    // frontier (`queue.low_water`) across driver ticks and force-rebases a wedged pipeline so any
-    // unforeseen stall — a wedged announcer, a lost wakeup, a silent peer set — is bounded, never a
-    // permanent hang, and is counted in `reservations_reclaimed`.
+    // frontier (`queue.low_water`) across driver ticks and force-rebases a stalled pipeline, so any
+    // stall — a stuck announcer, a lost wakeup, a silent peer set — is bounded rather than
+    // permanent, and is counted in `reservations_reclaimed`.
     let mut stall_watchdog = dg_xch_node::sync::StallWatchdog::new(
         queue.low_water(),
         std::time::Instant::now(),
@@ -5287,7 +5250,7 @@ async fn sync_driver<S: BlockStore + CoinStore + Send + Sync + 'static>(
         tokio::time::sleep(DRIVER_TICK).await;
         // Service any recovery the peer-free consumer delegated (orphan backtrack / --sync-from ref
         // fetch / missing-record repair / transient reset), running the UNMOVED recovery routines with
-        // the driver's peer while the consumer is parked holding nothing (RC-1). Each handler rebases the
+        // the driver's peer while the consumer is parked holding nothing. Each handler rebases the
         // queue to the engine peak, restoring the head invariant; the producer picks up the generation bump and replans.
         while let Ok(req) = recovery_rx.try_recv() {
             handle_recovery(&node, &registry, &queue, &mut follow_rotation, req).await;
@@ -5304,11 +5267,11 @@ async fn sync_driver<S: BlockStore + CoinStore + Send + Sync + 'static>(
                 queue.rebase(head);
             }
         }
-        // Recompute the chia-semantic synced flag every tick (chia full_node.py:930-948): it
+        // Recompute the synced flag every tick: it
         // opens the tip-context gossip gates only when the confirmed chain is CURRENT (last tx
         // block within 7 minutes), and decays back to false when the tip goes stale.
         node.update_synced().await;
-        // Peak-claim retraction sweep (chia on_disconnect → sync_store.peer_disconnected): drop the
+        // Peak-claim retraction sweep: drop the
         // claims of inbound peers that left the live map and any claim past its liveness TTL, so a
         // dead peer's phantom peak un-pins the sync bands within one tick. (Outbound claims retract
         // with their connection's ClaimGuard drop; the TTL is the backstop.)
@@ -5368,9 +5331,8 @@ async fn sync_driver<S: BlockStore + CoinStore + Send + Sync + 'static>(
                 );
             }
         }
-        // Caught up = no claim strictly heavier than our confirmed peak (chia new_peak: "Not
-        // interested in less heavy peaks") — the height comparison this replaces would chase a
-        // longer-but-lighter fork forever.
+        // Caught up = no claim strictly heavier than our confirmed peak — a height comparison
+        // would chase a longer-but-lighter fork forever.
         if target.is_none() && peak.is_some() {
             continue;
         }
@@ -5399,7 +5361,7 @@ async fn sync_driver<S: BlockStore + CoinStore + Send + Sync + 'static>(
                 match node.bulk_sync(&registry).await {
                     Ok(Some((_, h))) => {
                         info!(height = h, "fast-sync landed at recent-chain peak");
-                        // Band-exit seam (chia _finish_sync): the sync_range confirm path bypassed
+                        // Band-exit seam: the sync_range confirm path bypassed
                         // the per-block follow side effects, so fire peak-post-processing ONCE now
                         // — mempool revalidation + NewPeak/NewPeakTimelord/NewPeakWallet.
                         node.finish_sync_transition(&registry, &inbound_peers).await;
@@ -5410,7 +5372,7 @@ async fn sync_driver<S: BlockStore + CoinStore + Send + Sync + 'static>(
                 }
                 continue;
             }
-            // Mid-chain deep gap (G2, chia _sync): validate the weight proof and resolve the
+            // Mid-chain deep gap: validate the weight proof and resolve the
             // fork point ONCE per landing — including the reorg-across-the-gap reland when the
             // fork point is below our peak. Once anchored, fall through: gossip keeps running
             // while the detached fetch/confirm pipeline batch-syncs the gap from the fork point;
@@ -5424,8 +5386,8 @@ async fn sync_driver<S: BlockStore + CoinStore + Send + Sync + 'static>(
                 }
             }
         }
-        // Refresh the RequestPeers gossip answer from the live outbound set (production-parity
-        // plan 1.1): what we can vouch for is exactly who we are connected to right now.
+        // Refresh the RequestPeers gossip answer from the live outbound set: what we can vouch
+        // for is exactly who we are connected to right now.
         {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -5442,10 +5404,10 @@ async fn sync_driver<S: BlockStore + CoinStore + Send + Sync + 'static>(
                 .collect();
             *node.known_peers.write().await = snapshot;
         }
-        // Re-gossip freshly-admitted transactions (production-parity plan 1.3): everything the
+        // Re-gossip freshly-admitted transactions: everything the
         // mempool accepted since last tick — from peer gossip or local push_tx — goes out as
-        // NewTransaction to the peers we hold. Expire in-flight fetch guards by AGE (chia's
-        // tx_request_and_timeout): a request older than REQUEST_TIMEOUT with no body is dropped,
+        // NewTransaction to the peers we hold. Expire in-flight fetch guards by AGE:
+        // a request older than REQUEST_TIMEOUT with no body is dropped,
         // so the id is re-requestable and cannot pin the pending map. A blanket clear here would
         // wipe a just-issued request and make its legitimate response look unsolicited.
         node.tx_requested
@@ -5453,23 +5415,23 @@ async fn sync_driver<S: BlockStore + CoinStore + Send + Sync + 'static>(
             .await
             .retain(|_, t| t.at.elapsed() < REQUEST_TIMEOUT);
         broadcast_transactions(&node, &registry).await;
-        // Phase 2.1: validate received slot gossip into the state machine, then relay what was
+        // Validate received slot gossip into the state machine, then relay what was
         // accepted (driver-side so validation always has record ancestry + next-SSI context).
         process_sp_inbox(&node).await;
         broadcast_sp_announcements(&node, &registry).await;
-        // Phase 3: push the farmer-form signage points to inbound farmer peers (the node→farmer
+        // Push the farmer-form signage points to inbound farmer peers (the node→farmer
         // half of the farmer interface; the outbound relay above is full-node gossip only).
         broadcast_farmer_signage_points(&node, &inbound_peers).await;
         broadcast_ub_timelord_announcements(&node, &inbound_peers).await;
-        // Phase 2.2: pre-validate received unfinished blocks and relay the accepted ones.
+        // Pre-validate received unfinished blocks and relay the accepted ones.
         process_ub_inbox(&node).await;
         broadcast_ub_announcements(&node, &registry).await;
-        // Timelord infusion return (chia new_infusion_point_vdf): finish OUR cached unfinished block into a
+        // Timelord infusion return (`new_infusion_point_vdf`): finish OUR cached unfinished block into a
         // FullBlock and set it as the new peak — the self-farm path that no longer waits for the block to
         // come back as a peer's RespondBlock. Broadcasts NewPeak/NewPeakTimelord + advances slot state on a
         // new peak (mirrors the post-confirm side effects of the block-follow step below).
         process_ip_inbox(&node, &registry, &inbound_peers).await;
-        // Phase 1.5 compact-VDF consume: validate + swap pulled compact proofs, re-gossip accepted ones.
+        // Compact-VDF consume: validate + swap pulled compact proofs, re-gossip accepted ones.
         process_compact_vdf_inbox(&node).await;
         broadcast_compact_vdf_announcements(&node, &registry).await;
         // The block-follow producer/consumer is fully detached: the fetch_scheduler keeps the queue
@@ -5488,9 +5450,8 @@ async fn sync_driver<S: BlockStore + CoinStore + Send + Sync + 'static>(
 // shares its walks — anchored at `anchor` (the UB's parent, or the peak), depth per
 // difficulty_record_depth (513..=896 mid-epoch, 5,121..=5,503 across an epoch turn and its first
 // sub-epoch). Served from the node's in-memory record window (record_window.rs) with store
-// fallback per miss: chia parity is the Blockchain record cache (BLOCKS_CACHE_SIZE below the
-// peak), never a per-call DB walk — the old store walk here re-fetched the whole window from the
-// backend on every peak, the measured mod-4608 throughput trough on the Postgres legs.
+// fallback per miss — never a per-call DB walk, which would re-fetch the whole window from the
+// backend on every peak (a throughput trough on the Postgres legs).
 async fn difficulty_records_map<S: BlockStore + Send + Sync>(
     node: &Node<S>,
     anchor: &BlockRecord,
@@ -5505,7 +5466,7 @@ async fn difficulty_records_map<S: BlockStore + Send + Sync>(
     .await
 }
 
-// chia `blockchain.get_sp_and_ip_sub_slots`: the EOS bundles ending the slots the peak's signage
+// `blockchain.get_sp_and_ip_sub_slots`: the EOS bundles ending the slots the peak's signage
 // point and infusion sit in. Walks records back to the last first-in-sub-slot block and reads its
 // stored finished sub-slots; the overflow case additionally needs the previous slot's bundle.
 async fn sp_and_ip_sub_slots<S: BlockStore + Send + Sync>(
@@ -5556,7 +5517,7 @@ async fn sp_and_ip_sub_slots<S: BlockStore + Send + Sync>(
     }
 }
 
-// The relay announcement for an accepted signage point (chia signage_point_post_processing). Only
+// The relay announcement for an accepted signage point. Only
 // index > 0 SPs reach this path (they are appended by `new_signage_point`, which rejects index 0), so
 // the VDFs are present; `None` guards a malformed all-None SP and simply skips the announce.
 fn announce_for_sp(
@@ -5579,8 +5540,8 @@ fn announce_for_sp(
     })
 }
 
-// The farmer-form signage point for an accepted SP (chia new_signage_point → farmer_protocol.
-// NewSignagePoint). The challenge hash is the SP's sub-slot cc challenge, same as the gossip
+// The farmer-form signage point for an accepted SP (farmer_protocol.NewSignagePoint).
+// The challenge hash is the SP's sub-slot cc challenge, same as the gossip
 // announce; difficulty/SSI come from the accept site's next-SSI context so a farmer can size the
 // plot filter. `None` only if the SP's VDF outputs fail to hash.
 fn farmer_announce_for_sp(
@@ -5627,7 +5588,7 @@ fn announce_for_eos(eos: &EndOfSubSlotBundle) -> Option<NewSignagePointOrEndOfSu
     })
 }
 
-// The farmer-form index-0 signage point for a newly-finished sub-slot (chia full_node.py:2847-2863).
+// The farmer-form index-0 signage point for a newly-finished sub-slot.
 // A sub-slot start has no cc/rc SP VDF, so sp_source_data carries the challenge/reward SUB-SLOTS
 // (sub_slot_data), not vdf_data; the SP hashes ARE the sub-slot hashes. The farmer counterpart of
 // announce_for_eos (which serves the full-node NewSignagePointOrEndOfSubSlot). None only on hash fail.
@@ -5660,7 +5621,7 @@ fn farmer_announce_for_eos(
 }
 
 // Reset the slot state around a just-confirmed peak and queue relay announcements for anything
-// the future caches released (chia peak_post_processing's FullNodeStore half).
+// the future caches released.
 async fn update_slot_state_on_peak<S: BlockStore + CoinStore + Send + Sync + 'static>(
     node: &Arc<Node<S>>,
     peak_hash: Bytes32,
@@ -5676,9 +5637,9 @@ async fn update_slot_state_on_peak<S: BlockStore + CoinStore + Send + Sync + 'st
         match get_next_sub_slot_iters_and_difficulty(&node.constants, true, Some(&rec), &blocks) {
             Ok(v) => v,
             Err(e) => {
-                // chia peak_post_processing computes this against the Blockchain cache and cannot
-                // fail for a connected peak; a failure here means the record walk broke mid-chain.
-                // Skipping this peak's slot-state reset is strictly safer than the old fallback,
+                // This computation cannot fail for a connected peak; a failure here means the
+                // record walk broke mid-chain. Skipping this peak's slot-state reset is strictly
+                // safer than a fallback,
                 // which fed difficulty 0 into the slot state and the farmer announcements.
                 warn!(
                     event = "slot_state.ssi_difficulty_fail", peak = %peak_hash, error = %e,
@@ -5728,7 +5689,7 @@ async fn update_slot_state_on_peak<S: BlockStore + CoinStore + Send + Sync + 'st
 }
 
 // Validate every received slot-gossip payload into the state machine and queue relays for what
-// was accepted — the driver half of chia's respond_signage_point / respond_end_of_sub_slot.
+// was accepted — the driver half of respond_signage_point / respond_end_of_sub_slot.
 async fn process_sp_inbox<S: BlockStore + CoinStore + Send + Sync + 'static>(node: &Arc<Node<S>>) {
     let events: Vec<SpEvent> = node.sp_inbox.lock().await.drain(..).collect();
     if events.is_empty() {
@@ -5743,9 +5704,9 @@ async fn process_sp_inbox<S: BlockStore + CoinStore + Send + Sync + 'static>(nod
         None => HashMap::new(),
     };
     // A None peak yields the starting SSI/difficulty (never an Err). A connected peak cannot fail
-    // either — chia runs the same computation against its Blockchain cache — so an Err here means
-    // the record walk broke mid-chain: drop the drained batch (SP gossip is redundant across peers
-    // and ticks) rather than process it under difficulty 0, the old poisoning fallback.
+    // either — so an Err here means the record walk broke mid-chain: drop the drained batch
+    // (SP gossip is redundant across peers and ticks) rather than process it under difficulty 0,
+    // a poisoning fallback.
     let (next_ssi, next_diff) =
         match get_next_sub_slot_iters_and_difficulty(&node.constants, true, peak.as_ref(), &blocks)
         {
@@ -5766,7 +5727,7 @@ async fn process_sp_inbox<S: BlockStore + CoinStore + Send + Sync + 'static>(nod
         match event {
             SpEvent::SignagePoint(sp) => {
                 // A pulled RespondSignagePoint always carries real VDFs (index > 0); wrap them in the
-                // now-optional SignagePoint fields (chia's stored SP form).
+                // now-optional SignagePoint fields (the stored SP form).
                 let point = SignagePoint {
                     cc_vdf: Some(sp.challenge_chain_vdf),
                     cc_proof: Some(sp.challenge_chain_proof.clone()),
@@ -5785,9 +5746,8 @@ async fn process_sp_inbox<S: BlockStore + CoinStore + Send + Sync + 'static>(nod
                         .store(u32::from(sp.index_from_challenge), Ordering::Relaxed);
                     node.signage_points_total
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    // Chia's "⏲️ Finished signage point" INFO line (full_node.py new_signage_point):
-                    // the accept-side trace the protocol-equivalence gate joins on, keyed by the
-                    // same CC/RC VDF-output hashes chia prints.
+                    // The "finished signage point" INFO line: the accept-side trace the
+                    // protocol-equivalence gate joins on, keyed by the CC/RC VDF-output hashes.
                     if let (Ok(cc), Ok(rc)) = (
                         sp.challenge_chain_vdf.output.hash(),
                         sp.reward_chain_vdf.output.hash(),
@@ -5821,7 +5781,7 @@ async fn process_sp_inbox<S: BlockStore + CoinStore + Send + Sync + 'static>(nod
                     )
                     .is_some()
                 {
-                    // Chia's "⏲️ Finished sub slot" INFO line, keyed by the challenge-chain hash.
+                    // The "finished sub slot" INFO line, keyed by the challenge-chain hash.
                     if let Ok(cc) = eos.end_of_slot_bundle.challenge_chain.hash() {
                         info!(%cc, "finished sub slot");
                     }
@@ -5843,7 +5803,7 @@ async fn process_sp_inbox<S: BlockStore + CoinStore + Send + Sync + 'static>(nod
     }
 }
 
-// The gossip-transaction validator worker (chia TransactionQueue's consumer): drains the
+// The gossip-transaction validator worker: drains the
 // bounded inbox OFF the websocket read loop, runs the bundle→conditions CLVM + aggregate-
 // signature checks at next-block height, admits, and queues the re-gossip announcement.
 #[allow(clippy::too_many_arguments)] // the worker's seams are the node's shared Arcs, one each
@@ -5859,7 +5819,7 @@ fn spawn_tx_validator<S: BlockStore + CoinStore + Send + Sync + 'static>(
     tokio::spawn(async move {
         while run.load(Ordering::Relaxed) {
             tokio::time::sleep(Duration::from_millis(250)).await;
-            // chia add_transaction (full_node.py:2882-2885): NO_TRANSACTIONS_WHILE_SYNCING —
+            // NO_TRANSACTIONS_WHILE_SYNCING —
             // bundles that raced the synced-flag transition into the inbox are dropped without
             // running CLVM. The handler-side gates keep the inbox empty in steady not-synced
             // state; this covers the transition window.
@@ -5867,7 +5827,7 @@ fn spawn_tx_validator<S: BlockStore + CoinStore + Send + Sync + 'static>(
                 tx_inbox.lock().await.clear();
                 continue;
             }
-            // Drain both lanes, high-priority (trusted) first — chia TransactionQueue.pop() order.
+            // Drain both lanes, high-priority (trusted) first.
             let batch: Vec<(Bytes32, SpendBundle)> = tx_inbox.lock().await.drain_batch();
             if batch.is_empty() {
                 continue;
@@ -5876,7 +5836,7 @@ fn spawn_tx_validator<S: BlockStore + CoinStore + Send + Sync + 'static>(
                 // The origin was recorded at receipt (`on_respond_transaction` → `note_tx_origin`)
                 // with the remote host, so the announce drain can exclude an outbound origin too;
                 // the worker only validates + admits here.
-                // The shared admission seam (tx_admission.rs, chia full_node.add_transaction):
+                // The shared admission seam (tx_admission.rs, `full_node.add_transaction`):
                 // CLVM + aggregate-signature validation at next-block height, `Mempool::admit`,
                 // and the NewTransaction announce queued iff newly resident — identical to the
                 // push_tx and p2p SendTransaction ingress paths.
@@ -5896,13 +5856,11 @@ fn spawn_tx_validator<S: BlockStore + CoinStore + Send + Sync + 'static>(
     });
 }
 
-// The weight-proof serving worker (the daemon arm of chia full_node_api.py:359-395
-// request_proof_of_weight): drains the bounded RequestProofOfWeight inbox OFF the websocket read
+// The weight-proof serving worker (the daemon arm of request_proof_of_weight): drains the bounded RequestProofOfWeight inbox OFF the websocket read
 // loop, builds each requested proof through the crate's WeightProofServer — whose internal lock +
-// tip-keyed cache is the single-flight (chia's weight_proof.py:90 handler lock + pow_creation
-// event) — and responds to the requesting peer with the request id. Chia's refusals send nothing:
-// unknown tip (full_node_api.py:362-364) and tip below WEIGHT_PROOF_RECENT_BLOCKS
-// (weight_proof.py:86-88) are logged and dropped.
+// tip-keyed cache is the single-flight — and responds to the requesting peer with the request
+// id. Refusals send nothing: unknown tip and tip below WEIGHT_PROOF_RECENT_BLOCKS are logged and
+// dropped.
 fn spawn_wp_worker<S: BlockStore + Send + Sync + 'static>(
     store: Arc<S>,
     constants: ConsensusConstants,
@@ -5928,15 +5886,14 @@ fn spawn_wp_worker<S: BlockStore + Send + Sync + 'static>(
     });
 }
 
-// Compact-VDF solicitation scan cadence + window when `--uncompact` is on. chia's default
-// send_uncompact_interval is 0 (feature off, chia/util/initial-config.yaml:403); when an operator
-// enables it they pick the interval — 300s is ours. The window is a bounded slice of confirmed
-// blocks ending 5 below the peak (chia never compactifies within 5 of the peak).
+// Compact-VDF solicitation scan cadence + window when `--uncompact` is on (off by default).
+// The window is a bounded slice of confirmed blocks ending 5 below the peak (a block within 5 of
+// the peak is never compactified).
 const UNCOMPACT_INTERVAL: Duration = Duration::from_secs(300);
 const UNCOMPACT_WINDOW: u32 = 256;
-// chia chunks its broadcast_list into `target_uncompact_proofs`-sized chunks (config default 100)
-// and round-robins one chunk per connected timelord so blueboxes share the work rather than each
-// grinding the whole list. We match the chunk size; our fixed window rarely fills a chunk.
+// The broadcast list chunks into `target_uncompact_proofs`-sized chunks (100) round-robined one
+// chunk per connected timelord so blueboxes share the work rather than each grinding the whole
+// list. Our fixed window rarely fills a chunk.
 const UNCOMPACT_TARGET_PROOFS: usize = 100;
 // Re-solicit suppression (see SolicitLedger): do not re-send a field's request for one hour (12
 // scan ticks) — long enough that a connected bluebox is not spammed with duplicates while it grinds,
@@ -5969,12 +5926,12 @@ impl SolicitTarget for Arc<SocketPeer> {
     }
 }
 
-// SOLICIT (chia broadcast_uncompact_blocks' send half): hand `reqs` to connected bluebox TIMELORDS.
+// SOLICIT: hand `reqs` to connected bluebox TIMELORDS.
 // Filters `peers` to timelords, chunks the list into UNCOMPACT_TARGET_PROOFS-sized chunks, and
-// round-robins one chunk per timelord (chia's load-spreading — each bluebox gets a different slice),
+// round-robins one chunk per timelord (each bluebox gets a different slice),
 // sending each field as a RequestCompactProofOfTime. Returns the number of request messages sent.
 // An empty timelord set (the network-infused case: we run without a bluebox, the network compacts
-// for us) sends nothing and returns 0 — exactly like chia iterating an empty `connected_timelords`.
+// for us) sends nothing and returns 0.
 async fn solicit_uncompact_from_timelords<T: SolicitTarget>(
     reqs: &[RequestCompactProofOfTime],
     peers: &[T],
@@ -6019,7 +5976,7 @@ async fn solicit_uncompact_from_timelords<T: SolicitTarget>(
     sent
 }
 
-// SOLICITATION (chia broadcast_uncompact_blocks / uncompact_task). Flag-gated OFF by default.
+// SOLICITATION. Flag-gated OFF by default.
 // Scans a bounded recent window of confirmed blocks for still-bulky VDF proofs and SENDS a
 // RequestCompactProofOfTime to every connected bluebox TIMELORD (NodeType::Timelord) so it computes
 // + returns the compact proof (RespondCompactProofOfTime → on_respond_compact_proof_of_time → the
@@ -6113,12 +6070,12 @@ async fn respond_weight_proof(req: &WpRequest, wp: &WeightProof, net: &NetCounte
     }
 }
 
-// Validate every received unfinished block — chia's add_unfinished_block: the partial runs
+// Validate every received unfinished block: the partial runs
 // through validate_unfinished_header_block (everything except the infusion-point VDFs) with the
 // parent's difficulty context, then enters the cache and queues a v2 relay announcement.
 // (Known specialization: core's validator runs the recent-chain form, skip_overflow_last_ss_
 // validation=false — an overflow partial arriving before its final EOS may park until the slot
-// list catches up; the Phase 2 protocol-trace gate will measure whether that matters live.)
+// list catches up; the protocol-trace gate will measure whether that matters live.)
 async fn process_ub_inbox<S: BlockStore + CoinStore + Send + Sync + 'static>(node: &Arc<Node<S>>) {
     let blocks: Vec<UnfinishedBlock> = node.ub_inbox.lock().await.drain(..).collect();
     if blocks.is_empty() {
@@ -6143,7 +6100,7 @@ async fn process_ub_inbox<S: BlockStore + CoinStore + Send + Sync + 'static>(nod
         // ERROR into the same "we are behind" placeholder-drop as a genuine miss — and that drop also
         // `remove_requesting`s, forfeiting the re-fetch. For an OWN-farmed winning candidate whose prev
         // IS the current committed peak (read from THIS store during declare→assemble), a transient
-        // backend hiccup on this one lookup would silently lose the block. chia never loses a candidate
+        // backend hiccup on this one lookup would silently lose the block. A candidate must never be lost
         // to a DB read: add_unfinished_block resolves prev against the in-memory Blockchain, not the DB.
         //
         // Note the store never lags the validated chain here (engine commits a record BEFORE inserting
@@ -6155,9 +6112,9 @@ async fn process_ub_inbox<S: BlockStore + CoinStore + Send + Sync + 'static>(nod
             Ok(Some(prev)) => prev,
             Ok(None) => {
                 // Parent genuinely absent — we have not validated it yet. Park the placeholder and drop
-                // the pending request so a re-announce after the peak catches up re-fetches it. chia
-                // parity: add_unfinished_block cannot validate a UB whose prev is not in the chain. This
-                // is the expected steady-state outcome while syncing (the bulk of this counter).
+                // the pending request so a re-announce after the peak catches up re-fetches it (a UB
+                // whose prev is not in the chain cannot validate). This is the expected
+                // steady-state outcome while syncing (the bulk of this counter).
                 node.producer.candidate_dropped("ub_prev_unknown");
                 info!(
                     event = "producer.ub.dropped", reason = "ub_prev_unknown",
@@ -6197,11 +6154,11 @@ async fn process_ub_inbox<S: BlockStore + CoinStore + Send + Sync + 'static>(nod
                 continue;
             }
         };
-        // chia add_unfinished_block's dedup ladder, AFTER the disconnected-parent check (chia
-        // returns before seen-marking a disconnected block, so a parked "we are behind" block is
+        // The dedup ladder, AFTER the disconnected-parent check (a disconnected block is not
+        // seen-marked, so a parked "we are behind" block is
         // re-processable once we catch up) and BEFORE any validation: the seen set keyed on the
-        // EXACT unfinished block hash (many foliages can share one trunk — chia full_node.py:
-        // "This is intentional, to prevent DOS attacks"), then the per-(reward, foliage) cache
+        // EXACT unfinished block hash (many foliages can share one trunk — the seen set is the
+        // DoS bound), then the per-(reward, foliage) cache
         // check. Together they bound a burst of duplicate announces to ONE header validation and
         // ONE generator run.
         match block.hash() {
@@ -6227,7 +6184,7 @@ async fn process_ub_inbox<S: BlockStore + CoinStore + Send + Sync + 'static>(nod
             }
         }
         {
-            // chia get_unfinished_block2: already held at this (reward, foliage), or a BETTER
+            // get_unfinished_block2: already held at this (reward, foliage), or a BETTER
             // (smaller-foliage) variant held — ignore. Placeholder (requested-not-received)
             // entries do not count as held.
             let cache = node.unfinished.lock().await;
@@ -6246,9 +6203,8 @@ async fn process_ub_inbox<S: BlockStore + CoinStore + Send + Sync + 'static>(nod
         let records = difficulty_records_map(node, &prev).await;
         let is_first_in_sub_slot = !block.finished_sub_slots.is_empty();
         // With the window sized by difficulty_record_depth this cannot fail for a parent whose
-        // ancestry is in the store (chia parity: add_unfinished_block computes against the
-        // Blockchain cache and never fails for a connected parent). A failure now means the
-        // record walk broke mid-chain — a real invariant break worth the WARN.
+        // ancestry is in the store. A failure means the record walk broke mid-chain — a real
+        // invariant break worth the WARN.
         let (ssi, difficulty) = match get_next_sub_slot_iters_and_difficulty(
             &node.constants,
             is_first_in_sub_slot,
@@ -6284,17 +6240,14 @@ async fn process_ub_inbox<S: BlockStore + CoinStore + Send + Sync + 'static>(nod
             true,
         ) {
             Ok(required_iters) => {
-                // chia add_unfinished_block: the transactions generator RUNS — and the cost and
+                // The transactions generator RUNS — and the cost and
                 // aggregate-signature rules hold — BEFORE the block may enter the served cache or
-                // the relay queue. chia raises ConsensusError here (600s ban for the sender); a
-                // node that relayed without running the generator served the poisoned block to
-                // honest peers and ate that ban itself (observed live as a
-                // GENERATOR_RUNTIME_ERROR ban). Own-farmed candidates take this
-                // same path, exactly as chia's farmed_block=True does.
+                // the relay queue. Peers ban the sender of an invalid unfinished block; a node that
+                // relayed without running the generator serves the poisoned block to honest
+                // peers and eats that ban itself. Own-farmed candidates take this same path.
                 //
-                // Ban-posture delta (documented, not half-built): chia bans the SENDER of the
-                // invalid unfinished block for CONSENSUS_ERROR_BAN_SECONDS (600s,
-                // ws_connection.py:610-614). Our p2p layer has no timed ban list, and the
+                // Ban-posture delta: peers ban the SENDER of the invalid unfinished block for
+                // 600s. Our p2p layer has no timed ban list, and the
                 // RespondUnfinishedBlock inbox does not carry the sender's peer id — the
                 // enforceable action today is the drop + no-relay below, which closes the harm
                 // vector (nothing invalid is served or announced). Sender punishment lands with
@@ -6315,13 +6268,13 @@ async fn process_ub_inbox<S: BlockStore + CoinStore + Send + Sync + 'static>(nod
                         .remove_requesting(&partial_hash, foliage_hash.as_ref());
                     continue;
                 }
-                // Chia's "Added unfinished_block" INFO line (full_node.py add_unfinished_block).
+                // The "added unfinished block" INFO line.
                 info!(event = "producer.ub.added", partial = %partial_hash, "added unfinished block");
-                // chia add_unfinished_block: build the NewUnfinishedBlockTimelord BEFORE the block is
-                // moved into the cache. sub_slot_iters/difficulty are the same context the header
-                // validation used; ses is the summary the NEXT block would include (None on a near-genesis
-                // chain); rc_prev is the last reward-chain infusion before this SP (chia's index-0 vs
-                // index>0 split, full_node.py:2609-2622).
+                // Build the NewUnfinishedBlockTimelord BEFORE the block is moved into the cache.
+                // sub_slot_iters/difficulty are the same context the header validation used; ses
+                // is the summary the NEXT block would include (None on a near-genesis chain);
+                // rc_prev is the last reward-chain infusion before this SP (the index-0 vs
+                // index>0 split).
                 let timelord_request = {
                     let ses = next_sub_epoch_summary(
                         &node.constants,
@@ -6333,7 +6286,7 @@ async fn process_ub_inbox<S: BlockStore + CoinStore + Send + Sync + 'static>(nod
                     .unwrap_or(None);
                     let rcb = &block.reward_chain_block;
                     // Resolve the pos sub-slot's reward-chain hash under the slot lock (index-0 path only),
-                    // then let the pure helper apply chia's index-0/index>0 rc_prev split.
+                    // then let the pure helper apply the index-0/index>0 rc_prev split.
                     let pos_sub_slot_rc_hash = if rcb.signage_point_index == 0 {
                         let slot = node.slot_state.lock().await;
                         slot.get_sub_slot(&rcb.pos_ss_cc_challenge_hash)
@@ -6399,8 +6352,8 @@ async fn process_ub_inbox<S: BlockStore + CoinStore + Send + Sync + 'static>(nod
 }
 
 // The daemon half of the unfinished-block transactions gate: resolve the generator
-// back-references against OUR store (chia lookup_block_generators resolves against the parent's
-// branch; at the live tip the two coincide), then run the pure body validation
+// back-references against OUR store (at the live tip the store and the parent's branch
+// coincide), then run the pure body validation
 // (`validate_unfinished_block_body` — structural bindings, generator execution, cost rules,
 // aggregate signature). Returns the producer-metrics drop reason alongside the error so every
 // failure class is separately countable.
@@ -6453,7 +6406,7 @@ async fn validate_ub_body<S: BlockStore + CoinStore + Send + Sync + 'static>(
 // Fold a body-validation failure into its producer-metrics drop reason: the cost rules
 // (`ub_cost_mismatch`), the structural bindings (`ub_body_fail`), and everything the generator
 // RUN itself surfaces — deserialize failure, CLVM raise, bad aggregate signature — under
-// `ub_generator_fail` (chia GENERATOR_RUNTIME_ERROR's family, the live-ban vector).
+// `ub_generator_fail` (the GENERATOR_RUNTIME_ERROR family, the live-ban vector).
 fn classify_ub_body_error(e: NodeError) -> (&'static str, NodeError) {
     let reason = match &e {
         NodeError::Consensus(
@@ -6475,17 +6428,17 @@ fn classify_ub_body_error(e: NodeError) -> (&'static str, NodeError) {
     (reason, e)
 }
 
-/// Assemble the infused `FullBlock` for one `NewInfusionPointVDF` — steps 1-5 of chia
-/// `full_node.py::new_infusion_point_vdf` (chia:2672-2763), split out so the assembly is unit-testable
+/// Assemble the infused `FullBlock` for one `NewInfusionPointVDF` — the assembly half of
+/// `new_infusion_point_vdf`, split out so it is unit-testable
 /// against a seeded unfinished cache + `SlotState` without the block store's full validation engine.
-/// Returns `None` on any chia bail (unknown unfinished block, prev block not reachable, disconnected
+/// Returns `None` on any bail (unknown unfinished block, prev block not reachable, disconnected
 /// finished sub-slots, missing pos sub-slot, an iters failure, or an invalid pool signature) — the
 /// caller then drops the infusion point (the timelord re-sends on the next `NewPeakTimelord`).
 async fn assemble_infusion_block<S: BlockStore + CoinStore + Send + Sync + 'static>(
     node: &Arc<Node<S>>,
     req: &NewInfusionPointVDF,
 ) -> Option<FullBlock> {
-    // 1. chia:2672 — the unfinished block this infusion point finishes.
+    // 1. the unfinished block this infusion point finishes.
     let unfinished = node
         .unfinished
         .lock()
@@ -6500,7 +6453,7 @@ async fn assemble_infusion_block<S: BlockStore + CoinStore + Send + Sync + 'stat
         return None;
     };
 
-    // 2. chia:2684-2713 — backtrack the rc challenge through empty sub-slots, then find prev_b.
+    // 2. backtrack the rc challenge through empty sub-slots, then find prev_b.
     let last_slot_cc_hash = req.challenge_chain_ip_vdf.challenge;
     let target_rc_hash = node
         .slot_state
@@ -6520,7 +6473,7 @@ async fn assemble_infusion_block<S: BlockStore + CoinStore + Send + Sync + 'stat
         match backtrack_prev_block(node.store.as_ref(), peak_rec, target_rc_hash).await {
             Some(pb) => pb,
             None => {
-                // chia:2708-2713 add_to_future_ip + return: the prev block is not reachable yet. We do
+                // add_to_future_ip + return: the prev block is not reachable yet. We do
                 // not model the future-ip cache; the timelord re-sends on the next NewPeakTimelord.
                 warn!(
                     %target_rc_hash,
@@ -6532,7 +6485,7 @@ async fn assemble_infusion_block<S: BlockStore + CoinStore + Send + Sync + 'stat
         }
     };
 
-    // 3. chia:2715-2721 — the finished sub-slots from challenge_in_chain to last_slot_cc_hash.
+    // 3. the finished sub-slots from challenge_in_chain to last_slot_cc_hash.
     let challenge_in_chain = match &prev_b {
         None => node.constants.genesis_challenge,
         Some(pb) => match challenge_in_chain(node.store.as_ref(), pb).await {
@@ -6550,12 +6503,12 @@ async fn assemble_infusion_block<S: BlockStore + CoinStore + Send + Sync + 'stat
         .get_finished_sub_slots(challenge_in_chain, last_slot_cc_hash);
     let Some(finished_sub_slots) = finished_sub_slots else {
         debug!(
-            "infusion point: finished sub-slots not connected (chia get_finished_sub_slots None)"
+            "infusion point: finished sub-slots not connected"
         );
         return None;
     };
 
-    // 4. chia:2723-2745 — next SSI/difficulty, then SP total-iters from the pos sub-slot start.
+    // 4. next SSI/difficulty, then SP total-iters from the pos sub-slot start.
     let records = match &prev_b {
         Some(pb) => difficulty_records_map(node, pb).await,
         None => HashMap::new(),
@@ -6597,7 +6550,7 @@ async fn assemble_infusion_block<S: BlockStore + CoinStore + Send + Sync + 'stat
     };
     let sp_total_iters = sub_slot_start_iters + u128::from(sp_iters);
 
-    // chia's get_prev_transaction_block first return, computed against the store (core holds none).
+    // get_prev_transaction_block's first return, computed against the store (core holds none).
     let is_transaction_block = match &prev_b {
         None => true,
         Some(pb) => {
@@ -6613,7 +6566,7 @@ async fn assemble_infusion_block<S: BlockStore + CoinStore + Send + Sync + 'stat
         }
     };
 
-    // 5. chia:2747-2760 — assemble the FullBlock from the unfinished block + infusion-point VDFs.
+    // 5. assemble the FullBlock from the unfinished block + infusion-point VDFs.
     let block = match unfinished_block_to_full_block(
         &unfinished,
         req.challenge_chain_ip_vdf,
@@ -6633,7 +6586,7 @@ async fn assemble_infusion_block<S: BlockStore + CoinStore + Send + Sync + 'stat
             return None;
         }
     };
-    // chia:2761-2763 — refuse a pre-farm block whose height is not 0 (invalid pool signature).
+    // — refuse a pre-farm block whose height is not 0 (invalid pool signature).
     if !has_valid_pool_sig(&node.constants, &block) {
         warn!("infusion point: block has an invalid pool signature; dropping");
         return None;
@@ -6642,17 +6595,17 @@ async fn assemble_infusion_block<S: BlockStore + CoinStore + Send + Sync + 'stat
 }
 
 /// Drain the timelord infusion-return inbox and finish each of OUR cached unfinished blocks into a
-/// `FullBlock` set as the new peak — chia `full_node.py::new_infusion_point_vdf` (chia:2668). For each
+/// `FullBlock` set as the new peak (`new_infusion_point_vdf`). For each
 /// `NewInfusionPointVDF`:
-///   1. look the unfinished block up by `unfinished_reward_hash` (chia:2672 `get_unfinished_block`);
-///   2. backtrack the reward-chain challenge through empty finished sub-slots (chia:2688-2690) then find
+///   1. look the unfinished block up by `unfinished_reward_hash` (`get_unfinished_block`);
+///   2. backtrack the reward-chain challenge through empty finished sub-slots then find
 ///      the previous block by walking back from the peak matching `reward_infusion_new_challenge`
-///      (chia:2691-2713) — genesis (`target_rc_hash == GENESIS_CHALLENGE`) ⇒ `prev_b = None`;
-///   3. collect the finished sub-slots from `challenge_in_chain` to `last_slot_cc_hash` (chia:2715-2721);
-///   4. next SSI/difficulty (chia:2723-2728) and the SP total-iters from the pos sub-slot start
-///      (chia:2730-2745);
-///   5. assemble via [`unfinished_block_to_full_block`] (chia:2747-2760), check the pool signature
-///      (chia:2761-2763), then run it through the engine (`add_block` → set peak) exactly as a peer's
+///      — genesis (`target_rc_hash == GENESIS_CHALLENGE`) ⇒ `prev_b = None`;
+///   3. collect the finished sub-slots from `challenge_in_chain` to `last_slot_cc_hash`;
+///   4. next SSI/difficulty and the SP total-iters from the pos sub-slot start
+///     ;
+///   5. assemble via [`unfinished_block_to_full_block`], check the pool signature
+///     , then run it through the engine (`add_block` → set peak) exactly as a peer's
 ///      block: [`Node::follow_step_blocks`] validates, confirms, fires the S8 farmed-header match, and
 ///      returns the new peak. On a new peak the node broadcasts `NewPeak` (+ `NewPeakTimelord`) and
 ///      advances the slot state — the driver's post-confirm side effects, mirrored here.
@@ -6665,12 +6618,12 @@ async fn process_ip_inbox<S: BlockStore + CoinStore + Send + Sync + 'static>(
 ) {
     let reqs: Vec<NewInfusionPointVDF> = node.ip_inbox.lock().await.drain(..).collect();
     for req in reqs {
-        // Steps 1-5 (chia:2672-2763): look up + assemble + pool-signature check. `None` = any chia bail.
+        // Steps 1-5: look up + assemble + pool-signature check. `None` = any bail.
         let Some(block) = assemble_infusion_block(node, &req).await else {
             continue;
         };
 
-        // chia:2764-2771 — add_block: validate, persist, set peak (raise_on_disconnected). We route
+        // — add_block: validate, persist, set peak (raise_on_disconnected). We route
         // through the same follow path a peer's block takes; it fires the S8 farmed-header match (this
         // block IS one we farmed) and returns the new peak.
         let height = block.reward_chain_block.height;
@@ -6691,7 +6644,7 @@ async fn process_ip_inbox<S: BlockStore + CoinStore + Send + Sync + 'static>(
             }
             Ok(None) => {
                 // Validated but did not become the peak (a competing/heavier chain already leads, or we
-                // already hold it). chia's add_block likewise returns without a NewPeak in that case.
+                // already hold it); no NewPeak in that case.
                 info!(
                     height,
                     partial = %partial,
@@ -6699,9 +6652,8 @@ async fn process_ip_inbox<S: BlockStore + CoinStore + Send + Sync + 'static>(
                 );
             }
             Err(e) => {
-                // chia:2766-2770 — consensus error validating the block; log and move on (chia additionally
-                // re-sends the peak to the originating timelord to reset it — the driver's per-tick
-                // NewPeakTimelord broadcast covers that resync).
+                // Consensus error validating the block; log and move on (the driver's per-tick
+                // NewPeakTimelord broadcast covers the timelord resync).
                 warn!(error = %e, height, partial = %partial,
                     "infusion point: assembled block failed consensus validation");
             }
@@ -6709,10 +6661,10 @@ async fn process_ip_inbox<S: BlockStore + CoinStore + Send + Sync + 'static>(
     }
 }
 
-// Which unfinished-block announce a peer at `version` must receive. chia branches the broadcast on
-// the negotiated protocol version, NOT on a Capability enum variant: `new_clients` get
-// NewUnfinishedBlock2 and `old_clients` get NewUnfinishedBlock, split at `Version("0.0.35")`
-// (chia full_node.py new_unfinished_block, the old_clients/new_clients predicates). True = send v2.
+// Which unfinished-block announce a peer at `version` must receive. The broadcast branches on
+// the negotiated protocol version, NOT on a Capability enum variant: newer clients get
+// NewUnfinishedBlock2 and older clients get NewUnfinishedBlock, split at version 0.0.35.
+// True = send v2.
 #[must_use]
 fn announce_v2_for(version: ChiaProtocolVersion) -> bool {
     version > ChiaProtocolVersion::Chia0_0_35
@@ -6733,8 +6685,8 @@ fn outbound_peer_version(peer: &OutboundPeer) -> ChiaProtocolVersion {
 
 // Drain the unfinished-block relay queue, branching per peer on the negotiated protocol version:
 // NewUnfinishedBlock2 to peers > 0.0.35, NewUnfinishedBlock (reward hash only) to older peers —
-// exactly chia's split (chia relays a validated partial onward so the timelord's input propagates
-// ahead of infusion). Each message is encoded at that peer's own version.
+// (a validated partial relays onward so the timelord's input propagates ahead of infusion).
+// Each message is encoded at that peer's own version.
 async fn broadcast_ub_announcements<S: BlockStore + CoinStore + Send + Sync + 'static>(
     node: &Arc<Node<S>>,
     registry: &Arc<dyn OutboundPeers>,
@@ -6795,7 +6747,7 @@ async fn broadcast_ub_announcements<S: BlockStore + CoinStore + Send + Sync + 's
     }
 }
 
-// CONSUME driver pass (chia full_node.add_compact_vdf): validate each pulled compact proof off the
+// CONSUME driver pass (`full_node.add_compact_vdf`): validate each pulled compact proof off the
 // read path, swap it into the stored block, and queue a NewCompactVDF re-gossip. The block re-write
 // reuses the store's INSERT-OR-REPLACE body write-through under the SAME header hash (only a witness
 // changes — the block identity is unchanged), so no store surface is added.
@@ -6845,9 +6797,9 @@ async fn process_compact_vdf_inbox<S: BlockStore + CoinStore + Send + Sync + 'st
             continue;
         };
         // Defense-in-depth: swapping a VDF *proof* (witness) must not change the block's identity —
-        // the header hash commits to VdfInfo/foliage, not the proofs. We store `new_block` under
-        // `resp.header_hash`, so if a future `replace_proof` regression ever altered a committed
-        // field, this guard rejects it rather than silently writing content that mis-hashes its key.
+        // the header hash commits to VdfInfo/foliage, not the proofs. `new_block` is stored under
+        // `resp.header_hash`, so this guard rejects a replacement that altered a committed field
+        // rather than writing content that mis-hashes its key.
         if new_block.header_hash().ok() != Some(resp.header_hash) {
             warn!(
                 height = resp.height,
@@ -6880,8 +6832,8 @@ async fn process_compact_vdf_inbox<S: BlockStore + CoinStore + Send + Sync + 'st
 }
 
 // Drain the compact-VDF re-gossip queue as NewCompactVDF broadcasts to every live outbound peer
-// (chia full_node.add_compact_vdf's send_to_all; chia excludes the origin peer — our broadcast
-// helpers fan out to all outbound peers and rely on the peers' own request-dedup, harmless).
+// (the origin peer would normally be excluded — our broadcast helpers fan out to all outbound
+// peers and rely on the peers' own request-dedup, harmless).
 async fn broadcast_compact_vdf_announcements<S: BlockStore + CoinStore + Send + Sync + 'static>(
     node: &Arc<Node<S>>,
     registry: &Arc<dyn OutboundPeers>,
@@ -6955,8 +6907,7 @@ async fn wallet_peers(inbound_peers: &PeerMap) -> Vec<Arc<SocketPeer>> {
     wallets
 }
 
-// Push a confirmed peak to the wallet peers as NewPeakWallet — chia
-// `server.send_to_all([new_peak_message], NodeType.WALLET)` (full_node.py:1571). Fire-and-forget:
+// Push a confirmed peak to the wallet peers as NewPeakWallet. Fire-and-forget:
 // a wallet that misses one re-anchors on the next peak (and can always re-page via
 // RequestPuzzleState).
 async fn broadcast_new_peak_wallet(
@@ -6982,8 +6933,8 @@ async fn broadcast_new_peak_wallet(
     }
 }
 
-// Phase 3: push queued farmer-form signage points to inbound peers that handshook as farmers
-// (chia new_signage_point → farmer_protocol.NewSignagePoint). Farmers connect INBOUND to our peer
+// Push queued farmer-form signage points to inbound peers that handshook as farmers
+// (farmer_protocol.NewSignagePoint). Farmers connect INBOUND to our peer
 // server, so this walks the inbound PeerMap under a NodeType::Farmer filter — distinct from the
 // outbound full-node gossip relay in broadcast_sp_announcements. Fire-and-forget: a farmer that
 // misses one gets the next signage point (there are 64 per slot).
@@ -7025,8 +6976,8 @@ async fn broadcast_farmer_signage_points<S: BlockStore + CoinStore + Send + Sync
     }
 }
 
-// Phase 3/4: push queued NewUnfinishedBlockTimelord messages to inbound peers that handshook as
-// timelords (chia full_node.add_unfinished_block → `send_to_all([timelord_msg], NodeType.TIMELORD)`).
+// Push queued NewUnfinishedBlockTimelord messages to inbound peers that handshook as
+// timelords (`full_node.add_unfinished_block` → `send_to_all([timelord_msg], NodeType.TIMELORD)`).
 // Timelords connect INBOUND to our peer server, so this walks the inbound PeerMap under a
 // NodeType::Timelord filter — the timelord counterpart of broadcast_farmer_signage_points. Without
 // this, a farmed UnfinishedBlock never reaches a timelord and the block never completes into a
@@ -7112,7 +7063,7 @@ async fn broadcast_ub_timelord_announcements<S: BlockStore + CoinStore + Send + 
     }
 }
 
-// chia consensus/blockchain.py:671-690 `Blockchain.get_recent_reward_challenges`. The reward-chain
+// get_recent_reward_challenges: the reward-chain
 // challenges of the most recent ~2*MAX_SUB_SLOT_BLOCKS infusions, returned OLDEST-first as
 // (reward_infusion_new_challenge, total_iters) pairs — the `previous_reward_challenges` a timelord
 // needs to reconstruct the reward chain at the new peak. Walks the depth-bounded ancestor map back
@@ -7132,7 +7083,7 @@ fn get_recent_reward_challenges(
             recent_rc.push((curr.reward_infusion_new_challenge, curr.total_iters));
         }
         if curr.first_in_sub_slot() {
-            // chia asserts finished_reward_slot_hashes is Some for a first-in-sub-slot record.
+            // finished_reward_slot_hashes is Some for a first-in-sub-slot record.
             let hashes = curr.finished_reward_slot_hashes.as_ref()?;
             let mut sub_slot_total_iters = curr.ip_sub_slot_total_iters(constants).ok()?;
             for rc in hashes.iter().rev() {
@@ -7152,10 +7103,10 @@ fn get_recent_reward_challenges(
     Some(recent_rc)
 }
 
-// chia full_node.py:875-928 `FullNode.send_peak_to_timelords`. On every new peak the full node hands
+// send_peak_to_timelords. On every new peak the full node hands
 // its timelords a NewPeakTimelord so they can begin infusing on top of it — the peak counterpart of
 // broadcast_ub_timelord_announcements (timelords connect INBOUND, so this walks the inbound PeerMap
-// under a NodeType::Timelord filter). Every field is derived exactly as chia derives it: the in-slot
+// under a NodeType::Timelord filter). Every field is fully derived: the in-slot
 // difficulty, the peak record's deficit/sub_slot_iters, the next sub-epoch summary, the recent reward
 // challenges, the last challenge-block-or-EOS total iters, and the passed-ses-height flag. Bails (sends
 // nothing) if any derivation cannot be grounded in the loaded record window rather than shipping an
@@ -7190,7 +7141,7 @@ async fn broadcast_new_peak_timelord<S: BlockStore + CoinStore + Send + Sync + '
 }
 
 // The construction half of `send_peak_to_timelords` — shared by the peak broadcast above and the
-// on-connect TIMELORD greeting ([`FullNodeApi::timelord_peak`], chia on_connect :1009-1010).
+// on-connect TIMELORD greeting ([`FullNodeApi::timelord_peak`]).
 async fn build_new_peak_timelord<S: BlockStore + Send + Sync>(
     store: &S,
     constants: &ConsensusConstants,
@@ -7200,9 +7151,9 @@ async fn build_new_peak_timelord<S: BlockStore + Send + Sync>(
 ) -> Option<Box<NewPeakTimelord>> {
     let peak_block = store.get_block(&peak_hash).await.ok().flatten()?;
     let peak = store.get_block_record(&peak_hash).await.ok().flatten()?;
-    // Depth must cover the deepest of the chia walks here: the difficulty computation's
-    // can_finish_sub_and_full_epoch scan (up to 383 back mid-epoch, ~5120 at an epoch turn — the
-    // old fixed 512 failed both late-sub-epoch and epoch-turn peaks), passes_ses
+    // Depth must cover the deepest of the walks here: the difficulty computation's
+    // can_finish_sub_and_full_epoch scan (up to 383 back mid-epoch, ~5120 at an epoch turn — a
+    // fixed 512 fails both late-sub-epoch and epoch-turn peaks), passes_ses
     // (< sub_epoch_blocks = 384) and get_recent_reward_challenges (< 2*max_sub_slot_blocks = 256).
     // difficulty_record_depth's floor of 513 dominates the latter two.
     let records = crate::record_window::windowed_records_map(
@@ -7214,8 +7165,8 @@ async fn build_new_peak_timelord<S: BlockStore + Send + Sync>(
     )
     .await;
 
-    // difficulty: chia get_next_sub_slot_iters_and_difficulty(peak.header_hash, False)[1], including
-    // chia's height<=2 short-circuit to the starting difficulty.
+    // difficulty: get_next_sub_slot_iters_and_difficulty(peak, False)[1], including the
+    // height<=2 short-circuit to the starting difficulty.
     let difficulty = if peak.height <= 2 {
         constants.difficulty_starting
     } else {
@@ -7227,8 +7178,7 @@ async fn build_new_peak_timelord<S: BlockStore + Send + Sync>(
         diff
     };
 
-    // sub_epoch_summary: chia next_sub_epoch_summary(constants, blockchain, peak.required_iters,
-    // peak_block, True). dg_xch's next_sub_epoch_summary takes an UnfinishedBlock; reconstruct one from
+    // sub_epoch_summary: next_sub_epoch_summary takes an UnfinishedBlock; reconstruct one from
     // the peak FullBlock — it reads only signage_point_index, the prev-block hash, finished_sub_slots
     // and total_iters, all preserved by RewardChainBlock::get_unfinished and the shared foliage.
     let unfinished_peak = UnfinishedBlock {
@@ -7251,10 +7201,10 @@ async fn build_new_peak_timelord<S: BlockStore + Send + Sync>(
     )
     .unwrap_or(None);
 
-    // previous_reward_challenges: chia blockchain.get_recent_reward_challenges().
+    // previous_reward_challenges: `blockchain.get_recent_reward_challenges`().
     let previous_reward_challenges = get_recent_reward_challenges(constants, &peak, &records)?;
 
-    // last_challenge_sb_or_eos_total_iters: chia full_node.py:895-902. Walk back to the last
+    // last_challenge_sb_or_eos_total_iters: walk back to the last
     // challenge-block or first-in-sub-slot record; take its total_iters (challenge block) or the total
     // iters at the start of its infusion sub-slot (end-of-sub-slot case).
     let mut curr = &peak;
@@ -7270,7 +7220,7 @@ async fn build_new_peak_timelord<S: BlockStore + Send + Sync>(
             curr.ip_sub_slot_total_iters(constants).ok()?
         };
 
-    // passes_ses_height_but_not_yet_included: chia full_node.py:904-911. True unless a sub-epoch summary
+    // passes_ses_height_but_not_yet_included: true unless a sub-epoch summary
     // was already included at or after the last sub-epoch-block height boundary.
     let mut curr = &peak;
     let mut passes_ses_height_but_not_yet_included = true;
@@ -7328,8 +7278,7 @@ async fn send_new_peak_timelord<S: BlockStore + CoinStore + Send + Sync + 'stati
 }
 
 // Drain the tx-announce queue into NewTransaction broadcasts to EVERY connected full-node peer —
-// outbound AND inbound — excluding each transaction's origin peer (chia broadcast_added_tx:
-// `send_to_all([msg], NodeType.FULL_NODE, current_peer.peer_node_id)`, full_node.py:2991-3004).
+// outbound AND inbound — excluding each transaction's origin peer.
 // Fire-and-forget like the peak announcement: a peer that misses one can still pull the bundle
 // after any other node re-announces it.
 //
@@ -7349,7 +7298,7 @@ struct TxOrigin {
     host: Option<IpAddr>,
 }
 
-// Bounded insert into the tx-origin map (chia broadcast_added_tx current_peer tracking): prune
+// Bounded insert into the tx-origin map: prune
 // entries older than 60s and cap the map at 4096, so an unconsumed entry (a bundle that fails
 // admission, hence is never announced/consumed) cannot grow it without bound.
 async fn record_tx_origin(
@@ -7364,9 +7313,9 @@ async fn record_tx_origin(
     }
 }
 
-// Whether a FULL_NODE peer is the origin of a re-broadcast tx and must be skipped — chia
-// `broadcast_added_tx` (full_node.py:2991-3004) excludes `current_peer` from the NewTransaction
-// send. Callers pass the dispatch id for INBOUND peers (exact cert-hash match) and the remote host
+// Whether a FULL_NODE peer is the origin of a re-broadcast tx and must be skipped from the
+// NewTransaction send. Callers pass the dispatch id for INBOUND peers (exact cert-hash match)
+// and the remote host
 // for OUTBOUND peers (their shared cert hash cannot identify them); the peer is the origin when
 // EITHER the id or the host matches what was recorded at receipt.
 fn is_tx_rebroadcast_origin(
@@ -7385,10 +7334,10 @@ fn is_tx_rebroadcast_origin(
     matches!((o.host, peer_host), (Some(a), Some(b)) if a == b)
 }
 
-// chia broadcast_added_tx (full_node.py:2991-3004) excludes a tx's origin peer from the
-// NewTransaction re-broadcast. Inbound origins are excluded by their exact cert-hash id; the residual
-// was the OUTBOUND origin — every outbound dial shares our own client-cert hash as
-// its dispatch id, so it could not be identified and got a benign echo. The fix records the origin's
+// A tx's origin peer is excluded from the NewTransaction re-broadcast. Inbound origins are
+// excluded by their exact cert-hash id; the residual is the OUTBOUND origin — every outbound
+// dial shares our own client-cert hash as its dispatch id, so it cannot be identified that way.
+// The exclusion records the origin's
 // remote HOST too and excludes an outbound peer whose dialed host matches.
 #[cfg(test)]
 mod tx_origin_exclusion_tests {
@@ -7440,7 +7389,7 @@ mod tx_origin_exclusion_tests {
         );
     }
 
-    // No recorded origin (e.g. a locally-pushed tx, chia's current_peer=None) → nobody excluded.
+    // No recorded origin (e.g. a locally-pushed tx) → nobody excluded.
     #[test]
     fn no_origin_excludes_nobody() {
         assert!(!is_tx_rebroadcast_origin(
@@ -7498,7 +7447,7 @@ async fn broadcast_transactions<S: BlockStore + CoinStore + Send + Sync + 'stati
         for peer in &outbound {
             // Exclude the origin outbound peer by its dialed remote host — an outbound dial's
             // dispatch id is our own shared cert hash, so host is its only distinct identity
-            // (chia broadcast_added_tx's origin exclusion).
+            // (the origin exclusion).
             if is_tx_rebroadcast_origin(origin, None, peer.endpoint.0.parse::<IpAddr>().ok()) {
                 continue;
             }
@@ -7527,8 +7476,8 @@ async fn broadcast_transactions<S: BlockStore + CoinStore + Send + Sync + 'stati
 
 // Send NewPeak for the just-confirmed tip to every live outbound peer. Fire-and-forget: a
 // send failure only means that peer misses one announcement (the next step re-announces).
-// chia's message carries the UNFINISHED reward-chain-block hash of the peak — peers key
-// their unfinished-block caches on it — so it is derived exactly as chia does, from
+// The message carries the UNFINISHED reward-chain-block hash of the peak — peers key
+// their unfinished-block caches on it — derived from
 // `reward_chain_block.get_unfinished()`.
 async fn broadcast_new_peak<S: BlockStore + CoinStore + Send + Sync + 'static>(
     node: &Arc<Node<S>>,
@@ -7570,7 +7519,7 @@ async fn broadcast_new_peak<S: BlockStore + CoinStore + Send + Sync + 'static>(
 
 // The bulk-sync decision: a claimed peak far ahead of a near-empty local store. Gating on `local < GAP`
 // keeps it a one-shot from-zero entry — once fast-sync lands near tip, `local` is huge and tip-follow owns
-// chia new_peak ladder (full_node.py:840-862): the near-tip rung is a strictly-positive gap within
+// `new_peak` ladder: the near-tip rung is a strictly-positive gap within
 // SHORT_SYNC_BLOCKS_BEHIND_THRESHOLD, and only once we already hold a peak (block-by-block extends an
 // existing chain; from-zero/deep catch-up is the batch/bulk bands). The tip_follower engages on this
 // predicate and the driver defers on it, so the two never race the same band.
@@ -7587,12 +7536,10 @@ fn wants_fast_sync(local: u32, claimed: u32) -> bool {
     local < FAST_SYNC_GAP && claimed.saturating_sub(local) > FAST_SYNC_GAP
 }
 
-// The G2 band decision (chia new_peak, full_node.py:840-873): a claimed tip more than
-// SYNC_BLOCKS_BEHIND_THRESHOLD (300) ahead of the local peak enters the WP-anchored long-sync
-// band REGARDLESS of local height — chia's short-batch rung falls through to `_sync()` past the
-// threshold. A tip below WEIGHT_PROOF_RECENT_BLOCKS (= FAST_SYNC_GAP, chia
-// default_constants.py:72) cannot be weight-proof-anchored — chia batch-syncs from zero there
-// (full_node.py:850-854) and our follow band owns that rung. Within the band, `wants_fast_sync`
+// The long-sync band decision: a claimed tip more than SYNC_BLOCKS_BEHIND_THRESHOLD (300)
+// ahead of the local peak enters the WP-anchored long-sync band REGARDLESS of local height. A
+// tip below WEIGHT_PROOF_RECENT_BLOCKS (= FAST_SYNC_GAP) cannot be weight-proof-anchored —
+// our follow band owns that rung. Within the band, `wants_fast_sync`
 // discriminates the near-empty-store sub-case (recent-chain jump) from the mid-chain deep gap
 // (fork-point-anchored batch sync of the whole gap).
 fn wants_long_sync(local: u32, claimed: u32) -> bool {
@@ -7600,10 +7547,9 @@ fn wants_long_sync(local: u32, claimed: u32) -> bool {
 }
 
 // The action the mid-chain long-sync band takes once the WP fork point is resolved against the
-// local chain (pure, so the decision is unit-testable). chia check_fork_next_block
-// (chia/full_node/check_fork_next_block.py) lifts the no-fork conservative point to the local
-// peak when a peer's peak+1 block connects to our chain (its prev is our peak,
-// full_node.py:3516-3526 node_next_block_check); otherwise the sync starts at the conservative
+// local chain (pure, so the decision is unit-testable). The next-block probe lifts the no-fork
+// conservative point to the local peak when a peer's peak+1 block connects to our chain (its
+// prev is our peak); otherwise the sync starts at the conservative
 // point — below the peak that flows through the engine's atomic reorg reland, at/above it the
 // detached pipeline simply extends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -7622,10 +7568,10 @@ fn long_sync_plan(fork: &WpForkPoint, local_peak: u32, next_block_connects: bool
     match *fork {
         WpForkPoint::NoForkDetected { conservative } => {
             if next_block_connects || conservative >= local_peak {
-                // chia check_fork_next_block: fork_point = our peak height.
+                // fork_point = our peak height.
                 LongSyncPlan::Extend
             } else {
-                // The probe did not confirm our tip is on the proof's chain: keep chia's
+                // The probe did not confirm our tip is on the proof's chain: keep the
                 // conservative two-sub-epoch back-off and let the reland decide (identical
                 // blocks re-confirm as AlreadyHave; a divergent branch reorgs atomically).
                 LongSyncPlan::Rewind {
@@ -7641,9 +7587,9 @@ fn long_sync_plan(fork: &WpForkPoint, local_peak: u32, next_block_connects: bool
     }
 }
 
-// chia node_next_block_check (full_node.py:3516-3526): fetch the block at our peak + 1 and
-// report whether its prev header hash IS our peak — the check_fork_next_block lift that turns
-// the conservative no-fork point into "start from our peak". chia iterates its peers-with-peak
+// The next-block probe: fetch the block at our peak + 1 and report whether its prev header
+// hash IS our peak — the lift that turns the conservative no-fork point into "start from our
+// peak". The probe iterates the peers-with-peak
 // until ONE confirms (a stale peer's miss does not veto); so does this.
 async fn next_block_connects(
     peers: &[Arc<OutboundPeer>],
@@ -7729,13 +7675,11 @@ mod tests {
     use dg_xch_core::blockchain::coin_record::CoinRecord;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    // Audit G4 (reorg wallet-delta gap): a subscribed coin spent on branch A must read UNSPENT
-    // again after a reorg to branch B where the spend never happened — chia delivers the
-    // POST-ROLLBACK records to subscribers (`rolled_back_records`, full_node.py:2101-2119 →
-    // update_wallets :1535-1571). Before the ConfirmedDelta threading, the chaser reported only
-    // the reorg tip's own delta and the subscriber heard NOTHING about the rollback (the red this
-    // was written against). Drives the daemon's confirm tail (finish_follow_step) with exactly
-    // what the chaser now produces for a landed reorg.
+    // A subscribed coin spent on branch A must read UNSPENT again after a reorg to branch B where
+    // the spend never happened, which means delivering the POST-ROLLBACK records to subscribers.
+    // Reporting only the reorg tip's own delta would leave the subscriber hearing nothing about
+    // the rollback. Drives the daemon's confirm tail (finish_follow_step) with exactly what the
+    // chaser produces for a landed reorg.
     #[tokio::test]
     async fn reorg_rollback_states_reach_subscribed_wallets() {
         let nanos = SystemTime::now()
@@ -7747,6 +7691,8 @@ mod tests {
             std::process::id()
         ));
         let node = Node::boot(Config {
+            target_outbound: None,
+            target_peer_count: None,
             listen: "127.0.0.1:0".parse().unwrap(),
             rpc: "127.0.0.1:0".parse().unwrap(),
             introducer: None,
@@ -7894,29 +7840,29 @@ mod tests {
         );
     }
 
-    // Red-first: chia enters the weight-proof-anchored long sync
+    // The node enters the weight-proof-anchored long sync
     // whenever a peer's claimed tip is more than `sync_blocks_behind_threshold` (300,
-    // chia initial-config.yaml:360) ahead of the local peak — REGARDLESS of local height
-    // (chia full_node.py new_peak:856-873: past the short-batch rung it falls through to
+    // 300) ahead of the local peak — REGARDLESS of local height
+    // (new_peak:856-873: past the short-batch rung it falls through to
     // `_sync()`). Our band gate only fired from a near-empty store (`local < 1000`), so a node
     // with history that went offline for weeks ground 32-block FOLLOW windows with full
     // validation across the whole gap.
     #[test]
     fn deep_mid_chain_gap_selects_the_wp_anchored_long_sync_band() {
-        // A node at 2M offline for ~a month (gap ≈ 50k blocks): chia long-syncs (gap > 300).
+        // A node at 2M offline for ~a month (gap ≈ 50k blocks): long sync (gap > 300).
         assert!(
             wants_long_sync(2_000_000, 2_050_000),
             "a deep mid-chain gap must enter the WP-anchored long-sync band \
-             (chia sync_blocks_behind_threshold = 300, initial-config.yaml:360)"
+             (sync_blocks_behind_threshold = 300)"
         );
-        // Within the threshold the existing follow/backtrack bands own catch-up (chia's
-        // short_sync_batch rung, full_node.py:856-861).
+        // Within the threshold the existing follow/backtrack bands own catch-up (the
+        // short_sync_batch rung).
         assert!(
             !wants_long_sync(2_000_000, 2_000_300),
             "a gap at/below the threshold stays with the follow band"
         );
-        // A tip below WEIGHT_PROOF_RECENT_BLOCKS (1000, chia default_constants.py:72) cannot be
-        // weight-proof-anchored — chia batch-syncs from zero there (full_node.py:850-854).
+        // A tip below WEIGHT_PROOF_RECENT_BLOCKS (1000) cannot be weight-proof-anchored —
+        // batch sync from zero covers that band.
         assert!(
             !wants_long_sync(0, 900),
             "a tip below the weight-proof floor is never long-synced"
@@ -7927,10 +7873,10 @@ mod tests {
         assert!(wants_long_sync(1500, 9_000_000) && !wants_fast_sync(1500, 9_000_000));
     }
 
-    // The gap-closes-mid-sync exit ladder (task case 3): while the gap stays past the threshold
+    // The gap-closes-mid-sync exit ladder: while the gap stays past the threshold
     // the long-sync band owns catch-up toward the (re-polled, possibly advanced) target; within
     // the threshold it hands off to the FOLLOW band; within the short-sync threshold the
-    // event-driven tip_follower owns the last blocks. Chia's exact rungs: full_node.py:840-873.
+    // event-driven tip_follower owns the last blocks.
     #[test]
     fn long_sync_band_exits_cleanly_through_follow_then_near_tip() {
         let local = 2_000_000u32;
@@ -7951,12 +7897,11 @@ mod tests {
         assert!(!in_near_tip_band(2_050_500, 2_050_500, true));
     }
 
-    // The fork-point → action mapping (chia check_fork_next_block semantics,
-    // chia/full_node/check_fork_next_block.py + full_node.py:3516-3526).
+    // The fork-point → action mapping.
     #[test]
     fn long_sync_plan_follows_chia_fork_point_semantics() {
         let peak = 2_000_000u32;
-        // No fork detected + a peer's peak+1 connects → chia lifts to our peak: extend in place.
+        // No fork detected + a peer's peak+1 connects → lift to our peak: extend in place.
         assert_eq!(
             long_sync_plan(
                 &WpForkPoint::NoForkDetected {
@@ -7967,7 +7912,7 @@ mod tests {
             ),
             LongSyncPlan::Extend
         );
-        // No fork detected but NO peer confirms our tip: keep chia's conservative two-sub-epoch
+        // No fork detected but NO peer confirms our tip: keep the conservative two-sub-epoch
         // back-off — the reland re-follows from there (identical blocks are AlreadyHave).
         assert_eq!(
             long_sync_plan(
@@ -7982,7 +7927,7 @@ mod tests {
             }
         );
         // A detected divergence below our peak MUST rewind through the engine reorg — never
-        // blindly extend the stale branch (task case 4).
+        // blindly extend the stale branch.
         assert_eq!(
             long_sync_plan(
                 &WpForkPoint::Diverged {
@@ -8002,10 +7947,10 @@ mod tests {
         );
     }
 
-    // Sync-decoupling phase 2: the peer-free consumer's recovery signal round-trips through the driver
+    // The peer-free consumer's recovery signal round-trips through the driver
     // channel and unparks it. `await_reset` sends a `()`-reply request and awaits; a mock driver drains
     // the channel and replies — the RecoveryRequest → oneshot handshake the real orphan/repair/reset
-    // paths ride on (RC-1: the consumer holds no lock while parked here).
+    // paths ride on (the consumer holds no lock while parked here).
     #[tokio::test]
     async fn recovery_signal_round_trips_and_unparks_the_consumer() {
         let (tx, mut rx) = mpsc::channel::<RecoveryRequest>(RECOVERY_CHANNEL_CAP);
@@ -8048,19 +7993,17 @@ mod tests {
         );
     }
 
-    // Deadlock fix (Bug B) — a WEDGED driver that never services recovery must not hang the confirm
-    // consumer forever. The receiver is kept alive (so the send succeeds) but never replies; the oneshot
-    // sender rides inside the un-serviced request. Pre-fix, `await_reset` awaited the reply with no
-    // timeout → permanent hang (the consumer stops draining the queue → the producer parks on a full
-    // buffer → the whole pipeline freezes). Post-fix, it returns within RESET_REPLY_TIMEOUT and retries.
-    // Virtual time (`start_paused`) auto-advances to the internal timeout, so the test is instant.
+    // A driver that never services recovery must not hang the confirm consumer forever. The
+    // receiver is kept alive (so the send succeeds) but never replies; the oneshot sender rides
+    // inside the un-serviced request. `await_reset` must return within RESET_REPLY_TIMEOUT and
+    // retry, instead of parking the consumer and with it the whole pipeline. Virtual time
+    // (`start_paused`) auto-advances to the internal timeout, so the test is instant.
     #[tokio::test(start_paused = true)]
     async fn recovery_reply_timeout_unparks_the_consumer_when_the_driver_is_wedged() {
-        // Keep the receiver alive so the request is buffered but NEVER replied to (a wedged driver loop).
+        // Keep the receiver alive so the request is buffered but NEVER replied to.
         let (tx, _rx_alive) = mpsc::channel::<RecoveryRequest>(RECOVERY_CHANNEL_CAP);
-        // Outer bound is a test guard: on the pre-fix (unbounded) code, `await_reset` never completes, so
-        // this outer timeout is the only timer and trips → RED. On the fixed code, the internal
-        // RESET_REPLY_TIMEOUT fires first → await_reset returns → GREEN.
+        // Outer bound is a test guard: without the internal timeout `await_reset` never completes
+        // and this outer timer trips instead.
         let out = tokio::time::timeout(
             RESET_REPLY_TIMEOUT + Duration::from_secs(5),
             await_reset(&tx, |reply| RecoveryRequest::Reset { reply }),
@@ -8076,21 +8019,20 @@ mod tests {
         );
     }
 
-    // Deadlock fix (Bug B) — the confirm consumer must NEVER block on the announcer. The pre-fix
-    // `peak_tx.send().await` on a full, undrained channel BLOCKS (proven by the first assertion) — a
-    // wedged announcer then stops the consumer draining the BlockQueue, which parks the producer: the
-    // permanent wedge. `emit_confirmed_peak` drops the best-effort announcement under backpressure and
-    // returns immediately, so the consumer keeps draining.
+    // The confirm consumer must NEVER block on the announcer. A `peak_tx.send().await` on a full,
+    // undrained channel blocks (the first assertion below), which stops the consumer draining the
+    // BlockQueue and parks the producer. `emit_confirmed_peak` drops the best-effort announcement
+    // under backpressure and returns immediately, so the consumer keeps draining.
     #[tokio::test]
     async fn emit_confirmed_peak_never_blocks_the_consumer_on_a_wedged_announcer() {
-        let (tx, _rx_wedged) = mpsc::channel::<ConfirmedPeak>(1); // never drained = wedged announcer
+        let (tx, _rx_wedged) = mpsc::channel::<ConfirmedPeak>(1); // never drained = stalled announcer
         tx.try_send(ConfirmedPeak {
             hash: Bytes32::default(),
             height: 1,
         })
         .expect("first fits");
 
-        // Pre-fix behaviour, inline: a raw bounded send on the full channel blocks — the consumer wedge.
+        // A raw bounded send on the full channel blocks, which is the stall being avoided.
         let blocked = tokio::time::timeout(
             Duration::from_millis(200),
             tx.send(ConfirmedPeak {
@@ -8101,10 +8043,10 @@ mod tests {
         .await;
         assert!(
             blocked.is_err(),
-            "a raw send on a full channel blocks — exactly the pre-fix consumer wedge"
+            "a raw send on a full channel blocks the consumer"
         );
 
-        // The fix: emit_confirmed_peak returns immediately (drops under backpressure), never awaits.
+        // emit_confirmed_peak returns immediately (drops under backpressure) and never awaits.
         let emitted = emit_confirmed_peak(
             &tx,
             ConfirmedPeak {
@@ -8132,7 +8074,7 @@ mod tests {
     }
 
     // Red-first (Item 2, capabilities/version branching): a peer's unfinished-block announce type is
-    // chosen by its negotiated protocol version, split at 0.0.35 exactly as chia does — old peers get
+    // chosen by its negotiated protocol version, split at 0.0.35 — old peers get
     // v1 (NewUnfinishedBlock), new peers get v2 (NewUnfinishedBlock2).
     #[test]
     fn unfinished_announce_version_split_matches_chia_0_0_35_boundary() {
@@ -8142,7 +8084,7 @@ mod tests {
         );
         assert!(
             !announce_v2_for(ChiaProtocolVersion::Chia0_0_35),
-            "0.0.35 is the boundary, still old-client per chia (<= 0.0.35) — v1"
+            "0.0.35 is the boundary, still old-client (<= 0.0.35) — v1"
         );
         assert!(
             announce_v2_for(ChiaProtocolVersion::Chia0_0_36),
@@ -8220,7 +8162,7 @@ mod tests {
         }
     }
 
-    // An outbound peer's NewPeak records its per-connection claim (hash, height, WEIGHT — chia
+    // An outbound peer's NewPeak records its per-connection claim (hash, height, WEIGHT —
     // sync_store.peer_has_block), and the connection's NEWEST announcement replaces it (the
     // withdrawal path). Another connection's lighter claim never lowers the published heaviest.
     #[tokio::test]
@@ -8259,7 +8201,7 @@ mod tests {
         other.on_new_peak(Bytes32::default(), lower.clone()).await;
         assert_eq!(claimed_peak.load(Ordering::Relaxed), 9_054_698);
 
-        // The SAME connection re-announcing lower REPLACES its claim (chia peer_to_peak[peer] = Peak)
+        // The SAME connection re-announcing lower REPLACES its claim
         // — the withdrawal path the old fetch_max slot lacked.
         api.on_new_peak(Bytes32::default(), lower).await;
         assert_eq!(claimed_peak.load(Ordering::Relaxed), 5);
@@ -8275,7 +8217,7 @@ mod tests {
         }
     }
 
-    // Red-first (chia full_node.py::new_peak + sync_store.get_heaviest_peak): WEIGHT is the
+    // WEIGHT is the
     // fork-choice ordering key, not height. A heavier-but-shorter peak must be the sync/weight-proof
     // target over a longer-but-lighter fork, regardless of announcement order.
     #[tokio::test]
@@ -8317,7 +8259,7 @@ mod tests {
         assert_eq!(claimed_peak.load(Ordering::Relaxed), 100);
     }
 
-    // Red-first (chia full_node.py::on_disconnect → sync_store.peer_disconnected): a peer's
+    // A peer's
     // peak claim dies with its connection. A bogus high announcement from a peer that then disconnects
     // must not pin the claimed slot (and with it the FOLLOW band) forever.
     #[tokio::test]
@@ -8332,7 +8274,7 @@ mod tests {
         .await;
         assert_eq!(claimed_peak.load(Ordering::Relaxed), 9_999_999);
         // The announcing connection goes away — its per-connection handler map (and with it this
-        // StoreApi and its ClaimGuard) is dropped. chia retracts the claim in
+        // StoreApi and its ClaimGuard) is dropped. The claim retracts in
         // sync_store.peer_disconnected.
         drop(api);
         assert_eq!(
@@ -8348,7 +8290,7 @@ mod tests {
     }
 
     // Inbound claims (the shared server api keys them by the REAL peer id) retract through the
-    // driver's per-tick reconcile against the live inbound map — the other half of chia's
+    // driver's per-tick reconcile against the live inbound map — the other half of the
     // on_disconnect → sync_store.peer_disconnected.
     #[tokio::test]
     async fn inbound_claim_retracts_when_the_peer_leaves_the_live_map() {
@@ -8364,7 +8306,7 @@ mod tests {
         assert_eq!(book.heaviest(), None);
     }
 
-    // The weight-proof ↔ claim cross-check inputs (chia request_validate_wp:1154-1159, "Weight proof
+    // The weight-proof ↔ claim cross-check inputs ("Weight proof
     // had the wrong height/weight"): validated_proof compares the proof's LAST recent-chain block
     // (height, weight) against the announced claim. Against the real mainnet proof fixture, the
     // attested pair is the fixture tip with a real (nonzero) weight — so an announcement whose
@@ -8390,7 +8332,7 @@ mod tests {
         );
     }
 
-    // Node-level weight gate + quarantine (chia new_peak "Not interested in less heavy peaks" +
+    // Node-level weight gate + quarantine ("Not interested in less heavy peaks" +
     // request_validate_wp "already caught up" + bad_peak_cache): against a REAL confirmed local peak,
     // a longer-but-LIGHTER claim is no sync target; a heavier claim is; and once that heavier peak is
     // quarantined it is never re-selected.
@@ -8405,6 +8347,8 @@ mod tests {
             std::process::id()
         ));
         let config = Config {
+            target_outbound: None,
+            target_peer_count: None,
             listen: "127.0.0.1:0".parse().unwrap(),
             rpc: "127.0.0.1:0".parse().unwrap(),
             introducer: None,
@@ -8479,11 +8423,11 @@ mod tests {
         );
     }
 
-    // Phase 4 increment 5 emit trigger. A candidate stored at declare time (placeholder foliage sigs) +
+    // Candidate emit trigger. A candidate stored at declare time (placeholder foliage sigs) +
     // a farmer SignedValues reply => the foliage_block_data signature is verified against the plot key,
     // both signatures are spliced in, and the finished block is pushed to ub_inbox (the same path a
     // received unfinished block takes to the driver's validate+broadcast). Anchor:
-    // chia/full_node/full_node_api.py::signed_values -> full_node.add_unfinished_block.
+    // signed_values -> add_unfinished_block.
     #[tokio::test]
     async fn signed_values_splices_farmer_sigs_and_queues_for_broadcast() {
         use blst::min_pk::SecretKey;
@@ -8565,7 +8509,7 @@ mod tests {
         )
         .expect("candidate builds");
 
-        // The two hashes the farmer signs, and its real signatures over them (chia SignedValues).
+        // The two hashes the farmer signs, and its real signatures over them (SignedValues).
         let fbd_hash = candidate
             .foliage
             .foliage_block_data
@@ -8662,13 +8606,13 @@ mod tests {
         );
     }
 
-    // Phase 4 candidate assembly — the store-derived consensus walks (prev-block reward-chain backtrack,
+    // Candidate assembly — the store-derived consensus walks (prev-block reward-chain backtrack,
     // challenge_in_chain, is_transaction_block, the reward-claim walk, the tx-peak/timestamp) exercised in
     // isolation against a hand-seeded 4-block chain. This proves the trickiest parts of
     // try_build_candidate without the live plot proof + VDF-populated SlotState that the full
     // declare -> candidate path needs (that end-to-end path is the #[ignore]d harness note below).
     //
-    // The produce-path mempool gate (chia declare:1104-1112 coercion + mempool_manager's peak
+    // The produce-path mempool gate (coercion + mempool_manager's peak
     // gate + the tx-block requirement) — every failing arm yields the conservative empty block.
     #[test]
     fn mempool_payload_gate_matches_chia() {
@@ -8884,7 +8828,7 @@ mod tests {
         .expect("genesis unfinished block builds")
     }
 
-    // The infusion-return dispatch contract (chia full_node_api new_infusion_point_vdf /
+    // The infusion-return dispatch contract (`full_node_api` new_infusion_point_vdf /
     // new_signage_point_vdf / new_end_of_sub_slot_vdf sync gate + hand-off): a synced node QUEUES the
     // infusion point for the driver and routes the SP/EOS VDFs to the slot-state validation inbox; a
     // syncing node drops all three (tip-context objects it cannot finish).
@@ -9019,7 +8963,7 @@ mod tests {
             "signage-point + end-of-sub-slot VDFs routed to the slot-state inbox when synced"
         );
 
-        // Not synced: all three drop (chia's `if sync_store.get_sync_mode(): return None`).
+        // Not synced: all three drop (`if sync_store.get_sync_mode(): return None`).
         ip_inbox.lock().await.clear();
         sp_inbox.lock().await.clear();
         let api = make_api(Arc::new(AtomicBool::new(false)));
@@ -9037,7 +8981,7 @@ mod tests {
         );
     }
 
-    // The in-process infusion assembly (chia new_infusion_point_vdf steps 1-5, the load-bearing new path):
+    // The in-process infusion assembly (`new_infusion_point_vdf`, the load-bearing path):
     // a cached genesis unfinished block + an index-0 infusion point (all GENESIS_CHALLENGE) is finished by
     // `assemble_infusion_block` into exactly the FullBlock `unfinished_block_to_full_block` produces — proving
     // the cache lookup, the genesis rc-backtrack (prev_b = None), the empty finished-sub-slot collection, the
@@ -9055,6 +8999,8 @@ mod tests {
             std::env::temp_dir().join(format!("fn_ipasm_{}_{nanos}.sqlite", std::process::id()));
         let node = Arc::new(
             Node::boot(Config {
+                target_outbound: None,
+                target_peer_count: None,
                 listen: "127.0.0.1:0".parse().unwrap(),
                 rpc: "127.0.0.1:0".parse().unwrap(),
                 introducer: None,
@@ -9183,9 +9129,8 @@ mod tests {
     // real mainnet blocks is proven by core's unfinished_to_full_block_reconstruct fixture; the dispatch/queue
     // contract by infusion_return_handlers_queue_only_when_synced.
     // A real SqliteStore with ONE fault injected: `get_block_record` returns a store error while
-    // `fail` is armed, every other call delegates to the real backend. This is the transient-backend
-    // condition the drop site must survive WITHOUT losing the candidate — not a mock-through-the-seam,
-    // the actual store runs underneath.
+    // `fail` is armed, every other call delegates to the real backend. The drop site must survive
+    // this transient-backend condition without losing the candidate.
     struct FaultStore {
         inner: Arc<SqliteStore>,
         fail_get_block_record: Arc<AtomicBool>,
@@ -9483,12 +9428,10 @@ mod tests {
         }
     }
 
-    // Regression for the `ub_prev_unknown` producer drop: a STORE ERROR resolving an unfinished block's
-    // parent must NOT be misclassified as "we are behind" and lost. The old `let Ok(Some(prev)) = .. else`
-    // dropped the candidate AND `remove_requesting`d it on any `Err`; for our OWN winning candidate (whose
-    // parent is the committed peak) that is a lost block on a DB hiccup. Post-fix the candidate is RE-QUEUED
-    // (retryable) and never counted as `ub_prev_unknown`. This test FAILS on the pre-fix code (inbox drained
-    // to empty, `ub_prev_unknown` incremented) and PASSES after (inbox holds the re-queued candidate).
+    // A STORE ERROR resolving an unfinished block's parent must NOT be misclassified as "we are
+    // behind" and dropped: for our OWN winning candidate, whose parent is the committed peak, that
+    // would lose the block on a transient DB failure. The candidate is re-queued (retryable) and
+    // never counted as `ub_prev_unknown`.
     #[tokio::test]
     async fn ub_store_error_requeues_candidate_never_counts_it_as_prev_unknown() {
         let nanos = SystemTime::now()
@@ -9503,6 +9446,8 @@ mod tests {
         let node = Arc::new(
             Node::boot_with_store(
                 Config {
+                    target_outbound: None,
+                    target_peer_count: None,
                     listen: "127.0.0.1:0".parse().unwrap(),
                     rpc: "127.0.0.1:0".parse().unwrap(),
                     introducer: None,
@@ -9644,6 +9589,8 @@ mod tests {
         let node = Arc::new(
             Node::boot_with_store(
                 Config {
+                    target_outbound: None,
+                    target_peer_count: None,
                     listen: "127.0.0.1:0".parse().unwrap(),
                     rpc: "127.0.0.1:0".parse().unwrap(),
                     introducer: None,
@@ -9726,7 +9673,7 @@ mod tests {
     #[ignore = "needs a real plot proof + VDF-populated SlotState (dg_fast_farmer); run in a live deployment"]
     async fn declare_to_new_unfinished_block_end_to_end() {}
 
-    // sp_source_data parity (chia full_node.py:2856): the index-0 farmer signage point for a
+    // sp_source_data parity: the index-0 farmer signage point for a
     // finished sub-slot must carry sub_slot_data (the cc/rc SUB-SLOTS), never vdf_data, at index 0,
     // and survive a wire round-trip.
     #[test]
@@ -9793,7 +9740,7 @@ mod tests {
         assert_eq!(back, sp);
     }
 
-    // chia new_peak ladder (full_node.py:840-862): the near-tip block-by-block rung engages within
+    // `new_peak` ladder: the near-tip block-by-block rung engages within
     // short_sync_blocks_behind_threshold (20) and ONLY with a confirmed peak; wider gaps stay with the
     // batch/bulk bands. Both the tip_follower and the driver skip-guard key on this predicate.
     #[test]
@@ -9819,11 +9766,11 @@ mod tests {
         );
         assert_eq!(
             SHORT_SYNC_BLOCKS_BEHIND_THRESHOLD, 20,
-            "chia initial-config.yaml short_sync_blocks_behind_threshold"
+            "short_sync_blocks_behind_threshold"
         );
     }
 
-    // Emission-contract F1 (chia full_node.py:1917-1931, send_to_all NodeType.FARMER): a normal-index
+    // Emission contract, farmer leg: a normal-index
     // accepted SP is announced to farmers as NewSignagePoint carrying sp_source_data.vdf_data (the cc/rc
     // SP-VDF outputs), never sub_slot_data, with the SP sub-slot challenge as challenge_hash.
     #[test]
@@ -9857,7 +9804,7 @@ mod tests {
         );
     }
 
-    // Emission-contract N2 (chia full_node.py:1898-1899 / 2840-2841, send_to_all NodeType.FULL_NODE):
+    // Emission contract, full-node leg:
     // an accepted SP relays to full nodes as NewSignagePointOrEndOfSubSlot keyed on the SP sub-slot
     // challenge + index; an accepted EOS relays at index 0 keyed on the finished sub-slot hash with the
     // previous challenge chained.
@@ -10134,8 +10081,7 @@ mod tests {
         // G3 closed — the served header carries the block's REAL BIP158 transactions_filter: its
         // sha256 is the foliage filter_hash the wallet validates against, byte-equal to the
         // validation-side builder over the same delta, identical across all three header-serving
-        // handlers; return_filter=false serves chia's encoded-empty b"\x00"
-        // (full_block_utils.py:311).
+        // handlers; return_filter=false serves the encoded-empty b"\x00".
         #[tokio::test]
         async fn served_header_filter_matches_the_blocks_filter_hash() {
             let store = store_at_peak().await;
@@ -10186,8 +10132,8 @@ mod tests {
                 ),
                 _ => panic!("block_headers must serve"),
             }
-            // return_filter = false: chia serves the one-byte encoded-empty filter, NOT the real
-            // one and NOT a zero-length string (header_block_from_block, full_block_utils.py:311).
+            // return_filter = false: serve the one-byte encoded-empty filter, NOT the real
+            // one and NOT a zero-length string (header_block_from_block).
             match api.block_headers(PEAK, PEAK, false).await {
                 BlockHeadersReply::Respond(r) => assert_eq!(
                     r.header_blocks[0].transactions_filter.as_slice(),
@@ -10199,7 +10145,7 @@ mod tests {
         }
 
         // A non-transaction block's served filter is the encoded-empty b"\x00" (PyBIP158([]) —
-        // the same constant chia's fast path hardcodes), never the real-filter computation.
+        // the same constant the fast path hardcodes), never the real-filter computation.
         #[tokio::test]
         async fn non_transaction_block_serves_the_encoded_empty_filter() {
             let store = store_at_peak().await;
@@ -10297,8 +10243,8 @@ mod tests {
             assert!(excluded_entry.is_empty(), "an absent hash serves no coins");
         }
 
-        // The empty-puzzle-hashes short-circuit answers proofs=Some([]) — chia sends [] (an EMPTY
-        // proofs list), not None (full_node_api.py:1392-1394); a wallet distinguishes the two on
+        // The empty-puzzle-hashes short-circuit answers proofs=Some([]) — [] (an EMPTY
+        // proofs list), not None; a wallet distinguishes the two on
         // the wire.
         #[tokio::test]
         async fn additions_empty_request_serves_some_empty_proofs() {
@@ -10315,7 +10261,7 @@ mod tests {
                     assert_eq!(
                         r.proofs,
                         Some(Vec::new()),
-                        "chia's empty short-circuit sends proofs=[], not None"
+                        "the empty short-circuit sends proofs=[], not None"
                     );
                 }
                 AdditionsReply::Reject(_) => panic!("the empty request must serve"),
@@ -10324,7 +10270,7 @@ mod tests {
 
         // G2 closed — request_removals with specific coin names serves the removal coins with
         // MerkleSet proofs verifying against the foliage removals_root; Some-empty behaves like
-        // None (all removals, proofs=None — chia :1505).
+        // None (all removals, proofs=None — ).
         #[tokio::test]
         async fn removals_serve_proofs_that_verify_against_the_foliage_root() {
             use dg_xch_core::consensus::merkle_set::validate_merkle_proof;
@@ -10377,7 +10323,7 @@ mod tests {
             );
             assert_eq!(r.coins[1], (excluded_name, None));
 
-            // Some-empty = the trusted all-removals path with proofs None (chia :1505).
+            // Some-empty = the trusted all-removals path with proofs None.
             let req_empty = RequestRemovals {
                 height: PEAK,
                 header_hash,
@@ -10395,11 +10341,9 @@ mod tests {
             }
         }
 
-        // Byte-parity gate: the SERVED proof bytes are byte-equal to proofs emitted by the real
-        // chia_rs 0.42.1 MerkleSet (the exact CNI 2.7.1 pin) over the same block-5,000,000 delta —
-        // fixture merkle_proofs_5000000.json, generated by an oracle script driving
-        // chia_rs==0.42.1 with the CNI request_additions/request_removals leaf recipes (its roots
-        // were asserted equal to the block's real foliage roots at generation time).
+        // Byte-parity gate against the reference MerkleSet implementation over the same
+        // block-5,000,000 delta — fixture merkle_proofs_5000000.json, whose roots were asserted
+        // equal to the block's real foliage roots when it was generated.
         #[tokio::test]
         async fn served_proofs_are_byte_equal_to_chia_rs_0_42_1() {
             #[derive(serde::Deserialize)]
@@ -10453,7 +10397,7 @@ mod tests {
                 assert_eq!(
                     hex::encode(proof),
                     case.proof,
-                    "served addition proof bytes diverge from chia_rs 0.42.1 for {}",
+                    "served addition proof bytes diverge from the fixture for {}",
                     case.puzzle_hash
                 );
                 match (&case.coin_ids_proof, coin_proof) {
@@ -10484,7 +10428,7 @@ mod tests {
                 assert_eq!(
                     hex::encode(proof),
                     case.proof,
-                    "served removal proof bytes diverge from chia_rs 0.42.1 for {} (included={})",
+                    "served removal proof bytes diverge from the fixture for {} (included={})",
                     case.coin_name,
                     case.included
                 );
@@ -10780,7 +10724,7 @@ mod tests {
             );
         }
 
-        // ---- Wallet-serve bounds, red-first against chia 2.7.1 ----------------
+        // ---- Wallet-serve bounds ----------------------------------------------
 
         // The height the synthetic subscription coins are seeded at (any tx-block height works: the
         // register read is a pure coin-store query, blind to the block store).
@@ -10826,10 +10770,9 @@ mod tests {
             ))
         }
 
-        // Audit gap 1: the RegisterForPhUpdates initial-state read is bounded by
-        // `max_subscribe_response_items` (chia full_node_api.py:1809/1827 — the store query takes the
-        // budget as max_items). Truncation is SILENT: chia only logs it (api.py:1848-1861) and still
-        // echoes the REQUESTED puzzle hashes (RespondToPhUpdates(request.puzzle_hashes, ...)).
+        // The RegisterForPhUpdates initial-state read is bounded by
+        // `max_subscribe_response_items` (the store query takes the budget as max_items).
+        // Truncation is SILENT: logged, and the reply still echoes the REQUESTED puzzle hashes.
         #[tokio::test]
         async fn ph_initial_state_is_bounded_by_the_response_budget() {
             let ph = Bytes32::from([0x42; 32]);
@@ -10851,7 +10794,7 @@ mod tests {
             assert_eq!(
                 reg.response.puzzle_hashes,
                 vec![ph],
-                "chia echoes the REQUESTED hashes even when truncating"
+                "the reply echoes the REQUESTED hashes even when truncating"
             );
             assert_eq!(
                 reg.response.coin_states.len(),
@@ -10860,17 +10803,16 @@ mod tests {
             );
         }
 
-        // Audit gap 1 (hint leg): ONE budget is decremented across the puzzle-hash query and then the
-        // hint query (chia api.py:1826-1841: `max_items -= len(states)` before
-        // `hint_store.get_coin_ids_multi(..., max_items=max_items)`).
+        // Hint leg: ONE budget is decremented across the puzzle-hash query and then the hint
+        // query (`max_items -= len(states)` before the hint-id lookup).
         #[cfg(feature = "hint")]
         #[tokio::test]
         async fn ph_response_budget_is_shared_with_the_hint_query() {
             let ph = Bytes32::from([0x43; 32]);
             let mut records: Vec<CoinRecord> =
                 (1..=3).map(|t| synth_record(t, ph, SEED_HEIGHT)).collect();
-            // Four coins on OTHER puzzle hashes, each HINTED by the subscribed 32-byte value (chia
-            // passes the subscribed hashes as hint keys, api.py:1831).
+            // Four coins on OTHER puzzle hashes, each HINTED by the subscribed 32-byte value
+            // (the subscribed hashes double as hint keys).
             let hinted: Vec<CoinRecord> = (10..=13)
                 .map(|t| synth_record(t, Bytes32::from([t; 32]), SEED_HEIGHT))
                 .collect();
@@ -10922,8 +10864,8 @@ mod tests {
             );
         }
 
-        // Audit gap 3 (dedup half): chia feeds ONLY add_puzzle_subscriptions' return — the
-        // newly-subscribed set — to the initial-state query (api.py:1816-1830), so re-registering an
+        // Dedup half: ONLY add_puzzle_subscriptions' return — the newly-subscribed set —
+        // feeds the initial-state query, so re-registering an
         // already-subscribed hash yields NO initial states (and no repeated heavy scan).
         #[tokio::test]
         async fn repeat_ph_registration_yields_no_initial_state() {
@@ -10948,8 +10890,8 @@ mod tests {
             );
         }
 
-        // Audit gap 3 (overflow half): a hash dropped by the per-peer subscription cap is NOT part of
-        // add_puzzle_subscriptions' return, so chia never queries it — the initial-state read cannot be
+        // Overflow half: a hash dropped by the per-peer subscription cap is NOT part of
+        // add_puzzle_subscriptions' return, so it is never queried — the initial-state read cannot be
         // driven past the subscription cap with hashes that were never subscribed.
         #[tokio::test]
         async fn overflow_dropped_puzzle_hashes_are_not_queried() {
@@ -10983,7 +10925,7 @@ mod tests {
             assert_eq!(
                 reg.response.puzzle_hashes,
                 vec![ph_a, ph_b, ph_c],
-                "chia echoes the full requested list"
+                "the reply echoes the full requested list"
             );
             assert!(
                 reg.response.coin_states.is_empty(),
@@ -10991,9 +10933,9 @@ mod tests {
             );
         }
 
-        // Audit gaps 2+3, coin leg: chia truncates the REQUEST list to max_subscriptions, subscribes
-        // and queries the SLICED list, and echoes the sliced list back (api.py:1879-1889 — note the
-        // coin path deliberately keeps in-request duplicates queryable, the TODO at api.py:1876).
+        // Coin leg: the REQUEST list truncates to max_subscriptions; the SLICED list is
+        // subscribed, queried, and echoed back (the coin path deliberately keeps in-request
+        // duplicates queryable).
         #[tokio::test]
         async fn coin_registration_slices_the_request_to_the_subscription_cap() {
             let records: Vec<CoinRecord> = (1..=3)
@@ -11030,8 +10972,8 @@ mod tests {
             );
         }
 
-        // Audit gap 1, coin leg: the RegisterForCoinUpdates initial read is bounded by the same
-        // response budget (chia api.py:1874/1885 — get_coin_states_by_ids(max_items=max_items)).
+        // Coin leg: the RegisterForCoinUpdates initial read is bounded by the same response
+        // budget (get_coin_states_by_ids(max_items=max_items)).
         #[tokio::test]
         async fn coin_initial_state_is_bounded_by_the_response_budget() {
             let records: Vec<CoinRecord> = (1..=4)
@@ -11062,9 +11004,9 @@ mod tests {
             );
         }
 
-        // Audit gap 4: additions/removals are guarded by the wallet-sync LimitedSemaphore — on
-        // overflow chia REJECTS (RejectAdditionsRequest / RejectRemovalsRequest, api.py:1450, 1530)
-        // instead of queueing unbounded concurrent block-delta scans.
+        // additions/removals are guarded by the wallet-sync LimitedSemaphore — overflow REJECTS
+        // (RejectAdditionsRequest / RejectRemovalsRequest) instead of queueing unbounded
+        // concurrent block-delta scans.
         #[tokio::test]
         async fn wallet_serve_rejects_when_the_sync_semaphore_is_full() {
             let store = store_at_peak().await;
@@ -11119,8 +11061,8 @@ mod tests {
             ));
         }
 
-        // ---- request_puzzle_state / request_coin_state at the api seam (chia
-        // full_node_api.py:2002-2141), where the response budget and subscription caps are
+        // ---- request_puzzle_state / request_coin_state at the api seam, where the response
+        // budget and subscription caps are
         // injectable — the production 100k/200k numbers are impractical to seed. The wire-level
         // contract (dispatch, rejects, the Sage sequence) is proven in tests/puzzle_state.rs.
 
@@ -11217,8 +11159,8 @@ mod tests {
         // Sage's sync_puzzle_hashes loop (wallet_sync.rs:169-206) against an injected 4-item
         // budget: each page's (height, header_hash) feeds the NEXT request's reorg-consistency
         // check (which must PASS against our chain), no page splits a height, heights are
-        // ordered, and the union over pages is exactly the seeded set. This is chia's
-        // :2042-2076 paging contract end-to-end at the api seam.
+        // ordered, and the union over pages is exactly the seeded set. This is the paging
+        // contract end-to-end at the api seam.
         #[tokio::test]
         async fn puzzle_state_pages_thread_the_sage_loop_to_convergence() {
             let ph = Bytes32::from([0x5A; 32]);
@@ -11283,8 +11225,8 @@ mod tests {
             assert_eq!(names.len(), 12, "the loop converges to the seeded set");
         }
 
-        // The subscribe side effect (chia :2072-2074, :2135-2137) and its caps (:2026-2040,
-        // :2106-2121): subscribe_when_finished registers against the SAME per-peer cap the
+        // The subscribe side effect and its caps: subscribe_when_finished registers against the
+        // SAME per-peer cap the
         // register handlers use — an over-cap request rejects EXCEEDED_SUBSCRIPTION_LIMIT (the
         // exact reject Sage maps to SubscriptionLimitReached), cumulative across requests; a
         // non-subscribing request of the same size still serves.
@@ -11324,7 +11266,7 @@ mod tests {
             assert_eq!(wallet.peer_subscription_count(&peer).await, 0);
 
             // The same 5 hashes WITHOUT the subscribe flag serve fine (the cap gates only the
-            // side effect, chia's `request.subscribe_when_finished and ...`).
+            // side effect, `request.subscribe_when_finished and ...`).
             assert!(matches!(
                 api.puzzle_state(peer, None, req(phs(1..6), false)).await,
                 PuzzleStateReply::Respond(..)
@@ -11347,8 +11289,8 @@ mod tests {
                 PuzzleStateReply::Reject(RejectStateReason::ExceededSubscriptionLimit)
             ));
 
-            // …and the coin leg counts against the SAME combined cap (chia
-            // peer_subscription_count sums both sets): 3 ph + 2 coin ids > 4 → EXCEEDED; 1 fits.
+            // …and the coin leg counts against the SAME combined cap
+            // (peer_subscription_count sums both sets): 3 ph + 2 coin ids > 4 → EXCEEDED; 1 fits.
             let coin_req = |coin_ids: Vec<Bytes32>, subscribe: bool| RequestCoinState {
                 coin_ids,
                 previous_height: None,
@@ -11382,7 +11324,7 @@ mod tests {
         }
 
         // request_coin_state truncates the id list to the response budget BEFORE serving and
-        // echoes the truncated, deduped list (chia :2090-2093 via the list_limits parse cap +
+        // echoes the truncated, deduped list (via the list_limits parse cap +
         // dict.fromkeys) — with the budget injected small enough to see it.
         #[tokio::test]
         async fn coin_state_truncates_the_id_list_to_the_response_budget() {
@@ -11413,12 +11355,12 @@ mod tests {
             );
         }
 
-        // Response-item gate (chia parity): the RequestCoinState id list is truncated to
+        // Response-item gate: the RequestCoinState id list is truncated to
         // `max_subscribe_response_items(peer)` — the TRUSTED 500,000-tier budget for a configured
         // trusted peer, the UNTRUSTED 100,000-tier for everyone else. Injected small (trusted 4 /
         // untrusted 2) to observe it: a trusted peer echoes all four ids, an untrusted peer only two.
         // RED before the tier (the budget was a fixed field ignoring the peer); GREEN once it resolves
-        // per-peer from trust. The untrusted arm is the regression guard for the default.
+        // per-peer from trust; the untrusted arm pins the default.
         #[tokio::test]
         async fn coin_state_response_budget_is_trusted_for_configured_node_id() {
             let trusted = Bytes32::from([0xaa; 32]);
@@ -11464,13 +11406,11 @@ mod tests {
             );
         }
 
-        // Tx-queue priority gate (chia parity): a trusted peer's gossiped bundle takes the
-        // high-priority lane the validator worker drains first — chia
-        // `TransactionQueue.put(high_priority=is_trusted(peer))`. Enqueue an untrusted body FIRST and a
-        // trusted body SECOND through `on_respond_transaction`, then drain and assert the trusted one is
-        // first. RED before the tier (both went to one FIFO in arrival order); GREEN once
-        // on_respond_transaction routes by trust. The bodies must be solicited (chia's
-        // respond_transaction gate), so we pre-seed the pending-request set for each id.
+        // Tx-queue priority gate: a trusted peer's gossiped bundle takes the high-priority lane
+        // the validator worker drains first. Enqueue an untrusted body FIRST and a trusted body
+        // SECOND through `on_respond_transaction`, then drain and assert the trusted one is
+        // first. The bodies must be solicited (the respond_transaction gate), so we pre-seed the
+        // pending-request set for each id.
         #[tokio::test]
         async fn on_transaction_gives_trusted_peer_high_priority() {
             let trusted = Bytes32::from([0xaa; 32]);
@@ -11490,7 +11430,7 @@ mod tests {
             let trusted_tx = bundle(0x02);
             let untrusted_name = untrusted_tx.name().expect("name");
             let trusted_name = trusted_tx.name().expect("name");
-            // Pre-solicit both ids (chia pending_tx_request) so on_transaction accepts the bodies.
+            // Pre-solicit both ids so on_transaction accepts the bodies.
             {
                 let mut req = api.tx_requested.lock().await;
                 req.insert(
@@ -11526,7 +11466,7 @@ mod tests {
         }
 
         // Host-rules (response-item gate, via HOST): a LOCALHOST peer resolves
-        // trusted with an EMPTY trusted-peer set — chia `is_trusted_peer`'s `is_localhost(host)`
+        // trusted with an EMPTY trusted-peer set — `is_trusted_peer`'s `is_localhost(host)`
         // short-circuit. Proves the peer's host is threaded from `coin_state` into the trust gate:
         // the SAME peer id and empty config get the untrusted budget from a remote IP but the trusted
         // budget from 127.0.0.1. RED before host threading (host was never carried to the gate).
@@ -11640,7 +11580,7 @@ mod tests {
     }
 }
 
-// Compact-VDF SOLICITATION send path (chia broadcast_uncompact_blocks' send half). The scan's
+// Compact-VDF SOLICITATION send path. The scan's
 // per-block plan/dedup is proven purely in full-node/tests/compact_vdf.rs (against a real mainnet
 // block); here we prove the peer-conditional fan-out — the half that turns a solicitation list into
 // RequestCompactProofOfTime messages on connected TIMELORD links — against a recording mock, because
@@ -11694,9 +11634,9 @@ mod uncompact_solicit_tests {
         }
     }
 
-    // TEST 1 — a bulky field + a connected TIMELORD peer ⇒ a RequestCompactProofOfTime is sent for
-    // that field, and it round-trips back to the exact request we planned. On the pre-solicit code
-    // (a scan that only counted + logged) nothing was ever sent — this is the red this closes.
+    // A bulky field plus a connected TIMELORD peer means a RequestCompactProofOfTime is sent for
+    // that field, and it round-trips back to the exact request that was planned. A scan that only
+    // counted and logged would send nothing.
     #[tokio::test]
     async fn a_bulky_field_is_solicited_from_a_connected_timelord() {
         let reqs = vec![a_request(3 /* CC_SP */, 7)];
@@ -11724,8 +11664,8 @@ mod uncompact_solicit_tests {
         assert_eq!(decoded, reqs[0], "the sent request matches the planned one");
     }
 
-    // TEST 3 — the network-infused case: NO timelord peer connected (only a full-node peer). The
-    // scan runs, nothing is sent, nothing panics — chia iterating an empty connected_timelords set.
+    // The network-infused case: NO timelord peer connected, only a full-node peer. The scan runs,
+    // nothing is sent, nothing panics.
     #[tokio::test]
     async fn no_timelord_peer_sends_nothing_and_does_not_panic() {
         let reqs = vec![a_request(4 /* CC_IP */, 9)];
@@ -11757,14 +11697,11 @@ mod uncompact_solicit_tests {
     }
 }
 
-// Red-first proof — the unfinished-block RELAY gate. chia's add_unfinished_block
-// runs the transactions generator (and the cost/aggregate-signature rules) BEFORE a received
-// unfinished block enters full_node_store or the NewUnfinishedBlock/2 broadcast
-// (full_node.py:2497-2547: any generator error raises ConsensusError, and the SENDER is banned
-// 600s). Pre-fix, the driver validated ONLY the header (validate_unfinished_header_block) and
-// then cached + queued the relay — so a block whose generator chia rejects was served and
-// announced to honest peers, who then banned US (the live 2026-08-20 19:50
-// GENERATOR_RUNTIME_ERROR 600s ban by a chia 2.7.1 peer, after we relayed exactly such a block).
+// The unfinished-block RELAY gate. The transactions generator (and the cost/aggregate-signature
+// rules) must run BEFORE a received unfinished block enters the cache or the
+// NewUnfinishedBlock/2 broadcast: peers ban the sender of a generator-invalid block for 600s, so
+// a node that validates only the header and relays serves the poisoned block to honest peers and
+// eats that ban itself.
 //
 // Harness: the real mainnet recent-chain slice (heights 9,054,336..=9,054,620, the header-validation
 // fixture family) rebuilt into light-path block records and seeded into the store — real proofs of
@@ -11805,8 +11742,8 @@ mod ub_relay_gate_tests {
     }
 
     // Light-path (proof-of-space only, no VDF) required_iters, to seed ancestor records with a
-    // correct pb.ip_iters — the header-validation seeding recipe (node/tests/header_validation.rs), which
-    // mirrors weight_proof.py's _validate_pospace_recent_chain.
+    // correct pb.ip_iters — the header-validation seeding recipe
+    // (node/tests/header_validation.rs).
     fn light_required_iters(
         ancestors: &HashMap<Bytes32, BlockRecord>,
         block: &HeaderBlock,
@@ -11964,6 +11901,8 @@ mod ub_relay_gate_tests {
         let node = Arc::new(
             Node::boot_with_store(
                 Config {
+                    target_outbound: None,
+                    target_peer_count: None,
                     listen: "127.0.0.1:0".parse().unwrap(),
                     rpc: "127.0.0.1:0".parse().unwrap(),
                     introducer: None,
@@ -12004,21 +11943,20 @@ mod ub_relay_gate_tests {
             .is_some()
     }
 
-    // THE RED TEST: a real, header-valid unfinished block with a bogus
-    // transactions generator spliced in must be DROPPED — never cached for peers to fetch,
-    // never queued for the NewUnfinishedBlock2 announce. Pre-fix this failed on all three
-    // assertions: the driver validated the header only, cached the poisoned block, and queued
-    // the relay; every honest chia peer that fetched it ran the generator, hit the error, and
-    // banned us for 600s. The `ub_body_fail` counter doubles as the vacuity guard: it proves the
-    // block PASSED header validation and was rejected by the new transactions gate (a
-    // header-stage rejection would land under `ub_validation_fail` instead).
+    // A real, header-valid unfinished block with a bogus transactions generator spliced in must be
+    // DROPPED — never cached for peers to fetch, never queued for the NewUnfinishedBlock2
+    // announce. Header validation alone would cache the poisoned block and queue the relay, and
+    // every honest peer that fetched it would run the generator, hit the error, and ban us for
+    // 600s. The `ub_body_fail` counter is the vacuity guard: it proves the block PASSED header
+    // validation and was rejected by the transactions gate, since a header-stage rejection would
+    // land under `ub_validation_fail` instead.
     #[tokio::test]
     async fn header_valid_ub_with_bogus_generator_is_dropped_not_cached_not_relayed() {
         let (node, chain) = node_with_slice_records().await;
         let target = &chain[pick_target(&chain, false)];
         let mut ub = unfinished_from_header(target);
-        // A generator that is not even deserializable CLVM — chia's add_unfinished_block
-        // rejects the block (ConsensusError) without it ever reaching a peer.
+        // A generator that is not even deserializable CLVM — the block is rejected without
+        // ever reaching a peer.
         ub.transactions_generator = Some(SerializedProgram::from_hex("fffefd").expect("hex"));
         let poisoned = ub.clone();
         drive_one(&node, ub).await;
@@ -12046,8 +11984,7 @@ mod ub_relay_gate_tests {
 
     // The same gate on a TRANSACTION block: real transactions_info (plot-key-committed), bogus
     // generator bytes — the generator root no longer matches the committed
-    // transactions_info.generator_root (chia INVALID_TRANSACTIONS_GENERATOR_HASH,
-    // blockchain.py:719). Pre-fix this was cached and relayed too.
+    // transactions_info.generator_root (INVALID_TRANSACTIONS_GENERATOR_HASH).
     #[tokio::test]
     async fn tx_ub_with_generator_root_mismatch_is_dropped_not_relayed() {
         let (node, chain) = node_with_slice_records().await;
@@ -12076,7 +12013,7 @@ mod ub_relay_gate_tests {
 
     // FALSE-POSITIVE GUARD + the empty-generator fast path (the own-farmed non-transaction
     // shape): an honest unfinished block with no generator must still validate, enter the cache,
-    // and queue the relay announce — the gate must reject ONLY what chia rejects.
+    // and queue the relay announce — the gate must reject ONLY invalid blocks.
     #[tokio::test]
     async fn honest_ub_without_generator_still_validates_caches_and_announces() {
         let (node, chain) = node_with_slice_records().await;
@@ -12105,12 +12042,12 @@ mod ub_relay_gate_tests {
         }
     }
 
-    // chia's dedup ladder (seen set + get_unfinished_block2), now mirrored in front of the
+    // The dedup ladder (seen set + get_unfinished_block2) sits in front of the
     // validators: an exact duplicate in the same drain is dropped by the seen set, and a NEW
     // serialization at an already-cached (reward, foliage) — e.g. the same block with a
     // generator spliced in — is dropped by the cache check BEFORE any validation runs. One
     // announce total: a burst of duplicates costs one header validation and one generator run
-    // (chia full_node.py: "This is intentional, to prevent DOS attacks").
+    // (the DoS bound).
     #[tokio::test]
     async fn duplicate_ubs_are_deduped_and_validated_once() {
         let (node, chain) = node_with_slice_records().await;

@@ -4,9 +4,8 @@ use dg_xch_core::blockchain::sub_epoch_summary::SubEpochSummary;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 
-// Fixed height-window of recent block records: ~5,120 records ≈ 5–6 MB, bounded. A
-// growing HashMap is the anti-pattern; the ecosystem alternative is `portfu_core::cache::CircularCache`,
-// used here as a height-keyed ring so eviction is deterministic (lowest height first) and reorg-stable.
+// Fixed height-window of recent block records: ~5,120 records ≈ 5–6 MB. Eviction is
+// deterministic, lowest height first.
 pub const BLOCK_RECORD_WINDOW: usize = 5120;
 
 pub struct BlockRecordCache {

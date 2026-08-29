@@ -1,13 +1,12 @@
 mod common;
 
-// Inbound `error` protocol frames (chia ede354c58, code 255) and unknown message types over the
-// real WS loopback.
+// Inbound `error` protocol frames (code 255) and unknown message types over the real WS loopback.
 //
-// chia's posture, mirrored here:
-//   - an `error` frame is DECODED + LOGGED and the connection carries on — no ban, no
-//     disconnect (ws_connection.py `_api_call`: `Error.from_bytes` → `log.warning` → return);
-//   - a message type chia does not define disconnects the peer with a short ban
-//     (chia b1b68072a: PROTOCOL_ERROR close + INTERNAL_PROTOCOL_ERROR_BAN_SECONDS).
+// The posture:
+//   - an `error` frame is DECODED and LOGGED and the connection carries on — no ban, no
+//     disconnect;
+//   - an undefined message type disconnects the peer with a PROTOCOL_ERROR close and the short
+//     internal-protocol-error ban.
 
 use common::{MemApi, connect, spawn_full_node};
 use dg_xch_clients::websocket::oneshot;
@@ -49,9 +48,9 @@ async fn request_peers_round_trips(client: &dg_xch_clients::websocket::full_node
     .expect("the connection still serves after the frame");
 }
 
-// A conforming CNI peer's `error` report (a real chia message type) must be tolerated: logged,
-// never treated as a protocol violation — the connection keeps serving. This is the guard that
-// keeps the unknown-type disconnect from over-reaching onto chia's own code 255.
+// A conforming peer's `error` report is a defined message type and must be tolerated: logged,
+// never treated as a protocol violation, with the connection still serving. This keeps the
+// unknown-type disconnect from over-reaching onto code 255.
 #[tokio::test]
 async fn error_frame_is_tolerated_and_the_connection_keeps_serving() {
     let server = spawn_full_node(blind_api()).await;
@@ -86,17 +85,15 @@ async fn error_frame_is_tolerated_and_the_connection_keeps_serving() {
     );
 }
 
-// A message type chia 2.7.1 does NOT define must disconnect the peer with a short host ban —
-// chia b1b68072a (`_read_one_message`: unknown `ProtocolMessageTypes(type)` → ERROR log →
-// `close(INTERNAL_PROTOCOL_ERROR_BAN_SECONDS, WSCloseCode.PROTOCOL_ERROR,
-// Err.INVALID_PROTOCOL_MESSAGE)`). Before this landed we logged "No Matches" and kept serving.
+// An undefined message type must disconnect the peer with a short host ban: an ERROR log, a
+// PROTOCOL_ERROR close and the internal-protocol-error ban duration.
 #[tokio::test]
 async fn unknown_message_type_disconnects_and_bans() {
     let server = spawn_full_node(blind_api()).await;
     let client = connect(server.port).await;
 
-    // Hand-framed message: type 254 (unassigned in chia), no id, empty length-prefixed body
-    // (chia Message: uint8 type, Optional[uint16] id, bytes data).
+    // Hand-framed message: type 254 (unassigned), no id, empty length-prefixed body — the wire
+    // shape is uint8 type, optional uint16 id, then bytes.
     let raw: Vec<u8> = vec![254u8, 0u8, 0, 0, 0, 0];
     client
         .client
@@ -124,7 +121,7 @@ async fn unknown_message_type_disconnects_and_bans() {
         server
             .bans
             .is_banned(&"127.0.0.1".parse::<std::net::IpAddr>().unwrap()),
-        "the host gets chia's short INTERNAL_PROTOCOL_ERROR ban"
+        "the host gets the short internal-protocol-error ban"
     );
 
     // And the ban is enforced at the accept path: an immediate reconnect is refused.

@@ -1,13 +1,11 @@
-// CHIA-4203 (chia b483e59f22, #20829) — decode-time list limits, the CPU half.
+// Decode-time list limits, the CPU half.
 //
-// `dg_xch_serialize::parse_vec_limited` mirrors chia's `parse_list_limited`
-// (chia/util/streamable.py): parse the first `min(count, max_items)` elements, then skip the
-// remaining FIXED-SIZE elements in O(1) with a cursor seek (chia `f.seek(remaining * size, 1)`).
-// These tests pin the mechanics on the four wallet request types chia wires limits onto
-// (full_node_api.py: register_for_ph_updates / register_for_coin_updates / request_puzzle_state /
-// request_coin_state); the over-the-wire handler behavior is pinned in
-// `p2p/tests/t049_list_limited_decode.rs`. The MEMORY half (no pre-allocation from the untrusted
-// count, #180) is pinned in `streamable_alloc_bomb.rs`.
+// `dg_xch_serialize::parse_vec_limited` parses the first `min(count, max_items)` elements, then
+// skips the remaining FIXED-SIZE elements in O(1) with a cursor seek. These tests pin the
+// mechanics on the four wallet request types that carry limits (register_for_ph_updates /
+// register_for_coin_updates / request_puzzle_state / request_coin_state); the over-the-wire
+// handler behavior is pinned in `p2p/tests/t049_list_limited_decode.rs`. The MEMORY half (no
+// pre-allocation from the untrusted count) is pinned in `streamable_alloc_bomb.rs`.
 
 use dg_xch_core::blockchain::sized_bytes::Bytes32;
 use dg_xch_core::protocols::wallet::{
@@ -103,7 +101,7 @@ fn truncated_decode_keeps_head_and_lands_exactly_on_the_next_field() {
 }
 
 // At or under the limit the limited decode is byte-equivalent to the plain decode — a conforming
-// request is untouched (chia `items_to_parse = min(list_size, max_items)`).
+// request is untouched, since only `min(list_size, max_items)` elements are ever parsed.
 #[test]
 fn under_and_at_limit_decode_matches_unlimited() {
     let v = version();
@@ -124,8 +122,8 @@ fn under_and_at_limit_decode_matches_unlimited() {
 }
 
 // A claimed count that overstates the bytes actually present (a pure length-claim bomb): once
-// the claim is past the limit the skip runs off the buffer end — chia's `BytesIO.seek` past the
-// end succeeds and the NEXT field's read then fails at EOF. Both decoders reject the message;
+// the claim is past the limit the skip runs off the buffer end. A seek past the end succeeds and
+// the NEXT field's read then fails at EOF. Both decoders reject the message;
 // the limited one must do so WITHOUT attempting to parse the phantom tail (the seek is clamped
 // to the buffer end, an O(1) arithmetic step regardless of the claimed count).
 #[test]
@@ -143,12 +141,11 @@ fn overstated_claim_errors_without_parsing_the_phantom_tail() {
     assert!(plain.is_err(), "the plain decoder rejects the short list");
 
     // The limited decode must return promptly (clamped O(1) skip — parsing u32::MAX phantom
-    // elements would spin effectively forever) and error on the post-list field, chia's exact
-    // failure point.
+    // elements would spin effectively forever) and error on the post-list field.
     let limited = RegisterForPhUpdates::from_bytes_limited(&mut Cursor::new(raw.as_slice()), v, 4);
     assert!(
         limited.is_err(),
-        "the field after the over-claimed list fails at EOF, as in chia"
+        "the field after the over-claimed list fails at EOF"
     );
 }
 

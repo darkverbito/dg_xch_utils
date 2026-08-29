@@ -1,8 +1,7 @@
-// RPC parity — full-node RPC endpoints against a store seeded to a
-// real mainnet block. Semantics under test are chia's full_node_rpc_api.py: unknown block/coin =
-// error (not null), get_block_records end-EXCLUSIVE with error-on-missing-height,
-// include_spent_coins default FALSE, push_tx idempotent SUCCESS, the netspace formula, and the
-// chia-shaped blockchain_state. The HTTP envelope + TLS are exercised in tests/rpc_http.rs and
+// Full-node RPC endpoints against a store seeded to a real mainnet block. Semantics under
+// test: unknown block/coin = error (not null), get_block_records end-EXCLUSIVE with
+// error-on-missing-height, include_spent_coins default FALSE, push_tx idempotent SUCCESS, the
+// netspace formula, and the full blockchain_state shape. The HTTP envelope + TLS are exercised in tests/rpc_http.rs and
 // the integration capstone.
 
 mod common;
@@ -39,7 +38,7 @@ fn spent_window() -> CoinQueryWindow {
     }
 }
 
-// get_blockchain_state serves chia's full shape: peak as a full BlockRecord, the sync
+// get_blockchain_state serves the full shape: peak as a full BlockRecord, the sync
 // sub-object, mempool gauges, block_max_cost, and a node_id (all-zero without live state).
 #[tokio::test]
 async fn blockchain_state_reports_the_chia_shape() {
@@ -81,7 +80,7 @@ async fn get_block_and_record_by_hash() {
     assert_eq!(got_block.header_hash().expect("hh"), rec.header_hash);
 }
 
-// chia get_block: an unknown header hash is an ERROR (BLOCK_NOT_FOUND), never null.
+// `get_block`: an unknown header hash is an ERROR (BLOCK_NOT_FOUND), never null.
 #[tokio::test]
 async fn get_block_unknown_hash_errors() {
     let (node, _mp) = rpc().await;
@@ -95,7 +94,7 @@ async fn get_block_unknown_hash_errors() {
     assert!(matches!(err, full_node::RpcError::BadRequest(_)));
 }
 
-// chia get_block_records is END-EXCLUSIVE: [peak, peak) is empty, [peak, peak+1) is the peak.
+// `get_block_records` is END-EXCLUSIVE: [peak, peak) is empty, [peak, peak+1) is the peak.
 // Heights above the peak end the walk instead of erroring.
 #[tokio::test]
 async fn get_block_records_is_end_exclusive() {
@@ -113,7 +112,7 @@ async fn get_block_records_is_end_exclusive() {
     assert_eq!(recs.len(), 1);
     assert_eq!(recs[0].height, common::PEAK_HEIGHT);
 
-    // end beyond the peak: the walk breaks at the peak (chia's break), partial list.
+    // end beyond the peak: the walk breaks at the peak, partial list.
     let recs = node
         .get_block_records(common::PEAK_HEIGHT, common::PEAK_HEIGHT + 5)
         .await
@@ -121,7 +120,7 @@ async fn get_block_records_is_end_exclusive() {
     assert_eq!(recs.len(), 1);
 }
 
-// chia get_block_records: a height AT/BELOW the peak with no confirmed record is an ERROR
+// `get_block_records`: a height AT/BELOW the peak with no confirmed record is an ERROR
 // (HEIGHT_NOT_IN_BLOCKCHAIN), never a silent skip.
 #[tokio::test]
 async fn get_block_records_errors_on_missing_sub_peak_height() {
@@ -144,7 +143,7 @@ async fn get_block_records_over_cap_errors() {
     assert!(matches!(err, full_node::RpcError::BadRequest(_)));
 }
 
-// chia get_block_record_by_height: clamps NOTHING — a height above the peak is an error; the
+// `get_block_record_by_height`: clamps NOTHING — a height above the peak is an error; the
 // peak itself resolves to the canonical record.
 #[tokio::test]
 async fn get_block_record_by_height_peak_and_beyond() {
@@ -175,7 +174,7 @@ async fn get_blocks_serves_the_range() {
         blocks[0].0.header_hash().expect("hh"),
         common::peak_record().header_hash
     );
-    // Missing heights are skipped (chia get_full_blocks_at returns what exists).
+    // Missing heights are skipped (`get_full_blocks_at` returns what exists).
     let blocks = node
         .get_blocks(common::PEAK_HEIGHT - 2, common::PEAK_HEIGHT)
         .await
@@ -189,7 +188,7 @@ async fn get_blocks_serves_the_range() {
     assert!(matches!(err, full_node::RpcError::BadRequest(_)));
 }
 
-// chia get_coin_records_by_names: include_spent_coins defaults FALSE — a spent coin is only
+// `get_coin_records_by_names`: include_spent_coins defaults FALSE — a spent coin is only
 // visible when explicitly requested; the height window filters on the confirmed height.
 #[tokio::test]
 async fn coin_records_by_names_spent_default_and_window() {
@@ -216,7 +215,7 @@ async fn coin_records_by_names_spent_default_and_window() {
         .expect("default excludes spent");
     assert!(
         hidden.is_empty(),
-        "spent coin hidden by default (chia include_spent_coins=False)"
+        "spent coin hidden by default (include_spent_coins=False)"
     );
     let shown = node
         .get_coin_records_by_names(&[target], spent_window())
@@ -255,7 +254,7 @@ async fn coin_records_by_names_spent_default_and_window() {
     );
 }
 
-// chia get_coin_record_by_name: unknown coin is an ERROR.
+// `get_coin_record_by_name`: unknown coin is an ERROR.
 #[tokio::test]
 async fn coin_record_by_name_errors_on_unknown() {
     let (node, _mp) = rpc().await;
@@ -283,7 +282,7 @@ async fn push_tx_runs_bundle_and_admits_to_mempool() {
     assert!(mempool.lock().await.get(&name).is_some());
 }
 
-// chia push_tx: a bundle already resident answers SUCCESS (idempotent), no duplicate admission.
+// push_tx: a bundle already resident answers SUCCESS (idempotent), no duplicate admission.
 #[tokio::test]
 async fn push_tx_is_idempotent_on_duplicate() {
     let (node, mempool) = rpc().await;
@@ -357,7 +356,7 @@ async fn mempool_read_endpoints_serve_the_resident_item() {
     );
 }
 
-// get_network_space: the chia formula over two records — verified against an independent
+// get_network_space: the netspace formula over two records — verified against an independent
 // recomputation at pinned deltas, plus the same-hash and unknown-block error paths.
 #[tokio::test]
 async fn network_space_formula_and_errors() {
@@ -378,7 +377,7 @@ async fn network_space_formula_and_errors() {
         .get_network_space(&newer.header_hash, &older.header_hash)
         .await
         .expect("space");
-    // Independent recomputation (chia full_node_rpc_api.py:691-706): height 5,000,000 is past
+    // Independent recomputation: height 5,000,000 is past
     // no plot-filter halving and below the hard fork, so prefix bits stay at 9.
     #[allow(
         clippy::cast_precision_loss,
@@ -401,7 +400,7 @@ async fn network_space_formula_and_errors() {
 }
 
 // get_block_spends on a PRE-hard-fork block: the ROM generator surfaces no reveals — a clean
-// error, never a panic (chia serves these through its ROM runner). A non-transaction block
+// error, never a panic. A non-transaction block
 // (generator stripped) answers an empty list.
 #[tokio::test]
 async fn block_spends_pre_fork_errors_and_non_tx_block_is_empty() {
@@ -550,7 +549,7 @@ async fn coin_records_by_parent_ids_service_tier() {
 
 // get_additions_and_removals: seed_peak applies block 5,000,000's real additions (unspent) at the
 // peak height, so the endpoint returns them as additions with no removals — and rejects a header
-// hash that is not the confirmed block at its height (chia's fork check).
+// hash that is not the confirmed block at its height (the fork check).
 #[cfg(feature = "coin-index")]
 #[tokio::test]
 async fn additions_and_removals_at_the_peak_block() {
@@ -624,7 +623,7 @@ async fn coin_records_by_hint_resolves_indexed_coins() {
 }
 
 // get_puzzle_and_solution's height gate: an unspent coin (or a mismatched height) is refused before
-// any generator run — chia's INVALID_HEIGHT_FOR_COIN. Real reveal+solution extraction over a
+// any generator run — INVALID_HEIGHT_FOR_COIN. Real reveal+solution extraction over a
 // post-hard-fork generator is proven in core's `coin_spend_extraction` fixture test.
 #[tokio::test]
 async fn puzzle_and_solution_rejects_unspent_coin() {
@@ -658,7 +657,7 @@ async fn synced_flag_reflects_pipeline_state() {
 
 // ---- get_fee_estimate --------------------------------------------------------------------------
 
-// chia get_fee_estimate response shape: estimates[]/target_times[] (sorted), a float
+// `get_fee_estimate` response shape: estimates[]/target_times[] (sorted), a float
 // current_fee_rate, the mempool gauges, synced flag, and peak/last-block telemetry. An empty
 // mempool with no confirmation history yields the FLOOR (0) for every estimate — never a constant.
 #[tokio::test]
@@ -686,7 +685,7 @@ async fn get_fee_estimate_empty_returns_floor_and_chia_shape() {
 }
 
 // A mempool whose estimator has seen sustained confirmed pressure quotes POSITIVE estimates, and
-// they are monotonically non-increasing in target time (sooner ⇒ pricier) — chia's
+// they are monotonically non-increasing in target time (sooner ⇒ pricier) —
 // make_monotonically_decreasing over the sorted target_times.
 #[tokio::test]
 async fn get_fee_estimate_loaded_is_positive_and_monotonic() {
@@ -724,7 +723,7 @@ async fn get_fee_estimate_loaded_is_positive_and_monotonic() {
     );
 }
 
-// chia _validate_fee_estimate_cost: exactly one of {spend_bundle, cost} — neither or both errors.
+// `_validate_fee_estimate_cost`: exactly one of {spend_bundle, cost} — neither or both errors.
 #[tokio::test]
 async fn get_fee_estimate_requires_exactly_one_cost_source() {
     let (node, _mp) = rpc().await;

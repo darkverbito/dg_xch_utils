@@ -1,24 +1,16 @@
 // The daemon's record window: the in-process ancestor cache behind every consensus-walk record
-// map (`difficulty_records_map`) — the epoch-trough fix.
+// map (`difficulty_records_map`).
 //
-// chia parity: chia never re-reads the DB for the difficulty/SES walks. full_node.py hands
-// get_next_sub_slot_iters_and_difficulty / next_sub_epoch_summary its Blockchain, whose in-memory
-// record cache spans BLOCKS_CACHE_SIZE = EPOCH_BLOCKS + 4 * MAX_SUB_SLOT_BLOCKS records below the
-// peak (chia blockchain.py `__block_records` + `clean_block_records`, default_constants.py
-// BLOCKS_CACHE_SIZE = 4608 + 128 * 4), maintained incrementally by add_block_record as blocks
-// confirm. The daemon's old per-call store walk re-fetched that window from the backend every
-// time: 513..=896 sequential point reads mid-epoch, and 5,121..=5,503 for every anchor whose next
-// height sits in an epoch's FIRST sub-epoch (`difficulty_record_depth`'s epoch-turn regime,
-// `height_can_be_first_in_epoch(anchor + 1)` — true for all of offsets 0..=382 mod 4608). On the
-// Postgres backends each point read is a network round trip, which is the measured mod-4608
-// throughput trough (~30% for the epoch's first stretch); the mmap backend pays microseconds and
-// shows none.
+// A per-call store walk re-fetches the walk window from the backend every time: 513..=896
+// sequential point reads mid-epoch, and 5,121..=5,503 for every anchor whose next height sits in
+// an epoch's FIRST sub-epoch (`difficulty_record_depth`'s epoch-turn regime). On the Postgres
+// backends each point read is a network round trip.
 //
 // This module serves the same walk from a bounded in-memory window and touches the store only for
-// records the window has not yet seen: the whole window once at cold start, then just the new head
-// delta per peak (and a below-floor tail in the rare trailing-anchor case). Records are immutable
-// per header hash, so the by-hash cache can never serve a stale value; a reorg simply makes the
-// walk fetch the fork branch's new hashes from the store (cache misses), and
+// records the window has not yet seen: the whole window once at cold start, then just the new
+// head delta per peak (and a below-floor tail in the rare trailing-anchor case). Records are
+// immutable per header hash, so the by-hash cache can never serve a stale value; a reorg simply
+// makes the walk fetch the fork branch's new hashes from the store (cache misses), and
 // `BlockRecordCache::insert` evicts the superseded sibling at each overwritten height.
 
 use dg_xch_core::blockchain::block_record::BlockRecord;
@@ -32,22 +24,20 @@ use std::sync::atomic::Ordering;
 use tokio::sync::Mutex;
 
 // Window capacity: the shared constants-derived walk window
-// (`core::consensus::difficulty_adjustment::consensus_walk_window`) — one source of truth with the
-// node engine's walk cache, which the restart-resume repair sized to the same bound (a flat 5,120
-// engine window lost to the 5,503-deep first-sub-epoch retarget anchors while THIS window held
-// 5,760). Mainnet: 4608 + 384 + 6*128 = 5,760 records ≈ 6 MiB — bounded, enumerated in the bounds
-// audit. (`capacity_covers_every_depth_with_trailing_slack` pins the inequality against the real
-// depth function rather than trusting the arithmetic.)
+// (`core::consensus::difficulty_adjustment::consensus_walk_window`) — one source of truth with
+// the node engine's walk cache. Mainnet: 4608 + 384 + 6*128 = 5,760 records ≈ 6 MiB.
+// (`capacity_covers_every_depth_with_trailing_slack` pins the inequality against the real depth
+// function rather than trusting the arithmetic.)
 #[must_use]
 pub(crate) fn record_window_capacity(constants: &ConsensusConstants) -> usize {
     dg_xch_core::consensus::difficulty_adjustment::consensus_walk_window(constants)
 }
 
 // The ancestor record map for the consensus walks, `depth`-sized by `difficulty_record_depth`,
-// served from the shared window with store fallback per miss. The produced map is byte-identical
-// to the old pure store walk (same chain, same break-on-miss and stop-at-genesis semantics): the
-// window only ever holds records previously fetched from this same store, keyed by header hash,
-// and a record is immutable per hash. Fetched misses are folded back into the window (ascending
+// served from the shared window with store fallback per miss. The map is identical to a pure store
+// walk (same chain, same break-on-miss and stop-at-genesis semantics): the window only ever holds
+// records fetched from this same store, keyed by header hash, and a record is immutable per hash.
+// Fetched misses are folded back into the window (ascending
 // height, so `BlockRecordCache`'s lowest-first eviction keeps the window contiguous below the
 // newest head).
 pub(crate) async fn windowed_records_map<S: BlockStore + Send + Sync>(
@@ -115,8 +105,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    // The old per-call behavior, kept verbatim as the byte-identity oracle: the pure store walk
-    // the daemon ran before the window existed (`recent_records_map`).
+    // The byte-identity oracle: the pure per-call store walk.
     async fn store_walk_records_map<S: BlockStore + Send + Sync>(
         store: &S,
         tip: Bytes32,
@@ -259,14 +248,13 @@ mod tests {
                 h % MAINNET.epoch_blocks
             );
         }
-        // The epoch-turn regime really is the ~5.5K-record monster the trough measured.
+        // The epoch-turn regime is the deepest walk.
         assert_eq!(max_depth, 5_503);
     }
 
-    // The trough mechanism and its fix, pinned by exact store-read counts. Old behavior (the
-    // oracle walk) pays `depth` point reads on EVERY call — 5,131 at anchor offset 10. The window
-    // pays it once cold, then only the new head delta (32, a follow window) and zero on a
-    // same-peak re-serve (the sp-inbox tick).
+    // Store-read counts, pinned exactly. The oracle walk pays `depth` point reads on EVERY call —
+    // 5,131 at anchor offset 10. The window pays it once cold, then only the new head delta
+    // (32, a follow window) and zero on a same-peak re-serve (the sp-inbox tick).
     #[tokio::test]
     async fn store_reads_collapse_from_depth_per_call_to_head_delta() {
         let store = seeded_store().await;
@@ -285,7 +273,7 @@ mod tests {
         assert_eq!(
             cold_reads,
             u64::from(depth_cold),
-            "cold start pays the full window once — and this is what the OLD code paid per call"
+            "cold start pays the full window once"
         );
 
         // One follow window later: only the 32 new head records are fetched.

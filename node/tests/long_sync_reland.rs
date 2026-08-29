@@ -1,12 +1,10 @@
-// Reorg ACROSS the offline gap. A node with history
-// comes back after weeks; the weight proof's fork point lands BELOW the local peak (the network
-// reorged deeper than our tip while we were away). chia handles this by long-syncing from the
-// fork point (full_node.py:1104-1121) with Blockchain.add_block's fork choice performing the
-// reorg; ours re-follows forward windows from the fork point through
+// Reorg ACROSS the offline gap. A node with history comes back after weeks; the weight proof's
+// fork point lands BELOW the local peak (the network reorged deeper than our tip while we were
+// away). The node re-follows forward windows from the fork point through
 // `Chaser::long_sync_reland_reporting`, staging the divergent branch as orphan candidates until
-// it outweighs the stale peak — at which point the engine's SINGLE-TRANSACTION reorg (T0-4)
-// flips the chain. The short backtrack CANNOT cross this gap (its cap is 5, chia
-// full_node.py:738 — pinned red in backtrack.rs `fork_deeper_than_the_backtrack_cap...`).
+// it outweighs the stale peak — at which point the engine's single-transaction reorg flips the
+// chain. The short backtrack cannot cross this gap (its cap is 5 — pinned in backtrack.rs
+// `fork_deeper_than_the_backtrack_cap...`).
 //
 // Fixture conventions follow backtrack.rs: re-stamped real mainnet bodies on synthetic
 // (height, weight, prev) links, assume_valid above every synthetic height.

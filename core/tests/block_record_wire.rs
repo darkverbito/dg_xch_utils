@@ -1,17 +1,13 @@
-//! Byte-parity for `BlockRecord` against real chia mainnet records (campaign issue #155,
-//! DIVERGENCES.md "BlockRecord serialization byte-layout").
+//! Byte-parity for `BlockRecord` against real mainnet records.
 //!
-//! Chia oracle: chia_rs 0.42.1 `BlockRecord` (crates/chia-protocol/src/block_record.rs) — the
-//! `challenge_vdf_output` / `infused_challenge_vdf_output` fields are `ClassgroupElement`
-//! (bare 100-byte `bytes100`, no length prefix). The fixture blobs are actual
-//! `full_blocks.block_record` rows read from a synced chia-blockchain 2.7.1 mainnet node
-//! (blockchain_v2_mainnet.sqlite), so equality here is equality with what every chia peer
-//! serializes — not a re-derivation from our own encoder.
+//! The `challenge_vdf_output` / `infused_challenge_vdf_output` fields are `ClassgroupElement`:
+//! bare 100-byte values with no length prefix. The fixture blobs are actual
+//! `full_blocks.block_record` rows read from a synced mainnet node, so equality here is equality
+//! with what every peer serializes, not a re-derivation from our own encoder.
 //!
 //! Golden set: heights 3000000-3000003 (consecutive main-chain records, transaction and
-//! non-transaction) plus 3000209 (the first record at/after 3000000 carrying a
-//! `sub_epoch_summary_included` — which also pins the 2.7.1 SubEpochSummary embedding: no
-//! post-2.7.1 fields such as chia_rs main's `challenge_merkle_root`).
+//! non-transaction) plus 3000209, the first record at/after 3000000 carrying a
+//! `sub_epoch_summary_included`, which also pins the SubEpochSummary embedding.
 
 use dg_xch_core::blockchain::block_record::BlockRecord;
 use dg_xch_core::blockchain::sized_bytes::Bytes32;

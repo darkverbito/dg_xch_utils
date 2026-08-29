@@ -13,8 +13,8 @@
 //! seq-scans the whole table, stalling the reorg indefinitely.
 //!
 //! Fix: `CoinStore::ensure_reorg_indexes`, called at the top of the engine's `reorg`, builds those
-//! indexes idempotently before any rollback query runs (chia carries them from schema creation, so
-//! its rollback works at any sync depth). This test proves, on the pipeline confirm path: the
+//! indexes idempotently before any rollback query runs, so the rollback works at any sync depth.
+//! This test proves, on the pipeline confirm path: the
 //! reorg-tier indexes are ABSENT at open (deferred), a reorg driven through `confirm_staged_batch`
 //! below tip COMPLETES, and those indexes are PRESENT afterward.
 

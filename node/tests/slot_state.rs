@@ -1,7 +1,7 @@
-// Phase 2.1 — SlotState structural rules, mirrored from chia full_node_store.py's own test
-// idiom (skip_vdf_validation exercises every check EXCEPT the class-group proofs, which the
-// era-corpus gate covers with real mainnet VDFs on the builders). Each test pins one rule a
-// peer could otherwise abuse: challenge linkage, SES placement, ICC presence, SP indexing.
+// SlotState structural rules (skip_vdf_validation exercises every check EXCEPT the class-group
+// proofs, which the era-corpus gate covers with real mainnet VDFs on the builders). Each test
+// pins one rule a peer could otherwise abuse: challenge linkage, SES placement, ICC presence,
+// SP indexing.
 
 use dg_xch_core::blockchain::challenge_chain_subslot::ChallengeChainSubSlot;
 use dg_xch_core::blockchain::class_group_element::ClassgroupElement;
@@ -226,8 +226,8 @@ fn signage_point_claimed_iters_must_match_its_index() {
 
 #[test]
 fn get_signage_point_returns_sub_slot_start_for_genesis_challenge() {
-    // chia get_signage_point: cc_signage_point == GENESIS_CHALLENGE -> SignagePoint(None,None,None,None).
-    // This is the signage-point-index-0 SP (the sub-slot start); the node must serve it, not None.
+    // cc_signage_point == GENESIS_CHALLENGE -> the all-None sub-slot-start SP.
+    // This is the signage-point-index-0 SP; the node must serve it, not None.
     let state = SlotState::new(MAINNET);
     let sp = state
         .get_signage_point(&MAINNET.genesis_challenge)
@@ -237,8 +237,8 @@ fn get_signage_point_returns_sub_slot_start_for_genesis_challenge() {
 
 #[test]
 fn get_signage_point_none_for_unknown_challenge() {
-    // A challenge that is neither the genesis challenge nor any held sub-slot cc hash, and matches no
-    // stored SP, resolves to None (chia get_signage_point falls through to return None).
+    // A challenge that is neither the genesis challenge nor any held sub-slot cc hash, and
+    // matches no stored SP, resolves to None.
     let state = SlotState::new(MAINNET);
     assert!(state.get_signage_point(&Bytes32::from([200; 32])).is_none());
 }

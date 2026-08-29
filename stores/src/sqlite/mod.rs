@@ -25,8 +25,7 @@ pub struct SqliteStore {
     near_tip: Arc<AtomicBool>,
     // Background WAL checkpointer. Aborted on drop; see `spawn_checkpointer`.
     checkpointer: tokio::task::JoinHandle<()>,
-    // Read-only telemetry: commit latency by phase + checkpoint activity, recorded as a side
-    // effect of work this store already does, rendered by the node's /metrics responder.
+    // Commit latency by phase + checkpoint activity, rendered by the node's /metrics responder.
     pub(crate) telemetry: Arc<StoreTelemetry>,
     // `<db>-wal`, for the wal_bytes() file-size gauge (the SQLite WAL always lives at this suffix).
     wal_path: PathBuf,
@@ -40,32 +39,19 @@ impl Drop for SqliteStore {
 
 /// Size trigger for the off-writer WAL drain (see `spawn_checkpointer`): when the `-wal` file
 /// crosses this many bytes the checkpointer drains NOW, regardless of the bulk-phase cadence,
-/// escalating from PASSIVE to TRUNCATE until the file is back under the trigger. 128 MiB sits
-/// far above a healthy confirm's WAL (the largest single confirm window measured ~240 MiB is
-/// checkpointed across passes; steady per-block WAL is a few MB) yet ~8x below the ~1 GiB
-/// in-writer `wal_autocheckpoint` failsafe — so the failsafe, whose blocking copy-into-DB
-/// stalls confirm COMMITs for minutes on slow storage, can never be reached while the
-/// checkpointer task is alive. Measured on the live SQLite leg BEFORE this trigger existed:
-/// wal_bytes 1.44 GB with zero completed checkpointer passes, the failsafe firing inside
-/// confirm COMMITs (70-80% of commit time in <9% of commits, 5-120 s stalls), peak frozen,
-/// liveness exit 137 x13.
+/// escalating from PASSIVE to TRUNCATE until the file is back under the trigger. Must stay
+/// well under the in-writer `wal_autocheckpoint` failsafe (~1 GiB), whose blocking
+/// copy-into-DB runs inside a confirm COMMIT.
 const WAL_DRAIN_TRIGGER_BYTES: u64 = 128 * 1024 * 1024;
 
 /// WRITER-connection page-cache profile by sync phase (`PRAGMA cache_size`, negative = KiB).
 ///
-/// Bulk catch-up: 256 MiB. The 64 MiB cache holds ONE block's dirty set, but catch-up commits
-/// span whole multi-block windows — the largest measured single confirm window spilled ~240 MiB
-/// to the WAL, i.e. at 64 MiB the cache-spill path (not the commit) was writing most of the
-/// WAL, which is exactly the growth that feeds the WAL-drain pathology. 256 MiB covers that
-/// measured worst window so a batch commit spills nothing.
+/// Bulk catch-up runs 256 MiB: a catch-up commit spans a whole multi-block window, and a cache
+/// too small to hold it spills the dirty pages to the WAL before the COMMIT, which is itself a
+/// source of WAL growth. Near tip drops back to 64 MiB — per-block commits fit easily.
 ///
-/// Near tip: back to 64 MiB — per-block commits fit easily, and the memory is returned.
-///
-/// Writer-only on one connection: the read pool and the checkpointer keep the 64 MiB connect
-/// default, so the bulk profile costs at most one connection's cache (allocated lazily), not
-/// pool-size multiples — the smallest SQLite deployment measured has the headroom, and the
-/// profile shrinks again the moment the node reaches the tip. (The Raspberry-Pi floor profile
-/// is the separate mmap backend; it has no SQLite cache and is untouched.)
+/// The profile is writer-only: the read pool and the checkpointer keep the 64 MiB connect
+/// default, so the bulk cache costs one connection, not pool-size multiples.
 const WRITER_CACHE_BULK_KIB: i64 = 262_144;
 const WRITER_CACHE_NEAR_TIP_KIB: i64 = 65_536;
 
@@ -98,36 +84,29 @@ impl SqliteStore {
             .busy_timeout(Duration::from_secs(5))
             .foreign_keys(true)
             .pragma("mmap_size", "268435456")
-            // Page cache, the CONNECT default (read pool + checkpointer). The SQLite default
-            // (-2000 = 2 MiB) forces near-constant cache-spill to the WAL when a confirm writes
-            // thousands of random `coin_name` (hash-keyed, WITHOUT ROWID) rows into the multi-GB
-            // coin_record b-tree; 64 MiB holds a single block's working set. The WRITER is
-            // re-profiled by phase on top of this — bulk 256 MiB / near-tip 64 MiB (see
-            // WRITER_CACHE_BULK_KIB) — because catch-up batch commits span many blocks and spill
-            // at 64 MiB.
+            // Page cache for the CONNECT default (read pool + checkpointer); 64 MiB holds a
+            // single block's working set. The SQLite default (-2000 = 2 MiB) spills to the WAL
+            // constantly when a confirm writes thousands of hash-keyed `coin_name` rows into the
+            // multi-GB WITHOUT ROWID coin_record b-tree. The writer is re-profiled by phase on
+            // top of this (see `WRITER_CACHE_BULK_KIB`).
             .pragma("cache_size", "-65536")
-            // Keep the writer-COMMIT autocheckpoint OUT of normal operation. The store runs on network
-            // block storage (iSCSI, measured ~100 ms/fsync). An autocheckpoint firing inside a confirm
-            // COMMIT copies the whole accumulated WAL into the DB file and fsyncs it on the hot path — a
-            // multi-second-to-minute writer stall that freezes the confirmed peak and trips the
-            // liveness probe. The dedicated checkpointer (below) does that copy+fsync off the writer.
-            // The threshold is a disk-fill failsafe, not the mechanism: 262 144 pages ≈ 1 GiB is far
-            // above the largest single confirm window's WAL (~240 MiB), so it never fires while the
-            // checkpointer is alive; it only bounds the WAL if that background task ever stops.
+            // Keep the writer-COMMIT autocheckpoint out of normal operation: an autocheckpoint
+            // firing inside a confirm COMMIT copies the whole accumulated WAL into the DB file
+            // and fsyncs it on the hot path. The dedicated checkpointer below does that
+            // copy+fsync off the writer. This threshold (262 144 pages ≈ 1 GiB) is only a
+            // disk-fill failsafe for when that background task is gone.
             .pragma("wal_autocheckpoint", "262144");
         let mut writer = opts.clone().connect().await?;
-        // The store opens in the bulk (catch-up) phase: give the writer the bulk cache profile
-        // now; `set_near_tip` re-profiles it on every phase flip.
+        // The store opens in the bulk (catch-up) phase; `set_near_tip` re-profiles on each flip.
         sqlx::query(&format!("PRAGMA cache_size = -{WRITER_CACHE_BULK_KIB}"))
             .execute(&mut writer)
             .await?;
         migrate(&mut writer).await?;
         // Read-pool connections are RECYCLED (idle_timeout + max_lifetime): a pooled WAL reader
-        // that sits on an old read mark pins the checkpoint reset point — PASSIVE can copy
-        // frames into the DB but never reset the write pointer, so the `-wal` file grows
-        // without bound (measured live: 1.44 GB, past the in-writer failsafe, with the
-        // read-pool-idle gauge as the witness). Bounding every reader's lifetime bounds any pin
-        // to at most idle_timeout, letting the reset (and the size-triggered TRUNCATE) succeed.
+        // sitting on an old read mark pins the checkpoint reset point, so PASSIVE can copy
+        // frames into the DB but never reset the write pointer and the `-wal` file grows without
+        // bound. Bounding every reader's lifetime bounds the pin to at most idle_timeout,
+        // letting the reset (and the size-triggered TRUNCATE) succeed.
         let read = SqlitePoolOptions::new()
             .max_connections(4)
             .idle_timeout(Duration::from_secs(60))
@@ -159,8 +138,7 @@ impl SqliteStore {
     }
 
     /// Current size in bytes of the `-wal` file (0 when it does not exist yet). A metadata stat —
-    /// cheap enough for every scrape; the same number otherwise watched by hand by listing the
-    /// `-wal` file size while diagnosing WAL growth.
+    /// cheap enough for every scrape.
     #[must_use]
     pub fn wal_file_bytes(&self) -> u64 {
         std::fs::metadata(&self.wal_path).map_or(0, |m| m.len())
@@ -208,23 +186,20 @@ impl SqliteStore {
 /// Drive WAL checkpoints on a dedicated connection so their copy-into-DB + fsync latency never blocks
 /// the confirm writer.
 ///
-/// `wal_checkpoint(PASSIVE)` copies every checkpointable frame into the DB file and, when it reaches
-/// them all with no reader still reading the WAL, resets the write pointer to the front so the file is
-/// reused instead of growing without bound. PASSIVE is the only mode that takes no exclusive lock: it
-/// never blocks a concurrent writer and never hands another connection `SQLITE_BUSY` ("database is
-/// locked") — TRUNCATE/RESTART do, which deadlocks the single writer. While a confirm holds an open
-/// transaction PASSIVE simply does what it can and resets after the COMMIT lands. The copy+fsync runs
-/// here, off the writer, so a slow-fsync backend (iSCSI ~100 ms/sync) never stalls the confirmed peak.
+/// `wal_checkpoint(PASSIVE)` copies every checkpointable frame into the DB file and, once it has
+/// reached them all with no reader still reading the WAL, resets the write pointer to the front so
+/// the file is reused instead of growing without bound. PASSIVE is the only mode that takes no
+/// exclusive lock: it never blocks a concurrent writer and never hands another connection
+/// `SQLITE_BUSY` — TRUNCATE/RESTART do, which would deadlock the single writer. While a confirm
+/// holds an open transaction PASSIVE does what it can and resets after the COMMIT lands.
 ///
-/// PASSIVE does not shrink the WAL *file*: it stays at the high-water of the largest single
-/// transaction (one batch-confirm window today; a few MB once confirms commit per block). That is a
-/// bounded, reused file — harmless for reads now that the coin multi-get point-gets rather than scans.
-/// PASSIVE also cannot RESET a WAL some reader still holds a read mark into — which is exactly how
-/// the file grows without bound when a pooled reader wedges (the live 1.44 GB WAL): the
-/// size-triggered escalation below therefore finishes with TRUNCATE, which (on its own dedicated
-/// connection, bounded by `busy_timeout`, retried next tick on SQLITE_BUSY) waits the readers out,
-/// resets the log, and shrinks the file to zero — never on the writer's connection, so a busy
-/// writer degrades the escalation to "try again next second", not to a confirm stall.
+/// PASSIVE does not shrink the `-wal` file; it stays at the high-water of the largest single
+/// transaction. Nor can PASSIVE reset a WAL that some reader still holds a read mark into, which is
+/// how the file grows without bound when a pooled reader lingers. The size-triggered escalation
+/// below therefore finishes with TRUNCATE, which waits the (recycled, so bounded) readers out,
+/// resets the log and truncates the file to zero. TRUNCATE runs on this dedicated connection,
+/// bounded by `busy_timeout` and retried next tick on SQLITE_BUSY — never on the writer's
+/// connection, where it would stall a confirm.
 fn spawn_checkpointer(
     mut conn: SqliteConnection,
     near_tip: Arc<AtomicBool>,
@@ -240,37 +215,30 @@ fn spawn_checkpointer(
         // far), not a per-run delta — the counter must add only the advance since the last pass, and
         // treat a smaller value as a WAL reset (write pointer back at the front).
         let mut prev_checkpointed: i64 = 0;
-        // Bulk-phase drain cadence: near the tip the checkpointer drains every tick (1 s); during bulk
-        // catch-up it drains far less often so the confirm writer keeps most of the iSCSI write budget,
-        // but it MUST still drain. A fully-quiet bulk checkpointer let the WAL grow to the in-writer
-        // wal_autocheckpoint failsafe (262144 pages ≈ 1 GB) — whose blocking copy-to-DB stalls the
-        // confirmed peak for minutes on slow storage (peak freeze → liveness restart → repeat), because
-        // a from-genesis sync is millions of blocks from tip and never reaches the "drain at tip" path.
-        // At ~1 MB/s WAL growth a 20 s cadence bounds the file to tens of MB, orders of magnitude under
-        // the failsafe, and each off-writer PASSIVE pass is cheap.
+        // Bulk-phase drain cadence. Near the tip the checkpointer drains every tick (1 s); during
+        // bulk catch-up it drains far less often so the confirm writer keeps most of the write
+        // budget, but it MUST still drain: a from-genesis sync never reaches the near-tip path, so
+        // a quiet bulk checkpointer leaves the WAL to grow into the in-writer wal_autocheckpoint
+        // failsafe and its blocking copy-to-DB.
         const BULK_CHECKPOINT_TICKS: u32 = 20;
         let mut bulk_tick: u32 = 0;
         loop {
             tick.tick().await;
-            // Read-pool census every tick (cheap atomics): the WAL-pin witness. A high idle count while
-            // `wal_frames` refuses to fall means a pooled reader holds an old WAL read mark, blocking the
-            // checkpoint reset — names the reader that pins the WAL.
+            // Read-pool census every tick: a high idle count while `wal_frames` refuses to fall
+            // means a pooled reader holds an old WAL read mark and is blocking the checkpoint reset.
             telemetry
                 .read_pool_idle
                 .store(read.num_idle() as u64, Ordering::Relaxed);
             telemetry
                 .read_pool_size
                 .store(u64::from(read.size()), Ordering::Relaxed);
-            // The SIZE trigger, checked every tick in every phase (one file-metadata stat): a WAL
-            // past the trigger is drained NOW. The cadence alone proved insufficient live — a
-            // wedged reader let the file grow monotonically to the in-writer failsafe with the
-            // checkpointer completing zero effective passes.
+            // The size trigger, checked every tick in every phase (one file-metadata stat): a WAL
+            // past the trigger is drained NOW. The cadence alone does not bound the file, since a
+            // reader pinning the read mark makes every PASSIVE pass a no-op.
             let over_trigger =
                 std::fs::metadata(&wal_path).map_or(0, |m| m.len()) > wal_drain_trigger_bytes;
-            // Best-effort: a busy/failed checkpoint is retried on the next tick.
-            // Phase-aware cadence: near the tip drain every tick; during bulk drain on the slow cadence
-            // above — enough to bound the WAL below the failsafe while leaving the write budget to
-            // catch-up — unless the size trigger fired.
+            // Best-effort: a busy/failed checkpoint is retried on the next tick. Near the tip drain
+            // every tick; during bulk use the slow cadence above unless the size trigger fired.
             if !near_tip.load(Ordering::Relaxed) {
                 bulk_tick = bulk_tick.wrapping_add(1);
                 if !over_trigger && !bulk_tick.is_multiple_of(BULK_CHECKPOINT_TICKS) {
@@ -280,11 +248,9 @@ fn spawn_checkpointer(
                 bulk_tick = 0;
             }
             checkpoint_pass(&mut conn, &telemetry, &mut prev_checkpointed, "PASSIVE").await;
-            // Escalation: PASSIVE copies frames but neither resets a reader-pinned log nor ever
-            // shrinks the file. If the file is STILL past the trigger after the PASSIVE copy,
-            // TRUNCATE it — waits out the (recycled, so bounded) readers, resets the log, and
-            // truncates the file to zero. Bounded by the connection's busy_timeout; SQLITE_BUSY
-            // lands in checkpoint_busy/errors telemetry and the next tick retries.
+            // PASSIVE neither resets a reader-pinned log nor shrinks the file, so if it is still
+            // past the trigger afterwards, escalate to TRUNCATE. Bounded by the connection's
+            // busy_timeout; SQLITE_BUSY lands in telemetry and the next tick retries.
             if over_trigger
                 && std::fs::metadata(&wal_path).map_or(0, |m| m.len()) > wal_drain_trigger_bytes
             {
@@ -296,8 +262,7 @@ fn spawn_checkpointer(
 
 /// One timed `PRAGMA wal_checkpoint(mode)` on the dedicated checkpointer connection, its result
 /// row — (busy, log, checkpointed) per SQLite's wal_checkpoint docs — captured into the
-/// telemetry: duration histogram, frames drained, WAL length in frames, busy passes, outright
-/// errors. This is the "is the checkpointer keeping up" instrument.
+/// telemetry: duration histogram, frames drained, WAL length in frames, busy passes, errors.
 async fn checkpoint_pass(
     conn: &mut SqliteConnection,
     telemetry: &StoreTelemetry,
@@ -352,8 +317,8 @@ async fn migrate(conn: &mut SqliteConnection) -> Result<(), StoreError> {
         .execute(&mut *conn)
         .await?;
     // 0003 (service indexes) and 0006 (reorg indexes) are deferred to `build_indexes` at the
-    // sync->tip transition — see the postgres migrate note and the coin-record index-cost
-    // hardware report: secondary coin_record indexes are pure write-amplification during sync.
+    // sync->tip transition: secondary coin_record indexes are pure write-amplification during
+    // sync (see the postgres migrate note).
     #[cfg(feature = "hint")]
     sqlx::raw_sql(include_str!("../../migrations/sqlite/0004_hint.sql"))
         .execute(&mut *conn)

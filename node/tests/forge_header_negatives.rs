@@ -1,7 +1,5 @@
-// Tier-1 A-class header-mutation negatives (Q2 correctness campaign #195), the corpus-mutation
-// substitute for chia's block_tools re-forging. chia's TestBlockHeaderValidation builds a valid block
-// with block_tools (plots + BLS keys + VDF), mutates ONE field, and asserts the exact Err code
-// (chia/_tests/blockchain/test_blockchain.py). We cannot farm plots or compute VDFs in a test, so we
+// A-class header-mutation negatives, by corpus mutation rather than block re-forging: we cannot
+// farm plots or compute VDFs in a test, so we
 // start from a REAL mainnet header (the committed recent-chain corpus, heights 9054524..=9054620 —
 // the same fixture header_validation.rs validates clean), mutate ONE field, and drive it back through
 // the node's promoted validator (`validate_finished_header`) against the real ancestor map. The block
@@ -9,7 +7,7 @@
 // single-field flip that this node catches is proof of the rejection seam.
 //
 // A-class = the mutation breaks a hash/quality/structural check the validator asserts INLINE, so the
-// EXACT chia error name is recoverable (vs B-class, where the deferred-VDF batch collapses the code —
+// EXACT error name is recoverable (vs B-class, where the deferred-VDF batch collapses the code —
 // those live in forge_header_negatives_bclass.rs / are pinned by accepted-set). The target 9_054_611
 // is a clean non-genesis block with a signage point (sp_index != 0), so the sp/foliage signature and
 // total-iters gates are all live.
@@ -187,8 +185,7 @@ fn assert_rejects(mutate: impl FnOnce(&mut HeaderBlock), expected: &str) {
     );
 }
 
-// chia test_invalid_pospace / test_bad_pos (test_blockchain.py:529, 1208): a broken proof-of-space
-// field makes the quality string None → INVALID_POSPACE.
+// A broken proof-of-space field makes the quality string None -> INVALID_POSPACE.
 #[test]
 fn bad_proof_of_space_challenge_is_invalid_pospace() {
     assert_rejects(
@@ -197,7 +194,7 @@ fn bad_proof_of_space_challenge_is_invalid_pospace() {
     );
 }
 
-// chia test_bad_total_iters (test_blockchain.py:1299): total_iters off by one → INVALID_TOTAL_ITERS.
+// total_iters off by one -> INVALID_TOTAL_ITERS.
 #[test]
 fn bad_total_iters_is_rejected() {
     assert_rejects(
@@ -206,8 +203,7 @@ fn bad_total_iters_is_rejected() {
     );
 }
 
-// chia test_reward_block_hash (test_blockchain.py:1838): a wrong foliage.reward_block_hash →
-// INVALID_REWARD_BLOCK_HASH (check 32, inline).
+// A wrong foliage.reward_block_hash -> INVALID_REWARD_BLOCK_HASH (check 32, inline).
 #[test]
 fn bad_reward_block_hash_is_rejected() {
     assert_rejects(
@@ -220,9 +216,9 @@ fn bad_reward_block_hash_is_rejected() {
 // reward-chain block. The signage-point signatures are part of the reward-chain block hash, so a naive
 // sig flip ALSO breaks the inline URSB check, which fires BEFORE the deferred signature batch (our
 // window pipeline defers header-sig verification, then drains it after the inline ladder — see
-// node/src/header.rs). chia's inline sig check (test_blockchain.py check 12/14) fires before check 18,
-// so chia never sees this; the pure-hash re-cohere restores that ordering and lets the deferred batch
-// be the sole catch, reporting the exact sig tag via first_failing_sig.
+// node/src/header.rs). An inline sig check (checks 12/14) would fire before check 18; the pure-hash
+// re-cohere restores that ordering and lets the deferred batch be the sole catch, reporting the
+// exact sig tag via first_failing_sig.
 fn recohere_reward_hashes(b: &mut HeaderBlock) {
     // The sp signatures live in the reward-chain block, so a sig flip perturbs BOTH reward-block
     // hash commitments the inline ladder checks before the deferred sig batch runs: check 18 hashes
@@ -236,8 +232,8 @@ fn recohere_reward_hashes(b: &mut HeaderBlock) {
     b.foliage.reward_block_hash = b.reward_chain_block.hash().expect("reward block hash");
 }
 
-// chia test_bad_rc_sp_sig (test_blockchain.py:1344): a bad reward-chain signage-point signature →
-// INVALID_RC_SIGNATURE. A zero G2 point fails closed in bls_verify (no panic).
+// A bad reward-chain signage-point signature -> INVALID_RC_SIGNATURE. A zero G2 point fails closed
+// in bls_verify, without panicking.
 #[test]
 fn bad_rc_sp_signature_is_rejected() {
     assert_rejects(
@@ -249,8 +245,7 @@ fn bad_rc_sp_signature_is_rejected() {
     );
 }
 
-// chia test_bad_cc_sp_sig (test_blockchain.py:1387): a bad challenge-chain signage-point signature →
-// INVALID_CC_SIGNATURE.
+// A bad challenge-chain signage-point signature -> INVALID_CC_SIGNATURE.
 #[test]
 fn bad_cc_sp_signature_is_rejected() {
     assert_rejects(
@@ -262,8 +257,7 @@ fn bad_cc_sp_signature_is_rejected() {
     );
 }
 
-// chia test_bad_foliage_sb_sig (test_blockchain.py:1402): a bad foliage-block-data signature →
-// INVALID_PLOT_SIGNATURE (block data).
+// A bad foliage-block-data signature -> INVALID_PLOT_SIGNATURE (block data).
 #[test]
 fn bad_foliage_block_data_signature_is_rejected() {
     assert_rejects(
@@ -272,10 +266,7 @@ fn bad_foliage_block_data_signature_is_rejected() {
     );
 }
 
-// chia test_bad_signage_point_index (test_blockchain.py:1257) is VACUOUS: chia's uint8
-// recursive_replace raises ValueError before validation, wrapped in pytest.raises. Ours genuinely
-// reaches check 6 with an out-of-range index (== NUM_SPS_SUB_SLOT) → INVALID_SP_INDEX — a rejection
-// chia never actually exercises.
+// An out-of-range signage-point index (== NUM_SPS_SUB_SLOT) reaches check 6 -> INVALID_SP_INDEX.
 #[test]
 fn signage_point_index_at_bound_is_invalid_sp_index() {
     let bound = u8::try_from(MAINNET.num_sps_sub_slot).expect("num_sps fits u8");
@@ -288,12 +279,12 @@ fn signage_point_index_at_bound_is_invalid_sp_index() {
 // ======================================================================================
 // Tier-1 B-class: infusion-point VDF-mutation negatives.
 //
-// chia asserts an EXACT per-gate code (INVALID_CC_IP_VDF / INVALID_RC_IP_VDF). Our window pipeline
+// The exact per-gate codes are INVALID_CC_IP_VDF / INVALID_RC_IP_VDF, but the window pipeline
 // DEFERS every VDF proof out of the sequential header walk and verifies the whole window's batch
-// across all cores afterwards (node/src/header.rs). A `QueuedVdf` — unlike a `QueuedSig` — carries no
-// gate tag, so a deferred-batch VDF failure collapses to the coarse "INVALID_VDF ... (deferred
-// batch)" string on the single-block path. So B-class arms assert the ACCEPTED-SET (the coarse
-// string) here; C5 adds a VdfGateTag + first_failing_vdf and tightens these to the exact chia codes.
+// across all cores afterwards (node/src/header.rs). A `QueuedVdf` — unlike a `QueuedSig` — carries
+// no gate tag, so a deferred-batch VDF failure collapses to the coarse "INVALID_VDF ... (deferred
+// batch)" string on the single-block path. B-class arms therefore assert that coarse string; a
+// VdfGateTag plus first_failing_vdf would tighten them to the exact codes.
 //
 // A garbage VDF PROOF is the cleanest mutation: the proof is a HeaderBlock field, NOT inside the
 // reward_chain_block, so it perturbs no reward-block hash commitment — the deferred batch is the sole
@@ -302,8 +293,7 @@ fn signage_point_index_at_bound_is_invalid_sp_index() {
 
 fn garbage_proof() -> VdfProof {
     // witness_type 0, a non-empty non-witness, not normalized-to-identity: takes the standard
-    // validate_vdf branch, which the deferred batch then fails (chia uses VDFProof(0, std_hash(b""),
-    // False) in test_bad_cc_ip_vdf / test_bad_rc_ip_vdf).
+    // validate_vdf branch, which the deferred batch then fails.
     VdfProof {
         witness_type: 0,
         witness: UnsizedBytes::new(vec![0u8; 100]),
@@ -311,8 +301,8 @@ fn garbage_proof() -> VdfProof {
     }
 }
 
-// chia test_bad_cc_ip_vdf (test_blockchain.py:1750), proof arm: a bad challenge-chain infusion-point
-// VDF proof → INVALID_CC_IP_VDF. Coarse: INVALID_VDF (deferred batch) until C5.
+// Proof arm: a bad challenge-chain infusion-point VDF proof -> INVALID_CC_IP_VDF, coarsened to
+// INVALID_VDF by the deferred batch.
 #[test]
 fn bad_cc_ip_proof_is_invalid_vdf() {
     assert_rejects(
@@ -321,14 +311,14 @@ fn bad_cc_ip_proof_is_invalid_vdf() {
     );
 }
 
-// chia test_bad_rc_ip_vdf (test_blockchain.py:1778), proof arm: a bad reward-chain infusion-point VDF
-// proof → INVALID_RC_IP_VDF. Coarse: INVALID_VDF (deferred batch) until C5.
+// Proof arm: a bad reward-chain infusion-point VDF proof -> INVALID_RC_IP_VDF, coarsened to
+// INVALID_VDF by the deferred batch.
 #[test]
 fn bad_rc_ip_proof_is_invalid_vdf() {
     assert_rejects(|b| b.reward_chain_ip_proof = garbage_proof(), "INVALID_VDF");
 }
 
-// chia test_bad_cc_ip_vdf (test_blockchain.py:1750), output arm: a wrong challenge-chain IP VDF
+// Output arm: a wrong challenge-chain IP VDF
 // output. The output lives in the reward_chain_block, so check 29's DATA comparison still holds (both
 // sides read the mutated output) but the finished reward-block hash (check 32) breaks — re-cohere it
 // so the deferred proof check is the sole catch.
@@ -344,8 +334,8 @@ fn bad_cc_ip_output_is_invalid_vdf() {
     );
 }
 
-// chia test_bad_rc_ip_vdf (test_blockchain.py:1778), output arm: a wrong reward-chain IP VDF output
-// (target-form check 30) → INVALID_RC_IP_VDF, coarse INVALID_VDF. Same reward-block-hash re-cohere.
+// Output arm: a wrong reward-chain IP VDF output (target-form check 30) -> INVALID_RC_IP_VDF,
+// coarsened to INVALID_VDF. Same reward-block-hash re-cohere.
 #[test]
 fn bad_rc_ip_output_is_invalid_vdf() {
     assert_rejects(

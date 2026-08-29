@@ -1,12 +1,9 @@
-// TLS 1.3 minimum — chia CHIA-2102 (e57358aea): `ssl_context_for_server` sets
-// `minimum_version = TLSv1_3` (and drops the explicit 1.2 cipher list), so every CNI server-side
-// socket refuses a TLS 1.2 handshake. The floor is SERVER-side in chia (ssl_context_for_client
-// keeps python defaults); since one end of every p2p link is a server, the network is 1.3-floored.
+// TLS 1.3 minimum: every server-side socket refuses a TLS 1.2 handshake. The floor is SERVER-side
+// only, and since one end of every p2p link is a server, the network is 1.3-floored.
 //
-// RED before the fix: our `ServerConfig::builder()` accepted rustls' default version set
-// (TLS 1.2 + 1.3), so a 1.2-pinned client completed the handshake below. GREEN: the server is
-// built with `builder_with_protocol_versions(&[&TLS13])` and the 1.2 handshake is refused while
-// the 1.3 path (the stock chia peer shape, `rsa_client_auth_upgrade.rs`) still serves.
+// rustls' default builder accepts TLS 1.2 + 1.3, so the server must be built with
+// `builder_with_protocol_versions(&[&TLS13])`: the 1.2 handshake is then refused while the 1.3
+// path (`rsa_client_auth_upgrade.rs`) still serves.
 
 use dg_xch_core::constants::{CHIA_CA_CRT, CHIA_CA_KEY};
 use dg_xch_core::ssl::{
@@ -116,6 +113,6 @@ async fn server_refuses_tls12_and_accepts_tls13() {
     run.store(false, Ordering::Relaxed);
     assert!(
         v12.is_err(),
-        "a TLS 1.2-only client must be refused — chia e57358aea floors servers at TLS 1.3"
+        "a TLS 1.2-only client must be refused — servers are floored at TLS 1.3"
     );
 }

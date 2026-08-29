@@ -1,19 +1,17 @@
-//! Coin-store body validation on the live add-block path — chia
-//! `chia/consensus/block_body_validation.py::validate_block_body` rules 3, 5, 10, 11, 13-21.
+//! Coin-store body validation on the live add-block path — body rules 3, 5, 10, 11, 13-21.
 //!
-//! chia runs `validate_block_body` for EVERY block added, in both the singleton path
-//! (`full_node.py::add_block` -> `Blockchain.add_block`) and the long-sync batch path
-//! (`add_block_batch` -> `add_prevalidated_blocks` -> `Blockchain.add_block`); `skip_blocks` only
-//! skips blocks already validated below the fork point. There is no body-validation skip window.
-//! dg_xch mirrors that on every transaction block, gated only on FULL COIN HISTORY (a
+//! Body validation runs for EVERY block added, on both the single-block and batch paths.
+//! There is no body-validation skip window.
+//! dg_xch runs them on every transaction block, gated only on FULL COIN HISTORY (a
 //! `--sync-from` anchored store has no coin set below its anchor, so the store-backed rules are
-//! undefined there — chia has no such mode; the pure structural rules still run).
+//! undefined there; the pure structural rules still run).
 //!
 //! Vehicle: real mainnet block 5,000,004 validated on top of the confirmed fixture records
 //! 5,000,000..=5,000,003, with its 223 removals seeded as unspent coin rows at their real heights
 //! and the reward-claim walk grounded by two sub-fixture records (4,999,999 non-tx + 4,999,998 tx,
 //! carrying the claim puzzle hashes the block itself declares). The honest block must ACCEPT with
-//! full enforcement (the false-positive guard); each red test then breaks exactly one rule.
+//! full enforcement (the false-positive guard); each negative test below then breaks exactly one
+//! rule.
 
 mod common;
 
@@ -196,7 +194,7 @@ async fn engine_at_5000003(store: SqliteStore) -> Engine<SqliteStore, NativePrim
 
 // GREEN CONTROL / false-positive guard: the honest mainnet block, with its removals present and
 // unspent and its reward-claim walk grounded, passes FULL body validation (coin rules enforced)
-// and extends the peak. Every rule the red tests below break must NOT fire on real data.
+// and extends the peak. Every rule the negative tests below break must NOT fire on real data.
 #[tokio::test]
 async fn honest_mainnet_block_passes_full_coin_validation() {
     let store = seeded_store(None, None).await;
@@ -218,14 +216,11 @@ async fn honest_mainnet_block_passes_full_coin_validation() {
     assert_eq!(rec.spent_block_index, H);
 }
 
-// F1 (DIVERGENCE / correctness hole this campaign closed): chia block_header_validation.py check
-// 26a rejects a transaction block whose timestamp is more than MAX_FUTURE_TIME2 (120 s) beyond
-// wall-clock now (Err.TIMESTAMP_TOO_FAR_IN_FUTURE). Before this fix the engine read
-// `max_future_time2` NOWHERE — a block claiming an arbitrary far-future timestamp was accepted. The
-// same seeded engine that accepts the honest block4 above must now REJECT it once its timestamp is
-// pushed far into the future. The guard sits before the body/record work, so it wins over the
-// foliage-hash checks the mutated timestamp would otherwise trip — the rejection is specifically the
-// future-timestamp code.
+// A transaction block whose timestamp is more than `max_future_time2` (120 s) beyond wall-clock now
+// is rejected with TIMESTAMP_TOO_FAR_IN_FUTURE. The same seeded engine that accepts the honest
+// block4 above must REJECT it once its timestamp is pushed far into the future. The guard sits
+// before the body/record work, so it wins over the foliage-hash checks the mutated timestamp would
+// otherwise trip, and the rejection is specifically the future-timestamp code.
 #[tokio::test]
 async fn future_dated_transaction_block_is_rejected() {
     let store = seeded_store(None, None).await;
@@ -251,10 +246,9 @@ async fn future_dated_transaction_block_is_rejected() {
 }
 
 // Guard boundary / false-positive control: a timestamp only 60 s ahead is INSIDE the 120 s window,
-// so the future-timestamp guard must NOT fire. The block's outcome is otherwise unchanged from the
-// pre-fix behavior (this node does not separately bind the ftb timestamp on this path — a secondary
-// gap the future guard does not itself close), so we assert only that WHATEVER the outcome, it is not
-// a future-timestamp rejection — proving the guard does not over-reject within the allowed skew.
+// so the future-timestamp guard must NOT fire. This node does not separately bind the ftb timestamp
+// on this path, so the assertion is only that WHATEVER the outcome, it is not a future-timestamp
+// rejection — proving the guard does not over-reject within the allowed skew.
 #[tokio::test]
 async fn timestamp_within_future_window_is_not_rejected_as_future() {
     let store = seeded_store(None, None).await;
@@ -288,9 +282,8 @@ fn probe_removal() -> Bytes32 {
         .name()
 }
 
-// RED 1 — chia rule 15, DOUBLE_SPEND: one of the block's removals is already spent at an
-// ancestor height (at or below the fork point). Pre-fix the engine never consulted the coin
-// store and accepted the block.
+// Rule 15, DOUBLE_SPEND: one of the block's removals is already spent at an
+// ancestor height (at or below the fork point).
 #[tokio::test]
 async fn spending_an_already_spent_coin_is_rejected() {
     let name = probe_removal();
@@ -304,8 +297,8 @@ async fn spending_an_already_spent_coin_is_rejected() {
     assert_eq!(consensus_err(err), ChiaError::DoubleSpend);
 }
 
-// RED 2 — chia rule 15, UNKNOWN_UNSPENT: one of the block's removals does not exist anywhere
-// (store, fork, or this block). Pre-fix: accepted.
+// Rule 15, UNKNOWN_UNSPENT: one of the block's removals does not exist anywhere
+// (store, fork, or this block).
 #[tokio::test]
 async fn spending_a_nonexistent_coin_is_rejected() {
     let name = probe_removal();
@@ -334,8 +327,8 @@ fn rebind_foliage(block: &mut FullBlock) {
     block.foliage.foliage_transaction_block_hash = Some(ftb_hash);
 }
 
-// RED 3 — chia rule 5, INVALID_REWARD_COINS: a tampered reward claim (one mojo added to a claim
-// coin). Pre-fix the engine trusted ti.reward_claims_incorporated wholesale.
+// Rule 5, INVALID_REWARD_COINS: a tampered reward claim (one mojo added to a claim
+// coin): ti.reward_claims_incorporated is recomputed, never trusted.
 #[tokio::test]
 async fn tampered_reward_claims_are_rejected() {
     let store = seeded_store(None, None).await;
@@ -355,8 +348,8 @@ async fn tampered_reward_claims_are_rejected() {
     assert_eq!(consensus_err(err), ChiaError::InvalidRewardCoins);
 }
 
-// RED 4 — chia rule 19, INVALID_BLOCK_FEE_AMOUNT: the declared fee differs from the computed
-// removals-minus-additions. Pre-fix: never computed on the live path.
+// Rule 19, INVALID_BLOCK_FEE_AMOUNT: the declared fee differs from the computed
+// removals-minus-additions.
 #[tokio::test]
 async fn tampered_fee_amount_is_rejected() {
     let store = seeded_store(None, None).await;
@@ -371,8 +364,8 @@ async fn tampered_fee_amount_is_rejected() {
     assert_eq!(consensus_err(err), ChiaError::InvalidBlockFeeAmount);
 }
 
-// RED 5 — chia rule 11, BAD_ADDITION_ROOT / BAD_REMOVAL_ROOT: the foliage merkle roots must
-// commit to the actual coin delta. Pre-fix: never recomputed on the live path.
+// Rule 11, BAD_ADDITION_ROOT / BAD_REMOVAL_ROOT: the foliage merkle roots must
+// commit to the actual coin delta.
 #[tokio::test]
 async fn tampered_addition_and_removal_roots_are_rejected() {
     let store = seeded_store(None, None).await;
@@ -403,8 +396,8 @@ async fn tampered_addition_and_removal_roots_are_rejected() {
     assert_eq!(consensus_err(err), ChiaError::BadRemovalRoot);
 }
 
-// RED — chia rule 12, INVALID_TRANSACTIONS_FILTER_HASH: the foliage BIP158 filter must commit
-// to the actual additions/removals. Pre-fix: never recomputed on the live path.
+// Rule 12, INVALID_TRANSACTIONS_FILTER_HASH: the foliage BIP158 filter must commit
+// to the actual additions/removals.
 #[tokio::test]
 async fn tampered_filter_hash_is_rejected() {
     let store = seeded_store(None, None).await;
@@ -422,8 +415,8 @@ async fn tampered_filter_hash_is_rejected() {
     assert_eq!(consensus_err(err), ChiaError::InvalidTransactionsFilterHash);
 }
 
-// RED 6 — chia rule 3, INVALID_TRANSACTIONS_INFO_HASH: the foliage transaction block must bind
-// the transactions_info by hash. Pre-fix: unchecked on the live path.
+// Rule 3, INVALID_TRANSACTIONS_INFO_HASH: the foliage transaction block must bind
+// the transactions_info by hash.
 #[tokio::test]
 async fn tampered_transactions_info_hash_is_rejected() {
     let store = seeded_store(None, None).await;
@@ -472,7 +465,7 @@ fn tx_record(
     r
 }
 
-/// The exact reward claims chia expects a child transaction block to incorporate for `record`
+/// The exact reward claims a child transaction block must incorporate for `record`
 /// (a transaction block directly on top of another transaction block).
 fn claims_for(record: &BlockRecord) -> Vec<Coin> {
     vec![
@@ -541,7 +534,7 @@ fn synth_tx_block(
         cost: conds.cost,
         reward_claims_incorporated: claims,
     };
-    // The BIP158 filter over every addition's puzzle hash + every removal id (chia rule 12).
+    // The BIP158 filter over every addition's puzzle hash + every removal id (rule 12).
     let all_additions = additions_for_conditions(&conds, &ti.reward_claims_incorporated);
     let all_removals = removals_for_conditions(&conds);
     let mut filter_items: Vec<Vec<u8>> = Vec::new();
@@ -630,7 +623,7 @@ async fn run_synth_spend(
 
 // SYNTHETIC CONTROL: an honest-bodied synthetic spend clears EVERY body rule (reward claims,
 // roots, fees, coin lookups, conditions) and is accepted — the false-positive guard for the
-// synthetic vehicle the red tests below drive.
+// synthetic vehicle the negative tests below drive.
 #[tokio::test]
 async fn honest_synthetic_spend_is_accepted() {
     let create = ConditionWithArgs::CreateCoin(Bytes32::new([0x77; 32]), 9_000, Vec::new());
@@ -645,8 +638,7 @@ async fn honest_synthetic_spend_is_accepted() {
     );
 }
 
-// RED 7 — chia rule 16, MINTING_COIN: additions exceed removals. Pre-fix the engine never
-// compared them (no store lookup, no amounts).
+// Rule 16, MINTING_COIN: additions exceed removals.
 #[tokio::test]
 async fn minting_block_is_rejected() {
     let create = ConditionWithArgs::CreateCoin(Bytes32::new([0x77; 32]), 11_000, Vec::new());
@@ -656,7 +648,7 @@ async fn minting_block_is_rejected() {
     assert_eq!(consensus_err(err), ChiaError::MintingCoin);
 }
 
-// RED 8 — chia rule 10, COIN_AMOUNT_EXCEEDS_MAXIMUM: a created coin above the consensus cap
+// Rule 10, COIN_AMOUNT_EXCEEDS_MAXIMUM: a created coin above the consensus cap
 // (exercised with a lowered cap; mainnet's is u64::MAX, unreachable by construction).
 #[tokio::test]
 async fn oversized_coin_amount_is_rejected() {
@@ -670,8 +662,8 @@ async fn oversized_coin_amount_is_rejected() {
     assert_eq!(consensus_err(err), ChiaError::CoinAmountExceedsMaximum);
 }
 
-// RED 9 — rule-21 coin context (chia check_time_locks): ASSERT_MY_BIRTH_HEIGHT against the spent
-// coin's actual birth height. Pre-fix the coin context was always empty, so the assert never ran.
+// Rule 21 coin context (time-lock checks): ASSERT_MY_BIRTH_HEIGHT against the spent
+// coin's actual birth height, which requires a populated coin context.
 #[tokio::test]
 async fn wrong_birth_height_assert_is_rejected() {
     let conditions = vec![
@@ -684,10 +676,10 @@ async fn wrong_birth_height_assert_is_rejected() {
     assert_eq!(consensus_err(err), ChiaError::InvalidCondition);
 }
 
-// RED 10 — chia rule 15 with ForkInfo semantics, DOUBLE_SPEND_IN_FORK: a reorg-candidate branch
+// Rule 15 with ForkInfo semantics, DOUBLE_SPEND_IN_FORK: a reorg-candidate branch
 // block spending a coin ALREADY SPENT EARLIER ON THE SAME BRANCH is rejected at arrival — the
-// fork view must carry the branch's own removals, not just the main chain's. Pre-fix: accepted
-// into the branch, poisoning any later reorg replay.
+// fork view must carry the branch's own removals, not just the main chain's; admitting it would
+// poison any later reorg replay.
 #[tokio::test]
 async fn fork_branch_double_spend_is_rejected() {
     let records = common::load_records();
@@ -750,7 +742,7 @@ async fn fork_branch_double_spend_is_rejected() {
         }
     );
 
-    // Branch block A1 (already-validated delta, chia's fork_info role) spends the coin.
+    // Branch block A1 (already-validated delta, the fork-view role) spends the coin.
     let a1 = tx_record(
         template,
         0xa1,

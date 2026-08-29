@@ -3,8 +3,7 @@
 //! A deterministic commitment to the chain's coin set as of a height `H`: a Merkle Mountain
 //! Range over every coin creation confirmed at or below `H`, in canonical confirmation order,
 //! plus a spent-bitmap commitment over the same leaf sequence (the Grin TXO-MMR pattern:
-//! an append-only output MMR paired with a bitmap of which outputs are spent — see
-//! grin `doc/mmr.md` and the Grin "bitmap accumulator" in `core/src/core/pmmr`), bound to the
+//! an append-only output MMR paired with a bitmap of which outputs are spent), bound to the
 //! height and the main-chain header hash at that height.
 //!
 //! This module is the NORMATIVE spec of layout v1. An independent implementation that follows
@@ -18,9 +17,9 @@
 //! `coin_id` ordering is bytewise (unsigned lexicographic over the 32 bytes).
 //!
 //! Why not intra-block insertion order: none of the store backends preserves it. The SQL
-//! schemas key `coin_record` by `coin_name` with no per-block ordinal (see
-//! `stores/migrations/*/0001_coin_record.sql`), and the mmap backend's insertion-ordered coin
-//! log is an implementation detail its table does not guarantee to expose. Bytewise `coin_id`
+//! schemas key `coin_record` by `coin_name` with no per-block ordinal, and the mmap backend's
+//! insertion-ordered coin log is an implementation detail its table does not guarantee to
+//! expose. Bytewise `coin_id`
 //! is the one tie-break every backend can serve identically (SQLite BLOB comparison is
 //! memcmp; Postgres BYTEA comparison is bytewise), and any implementation can reproduce it
 //! from block data alone by sorting each block's additions by coin id. The tie-break is

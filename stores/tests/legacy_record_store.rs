@@ -1,8 +1,8 @@
-//! Restart-resume over a pre-#155 store: a sqlite store whose `block_record.record` blobs are in
+//! Restart-resume over a legacy store: a sqlite store whose `block_record.record` blobs are in
 //! the legacy layout (length-prefixed VDF outputs) must open and serve correctly under the
-//! chia-layout code, and keep following as new (chia-layout) records land on top — no resync.
+//! current code, and keep following as new records land on top — no resync.
 //!
-//! The legacy layout is pinned structurally IN THIS TEST (`legacy_blob_of`): the pre-#155 encoder
+//! The legacy layout is pinned structurally IN THIS TEST (`legacy_blob_of`): the legacy encoder
 //! wrote a u32-BE `0x00000064` prefix ahead of each bare 100-byte VDF output and was otherwise
 //! byte-identical. The store's fallback decoder is proven against that pinned form, not against
 //! its own inverse.
@@ -38,8 +38,8 @@ fn legacy_blob_of(chia: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Downgrade every stored record blob to the legacy layout in place — fabricating the on-disk
-/// state of a store leg written entirely before #155.
+/// Downgrade every stored record blob to the legacy layout in place, fabricating the on-disk
+/// state of a store leg written entirely under the legacy encoder.
 async fn downgrade_store_records(path: &std::path::Path) {
     let url = format!("sqlite://{}", path.display());
     let pool = sqlx::SqlitePool::connect(&url).await.expect("rw connect");
@@ -72,8 +72,7 @@ async fn legacy_layout_store_opens_and_follows() {
     chain.sort_by_key(|r| r.height);
     let peak = chain.last().expect("peak").clone();
 
-    // Phase 1: write the chain the way the pre-#155 fleet did — records + peak — then downgrade
-    // every blob to the legacy byte layout and close the store.
+    // Write the chain, then downgrade every blob to the legacy byte layout and close the store.
     {
         let store = new_store_at(&path).await;
         store.add_block_records(&chain).await.expect("add records");
@@ -82,7 +81,7 @@ async fn legacy_layout_store_opens_and_follows() {
     }
     downgrade_store_records(&path).await;
 
-    // Phase 2: reopen under the chia-layout code. Every read path must decode the legacy blobs.
+    // Reopen under the current code. Every read path must decode the legacy blobs.
     let store = new_store_at(&path).await;
     assert_eq!(
         store.get_peak().await.expect("peak"),
@@ -110,8 +109,8 @@ async fn legacy_layout_store_opens_and_follows() {
         .expect("batch get");
     assert_eq!(batch.len(), chain.len());
 
-    // Phase 3: follow. New records land in the chia layout on top of the legacy blobs; the store
-    // must extend the chain and serve both generations.
+    // Follow: new records land in the current layout on top of the legacy blobs; the store must
+    // extend the chain and serve both generations.
     let mut next = peak.clone();
     next.prev_hash = peak.header_hash;
     next.height = peak.height + 1;

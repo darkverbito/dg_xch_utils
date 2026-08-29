@@ -162,14 +162,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-// chia's DB (and chia_rs) BlockRecord layout is byte-identical to ours since campaign issue
-// #155 landed (the VDF outputs are bare fixed-100-byte ClassgroupElements): decode directly,
-// with chia's exact-fit framing (from_bytes + no trailing bytes).
+// The reference DB's BlockRecord layout is byte-identical to ours (the VDF outputs are bare
+// fixed-100-byte ClassgroupElements), so decode directly with exact-fit framing: from_bytes and
+// no trailing bytes.
 fn parse_chia_db_record(bytes: &[u8]) -> Result<BlockRecord, Box<dyn std::error::Error>> {
     let mut c = Cursor::new(bytes);
     let record = BlockRecord::from_bytes(&mut c, VERSION)?;
     if c.position() != bytes.len() as u64 {
-        return Err("trailing bytes after chia DB BlockRecord".into());
+        return Err("trailing bytes after imported BlockRecord".into());
     }
     Ok(record)
 }

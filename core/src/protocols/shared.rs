@@ -10,15 +10,15 @@ pub enum Capability {
     BlockHeaders = 2,
     RateLimitsV2 = 3,
     NoneResponse = 4,
-    // chia shared_protocol.Capability (2.7.1): the mempool-update push surface — deliberately
-    // NOT advertised (see the DIVERGENCES documented-intentional table).
+    // The mempool-update push surface. Defined for wire compatibility but deliberately not
+    // advertised.
     MempoolUpdates = 5,
     // Signals Hard Fork 2 support — pre-activation on mainnet (HF2 standing bucket).
     HardFork2 = 6,
-    // chia a1b12d321: when both peers advertise this, a ConfigureWindowSizes message follows
-    // the handshake and window-based (in-flight) rate limits replace v2 for the supported
-    // message types (`rate_limits_v3`). Not in the default outgoing set — chia 2.7.1 parity:
-    // the responder mirrors it when the initiator advertises it.
+    // When both peers advertise this, a ConfigureWindowSizes message follows the handshake and
+    // window-based (in-flight) rate limits replace v2 for the supported message types
+    // (`rate_limits_v3`). Not in the default outgoing set: the responder mirrors it when the
+    // initiator advertises it.
     RateLimitsV3 = 7,
 }
 
@@ -35,13 +35,12 @@ pub struct Handshake {
     pub capabilities: Capabilities, //Min Version 0.0.34
 }
 
-/// The `error` protocol message body — chia `shared_protocol.Error` (introduced in chia
-/// ede354c58; message-type code 255). CNI ≥ protocol 0.0.35 peers send it in place of a typed
-/// reject when a handler raises `ApiError` (ws_connection.py `error_response_version`), and
-/// tolerate receiving it: chia's `_api_call` decodes an inbound `error`, logs a warning, and
-/// carries on — no ban, no disconnect. Named `ErrorMessage` here (chia calls the streamable
-/// `Error`) to keep `std::io::Error` unambiguous at use sites. `data` streams as chia `bytes`
-/// (u32 length prefix + raw bytes — `Vec<u8>`'s exact wire shape).
+/// The `error` protocol message body (message-type code 255). Peers at protocol >= 0.0.35 send it
+/// in place of a typed reject when a handler fails, and tolerate receiving it: an inbound `error`
+/// is decoded, logged as a warning, and carried on from — no ban, no disconnect. Named
+/// `ErrorMessage` rather than `Error` to keep `std::io::Error` unambiguous at use sites. `data`
+/// streams as protocol `bytes`: a u32 length prefix plus raw bytes, which is `Vec<u8>`'s exact
+/// wire shape.
 #[derive(ChiaSerial, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ErrorMessage {
     pub code: i16,

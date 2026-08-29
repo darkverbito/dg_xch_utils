@@ -1,5 +1,4 @@
-// RATE_LIMITS_V3 constants pinned against chia `chia/server/rate_limits_v3.py` (a1b12d321,
-// in tag 2.7.1) — every entry copied from chia's table, never defaulted.
+// The RATE_LIMITS_V3 constants: every entry pinned to its protocol value, never defaulted.
 
 use dg_xch_core::protocols::ProtocolMessageTypes;
 use dg_xch_core::protocols::rate_limits_v3::{

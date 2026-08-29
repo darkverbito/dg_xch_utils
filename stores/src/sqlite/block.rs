@@ -22,7 +22,7 @@ const UPSERT_RECORD: &str = "INSERT INTO block_record \
     is_transaction_block = excluded.is_transaction_block, sub_epoch_summary = excluded.sub_epoch_summary, \
     record = excluded.record";
 
-// Legacy-tolerant (pre-#155 blobs decode via the fallback walk; see record_compat.rs).
+// Legacy-tolerant: older blobs decode via the fallback walk; see record_compat.rs.
 use crate::record_compat::decode_record;
 
 // Shared write bodies, parameterized over the connection so the same statements run either in a
@@ -240,9 +240,9 @@ impl BlockStore for SqliteStore {
         &self,
         h: u32,
     ) -> Result<Option<SerializedProgram>, StoreError> {
-        // Single confirmed-main-chain join (mirror of chia get_generators_at): the referenced generator lives
-        // in the block occupying `h` on the confirmed chain. No cheap generator-only parser exists, so the
-        // cold body is decompressed and decoded to the FullBlock, then its generator is returned.
+        // Single confirmed-main-chain join: the referenced generator lives in the block occupying
+        // `h` on the confirmed chain. No cheap generator-only parser exists, so the cold body is
+        // decompressed and decoded to the FullBlock, then its generator is returned.
         let row = sqlx::query(
             "SELECT block_body.body FROM block_body \
              JOIN block_record ON block_record.header_hash = block_body.header_hash \
@@ -472,8 +472,7 @@ impl BlockStore for SqliteStore {
         &self,
         ses_hash: &Bytes32,
     ) -> Result<Option<Vec<u8>>, StoreError> {
-        // chia BlockStore.get_sub_epoch_challenge_segments (block_store.py:173-192), minus the
-        // decode: the store hands back the opaque SubEpochSegments bytes.
+        // No decode here: the store hands back the opaque SubEpochSegments bytes.
         let row = sqlx::query(
             "SELECT challenge_segments FROM sub_epoch_segments_v3 WHERE ses_block_hash = ?",
         )
@@ -491,10 +490,9 @@ impl BlockStore for SqliteStore {
         ses_hash: &Bytes32,
         bytes: &[u8],
     ) -> Result<(), StoreError> {
-        // chia BlockStore.persist_sub_epoch_challenge_segments (block_store.py:164-171):
-        // INSERT OR REPLACE, one row per ses block hash. Fixed-arity statement — the default
-        // persistent prepared statement is correct here (the prepare-cache growth was caused by
-        // variable-arity multi-row SQL churning the cache; see postgres/coin.rs).
+        // INSERT OR REPLACE, one row per ses block hash. Fixed-arity statement, so the default
+        // persistent prepared statement is correct here; only variable-arity multi-row SQL churns
+        // the prepare cache (see postgres/coin.rs).
         let mut guard = self.writer.lock().await;
         sqlx::query(
             "INSERT OR REPLACE INTO sub_epoch_segments_v3 (ses_block_hash, challenge_segments) \
