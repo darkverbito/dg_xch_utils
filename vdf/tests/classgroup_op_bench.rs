@@ -1,7 +1,7 @@
 // Seconds-fast micro-benchmark of the class-group hot ops (square / multiply) on a real
 // 1024-bit-discriminant form — the inner loop of VDF verification and therefore of weight-proof
-// validation. The fast measure→optimize→measure loop: run this (seconds), not the 15-minute
-// full weight-proof validation, while iterating on the arithmetic.
+// validation. Run this (seconds), not the full weight-proof validation, while iterating on the
+// arithmetic.
 //
 //   cargo test --release -p dg_xch_vdf --test classgroup_op_bench -- --nocapture
 
@@ -57,8 +57,7 @@ fn classgroup_square_and_multiply_micro_bench() {
     );
 }
 
-// Per-segment overhead outside the class-group ops: get_b = hash_prime(264-bit) prime search via
-// Miller-Rabin — measures whether it is the next optimization target now that ops are ~10x faster.
+// Per-segment overhead outside the class-group ops: get_b = hash_prime(264-bit) prime search.
 #[test]
 fn get_b_micro_bench() {
     use dg_xch_vdf::form::get_b;

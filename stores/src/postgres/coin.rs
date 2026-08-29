@@ -20,9 +20,8 @@ const REMOVALS_PER_STATEMENT: usize = 10_000;
 
 // One block's coin deltas, parameterized over the connection: a self-contained transaction from
 // `apply_block`, or joined onto an open batch from `apply_block_in` (one fsync per block).
-// Multi-row statements, not per-coin queries: each coin as its own INSERT was one network
-// round-trip to the database per coin, which the `window.confirm` gauge exposed as ~60% of a
-// dust-era sync window's wall time (8.7s/window at height 4.69M).
+// Multi-row statements, not per-coin queries: each coin as its own INSERT is one network
+// round-trip to the database per coin.
 async fn apply_block_on(
     conn: &mut sqlx::PgConnection,
     height: u32,
@@ -55,9 +54,8 @@ async fn apply_block_on(
              coin_parent = excluded.coin_parent, amount = excluded.amount, timestamp = excluded.timestamp",
         );
         // persistent(false): the SQL text varies with chunk arity, so a prepared-statement cache
-        // entry (SQL string + per-parameter metadata, ~1MB at full width) is created per distinct
-        // arity per connection and retained — the dominant stack in the heap profile. sqlx's own
-        // QueryBuilder doc prescribes non-persistent execution for variable-length tuples.
+        // entry is created and retained per distinct arity per connection. sqlx's QueryBuilder
+        // doc prescribes non-persistent execution for variable-length tuples.
         qb.build().persistent(false).execute(&mut *conn).await?;
     }
     let removals = crate::sorted_removal_names(removals);
@@ -78,8 +76,7 @@ async fn apply_block_on(
 
 // The fork revert, parameterized over the connection: a self-contained transaction from
 // `rollback_to`, or the FIRST statements of the engine's single-transaction reorg from
-// `rollback_to_in` (rollback + branch re-applies + peak flip commit as one unit — chia
-// blockchain.py `add_block`'s `async with self.block_store.transaction():`).
+// `rollback_to_in` (rollback + branch re-applies + peak flip commit as one unit).
 async fn rollback_to_on(
     conn: &mut sqlx::PgConnection,
     fork_height: u32,
@@ -166,14 +163,9 @@ impl CoinStore for PostgresStore {
     ) -> Result<u64, StoreError> {
         let conn = batch.pg_conn()?;
         // The reorg transaction commits SYNCHRONOUSLY. The pool-wide `synchronous_commit = off`
-        // (mod.rs) trades a clean loss of the last ~wal_writer_delay of per-block commits for
-        // fsync-free block applies — resyncable chain data, fine to re-fetch. A reorg is different:
-        // it is rare (the ~32 ms fsync cost is irrelevant) and it REPLACES state the node has
-        // already acted on — losing an acknowledged reorg after a crash silently resurrects the
-        // abandoned branch until some later commit lands, inviting a double-spend view. `SET LOCAL`
-        // scopes the override to THIS transaction only; the per-block posture is untouched. Even
-        // without it the single transaction is atomic (async commit never tears or reorders — the
-        // crash loss is always a clean suffix); this buys durability, not consistency.
+        // (mod.rs) is fine for resyncable per-block applies, but losing an acknowledged reorg
+        // after a crash silently resurrects the abandoned branch until some later commit lands.
+        // `SET LOCAL` scopes the override to THIS transaction only.
         sqlx::query("SET LOCAL synchronous_commit = on")
             .execute(&mut *conn)
             .await?;
@@ -181,17 +173,11 @@ impl CoinStore for PostgresStore {
     }
 
     async fn ensure_reorg_indexes(&self) -> Result<(), StoreError> {
-        // Built NON-concurrently, unlike `build_indexes`' `CREATE INDEX CONCURRENTLY`. Two reasons:
-        // (1) the caller is the reorg itself (not a live tip-serving build), and it is not applying
-        // coins meanwhile, so the brief SHARE lock a plain build takes is free here; (2) a
-        // CONCURRENTLY build interrupted by a crash/SIGTERM leaves an INVALID index that
-        // `IF NOT EXISTS` then skips forever (a permanent seq-scan trap), whereas a plain build that
-        // is killed rolls back cleanly and the next reorg simply retries. Same index NAMES as
-        // migration 0006, so a later `build_indexes` (CONCURRENTLY IF NOT EXISTS) is a no-op, and
-        // vice versa. Idempotent: once the index exists this is a catalog check.
-        // confirmed_index is block-sequential (append order) → ~0.98 heap-correlated, so a BRIN
-        // serves the "confirmed_index > $1" rollback range in kilobytes and is near-free on insert.
-        // spent_index is not heap-correlated (create-early/spend-late), so it stays a btree.
+        // Built NON-concurrently: the caller is the reorg itself (no live coin applies, so the
+        // brief SHARE lock is free), and a CONCURRENTLY build interrupted by a crash leaves an
+        // INVALID index that `IF NOT EXISTS` then skips forever. Same index NAMES as migration
+        // 0006, so either path is a no-op after the other. BRIN on confirmed_index
+        // (block-sequential, heap-correlated); btree on spent_index (not heap-correlated).
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS coin_record_confirmed_index ON coin_record USING BRIN (confirmed_index)",
         )
@@ -243,8 +229,8 @@ impl CoinStore for PostgresStore {
         if puzzle_hashes.is_empty() {
             return Ok(Vec::new());
         }
-        // Per-puzzle-hash indexed query with a running LIMIT budget so the reply stays bounded by the
-        // caller's `max_items` (chia's max_items parameter, coin_store.py:486-509).
+        // Per-puzzle-hash indexed query with a running LIMIT budget so the reply stays bounded by
+        // the caller's `max_items`.
         let spent_clause = if include_spent {
             ""
         } else {
@@ -282,15 +268,14 @@ impl CoinStore for PostgresStore {
         filters: &CoinStateFilters,
         max_items: usize,
     ) -> Result<(Vec<CoinState>, Option<u32>), StoreError> {
-        // chia coin_store.py:610-633: nothing requested, or filters that admit nothing, finish empty.
+        // Nothing requested, or filters that admit nothing, finish empty.
         if puzzle_hashes.is_empty() || (!filters.include_spent && !filters.include_unspent) {
             return Ok((Vec::new(), None));
         }
         // Same shape as the SQLite leg (see sqlite/coin.rs): per-hash indexed probes, each
         // height-ordered (GREATEST is Postgres's scalar two-arg MAX) and LIMITed to max_items + 1
-        // in SQL, merged bounded — chia coin_store.py:635-671 semantics. The amount predicate
-        // compares the 8-byte big-endian BYTEA bytewise, which IS numeric >=; the zero blob is a
-        // no-op exactly like chia's omitted filter.
+        // in SQL, merged bounded. The amount predicate compares the 8-byte big-endian BYTEA
+        // bytewise, which IS numeric >=; the zero blob is a no-op.
         let height_filter = match (filters.include_spent, filters.include_unspent) {
             (true, true) => "",
             (true, false) => " AND spent_index > 0",
@@ -380,7 +365,7 @@ impl CoinStore for PostgresStore {
         max_items: usize,
     ) -> Result<Vec<Bytes32>, StoreError> {
         use sqlx::Row;
-        // LIMIT in the query, like chia's hint store (hint_store.py:26/42) — never fetch-then-truncate.
+        // LIMIT in the query — never fetch-then-truncate.
         let rows = sqlx::query("SELECT coin_name FROM coin_hint WHERE hint = $1 LIMIT $2")
             .bind(*hint)
             .bind(i64::try_from(max_items).unwrap_or(i64::MAX))

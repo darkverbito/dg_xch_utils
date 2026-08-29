@@ -1,16 +1,6 @@
-//! Compact CLVM node arena — u32 handles into typed pools, mirroring clvm_rs 0.17.7
-//! `src/allocator.rs` (`Allocator { u8_vec, atom_vec, pair_vec }`, `NodePtr` with a 6-bit
-//! object tag over a 26-bit index, small positive integers encoded inline in the handle, and
-//! ghost accounting so the inline optimization cannot change the consensus atom/pair limits).
-//!
-//! This replaces the bumpalo arena + per-op-result deep-copy representation: an eval
-//! intermediate now costs 8 bytes (a pair) or its atom bytes exactly once — never a deep
-//! clone of the accumulated tree. On a dust-era ROM bootstrap run the old representation
-//! retained 429 of 430 MiB of peak heap in eval intermediates (pre-arena baseline).
-//!
-//! Consensus limits (`MAX_NUM_ATOMS` / `MAX_NUM_PAIRS` = 62,500,000, 4 GiB heap ceiling)
-//! and the small-atom canonical-form test (`fits_in_small_atom`) are verbatim from
-//! clvm_rs 0.17.7, the representation proven at mainnet scale.
+//! Compact CLVM node arena — u32 handles into typed pools. A handle carries a 6-bit object
+//! tag over a 26-bit index; small positive integers are encoded inline in the handle, with
+//! ghost accounting so the inline optimization cannot change the consensus atom/pair limits.
 
 use crate::clvm::sexp::{AtomBuf, PairBuf, SExp};
 use crate::clvm::sexp_ext::SExpNumber;
@@ -20,7 +10,7 @@ use num_bigint::{BigInt, Sign};
 use std::fmt;
 use std::sync::Arc;
 
-// clvm_rs 0.17.7 allocator.rs consensus limits.
+// consensus limits
 const MAX_NUM_ATOMS: usize = 62_500_000;
 const MAX_NUM_PAIRS: usize = 62_500_000;
 const NODE_PTR_IDX_BITS: u32 = 26;
@@ -29,8 +19,7 @@ const NODE_PTR_IDX_MASK: u32 = (1 << NODE_PTR_IDX_BITS) - 1;
 const HEAP_LIMIT: usize = u32::MAX as usize;
 
 /// A compact handle to a node in an [`Arena`]. The top 6 bits carry the object type, the low
-/// 26 bits an index (pair pool, atom pool) or the small-atom value itself, exactly as
-/// clvm_rs 0.17.7 `NodePtr`.
+/// 26 bits an index (pair pool, atom pool) or the small-atom value itself.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NodePtr(u32);
 
@@ -95,8 +84,7 @@ impl fmt::Debug for NodePtr {
     }
 }
 
-/// Shape of a node: an atom, or a pair of child handles. Mirrors clvm_rs `SExp` (renamed to
-/// avoid colliding with the crate's tree-owning [`SExp`]).
+/// Shape of a node: an atom, or a pair of child handles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodeKind {
     Atom,
@@ -104,7 +92,7 @@ pub enum NodeKind {
 }
 
 /// Atom bytes: borrowed from the arena heap, or the canonical encoding of an inline small
-/// atom materialized into a 4-byte buffer. Mirrors clvm_rs `Atom`.
+/// atom materialized into a 4-byte buffer.
 #[derive(Debug, Clone, Copy)]
 pub enum Atom<'a> {
     Borrowed(&'a [u8]),
@@ -153,7 +141,7 @@ struct IntPair {
 }
 
 /// Returns the inline value if `v` is the canonical encoding of an unsigned integer that
-/// fits in 26 bits. Verbatim logic from clvm_rs 0.17.7 `fits_in_small_atom`.
+/// fits in 26 bits.
 #[must_use]
 pub fn fits_in_small_atom(v: &[u8]) -> Option<u32> {
     if !v.is_empty()
@@ -177,7 +165,7 @@ pub fn fits_in_small_atom(v: &[u8]) -> Option<u32> {
     }
 }
 
-/// Length of the canonical encoding of a small-atom value. Verbatim from clvm_rs 0.17.7.
+/// Length of the canonical encoding of a small-atom value.
 #[must_use]
 pub fn len_for_value(val: u32) -> usize {
     if val == 0 {
@@ -206,7 +194,6 @@ pub struct Arena {
     atom_vec: Vec<AtomSpan>,
     // ghost counters account for atoms/pairs/heap-bytes that were optimized out (inline
     // small atoms, zero-copy substr/concat shortcuts) so the consensus limits are unchanged
-    // by the optimizations — clvm_rs 0.17.7 semantics.
     ghost_atoms: usize,
     ghost_pairs: usize,
     ghost_heap: usize,
@@ -236,9 +223,8 @@ impl Arena {
         arena
     }
 
-    /// Truncate all pools (capacity retained) and reset the ghost counters to the clvm_rs
-    /// initial state (2 ghost atoms + 1 ghost heap byte, standing in for the nil()/one()
-    /// clvm_rs historically allocated).
+    /// Truncate all pools (capacity retained) and reset the ghost counters to their initial
+    /// state (2 ghost atoms + 1 ghost heap byte, standing in for nil/one).
     pub fn reset(&mut self) {
         self.u8_vec.clear();
         self.pair_vec.clear();
@@ -287,8 +273,8 @@ impl Arena {
         Ok(NodePtr::new(ObjectType::Pair, idx))
     }
 
-    /// Zero-copy substring view of an atom, clvm_rs 0.17.7 `new_substr`: a new span into the
-    /// parent's bytes for pool atoms; re-encode (and re-inline when canonical) for small atoms.
+    /// Zero-copy substring view of an atom: a new span into the parent's bytes for pool
+    /// atoms; re-encode (and re-inline when canonical) for small atoms.
     pub fn new_substr(
         &mut self,
         node: NodePtr,
@@ -353,8 +339,8 @@ impl Arena {
         }
     }
 
-    /// Concatenation into a single fresh atom, clvm_rs 0.17.7 `new_concat` (including the
-    /// zero- and one-term ghost shortcuts, which keep allocation counters consensus-exact).
+    /// Concatenation into a single fresh atom, including the zero- and one-term ghost
+    /// shortcuts, which keep allocation counters consensus-exact.
     pub fn new_concat(&mut self, new_size: usize, nodes: &[NodePtr]) -> Result<NodePtr, ClvmError> {
         self.check_atom_limit()?;
         let start = self.u8_vec.len();
@@ -427,8 +413,7 @@ impl Arena {
         Ok(NodePtr::new(ObjectType::Bytes, idx))
     }
 
-    /// Encode a number as a fresh atom with the crate's minimal signed big-endian encoding
-    /// (identical bytes to the previous `SExp::from(SExpNumber)` construction paths).
+    /// Encode a number as a fresh atom with the crate's minimal signed big-endian encoding.
     pub fn new_number(&mut self, n: &SExpNumber) -> Result<NodePtr, ClvmError> {
         match n {
             SExpNumber::I128(v) => self.new_i128(*v),
@@ -715,9 +700,7 @@ impl ArgCursor {
 
 #[cfg(test)]
 mod tests {
-    //! Round-trip and representation tests for the compact arena. The deterministic
-    //! pseudo-random round-trip is the property test for the import/export boundary: for
-    //! every generated tree, import→export must reproduce the exact atom bytes and shape.
+    //! Round-trip and representation tests for the compact arena.
     use super::*;
     use crate::constants::{NULL_SEXP, ONE_SEXP};
 
@@ -785,8 +768,7 @@ mod tests {
 
     #[test]
     fn number_encode_matches_sexp_from() {
-        // arena number encoding must be byte-identical to SExp::from's minimal signed
-        // big-endian, the encoding the previous representation shipped on the wire.
+        // arena number encoding must be byte-identical to SExp::from's minimal signed big-endian
         let mut a = Arena::new();
         for v in [
             0i64,
@@ -871,9 +853,8 @@ mod tests {
         assert_eq!(back, tree);
     }
 
-    // Deterministic pseudo-random round-trip property: 2,000 generated trees with mixed
-    // atom encodings (canonical, non-canonical, long) and nesting must survive
-    // import→export byte-identically.
+    // 2,000 generated trees with mixed atom encodings (canonical, non-canonical, long)
+    // and nesting must survive import→export byte-identically.
     #[test]
     fn round_trip_property_pseudo_random() {
         fn xorshift(state: &mut u64) -> u64 {

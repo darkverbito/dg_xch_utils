@@ -319,19 +319,9 @@ impl<'a> SExp<'a> {
                 "substr invalid bounds: {start} is > {end}"
             )));
         }
-        // Zero-copy view into the source atom, mirroring clvm_rs `Allocator::new_substr` (which
-        // returns an offset view into the parent atom's buffer). The op charges base cost 1 with
-        // NO malloc cost — the cost model assumes O(1) substr, so a copying substr was UNMETERED
-        // allocation: an adversarial program could copy up to the whole source atom per unit of
-        // cost, and the legitimate ROM generator's CLVM deserializer (which walks ref atoms via
-        // repeated "rest of buffer" substrs) paid two copies per parse step (the Vec here plus
-        // the arena deep-conversion). Measured on a dust-era corpus: the view cuts
-        // 25-40% of validation wall time; peak memory moves little because the dominant term is
-        // the run arena's retention of ALL eval intermediates (429 of 430 MiB attributed to the
-        // ROM bootstrap run — addressed separately by the compact-arena VM).
-        // Lifetime: the returned atom borrows from `self`, which lives at least as long as the
-        // run (program/args tree or the bump arena), and `AtomBuf::to_owned` deep-copies on the
-        // way out of `run`.
+        // substr charges base cost only, with no malloc cost, so it must be O(1): a copying
+        // substr is unmetered allocation and lets a program copy the whole source atom per
+        // unit of cost. The returned atom borrows from `self`, which outlives the run.
         let sub = SExp::Atom(AtomBuf::Borrowed(&atom[start..end]));
         Ok(sub)
     }
@@ -646,50 +636,37 @@ impl<'a> PairBuf<'a> {
     }
 }
 
-/// A process-wide `()` atom behind an `Arc`, used as an O(1) sentinel when emptying an owned
-/// `PairBuf` link during the iterative teardown in `impl Drop for PairBuf`. Cloning it is a
-/// refcount bump, so unwinding a spine allocates no per-node placeholder.
+/// Shared `()` sentinel used to empty an owned `PairBuf` link during iterative teardown.
+/// Cloning is a refcount bump, so unwinding a spine allocates no per-node placeholder.
 #[inline]
 fn nil_arc() -> Arc<SExp<'static>> {
     static NIL_ARC: Lazy<Arc<SExp<'static>>> = Lazy::new(|| Arc::new(NULL_SEXP));
     (*NIL_ARC).clone()
 }
 
-/// Stack-safe teardown of an owned cons spine (security finding U1).
+/// Stack-safe teardown of an owned cons spine.
 ///
-/// `SExp::Pair(PairBuf::Owned((Arc<SExp>, Arc<SExp>)))` forms an owned tree, and the compiler's
-/// default drop glue walks it recursively — one native stack frame per level. A deeply
-/// right-nested owned structure (e.g. a `run` result exported from the arena as a 500k-deep
-/// condition list) therefore overflows the native stack when freed (SIGABRT). clvm_rs is immune
-/// by design: results live in a flat `Allocator` and teardown is a single arena free
-/// (`clvmr::allocator`), never a deep owned tree. Our owned `SExp` is a divergence from that
-/// arena model, so this `Drop` restores the same stack-safety by unwinding the owned spine with
-/// an explicit heap worklist instead of the call stack.
+/// Default drop glue walks an owned `SExp` tree recursively, one native stack frame per level,
+/// so a deeply right-nested structure (a 500k-deep condition list) overflows the stack when
+/// freed. This unwinds the spine with an explicit heap worklist instead.
 ///
-/// The `Drop` lives on `PairBuf` (the field type of `SExp::Pair`), NOT on `SExp` itself: an
-/// explicit `Drop` on `SExp` would make it non-const-promotable, breaking `const NULL_SEXP`/
-/// `ONE_SEXP`, the `&'static` promotion in `SExp::from_bool` and `SExpIter`, and
-/// `Program::new_const` / `NULL_PROGRAM`. A `Drop` on a *field* type carries no such
-/// restriction, keeping the change fully contained. This is deallocation only — it changes no
-/// CLVM value, cost, tree hash, or serialization.
-///
-/// Shared ownership is preserved exactly: an `Arc` link is dismantled only when this teardown is
-/// its sole owner (`Arc::try_unwrap` succeeds). A link still referenced elsewhere is merely
-/// released — its strong count decremented — leaving the shared subtree wholly intact.
+/// Must stay on `PairBuf`, not on `SExp`: an explicit `Drop` on `SExp` makes it
+/// non-const-promotable and breaks `NULL_SEXP` / `ONE_SEXP`, the `&'static` promotions in
+/// `SExp::from_bool` and `SExpIter`, and `Program::new_const` / `NULL_PROGRAM`.
 impl<'a> Drop for PairBuf<'a> {
     fn drop(&mut self) {
         // Borrowed pairs own nothing; only Owned spines need unwinding.
         let PairBuf::Owned((first, rest)) = self else {
             return;
         };
-        // Cannot move fields out of a `Drop` type, so replace each child in place with the nil
-        // sentinel and take ownership of the real children onto the heap worklist.
+        // Fields cannot be moved out of a `Drop` type, so swap in the nil sentinel to take
+        // ownership of the children onto the worklist.
         let mut stack: Vec<Arc<SExp<'static>>> = Vec::new();
         stack.push(replace(first, nil_arc()));
         stack.push(replace(rest, nil_arc()));
         while let Some(link) = stack.pop() {
-            // Only tear apart links we solely own; a shared link is just released here — dropping
-            // the `Err(Arc)` decrements the strong count and leaves the shared subtree intact.
+            // Only dismantle solely-owned links; a shared link is just released, leaving the
+            // shared subtree intact.
             let Ok(mut node) = Arc::try_unwrap(link) else {
                 continue;
             };
@@ -697,8 +674,6 @@ impl<'a> Drop for PairBuf<'a> {
                 stack.push(replace(first, nil_arc()));
                 stack.push(replace(rest, nil_arc()));
             }
-            // `node` drops here: an Atom (trivial) or an already-emptied Pair whose children are
-            // the shared nil sentinel — a shallow, non-recursive free.
         }
     }
 }
@@ -1400,8 +1375,7 @@ impl_nz_ints!(
 #[cfg(test)]
 mod tests {
     //! SExp construction, environment traversal and tree-hash tests.
-    //! The nil tree hash (sha256 of `0x01`) is the canonical CLVM `()` hash used
-    //! throughout chia-blockchain.
+    //! The canonical CLVM `()` tree hash is sha256 of `0x01`.
     use super::*;
 
     #[test]

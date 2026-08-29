@@ -33,13 +33,13 @@ impl Backend {
 
 /// How the local RPC listener (`--rpc`) authenticates clients.
 ///
-/// - `Cni`: CNI-compatible mutual TLS against a per-install PRIVATE certificate authority — chia's
-///   `private_ssl_ca` posture (chia/rpc/rpc_server.py:179-182). The client MUST present a cert that
-///   chains to the private CA (`CERT_REQUIRED`); the served cert is signed by it. The private CA is
-///   taken from `PRIVATE_CA_CRT`/`PRIVATE_CA_KEY` (inline PEM) when both are set, else loaded from —
-///   or generated once and persisted into — `<ssl_dir>/ca/private_ca.{crt,key}`. The world-public
-///   Chia CA is NEVER a client-auth anchor here (it gates only the public P2P listener, whose key
-///   ships in-repo and authenticates nothing).
+/// - `Cni`: CNI-compatible mutual TLS against a per-install PRIVATE certificate authority. The
+///   client MUST present a cert that chains to the private CA; the served cert is signed by it.
+///   The private CA is taken from `PRIVATE_CA_CRT`/`PRIVATE_CA_KEY` (inline PEM) when both are
+///   set, else loaded from — or generated once and persisted into —
+///   `<ssl_dir>/ca/private_ca.{crt,key}`. The world-public Chia CA is NEVER a client-auth anchor
+///   here: its private key is public, so it authenticates nobody. It gates only the public P2P
+///   listener.
 /// - `Local`: for an operator running privately who does not want the cert machinery — server-only
 ///   TLS with an ephemeral self-signed cert and NO client-certificate requirement. Permitted only on
 ///   a LOOPBACK `--rpc` bind; the daemon refuses to start an unauthenticated RPC on a routable
@@ -73,10 +73,10 @@ impl RpcTlsMode {
 
 impl RpcTlsMode {
     /// The effective RPC socket bind for this mode. `Local` is UNAUTHENTICATED, so a routable
-    /// configured bind is DOWNGRADED to loopback (returning `true`) — this neither crashes a
-    /// previously-working node that passes `--rpc 0.0.0.0` NOR network-exposes an unauthenticated
-    /// RPC; the caller logs a loud warning and the operator opts into `--rpc-tls cni` for an
-    /// authenticated network RPC. `Cni` is authenticated and binds exactly as configured.
+    /// configured bind is DOWNGRADED to loopback (returning `true`) rather than exposing an
+    /// unauthenticated RPC to the network; the caller logs a loud warning and the operator opts
+    /// into `--rpc-tls cni` for an authenticated network RPC. `Cni` is authenticated and binds
+    /// exactly as configured.
     #[must_use]
     pub fn resolve_bind(&self, configured: SocketAddr) -> (SocketAddr, bool) {
         match self {
@@ -125,13 +125,11 @@ pub struct Config {
     // over a fetched span just below the anchor. Mutually exclusive with fast sync; independent
     // nodes can each take a disjoint chain segment.
     pub sync_from: u32,
-    // `--uncompact`: enable the compact-VDF solicitation scan (Phase 1.5). OFF by default, mirroring
-    // chia's own `send_uncompact_interval: 0` default (chia/util/initial-config.yaml:403). With the
-    // flag on, the scan hands bulky proofs to connected bluebox TIMELORDS via
-    // RequestCompactProofOfTime (chia broadcast_uncompact_blocks) and consumes their
-    // RespondCompactProofOfTime through the same validate/swap/re-gossip path as compact-VDF gossip.
-    // On a network-infused node with no timelord peer the scan runs and sends
-    // nothing — the code path exists and fires the moment a bluebox connects.
+    // `--uncompact`: enable the compact-VDF solicitation scan. OFF by default, matching the
+    // network-wide `send_uncompact_interval: 0` default. With the flag on, the scan hands bulky
+    // proofs to connected bluebox TIMELORDS via RequestCompactProofOfTime and consumes their
+    // RespondCompactProofOfTime through the same validate/swap/re-gossip path as compact-VDF
+    // gossip. With no timelord peer the scan runs and sends nothing.
     pub uncompact: bool,
     // `--prefetch-memory-mb <N>`: RAM budget (MiB) for the window readahead's resident block bodies.
     // `None` = the shipped default (256 MiB, adaptive depth ≤ 8, one window per peer) — no change
@@ -147,16 +145,20 @@ pub struct Config {
     // connection, never flooding one. Only takes effect alongside `--prefetch-memory-mb` (or on its
     // own, on the default budget).
     pub prefetch_max_inflight: Option<usize>,
+    /// Outbound connections the node keeps open. Unset = the p2p default.
+    pub target_outbound: Option<usize>,
+    /// Total peers (inbound + outbound) the node accepts. Unset = the p2p default.
+    pub target_peer_count: Option<usize>,
     // `--trusted-peer <node-id-hex>` (repeatable): the cert-hash node ids granted the trusted tier —
-    // chia's `trusted_peers` config map, keyed on `node_id.hex()`. A trusted peer gets the larger
+    // the `trusted_peers` map, keyed on `node_id.hex()`. A trusted peer gets the larger
     // subscription / response-item caps and high-priority transaction-queue placement.
     // Empty (the default) → no peer trusted by node id.
     pub trusted_peers: Vec<String>,
     // `--trusted-cidr <cidr>` (repeatable): CIDR networks whose peers are granted the trusted tier by
-    // remote IP — chia's `trusted_cidrs`. A peer whose host falls in any of these networks gets the
+    // remote IP. A peer whose host falls in any of these networks gets the
     // trusted caps + tx priority, exactly like a configured node id. Parsed once at boot; malformed
     // entries are skipped non-fatally. Note: with no config at all, localhost is STILL auto-trusted
-    // (chia `is_trusted_peer`); these CIDRs extend that to a wider trusted subnet.
+    // by the trust gate; these CIDRs extend that to a wider trusted subnet.
     pub trusted_cidrs: Vec<String>,
 }
 
@@ -182,6 +184,8 @@ impl Config {
         uncompact: bool,
         prefetch_memory_mb: Option<u64>,
         prefetch_max_inflight: Option<usize>,
+        target_outbound: Option<usize>,
+        target_peer_count: Option<usize>,
         trusted_peers: &[String],
         trusted_cidrs: &[String],
     ) -> Result<Self, String> {
@@ -211,6 +215,8 @@ impl Config {
             uncompact,
             prefetch_memory_mb,
             prefetch_max_inflight,
+            target_outbound,
+            target_peer_count,
             trusted_peers: trusted_peers.to_vec(),
             trusted_cidrs: trusted_cidrs.to_vec(),
             rpc_tls: RpcTlsMode::default(),
@@ -260,6 +266,8 @@ mod tests {
             false,
             None,
             None,
+            None,
+            None,
             &[],
             &[],
         )
@@ -282,6 +290,8 @@ mod tests {
             false,
             0,
             false,
+            None,
+            None,
             None,
             None,
             &["aa".repeat(32)],

@@ -1,18 +1,20 @@
-//! Version-tolerant decode for stored `block_record.record` blobs (campaign issue #155).
+//! Version-tolerant decode for stored `block_record.record` blobs.
 //!
-//! Until #155, `BlockRecord.challenge_vdf_output` / `infused_challenge_vdf_output` serialized as
-//! length-prefixed byte vectors (`VdfOutput { data: UnsizedBytes }` — a u32-BE `0x00000064` prefix
-//! ahead of each 100-byte VDF output). chia_rs `BlockRecord` carries bare fixed 100-byte
-//! `ClassgroupElement`s, and the struct now matches chia byte-for-byte — but every store leg in the
-//! fleet still holds records persisted in the legacy layout, and a forced resync is not acceptable.
+//! A legacy layout serialized `BlockRecord.challenge_vdf_output` /
+//! `infused_challenge_vdf_output` as length-prefixed byte vectors (`VdfOutput { data:
+//! UnsizedBytes }` — a u32-BE `0x00000064` prefix ahead of each 100-byte VDF output). The wire
+//! layout carries bare fixed 100-byte `ClassgroupElement`s and the struct now matches it, but
+//! store legs in the fleet still hold records persisted in the legacy layout and a forced
+//! resync is not acceptable.
 //!
-//! Decode strategy: try the chia layout first (every new write, and the steady state once a leg's
-//! records have churned), requiring exact-fit framing — the parse must consume the blob exactly.
+//! Decode strategy: try the wire layout first (every new write, and the steady state once a
+//! leg's records have churned), requiring exact-fit framing — the parse must consume the blob
+//! exactly.
 //! On any failure, fall back to a field-by-field walk of the legacy layout (also exact-fit). The
-//! two layouts cannot be confused: a legacy blob read as chia misplaces every field after byte 101
+//! two layouts cannot be confused: a legacy blob read as the wire form misplaces every field after byte 101
 //! and must survive ~10 constrained Option/bool tag bytes AND land on the exact blob length; the
 //! exact-fit gate alone rejects it in every observed case because the legacy form is 4 (or 8)
-//! bytes longer than the chia form of the same record. New writes always use the chia layout, so
+//! bytes longer than the wire form of the same record. New writes always use the wire layout, so
 //! legacy blobs age out as records are rewritten; reads never require a store migration.
 
 use crate::error::StoreError;
@@ -25,7 +27,7 @@ use std::io::{Cursor, Error, ErrorKind};
 
 const VERSION: ChiaProtocolVersion = ChiaProtocolVersion::Chia0_0_37;
 
-/// Decode a stored record blob: chia layout first (exact fit), legacy layout as the fallback.
+/// Decode a stored record blob: wire layout first (exact fit), legacy layout as the fallback.
 pub(crate) fn decode_record(blob: &[u8]) -> Result<BlockRecord, StoreError> {
     let mut cur = Cursor::new(blob);
     let chia_err = match BlockRecord::from_bytes(&mut cur, VERSION) {
@@ -36,14 +38,14 @@ pub(crate) fn decode_record(blob: &[u8]) -> Result<BlockRecord, StoreError> {
         ),
         Err(e) => e,
     };
-    // Not a chia-layout blob — pre-#155 stored form. Surface the chia-layout error if the
-    // legacy walk fails too: a blob that parses as neither is corrupt, and the primary
-    // (current-layout) diagnosis is the useful one.
+    // Not a wire-layout blob — try the legacy stored form. Surface the wire-layout error if the
+    // legacy walk fails too: a blob that parses as neither is corrupt, and the current-layout
+    // diagnosis is the useful one.
     decode_legacy_record(blob).map_err(|_| StoreError::Io(chia_err))
 }
 
-/// The pre-#155 layout: identical to chia's except the two VDF outputs are length-prefixed
-/// byte vectors instead of bare 100-byte values.
+/// The legacy layout: identical to the wire layout except the two VDF outputs are
+/// length-prefixed byte vectors instead of bare 100-byte values.
 fn decode_legacy_record(blob: &[u8]) -> Result<BlockRecord, Error> {
     fn f<T: ChiaSerialize>(c: &mut Cursor<&[u8]>) -> Result<T, Error> {
         T::from_bytes(c, VERSION)
@@ -119,7 +121,7 @@ mod tests {
             .collect()
     }
 
-    /// Real chia mainnet record blobs (see core/tests/block_record_wire.rs for provenance).
+    /// Real mainnet record blobs (see core/tests/block_record_wire.rs for provenance).
     fn goldens() -> Vec<Vec<u8>> {
         include_str!("../../core/tests/fixtures/block_record_mainnet_3000000.txt")
             .lines()
@@ -128,7 +130,7 @@ mod tests {
             .collect()
     }
 
-    /// Rebuild the pre-#155 blob for a chia-layout record byte-for-byte: the legacy encoder
+    /// Rebuild the legacy blob for a wire-layout record byte-for-byte: the legacy encoder
     /// wrote a u32-BE 0x64 length prefix ahead of each 100-byte VDF output and was otherwise
     /// identical. Pinned here structurally — independent of the shipped legacy decoder — so
     /// the compat path is proven against the layout itself, not against its own inverse.
@@ -168,7 +170,7 @@ mod tests {
             let from_legacy = decode_record(&legacy).expect("legacy blob decodes");
             let from_chia = decode_record(&blob).expect("chia blob decodes");
             assert_eq!(from_legacy, from_chia, "both layouts land the same record");
-            // A legacy record re-encodes in the chia layout — legacy blobs age out on rewrite.
+            // A legacy record re-encodes in the wire layout — legacy blobs age out on rewrite.
             assert_eq!(from_legacy.to_bytes(VERSION).expect("encode"), blob);
         }
     }

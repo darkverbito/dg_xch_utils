@@ -20,10 +20,8 @@ enum Operation {
     SwapEval,
 }
 
-/// The CLVM evaluator over the compact node [`Arena`]. The public surface is
-/// unchanged — `new(max_cost, flags)` + `run(program, args)` — but every eval
-/// intermediate now lives in the arena's typed pools as a u32 handle instead of a
-/// deep-copied `SExp` tree in a bump arena: `cons` is an 8-byte pair-pool push, a
+/// The CLVM evaluator over the compact node [`Arena`]: every eval intermediate lives in
+/// the arena's typed pools as a u32 handle — `cons` is an 8-byte pair-pool push, a
 /// path-traversal result is a handle copy, and an op result is allocated exactly once.
 pub struct ClvmRuntime {
     dialect: ChiaDialect,
@@ -60,19 +58,12 @@ impl ClvmRuntime {
     /// Evaluate `program` and leave the result in this runtime's arena, returning its
     /// [`NodePtr`] and the cost — WITHOUT `export`ing it to an owned `SExp` tree.
     ///
-    /// [`Self::run`] exports the result; that is unsafe for an adversarial block generator
-    /// whose output the caller streams. `export` (`Arena::export`) deep-copies each atom by
-    /// reference — a `concat`/`substr` ladder that emits one shared ~268 MB integer `num`
-    /// times is copied `num` times (a 280,000-arg vector OOM-killed a 24 GiB pod). The exported
-    /// owned `SExp` is a `PairBuf::Owned(Arc<..>)` spine; its `Drop` is iterative (finding U1,
-    /// `impl Drop for PairBuf` in `sexp.rs`), so freeing a 600,000-deep condition list no longer
-    /// overflows the native stack, but the export copy cost above still applies. clvmr never
-    /// materializes the
-    /// result: `run_program` leaves it in the flat `Allocator` and `parse_spends` walks
-    /// `NodePtr`s, charging condition cost incrementally and bailing at the first duplicate /
-    /// `MAX_BLOCK_COST_CLVM` (chia_rs chia-consensus 0.42.1 `conditions.rs::parse_conditions`
-    /// / `sanitize_int.rs::sanitize_uint`). Callers that need to bound a large output must
-    /// walk it from [`Self::arena`] rather than `run`.
+    /// [`Self::run`] exports the result, which is unsafe for an adversarial block generator
+    /// whose output the caller streams: `Arena::export` deep-copies each atom by reference, so a
+    /// `concat`/`substr` ladder emitting one shared ~268 MB integer `num` times is copied `num`
+    /// times and OOM-kills the process. A caller that needs to bound a large output must walk it
+    /// from [`Self::arena`] rather than `run`, charging condition cost incrementally and bailing
+    /// at the first duplicate or at `MAX_BLOCK_COST_CLVM`.
     pub fn run_in_arena(
         &mut self,
         program: &SExp,
@@ -241,7 +232,7 @@ impl ClvmRuntime {
         let args = self.value_stack.pop().ok_or(ClvmError::ValueStackEmpty)?;
         self.value_stack.push(v2_index);
         // Cons must be queued before the operand eval so the accumulated operand list is
-        // rebuilt in clvmr's eval_pair ordering.
+        // rebuilt in the correct order.
         self.op_stack.push(Operation::Cons);
         self.eval_pair(program, args)
     }
@@ -311,18 +302,16 @@ const fn first_non_zero(buf: &[u8]) -> usize {
 
 #[cfg(test)]
 mod tests {
-    //! Eval-loop, environment-traversal and cost-accounting tests.
-    //! The factorial run mirrors chia-blockchain's
-    //! `chia/_tests/clvm/test_clvm_step.py::test_simple_program_run` (result 120).
-    //! The traversal-cost constants are the canonical CLVM path-lookup costs
-    //! (TRAVERSE_BASE_COST 40 + 4 per zero byte + 4 per bit).
+    //! Eval-loop, environment-traversal and cost-accounting tests. The traversal-cost
+    //! constants are the canonical CLVM path-lookup costs (TRAVERSE_BASE_COST 40 +
+    //! 4 per zero byte + 4 per bit).
     use super::*;
     use crate::clvm::program::{Program, SerializedProgram};
     use crate::clvm::sexp::SExp;
     use crate::clvm::utils::INFINITE_COST;
     use num_bigint::BigInt;
 
-    // factorial, from test_clvm_step.py
+    // factorial
     const FACTORIAL_HEX: &str = "ff02ffff01ff02ff02ffff04ff02ffff04ff05ff80808080ffff04ffff01ff02\
 ffff03ffff09ff05ffff010180ffff01ff0101ffff01ff12ff05ffff02ff02ff\
 ff04ff02ffff04ffff11ff05ffff010180ff808080808080ff0180ff018080";
@@ -381,7 +370,7 @@ ff04ff02ffff04ffff11ff05ffff010180ff808080808080ff0180ff018080";
         assert!(matches!(err, ClvmError::CostExceeded(_, _)), "got {err:?}");
     }
 
-    // test_clvm_step.py::test_simple_program_run — factorial(5) == 120.
+    // factorial(5) == 120
     #[test]
     fn factorial_of_five_is_120() {
         let serial = SerializedProgram::from_hex(FACTORIAL_HEX).unwrap();

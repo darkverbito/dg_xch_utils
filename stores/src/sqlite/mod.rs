@@ -106,14 +106,11 @@ impl SqliteStore {
             // WRITER_CACHE_BULK_KIB) — because catch-up batch commits span many blocks and spill
             // at 64 MiB.
             .pragma("cache_size", "-65536")
-            // Keep the writer-COMMIT autocheckpoint OUT of normal operation. The store runs on network
-            // block storage (iSCSI, measured ~100 ms/fsync). An autocheckpoint firing inside a confirm
-            // COMMIT copies the whole accumulated WAL into the DB file and fsyncs it on the hot path — a
-            // multi-second-to-minute writer stall that freezes the confirmed peak and trips the
-            // liveness probe. The dedicated checkpointer (below) does that copy+fsync off the writer.
-            // The threshold is a disk-fill failsafe, not the mechanism: 262 144 pages ≈ 1 GiB is far
-            // above the largest single confirm window's WAL (~240 MiB), so it never fires while the
-            // checkpointer is alive; it only bounds the WAL if that background task ever stops.
+            // Keep the writer-COMMIT autocheckpoint OUT of normal operation: an autocheckpoint
+            // firing inside a confirm COMMIT copies the whole accumulated WAL into the DB file
+            // and fsyncs it on the hot path. The dedicated checkpointer (below) does that
+            // copy+fsync off the writer. The threshold (262 144 pages ≈ 1 GiB) is a disk-fill
+            // failsafe that only bounds the WAL if that background task ever stops.
             .pragma("wal_autocheckpoint", "262144");
         let mut writer = opts.clone().connect().await?;
         // The store opens in the bulk (catch-up) phase: give the writer the bulk cache profile
@@ -159,8 +156,7 @@ impl SqliteStore {
     }
 
     /// Current size in bytes of the `-wal` file (0 when it does not exist yet). A metadata stat —
-    /// cheap enough for every scrape; the same number otherwise watched by hand by listing the
-    /// `-wal` file size while diagnosing WAL growth.
+    /// cheap enough for every scrape.
     #[must_use]
     pub fn wal_file_bytes(&self) -> u64 {
         std::fs::metadata(&self.wal_path).map_or(0, |m| m.len())
@@ -352,8 +348,8 @@ async fn migrate(conn: &mut SqliteConnection) -> Result<(), StoreError> {
         .execute(&mut *conn)
         .await?;
     // 0003 (service indexes) and 0006 (reorg indexes) are deferred to `build_indexes` at the
-    // sync->tip transition — see the postgres migrate note and the coin-record index-cost
-    // hardware report: secondary coin_record indexes are pure write-amplification during sync.
+    // sync->tip transition: secondary coin_record indexes are pure write-amplification during
+    // sync (see the postgres migrate note).
     #[cfg(feature = "hint")]
     sqlx::raw_sql(include_str!("../../migrations/sqlite/0004_hint.sql"))
         .execute(&mut *conn)

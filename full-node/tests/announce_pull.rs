@@ -5,8 +5,8 @@
 // must go back out on the client's own socket. This test stands up exactly that: a mock peer
 // serves; the node under test dials it with its production outbound handler stack
 // (`Node::outbound_handler_factory`); the peer pushes `NewSignagePointOrEndOfSubSlot`; the test
-// asserts the CLIENT socket emits `RequestSignagePointOrEndOfSubSlot` back (chia
-// full_node_api.py new_signage_point_or_end_of_sub_slot → request pull).
+// asserts the CLIENT socket emits `RequestSignagePointOrEndOfSubSlot` back (the announce →
+// pull round trip).
 
 mod common;
 
@@ -39,6 +39,8 @@ fn config(listen: SocketAddr, rpc: SocketAddr) -> Config {
         std::process::id()
     ));
     Config {
+        target_outbound: None,
+        target_peer_count: None,
         listen,
         rpc,
         introducer: None,
@@ -122,8 +124,8 @@ async fn client_link_pulls_announced_signage_point() {
             .await
             .expect("boot"),
     );
-    // Tip-synced posture: the SP/unfinished admission gates require it (chia's "Ignore if
-    // syncing" guard) — live, the follow driver sets this on every confirmed peak.
+    // Tip-synced posture: the SP/unfinished admission gates require it (the ignore-while-
+    // syncing guard) — live, the follow driver sets this on every confirmed peak.
     node.synced.store(true, Ordering::Relaxed);
     let handlers = Arc::new(RwLock::new((node.outbound_handler_factory())()));
     let client_run = Arc::new(AtomicBool::new(true));
@@ -168,7 +170,7 @@ async fn client_link_pulls_announced_signage_point() {
         .await
         .expect("push announce to client");
 
-    // ---- the CLIENT socket must emit the pull (chia new_signage_point_or_end_of_sub_slot) ----
+    // ---- the CLIENT socket must emit the pull (`new_signage_point_or_end_of_sub_slot`) ----
     let mut pulled = None;
     for _ in 0..50 {
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -188,8 +190,8 @@ async fn client_link_pulls_announced_signage_point() {
     server_run.store(false, Ordering::Relaxed);
 }
 
-// The synced flag that GATES those pulls carries chia's semantic — `FullNode.synced`
-// (chia full_node.py:930-948): current iff the last transaction block at-or-below the confirmed
+// The synced flag that GATES those pulls: current iff the last transaction block at-or-below
+// the confirmed
 // peak has a timestamp within the last 7 minutes. Confirming a HISTORICAL peak (the live node sat
 // 8,338 blocks behind with the flag stuck true, pulling tip gossip it accepted 0 of) must NOT
 // count as synced; a fresh-timestamped peak must.
@@ -215,7 +217,7 @@ async fn synced_flag_requires_a_current_chain_tip() {
     node.update_synced().await;
     assert!(
         !node.synced.load(Ordering::Relaxed),
-        "a historical peak must not open the tip-gossip gates (chia full_node.py:930-948)"
+        "a historical peak must not open the tip-gossip gates"
     );
 
     // Advance to a peak whose transaction timestamp is NOW: synced.

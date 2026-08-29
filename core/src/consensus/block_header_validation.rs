@@ -1,5 +1,4 @@
 // Header-block validation: unfinished and finished header checks.
-// Ports chia/consensus/block_header_validation.py (no chia_rs port exists).
 // VDF (dg_xch_vdf) and proof-of-space (dg_xch_pos) verification is injected via HeaderValidationVerifier
 // to avoid a dependency cycle (both crates depend on dg_xch_core).
 
@@ -29,7 +28,7 @@ use std::io::Error;
 
 // Verifier seam so dg_xch_core need not depend on dg_xch_vdf / dg_xch_pos.
 // Which of the five finished-header BLS signature gates a `verify_bls_sig` call is, so the window
-// pipeline's deferred drain can reproduce the EXACT chia rejection string for the failing block
+// pipeline's deferred drain can reproduce the exact rejection string for the failing block
 // instead of a generic "bad sig" (the VDF drain loses its sub-error; this one does not).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum HeaderSigTag {
@@ -55,7 +54,7 @@ impl HeaderSigTag {
 }
 
 pub trait HeaderValidationVerifier {
-    // chia validate_vdf (basic, non normalization-aware form).
+    // VDF validation (basic, non normalization-aware form).
     fn validate_vdf(
         &self,
         constants: &ConsensusConstants,
@@ -65,7 +64,7 @@ pub trait HeaderValidationVerifier {
         target: Option<&VdfInfo>,
     ) -> bool;
 
-    // chia verify_and_get_quality_string.
+    // Proof-of-space quality-string verification.
     fn pospace_quality_string(
         &self,
         constants: &ConsensusConstants,
@@ -115,7 +114,7 @@ impl<T: HeaderValidationVerifier + ?Sized> HeaderValidationVerifier for &T {
     }
 }
 
-// chia ValidationState; prev_ses_block omitted (general-node path is always prev_ses_block=None).
+// Validation state; prev_ses_block omitted (general-node path is always prev_ses_block=None).
 #[derive(Clone, Copy)]
 pub struct ValidationState {
     pub ssi: u64,
@@ -134,7 +133,7 @@ pub fn bls_verify(pk: &Bytes48, msg: &[u8], sig: &Bytes96) -> bool {
     }
 }
 
-// chia validate_pospace_and_get_required_iters. Ok(None) on invalid proof of space.
+// Validate the proof of space and derive required iters. Ok(None) on invalid proof of space.
 #[allow(clippy::unnecessary_wraps, clippy::too_many_arguments)]
 pub fn validate_pospace_and_get_required_iters(
     verifier: &impl HeaderValidationVerifier,
@@ -162,8 +161,7 @@ pub fn validate_pospace_and_get_required_iters(
 
 // The pre-infusion half of a block — every field an UnfinishedBlock already carries. Both the
 // finished and unfinished validators run the same checks over this view, so the two paths can
-// never drift (chia keeps them aligned the same way: validate_finished_header_block calls
-// validate_unfinished_header_block on the shared prefix).
+// never drift.
 pub struct UnfinishedParts<'a> {
     pub finished_sub_slots: &'a [crate::blockchain::subslot_bundle::SubSlotBundle],
     pub reward_chain_block:
@@ -181,13 +179,13 @@ impl UnfinishedParts<'_> {
     }
 }
 
-/// Validate an unfinished header block — everything EXCEPT the infusion-point VDFs (chia
-/// `validate_unfinished_header_block`): finished sub-slots, signage-point VDFs, proof of space,
-/// foliage signatures/bindings, and the pre-infusion difficulty context. The Phase 2.2
+/// Validate an unfinished header block — everything EXCEPT the infusion-point VDFs:
+/// finished sub-slots, signage-point VDFs, proof of space,
+/// foliage signatures/bindings, and the pre-infusion difficulty context. The
 /// pre-infusion pipeline validates gossiped unfinished blocks through this before caching.
 ///
 /// # Errors
-/// Fail-closed: any violation is `Err` with the chia rejection name.
+/// Fail-closed: any violation is `Err` with the rejection name.
 pub fn validate_unfinished_header_block(
     constants: &ConsensusConstants,
     verifier: &impl HeaderValidationVerifier,
@@ -213,8 +211,8 @@ pub fn validate_unfinished_header_block(
     )
 }
 
-// chia validate_unfinished_header_block, recent-chain specialization
-// (skip_overflow_last_ss_validation=false, skip_vdf_is_valid=false). Fail-closed: any violation is Err.
+// Recent-chain specialization (skip_overflow_last_ss_validation=false,
+// skip_vdf_is_valid=false). Fail-closed: any violation is Err.
 #[allow(clippy::too_many_lines)]
 pub fn validate_unfinished_parts(
     constants: &ConsensusConstants,
@@ -894,9 +892,9 @@ pub fn validate_unfinished_parts(
             }
         }
         // 25/26 (filter hash, timestamps): filter check requires check_filter (False here); the
-        // future-timestamp check is wall-clock and non-deterministic, so it is not part of recent-chain
-        // header validation (chia's recent-block path runs the same header validator, but these two checks
-        // do not affect the proof's structural validity for a light client).
+        // future-timestamp check is wall-clock and non-deterministic, so it is not part of
+        // recent-chain header validation — neither affects the proof's structural validity
+        // for a light client.
         if !genesis_block {
             let prev_tx = blocks
                 .get(&ftb.prev_transaction_block_hash)
@@ -911,7 +909,7 @@ pub fn validate_unfinished_parts(
     Ok(required_iters)
 }
 
-// chia validate_finished_header_block. Infusion-point checks on top of the unfinished ones.
+// Infusion-point checks on top of the unfinished ones.
 #[allow(clippy::too_many_lines)]
 pub fn validate_finished_header_block(
     constants: &ConsensusConstants,

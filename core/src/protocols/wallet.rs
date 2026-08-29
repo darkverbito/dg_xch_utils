@@ -9,8 +9,8 @@ use dg_xch_serialize::{ChiaProtocolVersion, ChiaSerialize, parse_vec_limited};
 use serde::{Deserialize, Serialize};
 use std::io::{Cursor, Error};
 
-/// The fixed wire size of a [`Bytes32`] list element — the O(1)-skip stride for the CHIA-4203
-/// limited decoders below (chia `_element_fixed_size` reads the type's `_size`).
+/// The fixed wire size of a [`Bytes32`] list element — the O(1)-skip stride for the limited
+/// decoders below.
 const BYTES32_WIRE_SIZE: u64 = 32;
 
 #[derive(ChiaSerial, Clone, PartialEq, Eq, Serialize, Deserialize, Debug)]
@@ -167,11 +167,9 @@ pub struct RegisterForPhUpdates {
 }
 
 impl RegisterForPhUpdates {
-    /// Decode with `puzzle_hashes` truncated at `max_puzzle_hashes` DURING parse — the CPU half
-    /// of CHIA-4203 (chia `b483e59f22`: `register_for_ph_updates` wires
-    /// `list_limits={"puzzle_hashes": max_subscriptions(peer)}`). Elements past the cap are
-    /// skipped in O(1), never parsed; the fields after the list decode from the exact post-skip
-    /// position.
+    /// Decode with `puzzle_hashes` truncated at `max_subscriptions(peer)` DURING parse.
+    /// Elements past the cap are skipped in O(1), never parsed, so an inflated list claim cannot
+    /// buy parse CPU; the fields after the list decode from the exact post-skip position.
     pub fn from_bytes_limited(
         bytes: &mut Cursor<&[u8]>,
         version: ChiaProtocolVersion,
@@ -210,9 +208,7 @@ pub struct RegisterForCoinUpdates {
 }
 
 impl RegisterForCoinUpdates {
-    /// Decode with `coin_ids` truncated at `max_coin_ids` DURING parse — CHIA-4203
-    /// (chia `b483e59f22`: `register_for_coin_updates` wires
-    /// `list_limits={"coin_ids": max_subscriptions(peer)}`). See
+    /// Decode with `coin_ids` truncated at `max_subscriptions(peer)` DURING parse. See
     /// [`RegisterForPhUpdates::from_bytes_limited`].
     pub fn from_bytes_limited(
         bytes: &mut Cursor<&[u8]>,
@@ -329,9 +325,7 @@ pub struct RequestPuzzleState {
 }
 
 impl RequestPuzzleState {
-    /// Decode with `puzzle_hashes` truncated at `max_puzzle_hashes` DURING parse — CHIA-4203
-    /// (chia `b483e59f22`: `request_puzzle_state` wires
-    /// `list_limits={"puzzle_hashes": CoinStore.MAX_PUZZLE_HASH_BATCH_SIZE}`). See
+    /// Decode with `puzzle_hashes` truncated at `MAX_PUZZLE_HASH_BATCH_SIZE` DURING parse. See
     /// [`RegisterForPhUpdates::from_bytes_limited`].
     pub fn from_bytes_limited(
         bytes: &mut Cursor<&[u8]>,
@@ -376,10 +370,9 @@ pub struct RequestCoinState {
 }
 
 impl RequestCoinState {
-    /// Decode with `coin_ids` truncated at `max_coin_ids` DURING parse — CHIA-4203's motivating
-    /// case (chia `b483e59f22`: a `RequestCoinState` with 1.2M coin_ids cost ~6 s of parse CPU on
-    /// a Pi4; `request_coin_state` wires
-    /// `list_limits={"coin_ids": max_subscribe_response_items(peer)}`). See
+    /// Decode with `coin_ids` truncated at `max_subscribe_response_items(peer)` DURING parse.
+    /// This is the worst case for the unbounded form: a `RequestCoinState` claiming 1.2M coin_ids
+    /// costs seconds of parse CPU on a small node. See
     /// [`RegisterForPhUpdates::from_bytes_limited`].
     pub fn from_bytes_limited(
         bytes: &mut Cursor<&[u8]>,

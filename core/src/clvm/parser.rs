@@ -258,12 +258,8 @@ pub fn sexp_to_bytes(sexp: &SExp) -> std::io::Result<SerializedProgram> {
 
 #[cfg(test)]
 mod tests {
-    //! CLVM (de)serialization tests ported from chia-blockchain's
-    //! `chia/_tests/clvm/test_chialisp_deserialization.py`. Chia asserts these
-    //! fixtures via the CHIALISP_DESERIALISATION CLVM program; here we assert the
-    //! native `sexp_from_bytes` parser round-trips them and that the tree survives.
-    //! The 0xfe back-reference cases mirror chia_rs' `serialized_program`
-    //! back-reference decoder (the 0xfe marker area recently changed here).
+    //! CLVM (de)serialization tests: fixture round-trips through `sexp_from_bytes`,
+    //! back-reference (0xfe) decoding, and decoder fuzz.
     use super::*;
 
     fn parse(hex: &str) -> SExp<'static> {
@@ -271,7 +267,6 @@ mod tests {
         sexp_from_bytes(&mut Cursor::new(bytes.as_slice())).unwrap()
     }
 
-    // Ports chia serialized_atom_overflow() from test_chialisp_deserialization.py.
     // Emits an atom size prefix claiming `size` bytes, followed by only 1000 bytes.
     fn serialized_atom_overflow(size: u64) -> Vec<u8> {
         let mut size_blob: Vec<u8> = if size == 0 {
@@ -311,7 +306,7 @@ mod tests {
         size_blob
     }
 
-    // chia test_deserialization_simple_list: ("hello" "friend")
+    // ("hello" "friend")
     #[test]
     fn deserialization_simple_list_round_trips() {
         let hex = "ff8568656c6c6fff86667269656e6480";
@@ -320,7 +315,6 @@ mod tests {
         assert_eq!(hex::encode(reencoded.as_ref()), hex);
     }
 
-    // chia test_deserialization_password_coin
     #[test]
     fn deserialization_password_coin_round_trips() {
         let hex = "ff04ffff0affff0bff0280ffff01ffa02cf24dba5fb0a30e26e83b2ac5b9e29e1b16\
@@ -331,7 +325,6 @@ mod tests {
         assert_eq!(hex::encode(reencoded.as_ref()), hex);
     }
 
-    // chia test_deserialization_large_numbers
     #[test]
     fn deserialization_large_numbers_round_trips() {
         let hex = "ff9c00f316271c7fc3908a8bef464e3945ef7a253609ffffffffffffffffffb00fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffa1ff22ea0179500526edb610f148ec0c614155678491902d6000000000000000000180";
@@ -340,7 +333,7 @@ mod tests {
         assert_eq!(hex::encode(reencoded.as_ref()), hex);
     }
 
-    // chia test_overflow_atoms: a truncated over-large atom must error, never panic.
+    // a truncated over-large atom must error, never panic
     #[test]
     fn overflow_atoms_error_not_panic() {
         for size in [
@@ -360,7 +353,7 @@ mod tests {
 
     // A CLVM back-reference (0xfe) must decode to the same tree as its expanded
     // form. ("foobar" "foobar") compressed vs expanded (the second element is a
-    // back-reference to the first). Mirrors chia_rs' back-reference decoder.
+    // back-reference to the first).
     #[test]
     fn backreference_matches_expanded_tree() {
         let expanded = parse("ff86666f6f626172ff86666f6f62617280");
@@ -412,11 +405,11 @@ mod tests {
     }
 }
 
-/// Canonical CLVM serialization check — clvmr `is_canonical_serialization`, the SF9
-/// INVALID_TRANSACTIONS_GENERATOR_ENCODING rule: every atom (back-reference path atoms
-/// included) must use the minimal length-prefix encoding, and the stream must contain exactly
-/// one program with no trailing bytes. Only length-prefix minimality is enforced, exactly as
-/// clvmr does — a length-1 atom whose content would fit the single-byte form still passes.
+/// Canonical CLVM serialization check (the SF9 INVALID_TRANSACTIONS_GENERATOR_ENCODING
+/// rule): every atom (back-reference path atoms included) must use the minimal
+/// length-prefix encoding, and the stream must contain exactly one program with no
+/// trailing bytes. Only length-prefix minimality is enforced — a length-1 atom whose
+/// content would fit the single-byte form still passes.
 #[must_use]
 pub fn is_canonical_serialization(bytes: &[u8]) -> bool {
     let mut stream = Cursor::new(bytes);
@@ -447,7 +440,7 @@ pub fn is_canonical_serialization(bytes: &[u8]) -> bool {
 }
 
 // One atom's length prefix is minimal iff the length reaches the prefix width's floor
-// (clvmr `is_canonical_atom`: a 2-byte prefix starts at 1<<6, 3-byte at 1<<13, ...).
+// (a 2-byte prefix starts at 1<<6, 3-byte at 1<<13, ...).
 fn is_canonical_atom(stream: &mut Cursor<&[u8]>, first_byte: u8) -> bool {
     if first_byte == 0x80 || first_byte <= MAX_SINGLE_BYTE {
         return true;
@@ -478,8 +471,7 @@ fn is_canonical_atom(stream: &mut Cursor<&[u8]>, first_byte: u8) -> bool {
 mod canonical_tests {
     use super::is_canonical_serialization;
 
-    // Red-first, mirroring clvmr's own is_canonical_serialization cases: minimal encodings
-    // pass, non-minimal length prefixes and trailing garbage fail.
+    // minimal encodings pass; non-minimal length prefixes and trailing garbage fail
     #[test]
     fn canonical_forms_pass() {
         assert!(is_canonical_serialization(&[0x80])); // nil

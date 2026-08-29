@@ -1,14 +1,8 @@
-// U1 RED TEST — the owned `SExp` type has a RECURSIVE `Drop`.
-//
-// `SExp::Pair(PairBuf::Owned((Arc<SExp>, Arc<SExp>)))` forms an owned tree; dropping a deeply-nested
-// chain recurses one native stack frame per level, so an adversarial CLVM structure that decodes to
-// a deep owned list overflows the stack WHEN DROPPED (SIGABRT). chia/clvm_rs are immune by design —
-// they never materialize a deep owned tree (arena / `NodePtr` indices), so their teardown is a flat
-// arena free. This is a DIVERGENCE from clvm_rs (see docs/security-audit-2026-08.md, finding U1).
-//
-// The test builds a right-nested owned SExp `(() () () … )` DEPTH deep (iteratively — building never
-// recurses) and drops it on a bounded 1 MiB worker stack. On pr-52 HEAD the recursive `Drop`
-// overflows and aborts the process; the iterative-`Drop` fix drops it in O(1) stack and this passes.
+// An adversarial CLVM structure can decode to a deeply-nested owned `SExp`, and a recursive
+// teardown would take one native stack frame per level and abort the process when it is dropped.
+// These tests drop deep owned spines on a bounded 1 MiB worker stack to hold the iterative
+// teardown in place.
+
 use dg_xch_core::clvm::sexp::{AtomBuf, PairBuf, SExp};
 use std::sync::Arc;
 
@@ -23,23 +17,15 @@ fn build_deep(depth: usize) -> SExp<'static> {
     node
 }
 
-// FIXED (chino, CLVM-core): the teardown is now iterative. The naive `impl Drop for SExp` does not
-// compile — `SExp` carries `const NULL_SEXP`/`const ONE_SEXP` used as `&'static`, and a type with an
-// explicit `Drop` impl is not const-promotable, cascading into `from_bool`, `SExpIter`, and
-// `Program::new_const`. Instead the `Drop` lives on `PairBuf` (the field type of `SExp::Pair`), which
-// leaves `SExp` const-promotable, so none of that surface changes. The `Drop` unwinds the owned
-// `Arc<SExp>` spine with an explicit heap worklist (no recursion) and only dismantles links it solely
-// owns (`Arc::try_unwrap`), leaving shared subtrees intact. See `core/src/clvm/sexp.rs`.
 #[test]
 fn deep_owned_sexp_drops_without_stack_overflow() {
-    // 500k levels overflow any reasonable stack under a per-level recursive Drop; a bounded 1 MiB
-    // worker stack makes the crash deterministic, while an iterative Drop passes comfortably.
+    // 500k levels overflow any reasonable stack under a per-level recursive drop.
     const DEPTH: usize = 500_000;
     let handle = std::thread::Builder::new()
         .stack_size(1024 * 1024)
         .spawn(|| {
             let deep = build_deep(DEPTH);
-            drop(deep); // recursive Drop overflows here on pr-52 HEAD (SIGABRT)
+            drop(deep);
             DEPTH
         })
         .expect("spawn worker");
@@ -49,12 +35,8 @@ fn deep_owned_sexp_drops_without_stack_overflow() {
     assert_eq!(n, DEPTH);
 }
 
-// SHARED-OWNERSHIP CORRECTNESS: the iterative teardown must dismantle only the links it SOLELY owns
-// and stop at any `Arc` that is shared with another holder, leaving that shared subtree wholly
-// intact. This builds a deep sole-owned prefix whose tail is a small subtree held alive by an
-// independent `Arc` clone, drops the prefix (which exercises the iterative unwind), and then proves
-// the clone is still a fully-walkable, correct structure — i.e. `Arc::try_unwrap` correctly refused
-// to tear the shared tail apart.
+// The teardown must dismantle only solely-owned links and stop at any `Arc` shared with another
+// holder, leaving that subtree intact.
 #[test]
 fn shared_arc_tail_survives_iterative_drop_of_sole_owned_prefix() {
     // A small, distinctly-shaped shared tail: (1 2 3), i.e. three-deep right-nested owned pairs.
@@ -68,7 +50,6 @@ fn shared_arc_tail_survives_iterative_drop_of_sole_owned_prefix() {
         }
         node
     }
-    // Depth of the shared tail as an independent measurement, so the assertion below is self-checking.
     fn owned_pair_depth(mut node: &SExp<'static>) -> usize {
         let mut d = 0;
         while let SExp::Pair(PairBuf::Owned((_, rest))) = node {
@@ -84,8 +65,7 @@ fn shared_arc_tail_survives_iterative_drop_of_sole_owned_prefix() {
     let expected_depth = owned_pair_depth(&keep);
     assert_eq!(expected_depth, 3);
 
-    // Build a deep sole-owned prefix that ends in the shared tail (deep enough to demand the
-    // iterative unwind, on a bounded worker stack so a recursive teardown would abort).
+    // A sole-owned prefix deep enough to demand the iterative unwind, on a bounded stack.
     const PREFIX: usize = 200_000;
     let handle = std::thread::Builder::new()
         .stack_size(1024 * 1024)
@@ -97,8 +77,7 @@ fn shared_arc_tail_survives_iterative_drop_of_sole_owned_prefix() {
                     node,
                 ))));
             }
-            // Move the prefix out of its Arc (sole owner) and drop it: the iterative teardown walks
-            // down the prefix, reaches the shared tail (strong_count 2), and must NOT dismantle it.
+            // The teardown walks down the prefix, reaches the shared tail, and must stop there.
             let prefix = Arc::try_unwrap(node).unwrap_or_else(|a| (*a).clone());
             drop(prefix);
         })

@@ -132,7 +132,7 @@ impl<'a> BlockView<'a> {
 /// The signage point the node's slot state would return for this block's declare — the SAME VDFs the
 /// real reward chain block carries. At index > 0 it carries the real cc/rc SP VDFs (so the resolved
 /// pospace challenge is `cc_vdf.challenge` = `pos_ss_cc_challenge_hash`, and the reward chain block
-/// reassembles byte-identically); at index 0 it is chia's all-None sub-slot-start SP.
+/// reassembles byte-identically); at index 0 it is the all-None sub-slot-start SP.
 fn reconstruct_signage_point(v: &BlockView) -> SignagePoint {
     if v.rcb.signage_point_index == 0 {
         SignagePoint::sub_slot_start()
@@ -146,8 +146,8 @@ fn reconstruct_signage_point(v: &BlockView) -> SignagePoint {
     }
 }
 
-/// The challenge-chain SP hash a farmer put in `challenge_chain_sp` — chia block_header_validation 5b:
-/// the SP's cc-VDF output hash at index > 0, else the sub-slot challenge itself.
+/// The challenge-chain SP hash a farmer put in `challenge_chain_sp`: the SP's cc-VDF output hash
+/// at index > 0, else the sub-slot challenge itself.
 fn cc_sp_hash(rcb: &RewardChainBlock) -> Bytes32 {
     match &rcb.challenge_chain_sp_vdf {
         None => rcb.pos_ss_cc_challenge_hash,
@@ -163,12 +163,12 @@ fn rc_sp_hash(rcb: &RewardChainBlock) -> Bytes32 {
     }
 }
 
-/// Synthesize the `DeclareProofOfSpace` a farmer would have sent to produce this block — mirroring
-/// chia full_node_api.declare_proof_of_space's inputs, every field lifted from the real block.
+/// Synthesize the `DeclareProofOfSpace` a farmer would have sent to produce this block, every
+/// field lifted from the real block.
 fn synth_declare(v: &BlockView) -> DeclareProofOfSpace {
     let rcb = v.rcb;
     DeclareProofOfSpace {
-        // The resolved cc challenge (chia declare:916 requires it == the SP's cc challenge, which is
+        // The resolved cc challenge (must equal the SP's cc challenge, which is
         // `pos_ss_cc_challenge_hash`); the genesis check and try_build_candidate's cc-match key off it.
         challenge_hash: rcb.pos_ss_cc_challenge_hash,
         challenge_chain_sp: cc_sp_hash(rcb),
@@ -184,8 +184,8 @@ fn synth_declare(v: &BlockView) -> DeclareProofOfSpace {
     }
 }
 
-/// The pool target `try_build_candidate` would resolve for a non-genesis declare — chia declare
-/// :1050-1055: pool-contract plots pin the pool puzzle hash, OG plots carry the farmer's pool_target.
+/// The pool target `try_build_candidate` would resolve for a non-genesis declare: pool-contract
+/// plots pin the pool puzzle hash, OG plots carry the farmer's pool_target.
 fn resolved_pool_target(declare: &DeclareProofOfSpace) -> Option<PoolTarget> {
     if let Some(ph) = declare.proof_of_space.pool_contract_puzzle_hash {
         Some(PoolTarget {

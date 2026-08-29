@@ -1,5 +1,4 @@
 // Sub-epoch-summary construction.
-// Ports chia/consensus/make_sub_epoch_summary.py (no chia_rs port exists).
 
 use crate::blockchain::block_record::BlockRecord;
 use crate::blockchain::sized_bytes::Bytes32;
@@ -90,15 +89,13 @@ pub fn make_sub_epoch_summary(
     })
 }
 
-/// Ports chia/consensus/make_sub_epoch_summary.py `next_sub_epoch_summary`. Returns the sub-epoch
-/// summary that the block AFTER `block` would include, if any — used by the full node when it sends a
-/// farmed/received unfinished block on to timelords (`NewUnfinishedBlockTimelord.sub_epoch_summary`).
-/// `can_finish_soon` is chia's timelord flag: the block need not be able to finish the epoch right now,
-/// only within `MAX_SUB_SLOT_BLOCKS`.
+/// Returns the sub-epoch summary that the block AFTER `block` would include, if any — used
+/// by the full node when it sends a farmed/received unfinished block on to timelords
+/// (`NewUnfinishedBlockTimelord.sub_epoch_summary`). With `can_finish_soon` the block need
+/// not be able to finish the epoch right now, only within `MAX_SUB_SLOT_BLOCKS`.
 ///
-/// Returns `None` in every case chia does: no previous block or the previous block is genesis (so on a
-/// from-zero / near-genesis chain — the faithful-farmer regime — this is always `None`); the block just
-/// included a sub-epoch summary; or the block cannot finish the sub-epoch.
+/// Returns `None` when: there is no previous block or the previous block is genesis; the
+/// block just included a sub-epoch summary; or the block cannot finish the sub-epoch.
 ///
 /// # Errors
 /// Propagates store-walk gaps (a missing ancestor record) and the difficulty/SES-construction errors.
@@ -113,7 +110,7 @@ pub fn next_sub_epoch_summary(
     let signage_point_index = block.reward_chain_block.signage_point_index;
     let prev_header_hash = block.foliage.prev_block_hash;
     let Some(prev_b) = blocks.get(&prev_header_hash) else {
-        // chia try_block_record -> None (prev not known yet) also yields None here.
+        // prev not known yet yields None
         return Ok(None);
     };
     if prev_b.height == 0 {
@@ -217,7 +214,7 @@ pub fn next_sub_epoch_summary(
             signage_point_index,
             required_iters,
         )?;
-        // chia uint128(block.total_iters - ip_iters + sp_iters - (sub_slot_iters if overflow else 0)).
+        // total_iters - ip_iters + sp_iters - (sub_slot_iters if overflow else 0)
         let total_iters = block.reward_chain_block.total_iters;
         let overflow_adj = if overflow {
             u128::from(sub_slot_iters)

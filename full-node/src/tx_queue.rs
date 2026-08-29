@@ -1,38 +1,28 @@
-// The gossip-transaction admission queue with a trusted priority lane — chia `TransactionQueue`
-// (chia/full_node/tx_processing_queue.py, post-9491c6ee3). This is the bounded inbox
-// `on_transaction` fills off the websocket read loop and `spawn_tx_validator` drains.
+// The gossip-transaction admission queue with a trusted priority lane. This is the bounded
+// inbox `on_transaction` fills off the websocket read loop and `spawn_tx_validator` drains.
 //
-// Chia priority semantics (mirrored here): `TransactionQueue.put(tx, peer_id, high_priority)`
-// routes a high-priority (trusted, or local `peer_id=None`) entry into `_high_priority_queue` —
-// an UNBOUNDED SimpleQueue — and `pop()` drains that queue ENTIRELY before it ever touches the
-// per-peer untrusted queues.
+// Priority semantics: a high-priority (trusted, or local) entry goes into the high-priority
+// queue, which `pop()` drains ENTIRELY before it ever touches the per-peer untrusted queues.
 //
-// UNTRUSTED-LANE ORDERING — chia CHIA-3856 (9491c6ee3, cherry-picked as 04b9d010b): an adapted
-// DEFICIT ROUND ROBIN across peers, by advertised CLVM cost.
-//   - Each untrusted peer has its own queue ordered by advertised fee-per-cost, highest first
-//     (chia's per-peer `PriorityQueue` keyed on `-fee_per_cost`; a no-cost-info entry sorts last
-//     at `+inf`).
+// UNTRUSTED-LANE ORDERING is a deficit round robin across peers, by advertised CLVM cost.
+//   - Each untrusted peer has its own queue ordered by advertised fee-per-cost, highest first;
+//     a no-cost-info entry sorts last.
 //   - `pop()` walks the peers round-robin from a cursor. A peer may send its TOP transaction
-//     only when its cost DEFICIT covers the transaction's advertised cost (fallback
-//     `max_tx_clvm_cost` — chia passes `MAX_BLOCK_COST_CLVM // 2` — when the peer advertised no
-//     cost); the pop spends the deficit, resets it to zero when the peer's queue empties, and
-//     advances the cursor to the NEXT peer. When no peer can afford its top transaction, the
-//     LOWEST top-cost among peers with queued transactions is added to every such peer's
-//     deficit and the walk repeats (tx_processing_queue.py:159-205).
-//   This decreases the effect of one peer spamming the node: a peer's high-fpc stream can no
-//   longer monopolize validation order — service interleaves across peers by cost.
+//     only when its cost DEFICIT covers the transaction's advertised cost (falling back to
+//     `max_tx_clvm_cost` when the peer advertised no cost); the pop spends the deficit, resets
+//     it to zero when the peer's queue empties, and advances the cursor to the NEXT peer. When
+//     no peer can afford its top transaction, the LOWEST top-cost among peers with queued
+//     transactions is added to every such peer's deficit and the walk repeats.
+//   This bounds the effect of one peer spamming the node: a peer's high-fpc stream cannot
+//   monopolize validation order — service interleaves across peers by cost.
 //
-// Bounds: chia enforces a per-peer `peer_size_limit` (put raises TransactionQueueFull); we keep
-// that per-peer cap AND the pre-existing aggregate cap on the whole untrusted backlog (ours,
-// documented — chia's aggregate bound is implicit in its connection cap). The advertised
+// Bounds: a per-peer cap AND an aggregate cap on the whole untrusted backlog. The advertised
 // fee/cost affect ONLY service order, never admission — every bundle is validated at its TRUE
 // fee downstream.
 //
-// Cleanup delta (documented): chia prunes empty per-peer queues every 100 pops
-// (`_cleanup_peer_queues`). Our drain is batch-total — `drain_batch` empties every lane — so
-// the equivalent cleanup is a full reset of the per-peer state at the end of the drain (chia
-// resets each peer's deficit to zero the moment its queue empties, so a post-drain reset is
-// state-identical).
+// The drain is batch-total: `drain_batch` empties every lane, so the per-peer state is reset in
+// full at the end of the drain. A peer's deficit is already zeroed the moment its queue empties,
+// so the post-drain reset is state-identical.
 
 use dg_xch_core::blockchain::sized_bytes::Bytes32;
 use dg_xch_core::blockchain::spend_bundle::SpendBundle;
@@ -40,17 +30,17 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, VecDeque};
 
 // One untrusted-lane entry: the bundle and the ADVERTISED fee + cost (from the peer's
-// `NewTransaction`, chia's `PeerWithTx`) the lane orders on.
+// `NewTransaction`) the lane orders on.
 struct UntrustedTx {
     bundle: SpendBundle,
     advertised_fee: u64,
     advertised_cost: u64,
 }
 
-// Order two untrusted entries by advertised fee-per-cost, HIGHEST first (chia `-fee_per_cost` in
-// a lowest-first PriorityQueue). fpc = fee/cost compared without division via cross-multiplication
-// in u128 (advertised_fee ≤ ~2^50, advertised_cost < 2^33, so the product never overflows u128).
-// An entry with zero/unknown advertised cost has no fpc and sorts LAST (chia's `+inf` priority).
+// Order two untrusted entries by advertised fee-per-cost, HIGHEST first. fpc = fee/cost compared
+// without division via cross-multiplication in u128 (advertised_fee <= ~2^50, advertised_cost <
+// 2^33, so the product never overflows u128). An entry with zero/unknown advertised cost has no
+// fpc and sorts LAST.
 fn fee_per_cost_desc(a: &UntrustedTx, b: &UntrustedTx) -> Ordering {
     match (a.advertised_cost, b.advertised_cost) {
         (0, 0) => Ordering::Equal,
@@ -65,43 +55,39 @@ fn fee_per_cost_desc(a: &UntrustedTx, b: &UntrustedTx) -> Ordering {
     }
 }
 
-// A peer's untrusted lane: its fee-ordered queue plus its DRR cost deficit (chia
-// `PeerTransactionsQueue`).
+// A peer's untrusted lane: its fee-ordered queue plus its DRR cost deficit.
 #[derive(Default)]
 struct PeerLane {
-    // fpc-descending; FIFO among equal fpc (insertion keeps arrival order within a priority —
-    // chia's tie order is incidental bytes32 ordering; stable-FIFO is our documented choice).
+    // fpc-descending; FIFO among equal fpc (insertion keeps arrival order within a priority).
     queue: VecDeque<UntrustedTx>,
-    // The peer's deficit, in CLVM cost units (chia `PeerTransactionsQueue.deficit`).
+    // The peer's deficit, in CLVM cost units.
     deficit: u64,
 }
 
 /// A bounded gossip-transaction inbox with a trusted high-priority lane and a deficit-round-robin
-/// untrusted lane (chia `TransactionQueue`, post-CHIA-3856).
+/// untrusted lane.
 pub struct TxQueue {
-    // chia `_high_priority_queue`: trusted (and local) transactions, drained in full before the
-    // untrusted lanes. Unbounded, exactly as chia — trust is the admission control. FIFO.
+    // Trusted (and local) transactions, drained in full before the untrusted lanes. Unbounded:
+    // trust is the admission control here. FIFO.
     high: VecDeque<(Bytes32, SpendBundle)>,
-    // Per-peer untrusted lanes (chia `_peers_transactions_queues`).
+    // Per-peer untrusted lanes.
     lanes: HashMap<Bytes32, PeerLane>,
-    // Round-robin order + cursor (chia `_index_to_peer_map` / `_list_cursor`).
+    // Round-robin order + cursor.
     order: Vec<Bytes32>,
     cursor: usize,
     // Total entries across all untrusted lanes (the aggregate bound's accounting).
     total_untrusted: usize,
-    // Aggregate cap on the untrusted lane (ours; chia bounds per peer only).
+    // Aggregate cap on the untrusted lane, on top of the per-peer bound.
     cap: usize,
-    // Per-peer cap (chia `peer_size_limit` → TransactionQueueFull).
+    // Per-peer cap; a put past it is refused.
     per_peer: usize,
-    // The DRR cost fallback for entries with no advertised cost — chia `max_tx_clvm_cost`
-    // (full_node.py passes `MAX_BLOCK_COST_CLVM // 2`).
+    // The DRR cost fallback for entries with no advertised cost; `MAX_BLOCK_COST_CLVM / 2`.
     max_tx_clvm_cost: u64,
 }
 
 impl TxQueue {
-    /// A queue with the given untrusted-lane bounds and the DRR cost fallback (chia
-    /// `TransactionQueue(peer_size_limit, log, max_tx_clvm_cost=MAX_BLOCK_COST_CLVM // 2)`).
-    /// The high-priority lane is unbounded (chia).
+    /// A queue with the given untrusted-lane bounds and the DRR cost fallback. The
+    /// high-priority lane is unbounded.
     #[must_use]
     pub fn new(cap: usize, per_peer: usize, max_tx_clvm_cost: u64) -> Self {
         Self {
@@ -112,8 +98,7 @@ impl TxQueue {
             total_untrusted: 0,
             cap,
             per_peer,
-            // A zero fallback would let a costless entry pop for free forever; chia's value is
-            // always positive (MAX_BLOCK_COST_CLVM // 2).
+            // A zero fallback would let a costless entry pop for free forever, so floor it.
             max_tx_clvm_cost: max_tx_clvm_cost.max(1),
         }
     }
@@ -121,7 +106,7 @@ impl TxQueue {
     /// Enqueue `bundle` from `peer`. `high_priority` (a trusted peer) routes to the unbounded
     /// priority lane and always succeeds; an untrusted bundle is admitted to its peer's lane only
     /// if BOTH the aggregate and the per-peer bound have room — otherwise it is dropped on the
-    /// floor (chia `TransactionQueueFull`, mapped to a silent drop as before).
+    /// floor.
     /// `advertised_fee`/`advertised_cost` are the peer's `NewTransaction` values; they order the
     /// lane and price the DRR pop, never admission. Returns whether it was admitted.
     pub fn push(
@@ -163,8 +148,7 @@ impl TxQueue {
     }
 
     // The DRR cost of a lane's top entry — the advertised cost, or `max_tx_clvm_cost` when the
-    // peer sent no cost info (chia: "If we don't know the cost information ... fallback to the
-    // highest cost").
+    // peer sent no cost info; an unknown cost falls back to the highest.
     fn top_cost(&self, lane: &PeerLane) -> Option<u64> {
         lane.queue.front().map(|e| {
             if e.advertised_cost > 0 {
@@ -175,8 +159,7 @@ impl TxQueue {
         })
     }
 
-    // One deficit-round-robin pop from the untrusted lanes — the direct port of chia
-    // `TransactionQueue.pop()`'s normal-queue walk (tx_processing_queue.py:159-205).
+    // One deficit-round-robin pop from the untrusted lanes.
     fn pop_untrusted(&mut self) -> Option<(Bytes32, SpendBundle)> {
         if self.total_untrusted == 0 {
             return None;
@@ -209,7 +192,7 @@ impl TxQueue {
                 }
             }
             // No peer could afford its top transaction: add the lowest top-cost to every peer
-            // with queued transactions and try again (chia's deficit replenishment).
+            // with queued transactions and try again.
             let add = lowest_top_cost?;
             for peer in &self.order {
                 if let Some(lane) = self.lanes.get_mut(peer)
@@ -222,24 +205,23 @@ impl TxQueue {
     }
 
     /// Drain the whole queue for the validator worker's batch pass — the high-priority lane first
-    /// (FIFO), then the untrusted lanes in deficit-round-robin order (repeated chia `pop()`).
-    /// The per-peer state is reset afterwards (see the cleanup delta note in the module docs).
+    /// (FIFO), then the untrusted lanes in deficit-round-robin order. The per-peer state is
+    /// reset afterwards (see the module docs).
     pub fn drain_batch(&mut self) -> Vec<(Bytes32, SpendBundle)> {
         let mut out = Vec::with_capacity(self.high.len() + self.total_untrusted);
         out.extend(self.high.drain(..));
         while let Some(entry) = self.pop_untrusted() {
             out.push(entry);
         }
-        // Every lane is empty now (deficits already zeroed per chia's on-empty reset); drop the
-        // bookkeeping — chia's `_cleanup_peer_queues` outcome after a full drain.
+        // Every lane is empty now (deficits zeroed on empty); drop the bookkeeping.
         self.lanes.clear();
         self.order.clear();
         self.cursor = 0;
         out
     }
 
-    /// Drop every queued bundle — the not-synced transition flush (chia
-    /// `NO_TRANSACTIONS_WHILE_SYNCING`, the worker clears the inbox rather than validate stale
+    /// Drop every queued bundle — the not-synced transition flush (no transactions while
+    /// syncing: the worker clears the inbox rather than validate stale
     /// spends).
     pub fn clear(&mut self) {
         self.high.clear();
@@ -267,8 +249,7 @@ mod tests {
     use super::*;
     use dg_xch_core::blockchain::sized_bytes::Bytes96;
 
-    // The chia test fallback: `TEST_MAX_TX_CLVM_COST` in test_tx_processing_queue.py uses
-    // MAX_BLOCK_COST_CLVM // 2; the DRR vector below uses the small 20 chia's own DRR test uses.
+    // The test cost fallback is `MAX_BLOCK_COST_CLVM / 2`; the DRR vector below uses 20.
     const BIG_COST: u64 = 11_000_000_000 / 2;
 
     fn empty_bundle() -> SpendBundle {
@@ -282,8 +263,8 @@ mod tests {
         Bytes32::from([byte; 32])
     }
 
-    // Gate 3: a trusted peer's bundle jumps an already-queued untrusted bundle — chia
-    // high_priority routes to the separate lane pop() drains first.
+    // A trusted peer's bundle jumps an already-queued untrusted bundle: high priority routes to
+    // the separate lane the drain empties first.
     #[test]
     fn trusted_bundle_jumps_untrusted_backlog() {
         let mut q = TxQueue::new(256, 32, BIG_COST);
@@ -298,8 +279,8 @@ mod tests {
         assert!(q.is_empty());
     }
 
-    // WITHIN one peer's lane the queue drains by advertised fee-per-cost, highest FIRST (chia's
-    // per-peer PriorityQueue). Low-fpc inserted first, high-fpc second — the high one pops first.
+    // WITHIN one peer's lane the queue drains by advertised fee-per-cost, highest FIRST.
+    // Low-fpc inserted first, high-fpc second — the high one pops first.
     #[test]
     fn within_a_peer_lane_highest_fee_per_cost_drains_first() {
         let mut q = TxQueue::new(256, 32, BIG_COST);
@@ -322,9 +303,8 @@ mod tests {
         );
     }
 
-    // chia 9491c6ee3 (CHIA-3856): validation order round-robins ACROSS peers by CLVM-cost
-    // deficit — one peer's high-fpc stream must NOT be serviced ahead of every other peer's
-    // backlog. Two peers, three equal-cost bundles each, one peer advertising 90x the fee:
+    // Validation order round-robins ACROSS peers by CLVM-cost deficit: one peer's high-fpc
+    // stream must NOT be serviced ahead of every other peer's backlog. Two peers, three equal-cost bundles each, one peer advertising 90x the fee:
     // the drain must interleave A,B,A,B,A,B (each pop spends the peer's deficit and the cursor
     // moves on), not A,A,A,B,B,B.
     #[test]
@@ -348,9 +328,8 @@ mod tests {
         );
     }
 
-    // The direct port of chia's `test_normal_queue_deficit_round_robin` vector
-    // (test_tx_processing_queue.py, added in 9491c6ee3): four peers with top costs 15 / 5 / 10 /
-    // no-cost-info (fallback max_tx_clvm_cost = 20), equal fee 42. Deficit replenishment picks
+    // The deficit-round-robin vector: four peers with top costs 15 / 5 / 10 / no-cost-info
+    // (fallback max_tx_clvm_cost = 20), equal fee 42. Deficit replenishment picks
     // the LOWEST top cost each round, so the service order is peer2 (cost 5), peer3 (10),
     // peer1 (15), peer4 (fallback 20).
     #[test]
@@ -374,7 +353,7 @@ mod tests {
     }
 
     // A zero/unknown advertised cost prices at the max_tx_clvm_cost fallback, so it drains after
-    // a known-cost entry (chia's `+inf` lane priority + highest-cost DRR fallback).
+    // a known-cost entry: it sorts last in the lane and prices at the highest DRR fallback.
     #[test]
     fn unknown_cost_untrusted_entry_drains_last() {
         let mut q = TxQueue::new(256, 32, BIG_COST);
@@ -426,7 +405,7 @@ mod tests {
         assert_eq!(q.len(), 12);
     }
 
-    // Multiple high-priority entries drain in FIFO order among themselves (chia SimpleQueue).
+    // Multiple high-priority entries drain in FIFO order among themselves.
     #[test]
     fn high_priority_lane_is_fifo() {
         let mut q = TxQueue::new(256, 32, BIG_COST);
@@ -438,7 +417,7 @@ mod tests {
     }
 
     // Draining resets the round-robin bookkeeping; a fresh backlog starts from a clean cursor
-    // and clean deficits (chia's on-empty deficit reset + queue cleanup).
+    // and clean deficits.
     #[test]
     fn state_resets_between_batches() {
         let mut q = TxQueue::new(256, 32, BIG_COST);

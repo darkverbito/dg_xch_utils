@@ -31,6 +31,8 @@ fn config(listen: SocketAddr, rpc: SocketAddr) -> Config {
         std::process::id()
     ));
     Config {
+        target_outbound: None,
+        target_peer_count: None,
         listen,
         rpc,
         introducer: None,
@@ -84,9 +86,9 @@ async fn announced_transaction_is_pulled_validated_and_admitted() {
     common::seed_peak(&node.store).await;
     let coin = common::seed_easy_coin(&node.store, 1_000).await;
     node.mempool.lock().await.set_peak(common::PEAK_HEIGHT, 0);
-    // Tip-synced posture: transaction gossip is gated on the synced flag (chia
-    // full_node_api.py:229-233 "Ignore if syncing") — this test exercises the
-    // pull-validate-admit path of an AT-TIP node, same pattern as announce_pull.rs.
+    // Tip-synced posture: transaction gossip is gated on the synced flag (the
+    // ignore-while-syncing guard) — this test exercises the pull-validate-admit path of an
+    // AT-TIP node, same pattern as announce_pull.rs.
     node.synced.store(true, Ordering::Relaxed);
     let (serve_run, _inbound_peers) = node.spawn_peer_server().expect("peer server");
     tokio::time::sleep(Duration::from_millis(150)).await;
@@ -148,9 +150,9 @@ async fn announced_transaction_is_pulled_validated_and_admitted() {
     serve_run.store(false, Ordering::Relaxed);
 }
 
-// A NOT-synced node must ignore transaction gossip entirely — chia full_node_api.py
+// A NOT-synced node must ignore transaction gossip entirely — `full_node_api`
 // new_transaction ("Ignore if syncing", :229-233) returns None before any pull, and
-// add_transaction (full_node.py:2882-2885) drops queued bundles with
+// add_transaction drops queued bundles with
 // NO_TRANSACTIONS_WHILE_SYNCING. Without this gate every deep-syncing leg burned >98% CPU
 // running full CLVM + BLS on doomed mainnet gossip (the live flamegraph finding). Same rig as
 // the positive test, but the synced flag stays at its boot value (false): the announcement must
@@ -305,7 +307,7 @@ async fn peer_dropped_within(inbound_peers: &dg_xch_core::protocols::PeerMap, ms
     inbound_peers.read().await.is_empty()
 }
 
-// Behavior (b) — chia full_node_api.py new_transaction :235-241: a zero-cost announcement is
+// Behavior (b) — `new_transaction` :235-241: a zero-cost announcement is
 // a protocol violation; the peer is banned (`peer.close(CONSENSUS_ERROR_BAN_SECONDS)`). RED on the
 // pre-gate daemon: cost 0 clears the cost ceiling, the mempool is empty, so a RequestTransaction is
 // sent and the peer stays connected. GREEN: the connection is closed and the peer leaves the map.
@@ -332,10 +334,10 @@ async fn zero_cost_announcement_bans_the_peer() {
     rig.serve_run.store(false, Ordering::Relaxed);
 }
 
-// Behavior (c) — chia :243-259: an already-seen tx re-announced with a cost/fee that
+// Behavior (c): an already-seen tx re-announced with a cost/fee that
 // disagrees with our validated mempool item is a ban (outside the tolerated pre-2.4.3 quote diff).
 // The node first admits the bundle honestly, then the same peer re-announces it with a bad cost.
-// RED on the pre-gate daemon: the mismatch is silently ignored, the peer stays. GREEN: banned.
+// Without the gate the mismatch would be silently ignored and the peer would stay; it is banned.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn already_seen_tx_with_mismatched_cost_bans_the_peer() {
     let rig = stand_up_rig().await;
@@ -388,7 +390,7 @@ async fn already_seen_tx_with_mismatched_cost_bans_the_peer() {
     rig.serve_run.store(false, Ordering::Relaxed);
 }
 
-// Behavior (d) — chia :332-343 respond_transaction: a transaction body that answers no pull
+// Behavior (d) — respond_transaction: a transaction body that answers no pull
 // WE issued is unsolicited and dropped before validation. RED on the pre-gate daemon: an
 // unsolicited RespondTransaction is queued and the validator admits it (mempool len 1). GREEN: the
 // body is dropped at the door and the mempool stays empty.
@@ -512,7 +514,7 @@ async fn stand_up_capturing_rig() -> CapturingRig {
 }
 
 // Fill the node's mempool to its 110B ceiling with synthetic high-fee items so is_fee_enough has
-// to say no to weak fees (chia at_full_capacity + min-fee-rate).
+// to say no to weak fees (at_full_capacity + min-fee-rate).
 async fn fill_mempool_to_capacity(node: &Arc<Node>) {
     use dg_xch_core::blockchain::coin::Coin;
     use dg_xch_core::blockchain::coin_record::CoinRecord;
@@ -597,7 +599,7 @@ async fn fill_mempool_to_capacity(node: &Arc<Node>) {
     assert_eq!(mp.total_cost(), mp.max_total_cost(), "pool exactly full");
 }
 
-// chia full_node_api.py:261 — the is_fee_enough PRE-FETCH gate: with the pool at capacity, an
+// The is_fee_enough PRE-FETCH gate: with the pool at capacity, an
 // announcement whose advertised fee cannot possibly get in is never pulled (spam CLVM
 // protection). A fee that beats the pool's min fee rate is still pulled.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -648,7 +650,7 @@ async fn full_pool_low_fee_announcement_is_not_pulled() {
     );
 }
 
-// chia full_node.py:2991-3004 — broadcast_added_tx sends NewTransaction to ALL full-node peers
+// The announce sends NewTransaction to ALL full-node peers
 // EXCLUDING the origin. Our announcer client is an INBOUND full-node peer of the node under
 // test: it must receive announcements for transactions it did not originate, and never an echo
 // of its own.
@@ -692,7 +694,7 @@ async fn announce_drain_reaches_inbound_peers_and_excludes_origin() {
     }
     assert!(
         got_x,
-        "NewTransaction re-broadcast must reach INBOUND full-node peers (chia send_to_all)"
+        "NewTransaction re-broadcast must reach INBOUND full-node peers"
     );
 
     // Our own transaction: the origin peer must NOT get an echo.
@@ -724,8 +726,8 @@ async fn announce_drain_reaches_inbound_peers_and_excludes_origin() {
     );
 }
 
-// chia full_node_api.py request_mempool_transactions (:856-869) + mempool_manager
-// .get_items_not_in_filter (:1066-1082): the peer's BIP158 filter is DECODED and honored — items
+// `request_mempool_transactions` + mempool_manager
+// .get_items_not_in_filter: the peer's BIP158 filter is DECODED and honored — items
 // the peer already holds are not re-announced; items outside the filter are.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn request_mempool_transactions_honors_bip158_filter() {

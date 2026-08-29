@@ -137,24 +137,13 @@ impl<'a> Program<'a> {
 
     /// Split a curried program into its module and its curried arguments.
     ///
-    /// Mirrors chia's `Program.uncurry`
-    /// (`chia/types/blockchain_format/program.py:183`, delegated to by the
-    /// free `uncurry` at `:298`): a program that is **not** in curried
-    /// apply/quote form `(2 (1 . <mod>) <args>)` is not an error — chia's
-    /// `uncurry` catches every mismatch and returns `(self, self.to(0))`, i.e.
-    /// the program itself paired with a nil atom. This matches that contract
-    /// exactly: the `Result` is retained so existing callers keep compiling, but
-    /// the non-curried case is `Ok((self, nil))` rather than `Err`.
+    /// A program that is not in curried apply/quote form `(2 (1 . <mod>) <args>)`
+    /// is not an error; the non-curried case is `Ok((self, nil))`.
     pub fn uncurry(&'a self) -> Result<(Program<'a>, Program<'a>), ClvmError> {
-        // chia's `match(o, expected)` raises unless `o` is the atom `expected`
-        // (a pair's `.atom` is `None`, so a pair never matches).
         fn is_atom(o: &SExp, expected: &[u8]) -> bool {
             matches!(o, SExp::Atom(a) if a.as_ref() == expected)
         }
-        // chia unpacks `a, b, c = node.as_iter()`, which requires `node` to be a
-        // proper list of *exactly* three elements: three cons cells whose final
-        // tail is an atom. A fourth element (a pair tail) or a short list makes
-        // the unpack raise, i.e. "not curried".
+        // a proper list of exactly three elements; anything else is "not curried"
         fn three<'x>(node: &'x SExp<'x>) -> Option<(&'x SExp<'x>, &'x SExp<'x>, &'x SExp<'x>)> {
             let p0 = node.maybe_pair()?;
             let p1 = p0.rest().maybe_pair()?;
@@ -194,7 +183,6 @@ impl<'a> Program<'a> {
             }
             Some((Program::new_ref(module), Program::to(args.as_slice())))
         })();
-        // chia's fallback: `return self, self.to(0)` — `to(0)` is the nil atom.
         Ok(matched.unwrap_or_else(|| (Program::new_ref(self.sexp()), Program::to(0))))
     }
 
@@ -291,11 +279,9 @@ impl<'a> Program<'a> {
         flags: u32,
         args: &'_ Program,
     ) -> Result<(u64, Program<'static>), ClvmError> {
-        // Strictness is the CALLER's choice, exactly as in chia's clvmr: consensus execution runs
-        // unknown operators as no-ops with their well-defined cost (`op_unknown`); only mempool /
-        // explicitly-strict paths pass NO_UNKNOWN_OPS (see `run_mempool_with_cost`, spend_bundle).
-        // Forcing NO_UNKNOWN_OPS here rejected a real mainnet block generator that exercises an
-        // unassigned operator (mainnet 9,143,859, operator 28) — chia accepts it in consensus mode.
+        // Strictness is the caller's choice: consensus execution runs unknown operators as
+        // no-ops with their well-defined cost; only mempool / explicitly-strict paths pass
+        // NO_UNKNOWN_OPS.
         let mut runtime = ClvmRuntime::new(max_cost, flags);
         let (cost, result) = runtime.run(self.sexp(), args.sexp())?;
         Ok((cost, Program::new(result.to_owned())))
@@ -580,10 +566,8 @@ impl ChiaSerialize for SerializedProgram {
     where
         Self: Sized,
     {
-        // A `SerializedProgram` is opaque, already-serialized CLVM. Emit its RAW bytes verbatim, exactly as
-        // chia_rs streams `Program`/`SerializedProgram`. The previous parse-then-re-serialize normalized the
-        // encoding, which DROPS CLVM back-references (marker 0xfe, used by real block transaction
-        // generators) and would change the block's identity hash. Store and stream the wire bytes untouched.
+        // A `SerializedProgram` is opaque, already-serialized CLVM: emit its raw bytes verbatim.
+        // Re-serializing would drop CLVM back-references (0xfe) and change the block's identity hash.
         Ok(self.as_ref().to_vec())
     }
 
@@ -591,11 +575,9 @@ impl ChiaSerialize for SerializedProgram {
     where
         Self: Sized,
     {
-        // Consume EXACTLY one CLVM program from the stream to find its byte length, then keep the raw
-        // on-wire bytes. The back-reference-aware parser is required: real mainnet transaction generators
-        // use CLVM back-references (0xfe), which `sexp_from_bytes` rejects at `decode_size` ("bad
-        // encoding") — the exact `InvalidInput` that failed every `RespondBlocks` decode in production.
-        // We keep the raw slice (not the re-serialized tree) so the bytes round-trip identically.
+        // Consume exactly one CLVM program from the stream to find its byte length, then keep
+        // the raw on-wire bytes so they round-trip identically. The back-reference-aware
+        // parser is required: transaction generators use CLVM back-references (0xfe).
         let start = usize::try_from(bytes.position())
             .map_err(|_| Error::new(ErrorKind::InvalidInput, "cursor position overflow"))?;
         sexp_from_bytes_backrefs(bytes)
@@ -773,9 +755,6 @@ impl<'a> Serialize for Program<'a> {
 
 #[cfg(test)]
 mod tests {
-    //! Program-level tests ported from chia-blockchain's
-    //! `chia/_tests/clvm/test_program.py` (`test_at`, `test_uncurry*`,
-    //! `test_curry_uncurry`, `test_run`).
     use crate::clvm::assemble::assemble_text;
     use crate::clvm::program::Program;
     use crate::clvm::sexp::SExp;
@@ -793,7 +772,6 @@ mod tests {
         ]))
     }
 
-    // test_program.py::test_at
     #[test]
     fn at_navigates_by_first_rest_path() {
         let p = nested_list();
@@ -805,7 +783,6 @@ mod tests {
         assert!(p.at("ff").is_err());
     }
 
-    // test_program.py::test_run — (/ 2 5) with [10, -5] and [10, 5].
     #[test]
     fn run_div_positive_result() {
         let div = assemble_text("(/ 2 5)").unwrap();
@@ -819,9 +796,8 @@ mod tests {
         assert_eq!(out.as_vec(), Some(vec![0x02]));
     }
 
-    // test_program.py::test_run — (/ 2 5) run on [10, -5] returns 0xfe (-2) at
-    // cost 1107. An unsigned decode would read -5 as 251, so the result and cost
-    // both diverge. Signed two's-complement atom decode is required here.
+    // (/ 2 5) on [10, -5] returns 0xfe (-2) at cost 1107; requires signed
+    // two's-complement atom decode.
     #[test]
     fn run_div_negative_operand_result_and_cost() {
         let div = assemble_text("(/ 2 5)").unwrap();
@@ -836,7 +812,6 @@ mod tests {
         assert_eq!(cost, 1107);
     }
 
-    // test_program.py::test_uncurry — positive case.
     #[test]
     fn uncurry_positive_case() {
         // (2 (q . (+ 2 5)) (c (q . 1) 1))
@@ -846,7 +821,7 @@ mod tests {
         assert_eq!(args, Program::new(SExp::from(vec![SExp::from(1)])));
     }
 
-    // test_program.py::test_curry_uncurry — curry then uncurry is idempotent.
+    // curry then uncurry is idempotent
     #[test]
     fn curry_then_uncurry_round_trips() {
         let f = assemble_text("(+ 2 5)").unwrap();
@@ -859,9 +834,7 @@ mod tests {
         );
     }
 
-    // test_program.py::test_uncurry_not_curried — Chia returns (program, 0) for a
-    // program that was never curried, rather than raising. `uncurry` returns
-    // `Ok((self, nil))` for a non-curried program to match.
+    // a program that was never curried uncurries to (self, nil) rather than erring
     #[test]
     fn uncurry_not_curried_returns_program_and_nil() {
         let plus = assemble_text("(+ 2 5)").unwrap();
@@ -870,8 +843,7 @@ mod tests {
         assert!(args.sexp().nullp());
     }
 
-    // test_program.py::test_uncurry_top_level_garbage — garbage at the end of the
-    // top-level list ⇒ (self, nil), never a partial/false-positive uncurry.
+    // garbage at the end of the top-level list ⇒ (self, nil), never a partial uncurry
     #[test]
     fn uncurry_top_level_garbage_returns_program_and_nil() {
         let p = assemble_text("(2 (q . 1) (c (q . 1) (q . 1)) (q . 0x1337))").unwrap();
@@ -880,8 +852,7 @@ mod tests {
         assert!(args.sexp().nullp());
     }
 
-    // test_program.py::test_uncurry_not_pair — the quoted-module slot is an atom,
-    // not a `(1 . <mod>)` pair ⇒ (self, nil).
+    // the quoted-module slot is an atom, not a `(1 . <mod>)` pair ⇒ (self, nil)
     #[test]
     fn uncurry_not_pair_returns_program_and_nil() {
         let p = assemble_text("(2 1 (c (q . 1) (q . 1)))").unwrap();
@@ -890,8 +861,7 @@ mod tests {
         assert!(args.sexp().nullp());
     }
 
-    // test_program.py::test_uncurry_args_garbage — garbage at the end of an args
-    // cons ⇒ (self, nil): the args walker rejects the over-long inner list.
+    // garbage at the end of an args cons ⇒ (self, nil)
     #[test]
     fn uncurry_args_garbage_returns_program_and_nil() {
         let p = assemble_text("(2 (q . 1) (c (q . 1) (q . 1) (q . 0x1337)))").unwrap();

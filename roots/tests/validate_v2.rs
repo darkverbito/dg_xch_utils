@@ -1,18 +1,18 @@
-//! Order-independent validation core — red-first proofs.
+//! Order-independent validation core proofs.
 //!
-//! DRAFT STATUS: these are the **corpus-free** analogues of the corpus parity proofs. They
+//! These are the **corpus-free** analogues of the corpus parity proofs. They
 //! prove the algebraic properties — order-independence and fail-closed cancellation — on
 //! synthetic coins, with no corpus and no block-generator wiring:
 //!
 //!   (b) the SAME block set observed in FORWARD vs many SHUFFLED orders yields the IDENTICAL
 //!       XOR residual AND the IDENTICAL phase-1 root — order-independence, the property;
 //!   (c) a corrupted metadata fold (wrong created-height on a relative-timelock spend) BREAKS
-//!       cancellation AND flips the phase-1 root — the fold is load-bearing (red-first);
+//!       cancellation AND flips the phase-1 root — the fold is load-bearing;
 //!   (d) a dropped or extra coin BREAKS cancellation.
 //!
 //! The remaining corpus proof (a) — the aggregate over a real coin set's blocks in forward
 //! order cancels to the phase-1-derived root (parity) — requires the corpus and is run by the
-//! `roots/tests/coin_root_mainnet_parity.rs` harness (not in this draft; needs the corpus mount).
+//! `roots/tests/coin_root_mainnet_parity.rs` harness.
 //! Shuffling here uses a seeded LCG (no external RNG dep, deterministic, clippy-clean).
 
 use dg_xch_core::blockchain::sized_bytes::Bytes32;

@@ -4,8 +4,8 @@
 //! its CC_SP proof is still bulky (`witness_type == 5`) — so one fixture exercises both the
 //! serve-a-compact-proof arm and the stay-silent-on-a-bulky-proof arm.
 //!
-//! Chia oracle: `chia/full_node/full_node.py` `request_compact_vdf` (serve),
-//! `_needs_compact_proof`, `_can_accept_compact_proof`, `_replace_proof`.
+//! Covers `request_compact_vdf` (serve), `needs_compact_proof`, `can_accept_compact_proof`,
+//! and `replace_proof`.
 
 mod common;
 
@@ -35,7 +35,7 @@ fn cc_sp_vdf(
         .expect("fixture block has a CC_SP vdf")
 }
 
-// ---- SERVE arm (chia request_compact_vdf) ---------------------------------------------------
+// ---- SERVE arm (`request_compact_vdf`) ---------------------------------------------------
 
 #[test]
 fn serve_returns_our_proof_when_stored_field_is_already_compact() {
@@ -66,7 +66,7 @@ fn serve_stays_silent_on_a_field_vdf_info_mismatch() {
     assert!(serve_compact(&b, 9, &cc_ip_vdf(&b)).is_none());
 }
 
-// ---- needs_compact_proof (chia _needs_compact_proof) ----------------------------------------
+// ---- needs_compact_proof (`_needs_compact_proof`) ----------------------------------------
 
 #[test]
 fn needs_compact_proof_true_for_bulky_field_false_for_compact_field() {
@@ -85,7 +85,7 @@ fn needs_compact_proof_true_for_bulky_field_false_for_compact_field() {
     );
 }
 
-// ---- validate_compact_proof (chia validate_vdf from the default element) --------------------
+// ---- validate_compact_proof (`validate_vdf` from the default element) --------------------
 
 #[test]
 fn validate_accepts_the_real_compact_proof_and_rejects_a_tampered_one() {
@@ -122,13 +122,13 @@ fn validate_rejects_a_non_compact_proof_without_running_the_vdf() {
     ));
 }
 
-// ---- can_accept_compact_proof guards (chia _can_accept_compact_proof) ------------------------
+// ---- can_accept_compact_proof guards (`_can_accept_compact_proof`) ------------------------
 
 #[test]
 fn can_accept_rejects_a_too_recent_block() {
     let b = common::full_block();
     let h = b.height();
-    // Peak only 2 above the block — chia will not compactify a block within 5 of the peak.
+    // Peak only 2 above the block — a block within 5 of the peak is never compactified.
     assert!(!can_accept_compact_proof(
         &MAINNET,
         &b,
@@ -161,7 +161,7 @@ fn can_accept_rejects_a_duplicate_when_the_field_is_already_compact() {
     let b = common::full_block();
     let h = b.height();
     // Offer the block's own already-compact CC_IP proof back: it validates, but the field is not
-    // bulky, so needs_compact_proof is false and admission is refused (chia "Duplicate compact proof").
+    // bulky, so needs_compact_proof is false and admission is refused (the duplicate-compact-proof case).
     assert!(!can_accept_compact_proof(
         &MAINNET,
         &b,
@@ -173,7 +173,7 @@ fn can_accept_rejects_a_duplicate_when_the_field_is_already_compact() {
     ));
 }
 
-// ---- replace_proof mechanics (chia _replace_proof) ------------------------------------------
+// ---- replace_proof mechanics (`_replace_proof`) ------------------------------------------
 // The ACCEPT-AND-REPLACE happy path (can_accept => true, then replace) cannot be exercised
 // offline: it needs a genuine normalized-to-identity CC_SP proof that both validates AND matches
 // the stored VdfInfo, which is only produced by a live bluebox timelord. That end-to-end path is
@@ -206,7 +206,7 @@ fn replace_swaps_only_the_named_field_and_preserves_the_header_hash() {
     );
 }
 
-// ---- uncompact_fields (chia broadcast_uncompact_blocks enumeration) -------------------------
+// ---- uncompact_fields (`broadcast_uncompact_blocks` enumeration) -------------------------
 
 #[test]
 fn uncompact_fields_lists_only_the_bulky_cc_sp_field_of_this_block() {
@@ -234,7 +234,7 @@ fn replace_returns_none_on_a_vdf_info_mismatch() {
     assert!(replace_proof(&b, CC_SP, &cc_ip_vdf(&b), &sentinel).is_none());
 }
 
-// ---- plan_block_solicitations + SolicitLedger (chia broadcast_uncompact_blocks + our re-solicit
+// ---- plan_block_solicitations + SolicitLedger (`broadcast_uncompact_blocks` + our re-solicit
 // ---- suppression) --------------------------------------------------------------------------
 
 #[test]

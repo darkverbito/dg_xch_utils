@@ -1,5 +1,4 @@
 // Reconstructing a block's signage-point VDF inputs and challenges.
-// Ports chia/consensus/vdf_info_computation.py (no chia_rs port exists).
 
 use crate::blockchain::block_record::BlockRecord;
 use crate::blockchain::class_group_element::ClassgroupElement;

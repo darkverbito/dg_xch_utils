@@ -15,10 +15,10 @@ use std::time::Duration;
 // The live wedge (mainnet 9,147,575): the store's tip sits on an orphaned branch after a reorg at/below
 // it; every forward follow window from peak+1 fetches blocks whose FIRST parent is unknown, the engine
 // raises NodeError::Orphan ("unknown parent ..."), and the driver retries the identical window forever.
-// chia resolves this with short_sync_backtrack (full_node.py:715): fetch blocks BACKWARD one at a time
-// from the claimed tip until one connects to our chain (cap: fork no deeper than 5 below our peak,
-// full_node.py:738), then add the collected chain lowest-first; a deeper fork falls through to long sync
-// (new_peak, full_node.py:845-873). These tests pin that driver behavior on our Chaser.
+// The short-sync backtrack resolves this: fetch blocks BACKWARD one at a time from the claimed
+// tip until one connects to our chain (cap: fork no deeper than 5 below our peak), then add the
+// collected chain lowest-first; a deeper fork falls through to long sync. These tests pin that
+// driver behavior on our Chaser.
 
 const BASE_WEIGHT: u128 = 1_000_000;
 const FORK: u32 = 103; // fork point: last common block of chains A and B
@@ -179,7 +179,7 @@ async fn forward_follow_from_an_orphaned_tip_wedges_with_orphan_error() {
     );
 }
 
-// GREEN target — the mirrored short_sync_backtrack (chia full_node.py:715-774): on the orphan wedge,
+// The short-sync backtrack: on the orphan wedge,
 // fetch single blocks backward from below the failed window until one's parent is known (here
 // B(FORK+1), whose parent A(FORK) we have), then submit the collected chain lowest-first plus the
 // forward window; the engine's existing fork choice reorgs to branch B. The wedge resolves with no
@@ -215,9 +215,8 @@ async fn backtrack_converges_to_the_fork_branch_tip() {
     );
 }
 
-// GREEN target — the bounded-depth fallback (chia full_node.py:738 `while curr_height > peak_height - 5`
-// caps the backtrack; a fork deeper than that returns found_fork_point=False and new_peak falls through
-// to long sync, full_node.py:869-873). A peer whose branch shares NO ancestor within the cap must yield
+// The bounded-depth fallback: the backtrack is capped at 5 below the peak; a fork deeper than
+// that falls through to long sync. A peer whose branch shares NO ancestor within the cap must yield
 // the distinct DeepFork signal after a bounded number of single-block fetches — never an infinite retry.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn fork_deeper_than_the_backtrack_cap_signals_long_sync() {
@@ -256,7 +255,7 @@ async fn fork_deeper_than_the_backtrack_cap_signals_long_sync() {
     );
 }
 
-// ── tip-follow ladder (chia new_peak): forward-extend first, backtrack only on the orphan ──────────
+// ── tip-follow ladder: forward-extend first, backtrack only on the orphan ─────────────────────────
 //
 // The near-tip deviation: the tip_follower drove EVERY step through `follow_backtrack_reporting`,
 // whose depth-0 probe is `from-1` (our own peak). So a plain direct child of the peak still triggered
@@ -312,9 +311,8 @@ fn linear_chain_past_tip() -> (Vec<FullBlock>, Vec<FullBlock>) {
     (chain_a, child)
 }
 
-// RED (pre-fix behavior): the backtrack recovery arm, driven for a DIRECT CHILD, still probes backward
-// to the peak (`from-1`) before confirming — the per-block overhead the tip_follower used to pay every
-// step. This pins the deviation the ladder removes.
+// The backtrack recovery arm, driven for a DIRECT CHILD, still probes backward to the peak
+// (`from-1`) before confirming — the per-block overhead the forward-first ladder avoids.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn backtrack_arm_refetches_the_peak_even_for_a_direct_child() {
     let (chain_a, child) = linear_chain_past_tip();

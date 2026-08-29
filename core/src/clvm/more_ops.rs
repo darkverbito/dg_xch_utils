@@ -26,9 +26,9 @@ use std::ops::BitXorAssign;
 pub(crate) const MALLOC_COST_PER_BYTE: u64 = 10;
 
 const ARITH_BASE_COST: u64 = 99;
-// Hard-fork operator costs (clvmr more_ops.rs): `modpow` (60) and `mod` (61), active on mainnet
-// since the hard fork at 5,496,000. The NEW_* constants are clvmr's NEW_COST_MODEL variants — the
-// two models are selected at dispatch by the NEW_COST_MODEL flag, exactly as clvmr does.
+// Hard-fork operator costs: `modpow` (60) and `mod` (61), active on mainnet since the hard
+// fork at 5,496,000. The NEW_* constants are the NEW_COST_MODEL variants; the two models are
+// selected at dispatch by the NEW_COST_MODEL flag.
 const MODPOW_BASE_COST: u64 = 17000;
 const MODPOW_COST_PER_BYTE_BASE_VALUE: u64 = 38;
 const MODPOW_COST_PER_BYTE_EXPONENT: u64 = 3;
@@ -257,10 +257,8 @@ pub fn op_sha256<D: Dialect>(
     }
     cost += byte_count as u64 * SHA256_COST_PER_BYTE;
     let digest = hasher.finalize();
-    // Diagnostic tap: DGXCH_TRACE_SHA256=1 logs every sha256 call's args + digest so a
-    // wrong announcement id can be traced to the exact call. Checked ONCE per process
-    // (`var_os` per op call would take the env lock inside the hottest operator — 0.5-0.8%
-    // of validation CPU sampled — and serialize across replay workers).
+    // DGXCH_TRACE_SHA256=1 logs every sha256 call's args + digest. Checked once per
+    // process; a per-call env read would serialize across replay workers.
     static TRACE_SHA256: std::sync::LazyLock<bool> =
         std::sync::LazyLock::new(|| std::env::var_os("DGXCH_TRACE_SHA256").is_some());
     if *TRACE_SHA256 {
@@ -365,9 +363,8 @@ pub fn op_multiply<D: Dialect>(
     malloc_number(arena, cost, &total)
 }
 
-// Diagnostic tap: DGXCH_TRACE_ARITH=1 logs each arithmetic op's raw operand atoms and
-// result so a wrong computed amount can be traced to the exact op. Checked ONCE per process
-// (same per-op env-lock cost as the sha256 tap).
+// DGXCH_TRACE_ARITH=1 logs each arithmetic op's raw operand atoms and result.
+// Checked once per process, as with the sha256 tap.
 fn trace_arith(arena: &Arena, op: &str, args: NodePtr, result: &SExpNumber) {
     static TRACE_ARITH: std::sync::LazyLock<bool> =
         std::sync::LazyLock::new(|| std::env::var_os("DGXCH_TRACE_ARITH").is_some());
@@ -431,7 +428,7 @@ pub fn op_div<D: Dialect>(
     op_div_impl(arena, args, false)
 }
 
-// clvmr compute_new_div_cost (NEW_COST_MODEL): linear + quadratic-by-product terms.
+// NEW_COST_MODEL div cost: linear + quadratic-by-product terms.
 fn compute_new_div_cost(l0: usize, l1: usize) -> Result<u64, ClvmError> {
     let mut cost = NEW_DIV_BASE_COST;
     cost += (l0 as u64 + l1 as u64) * NEW_DIV_LINEAR_COST_PER_BYTE;
@@ -441,7 +438,7 @@ fn compute_new_div_cost(l0: usize, l1: usize) -> Result<u64, ClvmError> {
     Ok(cost + square / NEW_DIV_SQUARE_COST_PER_BYTE_DIVIDER)
 }
 
-// clvmr compute_modpow_cost, both models.
+// modpow cost, both models.
 fn compute_modpow_cost(
     bsize: usize,
     esize: usize,
@@ -478,9 +475,9 @@ fn number_to_bigint(n: SExpNumber) -> BigInt {
     }
 }
 
-// `mod` (operator 61, clvmr op_mod): floor modulus, division-by-zero rejected, malloc-costed
-// result. Flag-dependent exactly as clvmr: DISABLE_OP caps the dividend at 2048 bytes and LIMITS
-// caps operands at 256/1024 (both only until NEW_COST_MODEL bounds the cost instead).
+// `mod` (operator 61): floor modulus, division-by-zero rejected, malloc-costed result.
+// DISABLE_OP caps the dividend at 2048 bytes and LIMITS caps operands at 256/1024
+// (both only until NEW_COST_MODEL bounds the cost instead).
 pub fn op_mod<D: Dialect>(
     arena: &mut Arena,
     args: NodePtr,
@@ -511,7 +508,7 @@ pub fn op_mod<D: Dialect>(
     malloc_number(arena, cost, &r)
 }
 
-// `modpow` (operator 60, clvmr op_modpow): base^exponent mod modulus; negative exponent and zero
+// `modpow` (operator 60): base^exponent mod modulus; negative exponent and zero
 // modulus rejected; LIMITS caps every operand at 256 bytes until NEW_COST_MODEL; malloc-costed
 // result. Dispatch rejects the operator entirely under DISABLE_OP (soft fork 8).
 pub fn op_modpow<D: Dialect>(
@@ -674,9 +671,8 @@ pub fn op_substr<D: Dialect>(
             arena.debug_fmt(args)
         )))
     } else {
-        // Zero-copy view into the source atom, mirroring clvm_rs `new_substr` (an offset view
-        // into the parent atom's bytes — the op charges base cost 1 with NO malloc cost, so a
-        // copying substr would be unmetered allocation).
+        // Zero-copy view into the source atom: the op charges base cost 1 with no malloc
+        // cost, so a copying substr would be unmetered allocation.
         let r = arena.new_substr(a0, i1 as u32, i2 as u32)?;
         let cost: u64 = 1;
         Ok((cost, r))
@@ -941,11 +937,8 @@ pub fn op_softfork<D: Dialect>(
         Some((first, _rest)) => {
             let cost_bytes = int_atom(arena, first, "softfork")?;
             // Soft fork 9 (CANONICAL_INTS): the cost argument must be canonically encoded —
-            // at most one leading 0x00, and only when the next byte's high bit is set. This
-            // mirrors clvm_rs `src/op_utils.rs::uint_atom` (the canonical branch) as consumed
-            // by `src/run_program.rs::parse_softfork_arguments` (`uint_atom::<8>` for the
-            // expected cost). Below `soft_fork9_height` the flag is unset and any leading
-            // zeros are accepted — byte-identical to the pre-SF9 behavior.
+            // at most one leading 0x00, and only when the next byte's high bit is set. Below
+            // `soft_fork9_height` the flag is unset and any leading zeros are accepted.
             if (dialect.flags() & CANONICAL_INTS) != 0 {
                 let buf = cost_bytes.as_ref();
                 if !buf.is_empty() && buf[0] == 0 && (buf.len() < 2 || (buf[1] & 0x80) == 0) {
@@ -1000,16 +993,9 @@ pub(crate) fn mod_group_order(n: &BigInt) -> BigInt {
 
 /// G1 primitives for the two CLVM BLS operators, over raw `blst` FFI.
 ///
-/// Ported from chia_rs `chia-bls` (crates/chia-bls/src/public_key.rs, v0.42.1) —
-/// `PublicKey::from_integer`, `PublicKey::from_bytes`/`from_bytes_unchecked`/`is_valid`,
-/// `AddAssign` and `to_bytes` — which is exactly what clvmr 0.17.7 (the clvm_rs chia
-/// mainnet runs via chia_rs 0.42.x) executes for `pubkey_for_exp` (`G1Element::from_integer`)
-/// and `point_add` (`Allocator::g1` -> `G1Element::from_bytes`, `+=`, `new_g1`).
-///
-/// `parse_g1_compressed` preserves the acceptance set of the previous bls12_381
-/// implementation (`G1Affine::from_compressed`): compressed-flag/infinity/sort-bit
-/// canonicality, x < p, on-curve, and the G1 subgroup check, with `0xc0 || 0^47` as the
-/// only infinity encoding. tests/bls_ops_differential.rs proves the sets identical.
+/// `parse_g1_compressed` accepts only canonical compressed encodings:
+/// compressed-flag/infinity/sort-bit canonicality, x < p, on-curve, and the G1 subgroup
+/// check, with `0xc0 || 0^47` as the only infinity encoding.
 #[cfg(feature = "bls")]
 pub(crate) mod bls_g1 {
     use blst::{
@@ -1024,13 +1010,13 @@ pub(crate) mod bls_g1 {
         blst_p1::default()
     }
 
-    /// `generator * n` for a big-endian, group-order-reduced, non-negative integer —
-    /// chia-bls `PublicKey::from_integer`. `n_be` must be non-empty (a reduced zero is `[0]`).
+    /// `generator * n` for a big-endian, group-order-reduced, non-negative integer.
+    /// `n_be` must be non-empty (a reduced zero is `[0]`).
     pub(crate) fn generator_mul_be(n_be: &[u8]) -> blst_p1 {
         debug_assert!(!n_be.is_empty() && n_be.len() <= 32);
         // SAFETY: `blst_scalar_from_be_bytes` fully initializes `scalar` for 1..=32 input
-        // bytes; `blst_p1_mult` reads 256 scalar bits (the full blst_scalar width, as
-        // chia-bls passes) and fully initializes `point`. All pointers are valid locals.
+        // bytes; `blst_p1_mult` reads 256 scalar bits (the full blst_scalar width) and
+        // fully initializes `point`. All pointers are valid locals.
         unsafe {
             let mut scalar = MaybeUninit::<blst_scalar>::uninit();
             blst_scalar_from_be_bytes(scalar.as_mut_ptr(), n_be.as_ptr(), n_be.len());
@@ -1045,10 +1031,8 @@ pub(crate) mod bls_g1 {
         }
     }
 
-    /// Parse a 48-byte compressed G1 element — chia-bls `PublicKey::from_bytes` semantics
-    /// (canonical-infinity guards, `blst_p1_uncompress`, then `is_inf || in_g1`), returning
-    /// `None` for every invalid class exactly where bls12_381's `G1Affine::from_compressed`
-    /// returned a `None` `CtOption`.
+    /// Parse a 48-byte compressed G1 element: canonical-infinity guards,
+    /// `blst_p1_uncompress`, then `is_inf || in_g1`; `None` for every invalid class.
     pub(crate) fn parse_g1_compressed(bytes: &[u8; 48]) -> Option<blst_p1_affine> {
         let zeros_only = bytes[1..].iter().all(|b| *b == 0);
         if (bytes[0] & 0xc0) == 0xc0 {
@@ -1064,8 +1048,7 @@ pub(crate) mod bls_g1 {
             return None;
         }
         if zeros_only && (bytes[0] & 0x3f) == 0 {
-            // x = 0 without the infinity flag is non-canonical (chia-bls G1InfinityNotZero;
-            // bls12_381 rejects the same encoding through its subgroup check).
+            // x = 0 without the infinity flag is non-canonical
             return None;
         }
         // SAFETY: `bytes` is a valid 48-byte buffer; on BLST_SUCCESS `affine` is initialized.
@@ -1076,7 +1059,7 @@ pub(crate) mod bls_g1 {
             }
             affine.assume_init()
         };
-        // Subgroup check (bls12_381 `is_torsion_free`); infinity was handled above.
+        // Subgroup check; infinity was handled above.
         // SAFETY: `affine` is initialized and on the curve.
         if unsafe { blst_p1_affine_in_g1(&raw const affine) } {
             Some(affine)
@@ -1085,8 +1068,8 @@ pub(crate) mod bls_g1 {
         }
     }
 
-    /// `acc += p` — chia-bls `AddAssign`, on the affine addend (complete formula, handles
-    /// doubling and either operand at infinity).
+    /// `acc += p` on the affine addend (complete formula, handles doubling and either
+    /// operand at infinity).
     pub(crate) fn add_assign(acc: &mut blst_p1, p: &blst_p1_affine) {
         // SAFETY: both operands are valid initialized points.
         unsafe {
@@ -1094,8 +1077,7 @@ pub(crate) mod bls_g1 {
         }
     }
 
-    /// Compressed encoding — chia-bls `to_bytes` (`blst_p1_compress`); infinity encodes as
-    /// `0xc0 || 0^47`, identical to bls12_381 `G1Affine::to_compressed`.
+    /// Compressed encoding via `blst_p1_compress`; infinity encodes as `0xc0 || 0^47`.
     pub(crate) fn to_compressed(p: &blst_p1) -> [u8; 48] {
         // SAFETY: `p` is a valid initialized point; `blst_p1_compress` writes all 48 bytes.
         unsafe {
@@ -1120,14 +1102,12 @@ pub fn op_pubkey_for_exp<D: Dialect>(
         (mod_group_order(&number_from_slice(v0.as_ref())), v0.len())
     };
     let cost = PUBKEY_BASE_COST + (v0_len as u64) * PUBKEY_COST_PER_BYTE;
-    // clvmr 0.17.7 `op_pubkey_for_exp` (src/more_ops.rs:1129) `check_cost`s the
-    // exponent-priced cost against `max_cost` BEFORE the scalar multiplication; the
-    // 48-byte malloc surcharge is added to the returned cost but is not part of the
-    // in-operator check.
+    // The exponent-priced cost is checked against `max_cost` BEFORE the scalar
+    // multiplication; the 48-byte malloc surcharge is added to the returned cost but is
+    // not part of the in-operator check.
     check_cost(cost, max_cost)?;
     // `exp` is reduced mod the group order, so it is non-negative and its big-endian
-    // magnitude (`[0]` for zero) is at most 32 bytes — clvmr 0.17.7 passes exactly
-    // `mod_group_order(v0).to_bytes_be().1` to `G1Element::from_integer`.
+    // magnitude (`[0]` for zero) is at most 32 bytes.
     let point = bls_g1::generator_mul_be(&exp.to_bytes_be().1);
     new_atom_and_cost(arena, cost, &bls_g1::to_compressed(&point))
 }
@@ -1155,8 +1135,7 @@ pub fn op_point_add<D: Dialect>(
     let mut total = bls_g1::identity();
     let mut cursor = ArgCursor::new(args);
     while let Some(arg) = cursor.next(arena) {
-        // clvmr 0.17.7 `op_point_add` (src/more_ops.rs:1149) charges
-        // POINT_ADD_COST_PER_ARG and `check_cost`s against `max_cost` for EVERY
+        // POINT_ADD_COST_PER_ARG is charged and checked against `max_cost` for EVERY
         // argument, before parsing it — a cost-exhausted budget errors even when the
         // pending argument is garbage.
         cost += POINT_ADD_COST_PER_ARG;
@@ -1166,10 +1145,9 @@ pub fn op_point_add<D: Dialect>(
         if blob_bytes.len() == 48 {
             let mut as_array: [u8; 48] = [0; 48];
             as_array.clone_from_slice(&blob_bytes[0..48]);
-            // clvmr 0.17.7 `Allocator::g1` (src/allocator.rs:1107) -> chia-bls
-            // `G1Element::from_bytes` errors the whole operator on any invalid 48-byte
-            // encoding (non-canonical infinity, x = 0 without the infinity flag,
-            // x >= p, off-curve, wrong subgroup) — no silent skip.
+            // any invalid 48-byte encoding (non-canonical infinity, x = 0 without the
+            // infinity flag, x >= p, off-curve, wrong subgroup) errors the whole
+            // operator — no silent skip
             if let Some(point) = bls_g1::parse_g1_compressed(&as_array) {
                 bls_g1::add_assign(&mut total, &point);
             } else {
@@ -1255,19 +1233,15 @@ pub fn op_coinid<D: Dialect>(
         puzzle_hash: Bytes32::parse(&puzzle_hash)?,
         amount: u64_from_bigint(&as_int)?,
     };
-    // The 32-byte coin id is a freshly allocated atom, so — like op_sha256 and
-    // every other hashing op — it carries `len * MALLOC_COST_PER_BYTE` on top of
-    // the base COIN_ID_COST. clvmr's op_coinid returns via `new_atom_and_cost`,
-    // which adds exactly 32 * 10 = 320. Returning the bare COIN_ID_COST omitted
-    // that malloc cost and under-counted every coinid spend by 320.
+    // The 32-byte coin id is a freshly allocated atom, so — like every other hashing op —
+    // it carries `len * MALLOC_COST_PER_BYTE` (32 * 10 = 320) on top of the base COIN_ID_COST.
     let coin_id = coin.coin_id();
     new_atom_and_cost(arena, COIN_ID_COST, coin_id.as_ref())
 }
 #[cfg(test)]
 mod tests {
     //! Behavioral tests for the arithmetic / hashing / bitwise / string
-    //! operators. Operands are quoted; results follow canonical CLVM operator
-    //! semantics (clvm `more_ops.py` / chia_rs `more_ops.rs`).
+    //! operators. Operands are quoted; results follow canonical CLVM operator semantics.
     use crate::clvm::program::Program;
     use crate::clvm::sexp::SExp;
     use crate::clvm::utils::INFINITE_COST;
@@ -1324,7 +1298,7 @@ mod tests {
     // Signed two's-complement atom decode.
     #[test]
     fn div_negative_divisor_floors_to_minus_two() {
-        // (/ 10 -5) -> -2 (Chia). An unsigned decode would read -5 (0xfb) as 251 -> 10/251 == 0.
+        // (/ 10 -5) -> -2. An unsigned decode would read -5 (0xfb) as 251 -> 10/251 == 0.
         assert_eq!(
             int(&run_op(19, &[SExp::from(10), SExp::from(-5)]).unwrap()),
             BigInt::from(-2)
@@ -1334,16 +1308,15 @@ mod tests {
     // Signed two's-complement atom decode.
     #[test]
     fn add_with_negative_operand_is_signed() {
-        // (+ -1 1) -> 0 (Chia). An unsigned decode would read -1 (0xff) as 255 -> 256.
+        // (+ -1 1) -> 0. An unsigned decode would read -1 (0xff) as 255 -> 256.
         assert_eq!(
             int(&run_op(16, &[SExp::from(-1), SExp::from(1)]).unwrap()),
             BigInt::from(0)
         );
     }
 
-    // Signed-boundary coverage. Every case decodes a high-bit atom
-    // through the arithmetic path; results follow chia `int_from_bytes`
-    // (big-endian signed two's-complement) + `int_to_bytes` (minimal signed).
+    // Signed-boundary coverage. Every case decodes a high-bit atom through the
+    // arithmetic path; big-endian signed two's-complement decode, minimal signed encode.
     #[test]
     fn signed_boundary_decode_and_roundtrip() {
         // 0x80 == -128, 0x0080 == +128 ⇒ sum 0 (empty atom).
@@ -1375,7 +1348,7 @@ mod tests {
 
     #[test]
     fn div_negative_dividend_floors_toward_neg_infinity() {
-        // (/ -7 2) == -4 (chia floors toward -inf), atom 0xfc.
+        // (/ -7 2) == -4 (floors toward -inf), atom 0xfc.
         let q = run_op(19, &[SExp::from(-7), SExp::from(2)]).unwrap();
         assert_eq!(int(&q), BigInt::from(-4));
         assert_eq!(bytes(&q), vec![0xfc]);

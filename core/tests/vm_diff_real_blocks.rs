@@ -4,8 +4,9 @@ use dg_xch_core::clvm::runtime::ClvmRuntime;
 use dg_xch_core::clvm::sexp::SExp;
 
 // VM diff: run the extracted spend-4 puzzle + solution (block 5,494,140) through OUR
-// runtime and print every output condition's opcode + raw argument atoms. clvmr's output for
-// the identical inputs is the oracle; the first differing condition names the divergent op.
+// runtime and print every output condition's opcode + raw argument atoms. A reference VM's
+// output for the identical inputs is the oracle; the first differing condition names the
+// divergent op.
 //   VM_DIFF_PUZZLE=<puzzle.bin> VM_DIFF_SOLUTION=<solution.bin> \
 //   cargo test --release -p dg_xch_core --test vm_diff_real_blocks -- --ignored --nocapture
 #[test]

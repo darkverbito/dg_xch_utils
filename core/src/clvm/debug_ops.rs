@@ -5,8 +5,7 @@ use log::info;
 use std::io::Error;
 
 /// Debug print for the `(all "$print$" ...)` convention: `args` are the operands AFTER the
-/// print keyword, in order. Output format is unchanged from the tree-walking implementation:
-/// `first: second, third`.
+/// print keyword, in order. Output format: `first: second, third`.
 pub fn op_print<D: Dialect>(
     arena: &Arena,
     args: &[NodePtr],

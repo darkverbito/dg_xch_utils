@@ -1,11 +1,8 @@
-// Phase 2.1 — the slot state machine: finished sub-slots and signage points from the peak's
-// slot onward, so the node knows where the network is WITHIN a slot, not just at block
-// boundaries. A line-for-line mirror of the consensus half of chia's
-// `full_node_store.py::FullNodeStore` (`new_finished_sub_slot`, `new_signage_point`,
-// `new_peak`); the unfinished-block/candidate half is Phase 2.2. Everything a peer sends is
-// validated against the current tip state before it enters a cache — the future caches hold
-// only objects whose sole missing dependency is an infusion we have not seen yet, keyed by
-// that infusion's reward-chain challenge.
+// The slot state machine: finished sub-slots and signage points from the peak's slot onward, so
+// the node knows where the network is within a slot, not just at block boundaries. Everything a
+// peer sends is validated against the current tip state before it enters a cache — the future
+// caches hold only objects whose sole missing dependency is an infusion we have not seen yet,
+// keyed by that infusion's reward-chain challenge.
 
 use dg_xch_core::blockchain::block_record::BlockRecord;
 use dg_xch_core::blockchain::class_group_element::ClassgroupElement;
@@ -21,9 +18,8 @@ use dg_xch_vdf::validate_vdf_info;
 use std::collections::HashMap;
 use tracing::debug;
 
-// Cache bounds mirroring chia full_node_store.py (FUTURE_*_CACHE_* consts). The TTL half of
-// chia's eviction is omitted — the caps alone bound memory, and every cache is dropped
-// wholesale when its key's infusion arrives or the slot list resets.
+// Future-cache bounds. TTL eviction is omitted — the caps alone bound memory, and every cache is
+// dropped wholesale when its key's infusion arrives or the slot list resets.
 const FUTURE_CACHE_MAX_KEYS: usize = 128;
 const FUTURE_EOS_MAX_PER_KEY: usize = 4;
 const FUTURE_SP_MAX_PER_KEY: usize = 64;
@@ -36,9 +32,8 @@ struct FinishedSubSlot {
     start_total_iters: u128,
 }
 
-// A bounded per-key list cache (chia's LRUKeyedListCache minus TTL): at most `max_keys` keys,
-// each holding at most `max_per_key` entries; a full cache rejects rather than evicts, exactly
-// like chia's `append` returning False.
+// A bounded per-key list cache: at most `max_keys` keys, each holding at most `max_per_key`
+// entries; a full cache rejects rather than evicts.
 struct KeyedCache<T> {
     map: HashMap<Bytes32, Vec<T>>,
     max_keys: usize,
@@ -75,9 +70,8 @@ impl<T> KeyedCache<T> {
     }
 }
 
-// The peak's slot context (chia passes these as separate `new_peak` args): the EOS bundles
-// ending the slots the peak's signage point and infusion sit in (`None` per chia's rules for
-// the first slots / non-overflow), and the fork block on a reorg.
+// The peak's slot context: the EOS bundles ending the slots the peak's signage point and
+// infusion sit in (`None` for the first slots / non-overflow), and the fork block on a reorg.
 pub struct PeakSlotContext<'a> {
     pub sp_sub_slot: Option<&'a EndOfSubSlotBundle>,
     pub ip_sub_slot: Option<&'a EndOfSubSlotBundle>,
@@ -120,7 +114,7 @@ impl SlotState {
     }
 
     // The finished sub-slot whose challenge-chain hash is `challenge_hash`, with its index and
-    // start iters (chia `get_sub_slot`).
+    // start iters.
     #[must_use]
     pub fn get_sub_slot(
         &self,
@@ -136,13 +130,11 @@ impl SlotState {
         None
     }
 
-    // The cached signage point whose cc-vdf output hashes to `cc_signage_point` (chia
-    // `full_node_store.get_signage_point`). Returns an OWNED value (not a reference) because the
-    // sub-slot-start point — chia's `SignagePoint(None, None, None, None)` — is synthesized, not stored:
-    // when `cc_signage_point` is the genesis challenge or a finished sub-slot's challenge-chain hash, this
-    // is the signage-point-index-0 SP (chia `get_signage_point`, lines "if cc_signage_point ==
-    // GENESIS_CHALLENGE: return SignagePoint(None, None, None, None)" and the per-sub-slot cc-hash match).
-    // Otherwise it is the stored SP matched by `cc_vdf.output` hash (the farmer/pool lookup key).
+    // The cached signage point whose cc-vdf output hashes to `cc_signage_point`. Returns an
+    // owned value because the sub-slot-start point (all-`None`) is synthesized, not stored: when
+    // `cc_signage_point` is the genesis challenge or a finished sub-slot's challenge-chain hash,
+    // this is the index-0 SP. Otherwise it is the stored SP matched by `cc_vdf.output` hash (the
+    // farmer/pool lookup key).
     #[must_use]
     pub fn get_signage_point(&self, cc_signage_point: &Bytes32) -> Option<SignagePoint> {
         if *cc_signage_point == self.constants.genesis_challenge {
@@ -174,8 +166,8 @@ impl SlotState {
     }
 
     // The signage point at `index` in the slot with cc hash `challenge_hash`, provided it was
-    // built on `last_rc_infusion` (chia `get_signage_point_by_index`). Index 0 is the slot
-    // start itself, not a stored SP — callers handle it via `get_sub_slot`.
+    // built on `last_rc_infusion`. Index 0 is the slot start itself, not a stored SP — callers
+    // handle it via `get_sub_slot`.
     #[must_use]
     pub fn get_signage_point_by_index(
         &self,
@@ -196,10 +188,9 @@ impl SlotState {
         None
     }
 
-    // True if we hold a signage point at `index` built on a NEWER infusion than
-    // `last_rc_infusion` — i.e. an earlier index in the same slot proves we saw that infusion,
-    // yet the SP at `index` chains past it (chia `have_newer_signage_point`; the announce
-    // handler uses this to ignore outdated gossip).
+    // True if we hold a signage point at `index` built on a newer infusion than
+    // `last_rc_infusion` — an earlier index in the same slot proves we saw that infusion, yet
+    // the SP at `index` chains past it. The announce handler uses this to ignore outdated gossip.
     #[must_use]
     pub fn have_newer_signage_point(
         &self,
@@ -233,22 +224,19 @@ impl SlotState {
         false
     }
 
-    /// The finished sub-slots to include in a candidate being farmed — chia
-    /// `full_node_store.get_finished_sub_slots` (chia/full_node/full_node_store.py:1018). Collects the
-    /// EOS bundles from the one whose challenge-chain END-OF-SLOT VDF challenge equals
-    /// `challenge_in_chain` (the last challenge already in the chain at the candidate's previous block)
-    /// up to and INCLUDING the one whose challenge-chain HASH equals `last_challenge_to_add` (the
+    /// The finished sub-slots to include in a candidate being farmed. Collects the EOS bundles
+    /// from the one whose challenge-chain end-of-slot VDF challenge equals `challenge_in_chain`
+    /// (the last challenge already in the chain at the candidate's previous block) up to and
+    /// including the one whose challenge-chain hash equals `last_challenge_to_add` (the
     /// candidate's `cc_challenge_hash`).
     ///
-    /// `challenge_in_chain` is supplied by the caller because it is BLOCK-STORE-derived and `SlotState`
-    /// holds no block store: it is `GENESIS_CHALLENGE` when there is no previous block, else the previous
-    /// block's first-in-sub-slot ancestor's `finished_challenge_slot_hashes[-1]`
-    /// (chia get_finished_sub_slots lines "curr = prev_b; while not curr.first_in_sub_slot: ...").
+    /// `challenge_in_chain` is supplied by the caller because it is block-store-derived and
+    /// `SlotState` holds no block store: `GENESIS_CHALLENGE` when there is no previous block,
+    /// else the previous block's first-in-sub-slot ancestor's `finished_challenge_slot_hashes[-1]`.
     ///
-    /// Returns `Some([])` when `last_challenge_to_add == challenge_in_chain` (nothing to add), or `None`
-    /// when the last challenge is not found connected to `challenge_in_chain` — chia's `None` bail
-    /// ("Did not find hash ... connected to ..."). The genesis slot (`finished_sub_slots[0]`, whose `eos`
-    /// is `None`) is skipped exactly as chia iterates `self.finished_sub_slots[1:]`.
+    /// Returns `Some([])` when `last_challenge_to_add == challenge_in_chain` (nothing to add), or
+    /// `None` when the last challenge is not found connected to `challenge_in_chain`. The genesis
+    /// slot (`finished_sub_slots[0]`, whose `eos` is `None`) is skipped.
     #[must_use]
     pub fn get_finished_sub_slots(
         &self,
@@ -281,11 +269,10 @@ impl SlotState {
         None
     }
 
-    /// Backtrack a reward-chain challenge through the empty finished sub-slots we hold — the reversed
-    /// `finished_sub_slots` loop in chia `full_node_api.declare_proof_of_space:1000-1003`: while a stored
-    /// EOS's reward-chain hashes to the current `rc_challenge`, step to that slot's reward-chain
-    /// END-OF-SLOT VDF challenge. Resolves the reward-chain challenge the candidate's previous block must
-    /// carry BEFORE the block-store backtrack (which the daemon runs, since it needs the store).
+    /// Backtrack a reward-chain challenge through the empty finished sub-slots we hold: while a
+    /// stored EOS's reward-chain hashes to the current `rc_challenge`, step to that slot's
+    /// reward-chain end-of-slot VDF challenge. Resolves the reward-chain challenge the candidate's
+    /// previous block must carry before the block-store backtrack (which the daemon runs).
     #[must_use]
     pub fn backtrack_rc_challenge(&self, mut rc_challenge: Bytes32) -> Bytes32 {
         for slot in self.finished_sub_slots.iter().rev() {
@@ -298,10 +285,9 @@ impl SlotState {
         rc_challenge
     }
 
-    /// Validate and append a gossiped end-of-sub-slot bundle. `Some(())` means appended;
-    /// `None` means rejected or cached for a future infusion — chia's
-    /// `new_finished_sub_slot` (the returned infusion-point list is Phase 2.2's timelord
-    /// concern and is not modeled yet).
+    /// Validate and append a gossiped end-of-sub-slot bundle. `Some(())` means appended; `None`
+    /// means rejected or cached for a future infusion. Timelord infusion-point outputs are not
+    /// modeled.
     ///
     /// `blocks` is the record ancestry the deficit/ICC walks read (the engine's walk cache).
     #[allow(clippy::too_many_lines)]
@@ -608,9 +594,9 @@ impl SlotState {
         Some(())
     }
 
-    /// Validate and cache a gossiped signage point at `index` — chia's `new_signage_point`.
-    /// True means cached; false means rejected outright or parked in the future cache (its
-    /// slot's infusion has not reached us yet).
+    /// Validate and cache a gossiped signage point at `index`. True means cached; false means
+    /// rejected outright or parked in the future cache (its slot's infusion has not reached us
+    /// yet).
     #[allow(clippy::too_many_lines)]
     pub fn new_signage_point(
         &mut self,
@@ -628,9 +614,9 @@ impl SlotState {
         if index == 0 || u32::from(index) >= self.constants.num_sps_sub_slot {
             return false;
         }
-        // chia asserts all four VDF/proof fields are present for a real (index > 0) signage point
-        // (full_node_store.new_signage_point). The sub-slot-start SP (index 0, all-None) is rejected
-        // above; any partially-populated SP is malformed gossip — reject rather than panic.
+        // All four VDF/proof fields must be present for a real (index > 0) signage point. The
+        // sub-slot-start SP (index 0, all-None) is rejected above; any partially-populated SP is
+        // malformed gossip — reject rather than panic.
         let (Some(sp_cc_vdf), Some(sp_cc_proof), Some(sp_rc_vdf), Some(sp_rc_proof)) = (
             signage_point.cc_vdf.as_ref(),
             signage_point.cc_proof.as_ref(),
@@ -824,17 +810,16 @@ impl SlotState {
     }
 
     fn add_to_future_sp(&mut self, signage_point: &SignagePoint, index: u8) {
-        // Keyed by the SP's reward-chain challenge (chia add_to_future_sp). The sub-slot-start SP
-        // (all-None) never reaches here — new_signage_point rejects index 0 before this call.
+        // Keyed by the SP's reward-chain challenge. The sub-slot-start SP (all-None) never
+        // reaches here — new_signage_point rejects index 0 before this call.
         if let Some(rc_vdf) = &signage_point.rc_vdf {
             self.future_sp
                 .append(rc_vdf.challenge, (index, signage_point.clone()));
         }
     }
 
-    /// Reset the slot list around a newly-confirmed peak — chia's `new_peak`. Returns the
-    /// future-cached EOS and signage points that became connectable at this peak, already
-    /// re-validated.
+    /// Reset the slot list around a newly-confirmed peak. Returns the future-cached EOS and
+    /// signage points that became connectable at this peak, already re-validated.
     pub fn new_peak(
         &mut self,
         peak: &BlockRecord,
@@ -886,10 +871,10 @@ impl SlotState {
             }
 
             self.finished_sub_slots.clear();
-            // Silent-fallback note (class 5): 0 here is a LOAD-BEARING genesis sentinel — the branch below
-            // keys `prev_sub_slot_total_iters == 0` as "first sub-slot from genesis". A non-genesis
-            // underflow cannot reach this point: staging validates ip/sp iters before a record confirms.
-            // Do NOT swap for error propagation without re-keying the genesis branch.
+            // 0 here is a load-bearing genesis sentinel — the branch below keys
+            // `prev_sub_slot_total_iters == 0` as "first sub-slot from genesis". A non-genesis
+            // underflow cannot reach this point: staging validates ip/sp iters before a record
+            // confirms. Do not swap for error propagation without re-keying the genesis branch.
             let prev_sub_slot_total_iters =
                 peak.sp_sub_slot_total_iters(&self.constants).unwrap_or(0);
             if sp_sub_slot.is_some() || prev_sub_slot_total_iters == 0 {
@@ -963,7 +948,7 @@ mod tests {
 
     #[test]
     fn get_finished_sub_slots_returns_empty_when_last_equals_chain() {
-        // chia get_finished_sub_slots: last_challenge_to_add == challenge_in_chain -> [] (nothing to add).
+        // last_challenge_to_add == challenge_in_chain -> [] (nothing to add).
         let state = SlotState::new(MAINNET);
         let c = Bytes32::from([9; 32]);
         assert_eq!(state.get_finished_sub_slots(c, c), Some(Vec::new()));

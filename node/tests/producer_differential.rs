@@ -1,7 +1,5 @@
-// Differential-harvest harness: PROVE our block producer against REAL mainnet blocks.
-//
-// chia has no unit test for block production. This is the happy-path proof that replaces it — and it is
-// STRONGER than a unit test, because the oracle is the mainnet wire itself. A mainnet `FullBlock` is an
+// Differential-harvest harness: prove our block producer against REAL mainnet blocks — the
+// oracle is the mainnet wire itself. A mainnet `FullBlock` is an
 // `UnfinishedBlock` plus the timelord's three infusion VDFs (challenge-chain / reward-chain /
 // infused-challenge-chain infusion-point VDFs + their proofs). Strip those and what remains — the
 // `RewardChainBlockUnfinished`, the whole `Foliage`, the `FoliageTransactionBlock`, the
@@ -21,17 +19,16 @@
 // packing. A single byte of divergence is a real producer bug.
 //
 // ── KNOWN, DOCUMENTED DIVERGENCE (consensus-irrelevant) ────────────────────────────────────────────
-// `foliage.foliage_block_data.extension_data`: chia derives it from MT19937 (`random.Random(seed)`),
-// our producer derives it as `sha256(seed)` (core/src/consensus/producer.rs::extension_data_from_seed,
-// with the divergence note at producer.rs:48-60). There is NO seed that makes sha256(seed) equal a
+// `foliage.foliage_block_data.extension_data`: the reference derives it from MT19937, our
+// producer derives it as `sha256(seed)` (core/src/consensus/producer.rs::extension_data_from_seed).
+// There is NO seed that makes sha256(seed) equal a
 // given MT19937 value, and — critically — the current producer public API takes `seed: &[u8]`, NOT
 // `extension_data: Bytes32`, so a real extension_data CANNOT be injected through it. This harness
 // therefore (1) asserts extension_data is the SOLE differing field, (2) splices the real value in, then
 // (3) asserts WHOLE-BLOCK byte identity of everything else. See the report for the API-gap flag.
 //
 // ── INFUSION-REWRITTEN FOLIAGE FIELD (not a divergence — a mapping rule) ────────────────────────────
-// `foliage.reward_block_hash` is NOT a pass-through: on finishing, chia
-// `block_creation.py::unfinished_block_to_full_block` rewrites it to the FINISHED
+// `foliage.reward_block_hash` is NOT a pass-through: on finishing it is rewritten to the FINISHED
 // `reward_chain_block.get_hash()`, so a `FullBlock` carries the finished hash while the UnfinishedBlock
 // (and our producer, producer.rs:521) carries `get_unfinished().hash()`. The oracle reconstructs the
 // unfinished value via `unfinished_reward_block_hash()` — comparing against the block's finished value
@@ -189,7 +186,7 @@ fn produce_from_real(
     let is_tx = full.is_transaction_block();
     let height = full.reward_chain_block.height;
 
-    // Reward-claim walk: chia incorporates claims only on a transaction block above genesis.
+    // Reward-claim walk: claims incorporate only on a transaction block above genesis.
     let reward_claims = if is_tx && height > 0 {
         let ti = full
             .transactions_info
@@ -266,11 +263,10 @@ fn hexs(bytes: &[u8]) -> String {
     s
 }
 
-/// The unfinished value of `foliage.reward_block_hash`. This field is INFUSION-REWRITTEN when a block
-/// is finished: chia `block_creation.py::unfinished_block_to_full_block` does
-/// `foliage.replace(reward_block_hash = reward_chain_block.get_hash())` with the FINISHED reward-chain
-/// block, and `block_header_validation.py` then enforces `full.foliage.reward_block_hash ==
-/// full.reward_chain_block.get_hash()`. So a `FullBlock` carries the FINISHED hash, while the
+/// The unfinished value of `foliage.reward_block_hash`. This field is INFUSION-REWRITTEN when a
+/// block is finished — it becomes the FINISHED `reward_chain_block.get_hash()`, and header
+/// validation enforces `full.foliage.reward_block_hash == full.reward_chain_block.get_hash()`.
+/// So a `FullBlock` carries the FINISHED hash, while the
 /// UnfinishedBlock our producer emits carries `get_unfinished().hash()` (producer.rs:521, correct). The
 /// oracle must reconstruct the unfinished value — comparing our unfinished hash against the block's
 /// finished hash would be a mapping bug (they MUST differ). It is an infusion-only field, like the IP

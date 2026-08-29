@@ -18,9 +18,9 @@ use std::time::Duration;
 // the canonical chain continues above it. This is the fork-at-exactly-peak-minus-1 boundary of the
 // short-sync backtrack: the very first backtracked height (depth 0 = the peak height itself) must
 // find the fork, and the engine's fork choice must FLIP the peak through the atomic reorg
-// the moment the canonical branch outweighs — the old image instead logged "converged past
-// the fork" without moving the peak and re-orphaned forever. Distinct from backtrack.rs, whose fork
-// sits 2 below the peak and never exercises the same-height-sibling boundary.
+// the moment the canonical branch outweighs — never "converged past the fork" without moving
+// the peak. Distinct from backtrack.rs, whose fork sits 2 below the peak and never exercises
+// the same-height-sibling boundary.
 
 const BASE_WEIGHT: u128 = 1_000_000;
 const FORK: u32 = 105; // last common block — exactly peak - 1
@@ -53,8 +53,8 @@ fn build_chain(
 }
 
 // One weight schedule for BOTH branches: X and Y carry the SAME weight at PEAK (same-height mainnet
-// siblings differ in body, not weight), so canonical Y alone can never outweigh X — only its child
-// at PEAK+1 flips the branch, exactly the shape the old image failed to converge.
+// siblings differ in body, not weight), so canonical Y alone can never outweigh X — only its
+// child at PEAK+1 flips the branch.
 fn weight_at(h: u32) -> u128 {
     BASE_WEIGHT + u128::from(h - 100) * 10
 }
@@ -169,11 +169,11 @@ async fn forward_follow_over_a_wrong_peak_block_wedges_with_orphan_error() {
     );
 }
 
-// GREEN target: the backtrack's depth-0 probe (the peak height itself) fetches canonical Y, whose
-// parent (our FORK block) is known — the fork point is found at exactly peak - 1. Y parks as an
-// equal-weight orphan candidate; canonical PEAK+1 is the first block to outweigh X, and the engine
-// reorgs ATOMICALLY through the candidate branch [Y, PEAK+1] — the peak leaves the wrong block and
-// converges to the canonical tip. This is the exact transition the old image never made.
+// The backtrack's depth-0 probe (the peak height itself) fetches canonical Y, whose parent (our
+// FORK block) is known — the fork point is found at exactly peak - 1. Y parks as an equal-weight
+// orphan candidate; canonical PEAK+1 is the first block to outweigh X, and the engine reorgs
+// ATOMICALLY through the candidate branch [Y, PEAK+1] — the peak leaves the wrong block and
+// converges to the canonical tip.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn backtrack_flips_a_wrong_block_at_the_peak_to_the_canonical_branch() {
     let (ours, canonical) = fixture_chains();

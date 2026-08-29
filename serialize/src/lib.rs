@@ -67,13 +67,8 @@ pub trait ChiaSerialize {
     fn from_bytes(bytes: &mut Cursor<&[u8]>, version: ChiaProtocolVersion) -> Result<Self, Error>
     where
         Self: Sized;
-    /// Top-level decode entry mirroring chia's `Streamable.from_bytes`
-    /// (chia/util/streamable.py): decode a value from the front of `bytes` via the cursor-based
-    /// [`ChiaSerialize::from_bytes`] (chia's per-field `parse`, which legitimately leaves bytes for
-    /// following fields) and then require the **whole** buffer to be consumed, rejecting trailing
-    /// bytes. The full-consumption check lives only here, at the outer boundary — never inside the
-    /// nested `from_bytes` reader, so composite decoding is unaffected.
-    fn from_bytes_full(bytes: &[u8], version: ChiaProtocolVersion) -> Result<Self, Error>
+    /// Decodes a value, requiring the entire buffer to be consumed.
+    fn from_bytes_exact(bytes: &[u8], version: ChiaProtocolVersion) -> Result<Self, Error>
     where
         Self: Sized,
     {
@@ -125,17 +120,9 @@ impl ChiaSerialize for String {
         bytes.read_exact(&mut u32_len_ary)?;
         let vec_len = u32::from_be_bytes(u32_len_ary) as usize;
         if vec_len > 2048 {
-            trace!("decoding large vec (len={vec_len})");
+            warn!("decoding large vec (len={vec_len})");
         }
-        // Guard the declared length against the bytes actually remaining BEFORE allocating —
-        // the same remaining-bytes check the primitive and Vec<T> decoders already do. A wire
-        // u32 length is up to 4 GiB; `vec![0u8; vec_len]` on an unchecked length zero-fills that
-        // much transient heap before the read fails (the allocation-bomb signature). Chia's
-        // Streamable.parse_str reads exactly `length` bytes from the buffer and
-        // errors if short, never pre-zeroing a garbage length; match that fail-fast shape. NOTE:
-        // this cannot fire on the honest block-sync path — FullBlock/RespondBlocks carry no
-        // String/Map field (verified) — but it closes the hostile-decoder hole on message types
-        // that do (e.g. the Option<String> spend_type in coin-record responses).
+        // Check the declared length against remaining bytes before allocating.
         let remaining = bytes
             .get_ref()
             .as_ref()
@@ -208,9 +195,6 @@ where
     {
         let mut bool_buf: [u8; 1] = [0; 1];
         bytes.read_exact(&mut bool_buf)?;
-        // Chia's `parse_optional` (chia/util/streamable.py) requires the presence tag to be
-        // exactly 0x00 (None) or 0x01 (Some) and raises `ValueError` otherwise. Match that:
-        // any other byte is a malformed tag, not a lenient "Some".
         match bool_buf[0] {
             0 => Ok(None),
             1 => Ok(Some(T::from_bytes(bytes, version)?)),
@@ -307,27 +291,25 @@ where
     }
 }
 
-/// Decode a length-prefixed list, parsing at most `max_items` elements and skipping the rest —
-/// the CPU half of CHIA-4203 (chia `b483e59f22`, #20829: `chia/util/streamable.py::
-/// parse_list_limited`). A request whose list claims far more items than the handler will ever
-/// use (chia's motivating case: a `RequestCoinState` with 1.2M coin_ids, ~6 s of parse CPU on a
-/// Pi4 before the handler truncated) is truncated DURING decode:
+/// Decode a length-prefixed list, parsing at most `max_items` elements and skipping the rest.
+/// A request whose list claims far more items than the handler will ever use (a
+/// `RequestCoinState` claiming 1.2M coin_ids costs seconds of parse CPU on a small node) is
+/// truncated DURING decode:
 ///   - the first `min(count, max_items)` elements are parsed normally (head kept, order kept);
 ///   - when `element_fixed_size` is `Some(n)` the remaining `count - max_items` elements are
-///     skipped in O(1) by advancing the cursor `remaining * n` bytes (chia `f.seek(remaining *
-///     element_fixed_size, 1)`) — never allocated, never parsed;
-///   - a variable-size element type still parses the tail element-by-element, exactly as chia's
-///     fallback loop does (the O(1) skip is only sound for fixed-size elements).
+///     skipped in O(1) by advancing the cursor `remaining * n` bytes — never allocated, never
+///     parsed;
+///   - a variable-size element type still parses the tail element-by-element, since the O(1)
+///     skip is only sound for fixed-size elements.
 ///
-/// Seek-past-end tolerance mirrors chia: python `BytesIO.seek` beyond the buffer end succeeds and
-/// the outer full-consumption check then reads an empty remainder, so a message whose CLAIMED
-/// count overstates the bytes actually present is accepted with the truncated head once the claim
-/// is past the limit. The cursor is clamped to the buffer end (same observable behavior, no
-/// position/len underflow in [`ChiaSerialize::from_bytes_full`]'s consumed check); trailing
-/// garbage after a skip that lands INSIDE the buffer is still rejected there, as in chia.
+/// A skip past the buffer end is tolerated: the outer full-consumption check then reads an empty
+/// remainder, so a message whose CLAIMED count overstates the bytes actually present is accepted
+/// with the truncated head once the claim is past the limit. The cursor is clamped to the buffer
+/// end so [`ChiaSerialize::from_bytes_full`]'s consumed check cannot underflow; trailing garbage
+/// after a skip that lands INSIDE the buffer is still rejected there.
 ///
-/// The MEMORY half of CHIA-4203 (no pre-allocation from the untrusted count) landed with #180 —
-/// this decoder, like `Vec<T>::from_bytes`, starts empty and grows per parsed element.
+/// The memory half of the same bound: this decoder, like `Vec<T>::from_bytes`, never
+/// pre-allocates from the untrusted count — it starts empty and grows per parsed element.
 pub fn parse_vec_limited<T: ChiaSerialize>(
     bytes: &mut Cursor<&[u8]>,
     version: ChiaProtocolVersion,
@@ -566,10 +548,7 @@ impl<K: ChiaSerialize + Eq + Hash, V: ChiaSerialize> ChiaSerialize for HashMap<K
         if map_len > 2048 {
             warn!("Serializing Large Map: {map_len}");
         }
-        // No `with_capacity(map_len)` on an untrusted wire length: a garbage u32 (up to 4 G)
-        // sizes a multi-GiB hash table before a single entry is read (the same allocation-bomb
-        // class as the String/Vec length prefixes). Match the sibling Vec<T> decoder,
-        // which starts empty and grows as entries decode — fail-fast when the stream runs short.
+        // Never pre-allocate from an untrusted length prefix.
         let buf: HashMap<K, V> = HashMap::new();
         (0..map_len).try_fold(buf, |mut map, _| {
             let key = K::from_bytes(bytes, version)?;

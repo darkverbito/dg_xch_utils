@@ -1,5 +1,4 @@
 // Build a BlockRecord from a validated header block.
-// Ports chia/consensus/full_block_to_block_record.py (no chia_rs port exists).
 
 use crate::blockchain::block_record::BlockRecord;
 use crate::blockchain::challenge_block_info::ChallengeBlockInfo;

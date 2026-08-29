@@ -3,9 +3,9 @@ use dg_xch_vdf::form::{Form, nucomp_bound};
 use num_bigint::{BigInt, Sign};
 use std::time::Instant;
 
-// Decompose the class-group squaring cost (the trace-identified ~330ms/proof hotspot): full
-// square_with per-op time on the real 1024-bit mainnet-style discriminant, held against the
-// generator form evolving as verification would evolve it. Run:
+// Decompose the class-group squaring cost: full square_with per-op time on the real 1024-bit
+// mainnet-style discriminant, held against the generator form evolving as verification would
+// evolve it. Run:
 //   cargo test --release -p dg_xch_vdf --test square_bench -- --ignored --nocapture
 #[test]
 #[ignore = "timing tool"]

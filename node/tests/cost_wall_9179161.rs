@@ -6,14 +6,12 @@ use dg_xch_node::engine::run_body_expensive;
 use dg_xch_serialize::{ChiaProtocolVersion, ChiaSerialize};
 use std::io::Cursor;
 
-// The live tip-follow wall at mainnet 9,179,161..9,179,192 (2026-08-21): a node wedged
-// rejecting every follow step with `InvalidBlockCost`, peak frozen, liveness restart loop. The
-// window is real mainnet bytes wire-captured from a synced chia 2.x node (`block_fetch` →
-// RequestBlocks/RespondBlocks frames, the corpus-import format). Every transaction block in the
-// window must execute to EXACTLY its declared `transactions_info.cost` — the body rule the live
-// node holds each followed block to (chia `validate_block_body` rule 9, INVALID_BLOCK_COST) —
-// and its aggregate signature must verify. This exact window wedged production; it stays green
-// forever.
+// The tip-follow wall at mainnet 9,179,161..9,179,192: a node wedged rejecting every follow step
+// with `InvalidBlockCost`, peak frozen. The window is real mainnet bytes wire-captured from a
+// synced node (`block_fetch` → RequestBlocks/RespondBlocks frames, the corpus-import format).
+// Every transaction block in the window must execute to EXACTLY its declared
+// `transactions_info.cost` (body rule 9, INVALID_BLOCK_COST) and its aggregate signature must
+// verify. This exact window wedged production; it stays green forever.
 
 fn load_range(bytes: &[u8]) -> Vec<FullBlock> {
     RespondBlocks::from_bytes(&mut Cursor::new(bytes), ChiaProtocolVersion::default())

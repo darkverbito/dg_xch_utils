@@ -177,15 +177,15 @@ pub enum ProtocolMessageTypes {
     RequestCostInfo = 106,
     RespondCostInfo = 107,
 
-    //New farmer protocol messages (chia protocol_message_types.py: solution_response = 108)
+    //New farmer protocol messages (solution_response = 108)
     SolutionResponse = 108,
-    //Solver protocol (chia: solve = 109)
+    //Solver protocol (solve = 109)
     Solve = 109,
-    //Harvester partial proofs (chia: partial_proofs = 110)
+    //Harvester partial proofs (partial_proofs = 110)
     PartialProofs = 110,
-    //Rate-limits-v3 handshake follow-up (chia a1b12d321: configure_window_sizes = 111)
+    //Rate-limits-v3 handshake follow-up (configure_window_sizes = 111)
     ConfigureWindowSizes = 111,
-    //The error protocol message (chia ede354c58: error = 255) — see shared::ErrorMessage
+    //The error protocol message (error = 255) — see shared::ErrorMessage
     Error = 255,
 }
 impl From<u8> for ProtocolMessageTypes {
@@ -631,16 +631,11 @@ impl ChiaMessageHandler {
     }
 }
 
-/// Connection-scoped request/reply correlation table — the *Correlation Identifier* (Hohpe & Woolf,
-/// EIP 2003) realized as an O(1) pending-request map, routed by the *Reactor* read loop (POSA2).
+/// Connection-scoped request/reply correlation table: an O(1) pending-request map routed by
+/// the read loop.
 ///
-/// Historically the Chia wire `id` ([`ChiaMessage::id`]) that correlates a reply to its request was
-/// minted by a per-[`OutboundPeerSource`] `AtomicU16` reset to `1` and rebuilt every sync tick, so two
-/// concurrent in-flight requests on one long-lived connection could carry the *same* id. The read loop
-/// then fanned a reply to *every* matching waiter, and the true reply hit an already-closed cap-1
-/// channel — the requester waited out the full 30 s request timeout (the measured request-timeout stall).
-///
-/// This table owns id allocation *on the connection* (monotone, never reset, skipping any id currently
+/// The table owns id allocation *on the connection* (monotone, never reset, skipping any id
+/// currently
 /// in flight) and routes each reply to the single waiter that owns its id. Unsolicited gossip (no id)
 /// and inbound requests to answer (an id that is not one of ours) fall through to the handler scan.
 #[derive(Default)]
@@ -716,27 +711,27 @@ pub struct SocketPeer {
     pub node_type: Arc<RwLock<NodeType>>,
     pub protocol_version: Arc<RwLock<ChiaProtocolVersion>>,
     /// The capabilities the peer advertised in its handshake — the input to the per-connection rate
-    /// limiter's v1/v2 selection (chia `get_rate_limits_to_use`). Empty until the handshake is
+    /// limiter's v1/v2 selection. Empty until the handshake is
     /// processed; a message seen before then is charged under the stricter v1 numbers, which is safe.
     pub capabilities: Arc<RwLock<shared::Capabilities>>,
     pub websocket: Arc<RwLock<WebsocketConnection>>,
-    /// The peer's REMOTE host (IP), captured at accept/dial time. This is the ban key (chia bans by
-    /// `peer_info.host`, not by the cert-hash peer id used as the map key) — so the close path can
+    /// The peer's REMOTE host (IP), captured at accept/dial time. This is the ban key (the host,
+    /// not the cert-hash peer id used as the map key) — so the close path can
     /// enter this peer's IP into [`bans`](Self::bans). `None` when the remote addr was unavailable
     /// (e.g. an outbound dial to a hostname that was not resolved to an `IpAddr`), which simply means
     /// this peer cannot be host-banned — a fail-open we accept over guessing an IP.
     pub host: Option<std::net::IpAddr>,
-    /// The shared, server-wide timed ban list (chia `ChiaServer.banned_peers`). `Some` on inbound
+    /// The shared, server-wide timed ban list. `Some` on inbound
     /// server links (the full-node listener injects its registry so a rate-limit/consensus close both
     /// evicts the peer AND enters its host into the list the accept path consults); `None` on
     /// outbound client links, which do not maintain a ban list of their own.
     pub bans: Option<Arc<ban::BanRegistry>>,
-    /// Optional per-connection OUTBOUND self-throttle (chia's `outbound_rate_limiter`). When present
+    /// Optional per-connection OUTBOUND self-throttle. When present
     /// (full-node links), a frequency-capped message is paced against the PEER's budget before it is
     /// written, so a re-gossip burst cannot get US banned. `None` on non-full-node links, and on
     /// `None` [`SocketPeer::send`] writes directly — identical to the pre-throttle behaviour.
     pub outbound_limiter: Option<Arc<outbound_limiter::OutboundLimiter>>,
-    /// Per-connection RATE_LIMITS_V3 state (chia a1b12d321) — the same instance the link's
+    /// Per-connection RATE_LIMITS_V3 state — the same instance the link's
     /// [`WebsocketConnection`] and [`ReadStream`] hold, so the handshake arm (negotiation), the
     /// read loop (receive windows), and the request senders (outbound windows) all see one
     /// truth. Inert (`!is_active()`) unless the capability was negotiated.
@@ -744,11 +739,11 @@ pub struct SocketPeer {
 }
 impl SocketPeer {
     /// Send `msg` to this peer, self-throttling first when an outbound limiter is installed. The
-    /// throttle wait runs in THIS task holding NO connection lock (chia `_wait_and_retry` defers the
-    /// message, it does not block the send loop); only once the message is admitted do we take the
+    /// throttle wait runs in THIS task holding NO connection lock; only once the message is
+    /// admitted do we take the
     /// write lock and write it. An `Unlimited` serve type (RespondBlocks, …) is admitted instantly, so
     /// our sync/serve path is never delayed. A dropped message (exempt over budget, or the bounded
-    /// attempt cap reached) is logged and swallowed — chia likewise returns without sending.
+    /// attempt cap reached) is logged and swallowed.
     pub async fn send(&self, msg: ChiaMessage) -> Result<(), Error> {
         if let Some(limiter) = &self.outbound_limiter {
             let caps = self.capabilities.read().await.clone();
@@ -829,9 +824,8 @@ pub struct WebsocketConnection {
 }
 /// Upper bound on a single websocket write. A peer that stops draining (full TCP receive window
 /// → Sink backpressure) must never wedge the sender: the caller holds the connection write lock
-/// across `send`, so an unbounded write there stalls every other sender on that peer — the 7-minute
-/// follow-loop stall that tripped the liveness probe. 30s matches the request timeout: past it the
-/// peer is dead and the caller should fail over.
+/// across `send`, so an unbounded write there stalls every other sender on that peer. 30s
+/// matches the request timeout: past it the peer is dead and the caller should fail over.
 pub const SEND_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Write `msg` into `sink`, bounding the write with `timeout` so a non-draining peer cannot block it
@@ -897,8 +891,8 @@ impl WebsocketConnection {
     }
 
     /// Release a reserved correlation id whose reply never arrived (timeout / send failure).
-    /// Frees any RATE_LIMITS_V3 outbound-window slot the request occupied (chia decrements
-    /// `in_flight` in `send_request`'s finally).
+    /// Frees any RATE_LIMITS_V3 outbound-window slot the request occupied; without this a
+    /// timed-out request leaks its window slot forever.
     pub fn cancel_request(&self, id: u16) {
         self.pending.cancel(id);
         self.v3.out_release(id);
@@ -936,16 +930,16 @@ pub struct ReadStream {
     /// Shared with the owning [`WebsocketConnection`]; a reply whose id is registered here is routed
     /// to its single waiter and does not fan out to the handler scan (see [`PendingRequests`]).
     pending: Arc<PendingRequests>,
-    /// Optional per-connection inbound rate limiter (chia's `inbound_rate_limiter`). When present,
+    /// Optional per-connection inbound rate limiter. When present,
     /// EVERY inbound message is charged against the composed limits BEFORE the correlation fast-path
-    /// or the handler scan runs — so solicited replies (RespondBlocks bursts) count too, matching
-    /// chia which limits in `_read_one_message` ahead of dispatch. A violation closes the connection
-    /// and evicts the peer (chia `close(RATE_LIMITER_BAN_SECONDS)`). `None` on non-full-node links
-    /// (harvester/farmer/wallet clients), which chia also leaves unpoliced.
+    /// or the handler scan runs — so solicited replies (RespondBlocks bursts) count too.
+    /// A violation closes the connection
+    /// and evicts the peer. `None` on non-full-node links
+    /// (harvester/farmer/wallet clients), which are left unpoliced.
     limiter: Option<Arc<rate_limits::RateLimiter>>,
     /// Per-connection RATE_LIMITS_V3 state (shared with the [`WebsocketConnection`]): when the
     /// capability was negotiated, v3-tabled types bypass the time-based limiter and bounded
-    /// request types are admitted through in-flight receive windows instead (chia a1b12d321).
+    /// request types are admitted through in-flight receive windows instead.
     v3: Arc<rate_limits_v3::V3Link>,
 }
 impl ReadStream {
@@ -978,15 +972,14 @@ impl ReadStream {
                                     match ChiaMessage::from_bytes(&mut cursor, protocol_version) {
                                         Ok(chia_msg) => {
                                             let msg_arc: Arc<ChiaMessage> = Arc::new(chia_msg);
-                                            // chia b1b68072a (`_read_one_message`): a message type
-                                            // outside chia's enum disconnects the peer with the short
-                                            // INTERNAL_PROTOCOL_ERROR ban and a PROTOCOL_ERROR (1002)
-                                            // close, BEFORE the rate limiter or any dispatch sees it.
-                                            // Safe because our recognized-code set is pinned EQUAL to
-                                            // chia 2.7.1's (core/tests/protocol_message_codes.rs) —
-                                            // this can never fire on a conforming CNI peer. Links
-                                            // without a ban registry / resolved host (outbound
-                                            // clients) still close, they just cannot host-ban.
+                                            // An undefined message type disconnects the peer with
+                                            // the short INTERNAL_PROTOCOL_ERROR ban and a
+                                            // PROTOCOL_ERROR (1002) close, BEFORE the rate limiter
+                                            // or any dispatch sees it. The recognized-code set is
+                                            // pinned by core/tests/protocol_message_codes.rs, so
+                                            // this never fires on a conforming peer. Links without
+                                            // a ban registry or resolved host still close, they
+                                            // just cannot host-ban.
                                             if msg_arc.msg_type == ProtocolMessageTypes::Unknown {
                                                 error!(
                                                     "Disconnecting peer {} for unknown message type",
@@ -1021,13 +1014,12 @@ impl ReadStream {
                                                 }
                                                 return;
                                             }
-                                            // RATE_LIMITS_V3 (chia a1b12d321): once negotiated,
-                                            // v3-tabled types are NOT subject to the time-based
-                                            // limiter; bounded request types are admitted through
-                                            // an in-flight receive window instead — over-window
-                                            // closes with the RATE_LIMITER ban, exactly like a v2
-                                            // violation. Localhost peers bypass window enforcement
-                                            // (chia: `not is_localhost and not exempt`), but still
+                                            // Once RATE_LIMITS_V3 is negotiated, v3-tabled types
+                                            // are NOT subject to the time-based limiter; bounded
+                                            // request types are admitted through an in-flight
+                                            // receive window instead, and over-window closes with
+                                            // the RATE_LIMITER ban like a v2 violation. Localhost
+                                            // and exempt peers bypass window enforcement but still
                                             // bypass v2 for v3 types.
                                             let v3_typed = self.v3.is_active()
                                                 && rate_limits_v3::v3_setting(msg_arc.msg_type)
@@ -1082,13 +1074,12 @@ impl ReadStream {
                                                     }
                                                 }
                                             }
-                                            // Inbound rate limit (chia `inbound_rate_limiter` in
-                                            // `_read_one_message`): charge EVERY message against the
-                                            // composed per-connection limits BEFORE the correlation
-                                            // fast-path or the handler scan — so solicited replies
-                                            // count too. A violation closes the connection and evicts
-                                            // the peer (chia `close(RATE_LIMITER_BAN_SECONDS)`; our
-                                            // timed-ban behavior is applied below).
+                                            // Inbound rate limit: charge EVERY message against
+                                            // the composed per-connection limits BEFORE the
+                                            // correlation fast-path or the handler scan, so
+                                            // solicited replies count too. A violation closes the
+                                            // connection, evicts the peer, and applies the timed
+                                            // rate-limiter ban below.
                                             if let Some(limiter) = &self.limiter
                                                 && !v3_typed
                                             {
@@ -1108,8 +1099,7 @@ impl ReadStream {
                                                         .await
                                                         .remove(self.peer_id.as_ref())
                                                     {
-                                                        // chia `close(RATE_LIMITER_BAN_SECONDS)`:
-                                                        // enter this peer's REMOTE host into the
+                                                        // Enter this peer's REMOTE host into the
                                                         // timed ban list so a reconnect within the
                                                         // window is refused at the accept path — not
                                                         // just this connection closed. No-op on links
@@ -1140,8 +1130,7 @@ impl ReadStream {
                                                 && self.pending.deliver(id, msg_arc.clone())
                                             {
                                                 // A solicited reply frees any v3 outbound-window
-                                                // slot its request occupied (chia decrements
-                                                // `in_flight` when the response resolves).
+                                                // slot its request occupied.
                                                 self.v3.out_release(id);
                                                 debug!(
                                                     "Routed reply id={id}: {:?}",
@@ -1200,12 +1189,11 @@ impl ReadStream {
                                 tokio_tungstenite::tungstenite::Error::Io(e) => {
                                     warn!("Server Stream Closed: {e}");
                                 },
-                                // Same class at the TLS layer: rustls reports a peer that drops
-                                // the socket without sending close_notify as an error, and public
-                                // chia peers do this constantly — benign peer behavior, not a
-                                // fault of ours. Debounced to one WARN per window (DEBUG carries
-                                // every instance when toggled on) so a real TLS fault still leaves
-                                // a trace without an ERROR line per abandoned handshake.
+                                // Same class at the TLS layer: a peer dropping the socket
+                                // without sending close_notify is routine on a public
+                                // listener. Debounced to one WARN per window (DEBUG carries
+                                // every instance) so a real TLS fault still leaves a trace
+                                // without an ERROR line per abandoned handshake.
                                 tokio_tungstenite::tungstenite::Error::Tls(e) => {
                                     use std::sync::atomic::AtomicU64;
                                     static LAST_TLS_WARN_UNIX: AtomicU64 = AtomicU64::new(0);
@@ -1263,7 +1251,7 @@ mod send_timeout_tests {
     use std::time::Duration;
     use tokio_tungstenite::tungstenite::Message;
 
-    // A ready sink (a chia peer draining normally): the write completes and round-trips Ok.
+    // A ready sink (a peer draining normally): the write completes and round-trips Ok.
     #[tokio::test]
     async fn send_round_trips_on_a_ready_sink() {
         let mut sink = futures_util::sink::drain::<Message>();

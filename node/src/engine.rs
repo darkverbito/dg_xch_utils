@@ -54,9 +54,9 @@ use tracing::{Instrument, debug, info_span};
 // mid-window, walling the node with GeneratorRefHasNoGenerator; the per-window clear cannot.)
 
 /// The expensive PURE half of body validation (CLVM generator run + BLS aggregate verify),
-/// precomputed off-thread by the window pipeline. chia keys the CLVM flag ladder on the block's
-/// OWN height — fully known at precompute time — so a precomputation is
-/// always valid and never discarded.
+/// precomputed off-thread by the window pipeline. The CLVM flag ladder keys on the block's OWN
+/// height — fully known at precompute time — so a precomputation is always valid and never
+/// discarded.
 pub struct PrecomputedBody {
     pub conds: SpendBundleConditions,
     pub agg_sig_verified: bool,
@@ -88,9 +88,8 @@ pub fn run_body_expensive<P: ConsensusPrimitives>(
         generator_refs: generator_refs.to_vec(),
         constants: *constants,
         height: block.height(),
-        // chia keys the CLVM flag ladder off the block's OWN height — mainnet
-        // 5,496,002 validates with post-fork cost accounting while its prev tx block is
-        // pre-fork.
+        // The CLVM flag ladder keys off the block's OWN height — mainnet 5,496,002 validates
+        // with post-fork cost accounting while its prev tx block is pre-fork.
         flags: BlockGeneratorFlags::for_height(constants, block.height()),
     };
     let conds = primitives.run_block_generator(&input)?;
@@ -102,28 +101,24 @@ pub fn run_body_expensive<P: ConsensusPrimitives>(
     Ok((conds, verified))
 }
 
-/// The transactions half of chia `full_node.py::add_unfinished_block`, run on every received
-/// unfinished block AFTER its header validates and BEFORE it may enter the served cache or the
-/// relay queue: the structural generator/`transactions_info` bindings (chia
-/// `blockchain.validate_unfinished_block_header`), the generator EXECUTION with the aggregate
-/// signature verify (chia `_run_block` — the `GENERATOR_RUNTIME_ERROR` gate), and the cost rules
-/// (chia `validate_block_body` rules 7 and 9). chia raises `ConsensusError` — and the sender eats
-/// a 600s ban — on any failure here; a node that relays such a block without running its
-/// generator eats that ban itself from every honest peer that fetches the block (the live
-/// 2026-08-20 GENERATOR_RUNTIME_ERROR ban).
+/// The transactions half of unfinished-block validation, run on every received unfinished block
+/// AFTER its header validates and BEFORE it may enter the served cache or the relay queue: the
+/// structural generator/`transactions_info` bindings, the generator EXECUTION with the aggregate
+/// signature verify (the `GENERATOR_RUNTIME_ERROR` gate), and the cost rules. Peers ban the
+/// sender on any failure here; a node that relays such a block without running its generator
+/// eats that ban itself from every honest peer that fetches the block.
 ///
-/// Execution parity: the run budget is chia's `min(MAX_BLOCK_COST_CLVM, transactions_info.cost)`
-/// (full_node.py `_run_block` call), so a generator whose true cost exceeds its claim fails
-/// DURING the run (`BlockCostExceedsMax`, chia `BLOCK_COST_EXCEEDS_MAX`) after burning at most
-/// the CLAIMED cost of CPU — never the full block budget. A run that finishes under the claim is
-/// then held to exact equality (`InvalidBlockCost`, chia `INVALID_BLOCK_COST`).
+/// The run budget is `min(MAX_BLOCK_COST_CLVM, transactions_info.cost)`, so a generator whose
+/// true cost exceeds its claim fails DURING the run (`BlockCostExceedsMax`) after burning at
+/// most the CLAIMED cost of CPU — never the full block budget. A run that finishes under the
+/// claim is then held to exact equality (`InvalidBlockCost`).
 ///
 /// `height` is the unfinished block's own height (parent + 1) — the CLVM flag-ladder key;
 /// `prev_tx_height` is the previous TRANSACTION block's height — the SF9
 /// body-rule key. Two regimes, two keys, exactly as `validate_body` above.
 ///
 /// Returns the executed conditions for a generator-bearing block, `None` for a block with no
-/// generator (chia's `conds` stays `None` there too).
+/// generator.
 ///
 /// # Errors
 /// [`NodeError::Consensus`] with the matching [`ChiaError`] code on any structural, execution,
@@ -137,8 +132,8 @@ pub fn validate_unfinished_block_body<P: ConsensusPrimitives>(
     prev_tx_height: u32,
 ) -> Result<Option<SpendBundleConditions>, NodeError> {
     let Some(ti) = block.transactions_info.as_ref() else {
-        // Non-transaction unfinished block: chia validate_unfinished_block_header rejects a
-        // generator or a foliage transaction block that should not be there (blockchain.py:729-734).
+        // Non-transaction unfinished block: reject a generator or a foliage transaction block
+        // that should not be there.
         if block.transactions_generator.is_some() {
             return Err(ChiaError::InvalidTransactionsGeneratorHash.into());
         }
@@ -147,8 +142,8 @@ pub fn validate_unfinished_block_body<P: ConsensusPrimitives>(
         }
         return Ok(None);
     };
-    // chia blockchain.py:724-728 — a transactions_info without a foliage transaction block, or one
-    // whose foliage does not commit to it, is INVALID_TRANSACTIONS_INFO_HASH.
+    // A transactions_info without a foliage transaction block, or one whose foliage does not
+    // commit to it, is INVALID_TRANSACTIONS_INFO_HASH.
     let ftb = block
         .foliage_transaction_block
         .as_ref()
@@ -156,13 +151,12 @@ pub fn validate_unfinished_block_body<P: ConsensusPrimitives>(
     if ftb.transactions_info_hash != transactions_info_hash(ti)? {
         return Err(ChiaError::InvalidTransactionsInfoHash.into());
     }
-    // SF9 body rules key on the PREVIOUS transaction block's height (chia block_body_validation),
-    // the OPPOSITE keying from the CLVM flag ladder's own-height rule.
+    // SF9 body rules key on the PREVIOUS transaction block's height, the OPPOSITE keying from
+    // the CLVM flag ladder's own-height rule.
     let sf9 = prev_tx_height >= constants.soft_fork9_height;
     let Some(generator) = block.transactions_generator.clone() else {
-        // Empty transaction block: zeroed generator root, empty ref list, zero
-        // cost, and the aggregate signature verifies over the empty spend set. conds stays None,
-        // exactly as chia's.
+        // Empty transaction block: zeroed generator root, empty ref list, zero cost, and the
+        // aggregate signature verifies over the empty spend set. conds stays None.
         if ti.generator_root != Bytes32::default() {
             return Err(ChiaError::InvalidTransactionsGeneratorHash.into());
         }
@@ -180,13 +174,13 @@ pub fn validate_unfinished_block_body<P: ConsensusPrimitives>(
         primitives.verify_block_aggregate_signature(&empty, &ti.aggregated_signature, constants)?;
         return Ok(None);
     };
-    // chia 8b (TOO_MANY_GENERATOR_REFS): generator back-reference lists are banned past SF9,
-    // checked before the generator runs.
+    // TOO_MANY_GENERATOR_REFS: generator back-reference lists are banned past SF9, checked
+    // before the generator runs.
     if sf9 && !block.transactions_generator_ref_list.is_empty() {
         return Err(ChiaError::TooManyGeneratorRefs.into());
     }
-    // Structural identity BEFORE the expensive run, chia's order: the generator and ref-list roots
-    // must match the transactions_info the foliage committed to (blockchain.py:717-722).
+    // Structural identity BEFORE the expensive run: the generator and ref-list roots must match
+    // the transactions_info the foliage committed to.
     if transactions_generator_root(&generator) != ti.generator_root {
         return Err(ChiaError::InvalidTransactionsGeneratorHash.into());
     }
@@ -194,7 +188,7 @@ pub fn validate_unfinished_block_body<P: ConsensusPrimitives>(
     if refs_root != ti.generator_refs_root {
         return Err(ChiaError::InvalidTransactionsGeneratorHash.into());
     }
-    // The chia run budget: min(MAX_BLOCK_COST_CLVM, claimed cost) — see the doc comment.
+    // The run budget: min(MAX_BLOCK_COST_CLVM, claimed cost) — see the doc comment.
     let mut clamped = *constants;
     clamped.max_block_cost_clvm = std::cmp::min(clamped.max_block_cost_clvm, ti.cost);
     let input = BlockGeneratorInput {
@@ -207,22 +201,21 @@ pub fn validate_unfinished_block_body<P: ConsensusPrimitives>(
         flags: BlockGeneratorFlags::for_height(constants, height),
     };
     let conds = primitives.run_block_generator(&input)?;
-    // chia validate_block_body rule 9 (INVALID_BLOCK_COST): the claimed cost must be exact.
-    // Rule 7 (BLOCK_COST_EXCEEDS_MAX) is enforced inside the run by the clamped budget.
+    // Rule 9 (INVALID_BLOCK_COST): the claimed cost must be exact. Rule 7
+    // (BLOCK_COST_EXCEEDS_MAX) is enforced inside the run by the clamped budget.
     if conds.cost != ti.cost {
         return Err(ChiaError::InvalidBlockCost.into());
     }
-    // chia SF9 (INVALID_TRANSACTIONS_GENERATOR_ENCODING): canonical CLVM serialization, checked
-    // after the cost comparison exactly as chia orders it.
+    // SF9 (INVALID_TRANSACTIONS_GENERATOR_ENCODING): canonical CLVM serialization, checked after
+    // the cost comparison.
     if sf9 && !is_canonical_serialization(generator.as_ref()) {
         return Err(ChiaError::ComplexGeneratorReceived.into());
     }
-    // chia SF9 (TOO_MANY_SPENDS): at most 6,000 spends per block.
+    // SF9 (TOO_MANY_SPENDS): at most 6,000 spends per block.
     if sf9 && conds.spends.len() > MAX_SPENDS_PER_BLOCK {
         return Err(ChiaError::TooManySpends.into());
     }
-    // chia _run_block also aggregate-verifies the signature set (run_block_generator validates
-    // the signature; conditions.validated_signature is asserted in add_unfinished_block).
+    // The signature set is aggregate-verified here as well.
     primitives.verify_block_aggregate_signature(&conds, &ti.aggregated_signature, constants)?;
     Ok(Some(conds))
 }
@@ -239,19 +232,19 @@ pub struct BlockDelta {
     pub record: BlockRecord,
     pub additions: Vec<CoinRecord>,
     pub removals: Vec<Bytes32>,
-    // Create-coin hints `(hint, created_coin_id)` for this block's spends — the `coin_hint` index
-    // feed (chia hint store). Derived from the same conditions as `additions`; written into the
+    // Create-coin hints `(hint, created_coin_id)` for this block's spends — the `coin_hint`
+    // index feed. Derived from the same conditions as `additions`; written into the
     // coin store in the SAME batch as the deltas (`CoinStore::apply_hints_in`). Empty for a
     // non-transaction / hintless block.
     pub hints: Vec<(Bytes32, Bytes32)>,
 }
 
-// The chia `ForkInfo` equivalent for coin-store body validation: the coin additions/removals of
-// every UNAPPLIED ancestor between the coin store's confirmed state and the block being validated
-// — staged window blocks (their coins commit at window confirm) and pending orphan-branch blocks
-// (their coins commit only on reorg). `fork_height` is the height of the last ancestor whose coins
-// ARE in the store (-1 while validating genesis); main-chain spends above it do not count against
-// this branch, exactly as chia's `validate_block_body` treats `fork_info`.
+// The fork view for coin-store body validation: the coin additions/removals of every UNAPPLIED
+// ancestor between the coin store's confirmed state and the block being validated — staged
+// window blocks (their coins commit at window confirm) and pending orphan-branch blocks (their
+// coins commit only on reorg). `fork_height` is the height of the last ancestor whose coins ARE
+// in the store (-1 while validating genesis); main-chain spends above it do not count against
+// this branch.
 struct ForkView {
     fork_height: i64,
     additions: HashMap<Bytes32, CoinRecord>,
@@ -267,19 +260,17 @@ pub enum AddBlockOutcome {
     AlreadyHave,
 }
 
-/// One landed reorg's wallet-visible summary — chia's `StateChangeSummary` halves the wallet
-/// path needs (chia/consensus/blockchain.py:68-76: `fork_height`, `rolled_back_records`, and the
-/// re-applied branch whose additions/removals become the "new states"). Queued by [`Engine`]'s
+/// One landed reorg's wallet-visible summary: the fork height, the rolled-back records, and the
+/// re-applied branch whose additions/removals become the "new states". Queued by [`Engine`]'s
 /// reorg arm and drained by the chaser's reporting confirm loop, which expands `reapplied` into
 /// per-block confirmed deltas and attaches `rolled_back` to the first of them.
 #[derive(Debug)]
 pub struct ReorgReport {
     /// The last common height — coins above it on the losing branch were reverted.
     pub fork_height: u32,
-    /// Post-rollback coin records of the abandoned span — chia `coin_store.rollback_to_block`'s
-    /// returned `coin_changes` (chia/full_node/coin_store.py:705-751): a coin CREATED above the
-    /// fork reverts to `confirmed_block_index = 0` / `timestamp = 0` ("no longer on chain"); a
-    /// coin SPENT above the fork (created at or below it) reverts to unspent.
+    /// Post-rollback coin records of the abandoned span: a coin CREATED above the fork reverts
+    /// to `confirmed_block_index = 0` / `timestamp = 0` ("no longer on chain"); a coin SPENT
+    /// above the fork (created at or below it) reverts to unspent.
     pub rolled_back: Vec<CoinRecord>,
     /// The winning branch's already-validated deltas, fork+1..=tip in height order.
     pub reapplied: Vec<BlockDelta>,
@@ -326,18 +317,17 @@ pub struct Engine<S, P> {
     // keep sync-length-independent retention — see [`SEED_GENERATOR_CACHE_CAP`].
     seed_generators: HashMap<u32, dg_xch_core::clvm::program::SerializedProgram>,
     // Deltas of STAGED (not yet confirmed) window blocks, by header hash — the fork-view overlay
-    // for coin-store body validation (chia's ForkInfo role for the in-window branch: a window
-    // block's removals must validate against the coin set of earlier blocks of the SAME window,
-    // whose coins are not applied to the store until the window confirms). Inserted at stage,
-    // drained at confirm; bounded by the window size.
+    // for coin-store body validation: a window block's removals must validate against the coin
+    // set of earlier blocks of the SAME window, whose coins are not applied to the store until
+    // the window confirms. Inserted at stage, drained at confirm; bounded by the window size.
     staged_deltas: HashMap<Bytes32, BlockDelta>,
-    // The window staging READ preload (chia `block_store.get_block_records_by_hash`,
-    // block_store.py:328, batched instead of per-block): candidate records for every window
-    // header hash fetched in ONE call, plus the confirmed peak height at window start. Serves
+    // The window staging READ preload (batched instead of per-block): candidate records for
+    // every window header hash fetched in ONE call, plus the confirmed peak height at window
+    // start. Serves
     // `prepare_delta`'s AlreadyHave gate and headers-first candidate lookup without one awaited
-    // store round-trip per staged block (the measured catch-up residue: ~2 point reads per block,
-    // serialized across the window). `None` = no preload — every non-window path reads the store
-    // exactly as before. Same lifecycle as the staged overlay: set by
+    // store round-trip per staged block (~2 point reads per block, serialized across the
+    // window). `None` = no preload — every non-window path reads the store directly. Same
+    // lifecycle as the staged overlay: set by
     // [`Engine::preload_stage_context`], cleared with [`Engine::clear_staged_overlay`] /
     // [`Engine::clear_stage_preload`].
     stage_preload: Option<StagePreload>,
@@ -345,8 +335,8 @@ pub struct Engine<S, P> {
     // assume-valid seam: below this height script/sig validation is bypassed but the block is
     // still confirmed and its PoW header still validated. 0 = off (fresh genesis default).
     assume_valid: u32,
-    // Whether the coin-store-backed body rules (chia block_body_validation rules 5 and 15-21)
-    // are enforced. chia runs them on EVERY block — it always has full history. A `--sync-from`
+    // Whether the coin-store-backed body rules (rules 5 and 15-21) are enforced. A full-history
+    // node runs them on every block. A `--sync-from`
     // anchored store has no coin set (and no records) below its anchor, so those rules are
     // undefined there; the pure structural rules (3, 10-14) still run on every transaction
     // block. `None` = undecided; resolved lazily per transaction block from the store's
@@ -551,7 +541,7 @@ where
     /// [`Engine::stage_block_pre`] with the archive writes threaded into a caller-owned WINDOW
     /// staging batch instead of a per-block commit — the CATCH-UP half of the phase-aware commit
     /// granularity [`Engine::confirm_staged_batch`] already applies on the confirm side (batch
-    /// during bulk sync, one transaction per block near the tip; chia's shape). On the SQLite
+    /// during bulk sync, one transaction per block near the tip). On the SQLite
     /// backend every commit is an fsync serialized on the single writer connection, so per-block
     /// staging commits cost a full write round-trip per block of pure dead time between the
     /// parallel body precompute and the confirm. The batch opens lazily at the first block that
@@ -609,7 +599,7 @@ where
     /// 300s liveness clock keeps resetting) and the WAL stays ~one block for the active checkpointer.
     /// CATCH-UP: the whole window in ONE transaction, so the full slow-disk write budget goes to the
     /// writer while the checkpointer stays quiet (the WAL grows toward the autocheckpoint failsafe).
-    /// Both mirror chia -- batch during bulk sync, one db transaction per block near the tip. The fast
+    /// Batch during bulk sync, one db transaction per block near the tip. The fast
     /// path applies every delta that plainly extends the running peak; a non-extension stops it and
     /// the remaining deltas take the [`Self::confirm_staged`] path, so fork choice / reorg semantics
     /// stay byte-identical. Reorg-safe: a mid-window failure leaves peak = last committed block
@@ -634,8 +624,8 @@ where
     /// drain) the carried batch is DROPPED, rolling the staged archive rows back — the window
     /// retries and re-stages wholesale (`begin()`'s rollback guard clears the dangling
     /// transaction). A carried batch whose FIRST delta does not extend the peak is committed
-    /// archive-only (no `set_peak`) before the sequential fork-choice path runs, which needs those
-    /// rows durable exactly as the old separate staging commit provided.
+    /// archive-only (no `set_peak`) before the sequential fork-choice path runs, which needs
+    /// those rows durable.
     ///
     /// # Errors
     /// Returns [`NodeError::Store`] on a persistence failure.
@@ -662,8 +652,8 @@ where
         // durable peak advances every block (the 300s liveness clock keeps resetting) and the WAL stays
         // ~one block for the active checkpointer; during bulk catch-up, accumulate the whole window into
         // ONE transaction so the full slow-disk write budget goes to the writer while the checkpointer is
-        // quiet. The store carries the phase (near-tip band), set by the follow driver. This mirrors chia:
-        // batch during long/bulk sync, one db transaction per block near the tip.
+        // quiet. The store carries the phase (near-tip band), set by the follow driver: batch
+        // during long/bulk sync, one db transaction per block near the tip.
         let per_block = self.store.near_tip();
         // Catch-up mode reuses ONE batch across the window — seeded with the CARRIED staging
         // transaction when the window loop handed one over; near-tip mode commits each block
@@ -776,7 +766,7 @@ where
     }
 
     /// Batch the staging loop's per-block store reads for one window: ONE
-    /// `get_block_records_by_hash` over every window header hash (chia block_store.py:328) + one
+    /// `get_block_records_by_hash` over every window header hash + one
     /// peak read, consulted by `prepare_delta`'s AlreadyHave gate and candidate lookup instead of
     /// two awaited point reads per staged block. The window loop calls this right before staging;
     /// the context dies with the staged overlay (error paths) or via [`Self::clear_stage_preload`]
@@ -848,8 +838,8 @@ where
             .or_else(|| self.seed_generators.get(&height))
     }
 
-    /// The previous-TRANSACTION-block height for `block`, from the confirmed store (chia
-    /// block_body_validation semantics) — the flag-ladder key the window pipeline's parallel
+    /// The previous-TRANSACTION-block height for `block`, from the confirmed store — the
+    /// flag-ladder key the window pipeline's parallel
     /// body precompute uses. The checkpoint-anchor candidate subtlety is deliberately ignored
     /// here: on any mismatch with the engine's own stage-time derivation the precompute is
     /// discarded and validation runs inline.
@@ -898,7 +888,7 @@ where
     /// Verify a whole window's deferred header BLS signatures across all cores. `true` iff every
     /// signature verifies (byte-identical to the inline gates). The window pipeline uses this as the
     /// fast-path check; on a `false`, [`crate::header::first_failing_sig`] over the failing block's
-    /// slice attributes the exact height and chia rejection string.
+    /// slice attributes the exact height and rejection string.
     #[must_use]
     pub fn verify_sig_window(&self, queue: &[crate::header::QueuedSig]) -> bool {
         crate::header::verify_sig_batch(queue)
@@ -946,10 +936,10 @@ where
             return Ok(None);
         }
         let prev = self.prev_record(block).await?;
-        // Resolve block-level generator back-references (chia get_block_generator / lookup_block_generators):
-        // each referenced height's generator is fetched from the confirmed chain, in ref-list order — empty
-        // for a block with no ref-list. Body validation stays sync (derive_delta), so resolution — the only
-        // async, store-touching step — happens here and the resolved refs are threaded down.
+        // Resolve block-level generator back-references: each referenced height's generator is
+        // fetched from the confirmed chain, in ref-list order — empty for a block with no
+        // ref-list. Body validation stays sync (derive_delta), so resolution — the only async,
+        // store-touching step — happens here and the resolved refs are threaded down.
         // ONLY for the inline body run: when the window pipeline hands a `PrecomputedBody`, the
         // precompute already resolved these refs and `run_body_expensive` consumed them; the
         // precomputed branch of `validate_body` never reads them again (the `generator_refs_root`
@@ -962,13 +952,14 @@ where
             self.resolve_generator_refs(&block.transactions_generator_ref_list)
                 .await?
         };
-        // Previous-TRANSACTION-block context for the time-lock conditions: chia validates
-        // ASSERT_HEIGHT/SECONDS against the previous transaction block's height/timestamp
-        // (chia block_body_validation), never this block's own.
-        // The headers-first candidate record for THIS block (if the fast-sync header pass stored one)
-        // carries the weight-proof-attested epoch context — sub_slot_iters and, at a sub-epoch boundary,
-        // the included sub-epoch summary — the checkpoint's ground truth when the local ancestry is too
-        // shallow for chia's epoch walk. Without it the anchor confirm would fabricate
+        // Previous-TRANSACTION-block context for the time-lock conditions: ASSERT_HEIGHT/SECONDS
+        // validate against the previous transaction block's height/timestamp, never this block's
+        // own.
+        // The headers-first candidate record for THIS block (if the fast-sync header pass stored
+        // one) carries the weight-proof-attested epoch context — sub_slot_iters and, at a
+        // sub-epoch boundary, the included sub-epoch summary — the checkpoint's ground truth when
+        // the local ancestry is too shallow for the epoch walk. Without it the anchor confirm
+        // would fabricate
         // sub_slot_iters_starting into the record and every descendant would inherit the poisoned value
         // (the required_iters-over-sp-interval rejections just after sub-epoch boundaries).
         let candidate = match preloaded_candidate {
@@ -993,16 +984,13 @@ where
                 ));
             }
         }
-        // chia block_header_validation.py check 26a (2.7.1): a transaction block's timestamp must not
-        // be more than MAX_FUTURE_TIME2 seconds beyond wall-clock now
-        // (`ftb.timestamp > int(time.time() + constants.MAX_FUTURE_TIME2)`). This is a
-        // NON-DETERMINISTIC wall-clock gate, deliberately excluded from the deterministic header
-        // validator (`core/src/consensus/block_header_validation.rs` notes it "is wall-clock and
-        // non-deterministic, so it is not part of recent-chain header validation") and enforced HERE
-        // at ingest instead. Historical sync blocks carry past timestamps, so the accept path (corpus
+        // Check 26a: a transaction block's timestamp must not be more than MAX_FUTURE_TIME2
+        // seconds beyond wall-clock now. This is a NON-DETERMINISTIC wall-clock gate, so it is
+        // deliberately excluded from the deterministic header validator and enforced HERE at
+        // ingest instead. Historical sync blocks carry past timestamps, so the accept path (corpus
         // replay, real gossip) is unaffected; only a block claiming a far-future timestamp is refused.
-        // chia 2.7.1 uses MAX_FUTURE_TIME2 unconditionally at 26a (the pre-soft-fork2 MAX_FUTURE_TIME
-        // is dead on mainnet, where soft_fork2_height == 0). Placed before body/record work so it wins
+        // MAX_FUTURE_TIME2 applies unconditionally: the pre-soft-fork2 MAX_FUTURE_TIME is dead on
+        // mainnet, where soft_fork2_height == 0. Placed before body/record work so it wins
         // over the timestamp-dependent foliage-hash checks a forged timestamp would also trip.
         if let Some(ftb) = block.foliage_transaction_block.as_ref() {
             let now = std::time::SystemTime::now()
@@ -1018,9 +1006,8 @@ where
             }
         }
         // Body validation: the pure half (generator/sig/roots-of-generator identity) in
-        // `validate_body`, then the coin-store-backed half (chia block_body_validation rules
-        // 3, 5, 10-21) — both BEFORE record derivation, mirroring the engine's established
-        // body-first rejection order.
+        // `validate_body`, then the coin-store-backed half (body rules 3, 5, 10-21) — both
+        // BEFORE record derivation, keeping the engine's body-first rejection order.
         let (conds, additions, removals) = if block.is_transaction_block() {
             let out = self.validate_body(block, &generator_refs, prev_tx, pre)?;
             self.validate_body_coin_rules(block, out.0.as_ref(), &out.1, &out.2, prev_tx)
@@ -1030,10 +1017,9 @@ where
             (None, Vec::new(), Vec::new())
         };
         // Record derivation runs the consensus ancestry walks (retarget/SES/header validation)
-        // over the walk cache. chia's walks fall back to the DB on a cache miss
-        // (blockchain.py `block_record` → `get_block_record_from_db`, and the warmup at
-        // full_node.py:1193-1205); mirror that here: a NotFound from a walk triggers ONE
-        // store-backed ancestry repair + retry, so a cache/store misalignment (a restart warm
+        // over the walk cache, falling back to the store on a cache miss: a NotFound from a walk
+        // triggers ONE store-backed ancestry repair + retry, so a cache/store misalignment (a
+        // restart warm
         // that stopped at a mid-span hole since backfilled, records a driver repair landed
         // without a re-warm) resolves from the store instead of livelocking the MissingRecord
         // recovery on the identical window. The hot path is untouched — the fallback runs only
@@ -1075,7 +1061,7 @@ where
         matches!(e, NodeError::Io(io) if io.kind() == std::io::ErrorKind::NotFound)
     }
 
-    /// Store fallback for the consensus ancestry walks (chia parity: cache miss → DB read).
+    /// Store fallback for the consensus ancestry walks (cache miss → DB read).
     /// Walks back from `tip` (the staging block's parent hash) along `prev_hash`, pulling every
     /// record the cache lacks from the store into the cache, down to the walk depth the block at
     /// `height` can read (`difficulty_record_depth` + trailing slack, capped at the cache
@@ -1211,9 +1197,9 @@ where
 
     /// Resolve a block's `transactions_generator_ref_list` into ordered [`GeneratorReference`]s by fetching
     /// each referenced prior block's generator from the confirmed main chain — the storage side of
-    /// block-level back-reference compression. Order follows the ref-list (chia `get_block_generator` /
-    /// `lookup_block_generators`); a referenced height with no confirmed generator is a validation failure
-    /// (chia raises `Err.GENERATOR_REF_HAS_NO_GENERATOR`), never a silent pass.
+    /// block-level back-reference compression. Order follows the ref-list; a referenced height
+    /// with no confirmed generator is a validation failure (`GENERATOR_REF_HAS_NO_GENERATOR`),
+    /// never a silent pass.
     ///
     /// # Errors
     /// [`NodeError::Consensus`] ([`ChiaError::GeneratorRefHasNoGenerator`]) if a referenced height has no
@@ -1267,8 +1253,8 @@ where
             .foliage_transaction_block
             .as_ref()
             .map_or(0, |f| f.timestamp);
-        // Create-coin hints for the coin_hint index (chia hint store), derived from the same
-        // conditions that produced `additions` — `None` (empty) for a non-transaction / empty block.
+        // Create-coin hints for the coin_hint index, derived from the same conditions that
+        // produced `additions` — `None` (empty) for a non-transaction / empty block.
         let hints = conds.as_ref().map(hints_for_conditions).unwrap_or_default();
         debug!(
             coins = additions.len(),
@@ -1305,12 +1291,11 @@ where
         let generator = match block.transactions_generator.clone() {
             Some(g) => g,
             None => {
-                // A transaction block MAY omit its generator (an empty
-                // transaction block). chia block_body_validation: the generator root must be
-                // zeroes, the ref list must be empty (refs_root = the empty-list sentinel),
-                // the declared cost must be 0, and the aggregated signature must verify over
-                // the empty spend set. Additions are the incorporated reward claims only and
-                // there are no removals; conds is None exactly as chia's conds is None.
+                // A transaction block MAY omit its generator (an empty transaction block): the
+                // generator root must be zeroes, the ref list must be empty (refs_root = the
+                // empty-list sentinel), the declared cost must be 0, and the aggregated
+                // signature must verify over the empty spend set. Additions are the
+                // incorporated reward claims only and there are no removals; conds is None.
                 if ti.generator_root != Bytes32::default() {
                     return Err(ChiaError::InvalidTransactionsGeneratorHash.into());
                 }
@@ -1346,10 +1331,10 @@ where
             }
         };
         // SF9 body rules key on the PREVIOUS transaction block's height — the OPPOSITE keying
-        // from the CLVM flag ladder's own-height rule; both are chia's.
+        // from the CLVM flag ladder's own-height rule.
         let sf9 = prev_tx.0 >= self.constants.soft_fork9_height;
-        // chia 8b (TOO_MANY_GENERATOR_REFS): generator back-reference lists are banned past SF9,
-        // checked before the generator runs.
+        // TOO_MANY_GENERATOR_REFS: generator back-reference lists are banned past SF9, checked
+        // before the generator runs.
         if sf9 && !block.transactions_generator_ref_list.is_empty() {
             return Err(ChiaError::TooManyGeneratorRefs.into());
         }
@@ -1372,9 +1357,8 @@ where
         if gen_root != ti.generator_root {
             return Err(ChiaError::InvalidTransactionsGeneratorHash.into());
         }
-        // Compute refs_root over the ACTUAL referenced heights (was hardcoded `&[]`, which rejected every
-        // real ref-list block). A ti.generator_refs_root that disagrees with the resolved ref-list is a
-        // rejection — matching chia's block-body validation.
+        // Compute refs_root over the ACTUAL referenced heights. A ti.generator_refs_root that
+        // disagrees with the resolved ref-list is a rejection.
         let refs_root = transactions_generator_refs_root(&block.transactions_generator_ref_list)?;
         if refs_root != ti.generator_refs_root {
             return Err(ChiaError::InvalidTransactionsGeneratorHash.into());
@@ -1382,12 +1366,12 @@ where
         if conds.cost != ti.cost {
             return Err(ChiaError::InvalidBlockCost.into());
         }
-        // chia SF9 (INVALID_TRANSACTIONS_GENERATOR_ENCODING): canonical CLVM serialization,
-        // checked after the cost comparison exactly as chia orders it.
+        // SF9 (INVALID_TRANSACTIONS_GENERATOR_ENCODING): canonical CLVM serialization, checked
+        // after the cost comparison.
         if sf9 && !is_canonical_serialization(generator.as_ref()) {
             return Err(ChiaError::ComplexGeneratorReceived.into());
         }
-        // chia SF9 (TOO_MANY_SPENDS): at most 6,000 spends per block.
+        // SF9 (TOO_MANY_SPENDS): at most 6,000 spends per block.
         if sf9 && conds.spends.len() > MAX_SPENDS_PER_BLOCK {
             return Err(ChiaError::TooManySpends.into());
         }
@@ -1423,14 +1407,10 @@ where
         Ok((Some(conds), additions, removals))
     }
 
-    // ---- Coin-store body validation (chia block_body_validation.py rules 3, 5, 10-21) ---------
+    // ---- Coin-store body validation (body rules 3, 5, 10-21) ----------------------------------
     //
-    // chia runs `validate_block_body` for EVERY block added — the singleton path
-    // (full_node.py add_block → Blockchain.add_block) and the long-sync batch path
-    // (add_block_batch → add_prevalidated_blocks → Blockchain.add_block) both land here; there is
-    // no body-validation skip window (skip_blocks only skips already-validated blocks below the
-    // fork). The engine mirrors that placement: these rules run on every transaction block on
-    // both the single-block and staged-window paths, before record/header derivation.
+    // These rules run on every transaction block on both the single-block and staged-window
+    // paths, before record/header derivation. There is no body-validation skip window.
 
     // Lazily resolve whether the coin-store-backed rules are enforced (see `full_history`).
     // Only the POSITIVE decision is cached: full history is monotone (records are never
@@ -1452,7 +1432,7 @@ where
         Ok(v)
     }
 
-    // The block-body rules that read the coin/record store, in chia's rule order. The pure
+    // The block-body rules that read the coin/record store, in rule order. The pure
     // structural rules (3, 10, 11, 12, 13, 14) run on every transaction block; the store-backed
     // rules (15-20 and the rule-21 coin context) require full coin history; rule 5 runs whenever
     // the record walk can complete (strictly under full history). Rule 4
@@ -1505,8 +1485,8 @@ where
         }
 
         // Rule 12: the BIP158 transactions filter commits to every addition's puzzle hash and
-        // every removal id — the same construction the producer builds (chia
-        // `PyBIP158(byte_array_tx)`, additions incl. coinbase first, then removal names).
+        // every removal id — the same construction the producer builds (additions incl.
+        // coinbase first, then removal names).
         let mut filter_items: Vec<Vec<u8>> = Vec::with_capacity(additions.len() + removals.len());
         for a in additions {
             filter_items.push(a.coin.puzzle_hash.bytes().to_vec());
@@ -1574,8 +1554,8 @@ where
                 return Err(ChiaError::InvalidBlockFeeAmount.into());
             }
             // Rule 20: each removed coin's stored puzzle hash matches the spend's puzzle reveal.
-            // (The coin id commits to the puzzle hash, so this is reachable only through a corrupt
-            // store row — chia checks it and so do we.)
+            // (The coin id commits to the puzzle hash, so this is reachable only through a
+            // corrupt store row.)
             if let Some(c) = conds {
                 for spend in &c.spends {
                     if let Some(rec) = removal_records.get(&spend.coin_id)
@@ -1604,8 +1584,8 @@ where
         }
 
         // Rule 21 + block-level condition checks (announcements, ephemeral/concurrent asserts,
-        // absolute and relative time-locks). chia validates time-locks against the PREVIOUS
-        // transaction block's height/timestamp (block_body_validation), never this block's own.
+        // absolute and relative time-locks). Time-locks validate against the PREVIOUS
+        // transaction block's height/timestamp, never this block's own.
         // Assume-valid: below the milestone the script-output checks are skipped.
         if let Some(c) = conds
             && height >= self.assume_valid
@@ -1620,11 +1600,11 @@ where
         Ok(())
     }
 
-    // chia rule 5 (`INVALID_REWARD_COINS`): walk from the foliage-declared previous transaction
+    // Rule 5 (`INVALID_REWARD_COINS`): walk from the foliage-declared previous transaction
     // block down through the non-transaction blocks behind it, computing the exact reward coins
     // this block must incorporate. `strict` (full history) makes a missing walk record a
     // rejection; otherwise (anchored store, walk reaching below the anchor) the rule is skipped
-    // for this block — chia has no anchored mode, its records always resolve.
+    // for this block.
     async fn validate_reward_claims(
         &self,
         block: &FullBlock,
@@ -1734,7 +1714,7 @@ where
     }
 
     // Previous-TRANSACTION-block context (height, timestamp) for the CLVM flag ladder and the
-    // time-lock conditions: chia validates ASSERT_HEIGHT/SECONDS against the previous transaction
+    // time-lock conditions: ASSERT_HEIGHT/SECONDS validate against the previous transaction
     // block's height/timestamp, never this block's own. `candidate` is this block's own
     // headers-first record (if the fast-sync header pass stored one); it grounds the checkpoint
     // anchor when the local ancestor is missing (weight-proof-attested prev-tx height). Shared by
@@ -1756,10 +1736,8 @@ where
                 // ancestor between two transaction blocks is a cache entry (`finish_stage`
                 // inserts each staged record; confirm and the resume warm insert the recent
                 // confirmed ancestry), so the walk resolves without an awaited store round-trip
-                // per non-tx-parented block — one of the measured per-block reads of the
-                // catch-up staging residue. The walk follows `prev_hash` (branch ancestry —
-                // chia block_body_validation reads the previous transaction block through the
-                // blockchain's own records); any cache gap falls back to the store read below.
+                // per non-tx-parented block. The walk follows `prev_hash` (branch ancestry);
+                // any cache gap falls back to the store read below.
                 let target = p.prev_transaction_block_height;
                 let mut walked: Option<(u32, Option<u64>)> = None;
                 let mut cur = self.cache.get(&p.prev_hash);
@@ -1797,12 +1775,10 @@ where
     }
 
     /// Rebuild a stored-but-non-confirmed branch block's already-validated coin delta from the
-    /// DURABLE store (its persisted body + record) — chia's `ForkInfo` / `advance_fork_info`
-    /// rebuilt from the block store instead of an in-memory cache. The in-memory
-    /// `pending`/`staged_deltas` caches are bounded and lost on restart; the store is
-    /// authoritative and unbounded, so a fork of ANY depth (and one that surfaces only after a
-    /// process restart) can be reconstructed. The coin delta is re-derived exactly as the block
-    /// was first validated — chia re-runs `get_name_puzzle_conditions` for every fork block — via
+    /// DURABLE store (its persisted body + record). The in-memory `pending`/`staged_deltas`
+    /// caches are bounded and lost on restart; the store is authoritative and unbounded, so a
+    /// fork of ANY depth (and one that surfaces only after a process restart) can be
+    /// reconstructed. The coin delta is re-derived exactly as the block was first validated, via
     /// the pure body half only, so there is no recursion into the fork view.
     ///
     /// # Errors
@@ -1838,13 +1814,11 @@ where
     // Build the ForkView for `block`: walk parent-ward from its prev hash to the first CONFIRMED
     // ancestor — the fork point, at ANY depth — folding every unapplied ancestor's coin delta into
     // the view along the way. The delta comes from the in-memory overlay when present (staged
-    // window blocks, then pending orphan branches) and otherwise is REBUILT FROM THE DURABLE STORE
-    // (`delta_from_store`): chia's `find_fork_point.lookup_fork_chain` (walk store block-records to
-    // the fork) + `advance_fork_info` (re-derive each fork block's coin delta). There is no
-    // reorg-depth horizon — the in-memory caches are bounded and volatile (lost on restart), the
-    // store is not, so a heavier valid branch is reconstructed regardless of fork depth or a
-    // restart (chia has no such horizon; blockchain.py:495-510 weight-only fork choice +
-    // coin_store.py:705-727 unfloored rollback). A parent absent from both the overlay and the
+    // window blocks, then pending orphan branches) and otherwise is REBUILT FROM THE DURABLE
+    // STORE (`delta_from_store`): walk store block-records to the fork and re-derive each fork
+    // block's coin delta. There is no reorg-depth horizon — the in-memory caches are bounded and
+    // volatile (lost on restart), the store is not, so a heavier valid branch is reconstructed
+    // regardless of fork depth or a restart. A parent absent from both the overlay and the
     // store is the checkpoint-anchor bootstrap (pre-anchor state is trusted wholesale, fork view
     // empty). The walk streams one ancestor at a time (O(1) beyond the accumulated coin delta,
     // which the in-cache walk already accumulated); a non-strictly-decreasing height is a corrupt
@@ -1887,9 +1861,8 @@ where
                     return Ok(view);
                 }
                 // Stored but NON-confirmed: a branch block whose delta is not in the in-memory
-                // caches (a restart, or a fork deeper than the in-memory window). Rebuild its coin
-                // delta from the durable store and keep walking — chia's advance_fork_info, no
-                // horizon.
+                // caches (a restart, or a fork deeper than the in-memory window). Rebuild its
+                // coin delta from the durable store and keep walking — no horizon.
                 Some(_) => {
                     let d = self.delta_from_store(&cursor).await?;
                     Self::fold_delta_into_view(&mut view, &d);
@@ -1926,10 +1899,10 @@ where
         Ok(prev)
     }
 
-    // chia rule 15 (`UNKNOWN_UNSPENT` / `DOUBLE_SPEND` / `DOUBLE_SPEND_IN_FORK`): resolve every
-    // removal to the coin record it spends, in chia's exact precedence — ephemeral (created by
-    // this very block), spent-in-fork rejection, then ONE batched store lookup interpreted
-    // against the fork point, then the fork/window additions.
+    // Rule 15 (`UNKNOWN_UNSPENT` / `DOUBLE_SPEND` / `DOUBLE_SPEND_IN_FORK`): resolve every
+    // removal to the coin record it spends, in fixed precedence — ephemeral (created by this
+    // very block), spent-in-fork rejection, then ONE batched store lookup interpreted against
+    // the fork point, then the fork/window additions.
     async fn lookup_removals(
         &self,
         height: u32,
@@ -2012,9 +1985,9 @@ where
         &self.constants
     }
 
-    /// Light-path (proof-of-space only, no VDF) `required_iters` for a recent-chain header — mirrors
-    /// `weight_proof.py::_validate_pospace_recent_chain`. Headers-first seeds each candidate record with this
-    /// so the next block's full validation reads a correct `pb.ip_iters` (the tip-cache seed the single-block validator lacked).
+    /// Light-path (proof-of-space only, no VDF) `required_iters` for a recent-chain header.
+    /// Headers-first seeds each candidate record with this so the next block's full validation
+    /// reads a correct `pb.ip_iters`.
     ///
     /// # Errors
     /// Returns [`NodeError::Invalid`] if the proof of space is invalid or an ancestor is absent.
@@ -2107,9 +2080,9 @@ where
     // required_iters == 0 poisons every descendant's difficulty retarget, which reads it back through
     // get_next_sub_slot_iters_and_difficulty -> prev_b.sp_total_iters() -> ip_iters() ->
     // calculate_ip_iters(), and correctly rejects 0 ("Required iters 0 is not below the sp interval iters").
-    // required_iters itself needs no VDF/ancestor chain, only the proof of space (chia
-    // calculate_iterations_quality), so it is always computable and always >= 1 (the max(_, 1) clamp).
-    // Chia's recent-chain warm gate (weight_proof.py `_validate_recent_blocks`): full validation and
+    // required_iters itself needs no VDF/ancestor chain, only the proof of space, so it is
+    // always computable and always >= 1 (the max(_, 1) clamp).
+    // The recent-chain warm gate: full validation and
     // the epoch-machinery walks engage only once more than 2 sub-slot boundaries AND more than 11
     // transaction blocks of ancestry are reachable in the cache (reaching genesis always qualifies —
     // the whole ancestry is known there). With less context, the backward walks (icc challenge
@@ -2181,13 +2154,13 @@ where
         )
     }
 
-    // Proof-of-space `required_iters` for a header, independent of the VDF/ancestor chain. The block's
-    // difficulty is its weight increment over `prev` (chia enforces block.weight == prev.weight + difficulty,
-    // the INVALID_WEIGHT check), and the pospace challenge is the block's declared pos_ss_cc_challenge_hash —
-    // exactly what the full header validator feeds to pospace after confirming get_block_challenge equals it
-    // (chia validate_unfinished_header_block: INVALID_CC_CHALLENGE then validate_pospace_and_get_required_iters).
-    // So the value this returns equals the full-validation path's required_iters for the same valid block,
-    // while needing none of its deep ancestor walk. prev_transaction_block_height is unused by
+    // Proof-of-space `required_iters` for a header, independent of the VDF/ancestor chain. The
+    // block's difficulty is its weight increment over `prev` (block.weight == prev.weight +
+    // difficulty, the INVALID_WEIGHT check), and the pospace challenge is the block's declared
+    // pos_ss_cc_challenge_hash — exactly what the full header validator feeds to pospace after
+    // confirming get_block_challenge equals it. So the value this returns equals the
+    // full-validation path's required_iters for the same valid block, while needing none of its
+    // deep ancestor walk. prev_transaction_block_height is unused by
     // validate_pospace_and_get_required_iters (dg_xch's pospace quality is height-based only), so 0 is passed.
     fn pospace_required_iters(
         &self,
@@ -2259,14 +2232,12 @@ where
             &self.constants,
             header.reward_chain_block.signage_point_index,
         )?;
-        // The record's sub_slot_iters, chia-mirrored: blockchain.py add_block feeds every
-        // block_to_block_record from get_next_sub_slot_iters_and_difficulty — records are epoch-adjusted
-        // at creation, never blind-inherited. When the local ancestry can run that walk, run it. At a
-        // weight-proof checkpoint the deep ancestry is absent; chia substitutes the proof's summaries
-        // (pre_validate_blocks_multiprocessing's wp_summaries) — here that attested value is the
-        // headers-first candidate record's ssi (`candidate_ssi`). Blind inheritance is the between-
-        // boundaries fallback; fabricating sub_slot_iters_starting mid-chain (the old behavior) poisoned
-        // the anchor record and every descendant with the genesis constant.
+        // The record's sub_slot_iters: records are epoch-adjusted at creation, never
+        // blind-inherited. When the local ancestry can run the retarget walk, run it. At a
+        // weight-proof checkpoint the deep ancestry is absent; the attested value is the
+        // headers-first candidate record's ssi (`candidate_ssi`). Blind inheritance is the
+        // between-boundaries fallback; fabricating sub_slot_iters_starting mid-chain would
+        // poison the anchor record and every descendant with the genesis constant.
         let ancestors = self.cache.records();
         let new_slot = !header.finished_sub_slots.is_empty();
         let candidate_ssi = candidate.map(|r| r.sub_slot_iters);
@@ -2288,7 +2259,7 @@ where
             Some(p) => candidate_ssi.unwrap_or(p.sub_slot_iters),
             None => candidate_ssi.unwrap_or(self.constants.sub_slot_iters_starting),
         };
-        // The included sub-epoch summary, chia-mirrored (block_to_block_record): when any finished
+        // The included sub-epoch summary: when any finished
         // sub-slot declares a subepoch_summary_hash, the record must carry the summary itself — the
         // difficulty/epoch machinery (can_finish_sub_and_full_epoch, the get_next_* pass-throughs) reads
         // its presence from records, and a boundary record stored WITHOUT it makes every later new-slot
@@ -2435,8 +2406,8 @@ where
                     &delta.removals,
                 )
                 .await?;
-            // coin_hint rows land in the SAME batch as the coin deltas (chia writes hints inside
-            // _reconsider_peak); a no-op unless the hint tier is built.
+            // coin_hint rows land in the SAME batch as the coin deltas; a no-op unless the hint
+            // tier is built.
             self.store.apply_hints_in(&mut batch, &delta.hints).await?;
             self.store
                 .set_peak_in(&mut batch, &delta.header_hash)
@@ -2452,15 +2423,13 @@ where
         Ok(())
     }
 
-    // Reorg to a heavier branch: find the fork, revert coins above it (streamed, O(1) RAM), re-apply the
-    // candidate branch's already-validated deltas in order, then flip confirmation pointers to the new tip —
-    // ALL inside one store batch. chia wraps this whole state transition in a single
-    // `async with self.block_store.transaction():` (chia/consensus/blockchain.py add_block →
-    // coin_store.rollback_to_block + per-block new_block + block rollback/set_in_chain/set_peak), so a crash
-    // anywhere means the reorg never happened. Running it as N separate transactions (the pre-T0-4 shape)
-    // left a crash window where coins were reverted above the fork while the peak still pointed at the old
-    // branch — and nothing on boot reconciled. The branch deltas were validated at arrival against their
-    // fork view (T0-1 staged_deltas/ForkView); this replay applies those fork-validated deltas unchanged.
+    // Reorg to a heavier branch: find the fork, revert coins above it (streamed, O(1) RAM),
+    // re-apply the candidate branch's already-validated deltas in order, then flip confirmation
+    // pointers to the new tip — ALL inside one store batch, so a crash anywhere means the reorg
+    // never happened. Running it as N separate transactions would leave a crash window where
+    // coins were reverted above the fork while the peak still pointed at the old branch. The
+    // branch deltas were validated at arrival against their fork view; this replay applies those
+    // fork-validated deltas unchanged.
     async fn reorg(
         &mut self,
         delta: &BlockDelta,
@@ -2473,9 +2442,8 @@ where
         // BELOW tip — a node stuck on a minority equal-weight tie-break branch must reorg to rejoin
         // the heavier chain, long before that build fires — and without the indexes each query
         // seq-scans the whole coin table — on a large table each rollback query scans every
-        // row, stalling the reorg indefinitely. Ensure them here,
-        // idempotently, before any rollback query runs — chia carries these indexes from schema
-        // creation, so its rollback works at any sync depth.
+        // row, stalling the reorg indefinitely. Ensure them here, idempotently, before any
+        // rollback query runs.
         self.store.ensure_reorg_indexes().await?;
         self.pending.insert(delta.header_hash, delta.clone());
         let branch = self.candidate_branch(delta).await?;
@@ -2483,12 +2451,9 @@ where
             .first()
             .map_or(delta.height, |d| d.height)
             .saturating_sub(1);
-        // The abandoned span's post-rollback coin states, read BEFORE the rollback mutates them —
-        // chia `coin_store.rollback_to_block` computes exactly this inside its rollback
-        // transaction and `_reconsider_peak` threads it out as
-        // `StateChangeSummary.rolled_back_records` (chia/full_node/coin_store.py:705-751,
-        // chia/consensus/blockchain.py:489-600). Bounded by the reorg depth (≤ the pending
-        // horizon). A store failure here aborts the reorg before any mutation.
+        // The abandoned span's post-rollback coin states, read BEFORE the rollback mutates
+        // them. Bounded by the reorg depth (≤ the pending horizon). A store failure here aborts
+        // the reorg before any mutation.
         let rolled_back = self
             .store
             .rolled_back_coin_states(fork_height, old_peak_height)
@@ -2503,8 +2468,7 @@ where
                 self.store
                     .apply_block_in(&mut batch, d.height, d.timestamp, &d.additions, &d.removals)
                     .await?;
-                // coin_hint rows land in the SAME batch as the whole reorg (chia writes hints
-                // inside _reconsider_peak, itself inside the transaction); no-op without the
+                // coin_hint rows land in the SAME batch as the whole reorg; no-op without the
                 // hint tier.
                 self.store.apply_hints_in(&mut batch, &d.hints).await?;
             }
@@ -2534,11 +2498,9 @@ where
     // fork+1..=tip in height order. Each branch delta comes from `pending` when present and is
     // otherwise REBUILT FROM THE DURABLE STORE (`delta_from_store`) — the reorg-replay analog of
     // the store-backed fork walk in `fork_view`, so a reorg whose branch ancestors survive only in
-    // the store (a restart, or a fork deeper than the pending horizon) re-applies the FULL branch
-    // (chia rolls the coin store back to the fork height at any depth and re-applies the fork
-    // chain; blockchain.py:509-510, coin_store.py:705-727). The height guard makes the walk
-    // terminate at the confirmed chain and turns a corrupt (cyclic) store into an error, never a
-    // truncated branch.
+    // the store (a restart, or a fork deeper than the pending horizon) re-applies the FULL
+    // branch. The height guard makes the walk terminate at the confirmed chain and turns a
+    // corrupt (cyclic) store into an error, never a truncated branch.
     async fn candidate_branch(&self, tip: &BlockDelta) -> Result<Vec<BlockDelta>, NodeError> {
         let mut branch = Vec::new();
         let mut cursor = tip.header_hash;
@@ -2602,11 +2564,10 @@ fn coin_record(coin: Coin, height: u32, timestamp: u64, coinbase: bool) -> CoinR
     }
 }
 
-// Node-local FullBlock→HeaderBlock view for record computation. The two share every field the record needs;
-// the transactions_filter is unused by header_block_to_sub_block_record. Promoted to a reusable core
-// method. The filter default is chia's ENCODED-EMPTY filter b"\x00" (PyBIP158([]) —
-// full_block_utils.py:311), never a zero-length byte string; the daemon's wallet-facing header
-// serving overrides it with the real per-block filter (coin-index tier).
+// Node-local FullBlock→HeaderBlock view for record computation. The two share every field the
+// record needs; the transactions_filter is unused by header_block_to_sub_block_record. The
+// filter default is the ENCODED-EMPTY filter b"\x00", never a zero-length byte string; the
+// daemon's wallet-facing header serving overrides it with the real per-block filter.
 pub fn header_block_from_full_block(block: &FullBlock) -> HeaderBlock {
     HeaderBlock {
         finished_sub_slots: block

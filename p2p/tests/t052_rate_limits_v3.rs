@@ -1,8 +1,6 @@
 mod common;
 
-// RATE_LIMITS_V3 (chia a1b12d321, CHIA-3895/3944/3970) over the real WS loopback.
-//
-// chia's shape, mirrored here:
+// RATE_LIMITS_V3 over the real WS loopback. The shape:
 //   - the capability is NOT in the default outgoing set; a RESPONDER auto-mirrors it when the
 //     initiator's handshake advertises it, then both sides exchange ConfigureWindowSizes;
 //   - after the exchange, v3-tabled types leave the time-based limiter and bounded request
@@ -108,8 +106,8 @@ async fn send_plain(
 }
 
 // The responder mirror + configure exchange: a v3-advertising handshake gets a reply that ALSO
-// advertises v3 (chia: "If the peer advertises v3, let's advertise v3 as well"), and once the
-// peer's ConfigureWindowSizes lands, the link is v3-active on the server.
+// advertises v3, and once the peer's ConfigureWindowSizes lands, the link is v3-active on the
+// server.
 #[tokio::test]
 async fn responder_mirrors_v3_and_activates_after_configure_exchange() {
     let server = spawn_full_node(blind_api()).await;
@@ -155,8 +153,8 @@ async fn responder_mirrors_v3_and_activates_after_configure_exchange() {
     assert_eq!(server.peers.read().await.len(), 1, "peer stays connected");
 }
 
-// A configure that bounds one of OUR unlimited (response) types is chia's INVALID_HANDSHAKE —
-// the connection closes.
+// A configure that bounds one of OUR unlimited (response) types is an invalid handshake; the
+// connection closes.
 #[tokio::test]
 async fn configure_bounding_our_unlimited_type_is_refused() {
     let server = spawn_full_node(blind_api()).await;
@@ -227,9 +225,8 @@ async fn configure_without_negotiation_is_refused() {
 
 // Window enforcement: with v3 active and the peer NOT localhost/exempt, a third concurrent
 // RequestBlock (window 2) while two are still being processed closes the connection with the
-// RATE_LIMITER ban — chia's `receive_window` check. The loopback peer's recorded host is
-// swapped to a public address to step past the localhost bypass (chia bypasses enforcement for
-// localhost too; the bypass itself is the second half of the test).
+// RATE_LIMITER ban. The loopback peer's recorded host is swapped to a public address to step
+// past the localhost bypass; the bypass itself is the second half of the test.
 #[tokio::test]
 async fn third_concurrent_request_over_the_window_disconnects_and_bans() {
     let server = spawn_full_node(Arc::new(SlowApi)).await;
@@ -320,7 +317,7 @@ async fn third_concurrent_request_over_the_window_disconnects_and_bans() {
 }
 
 // The localhost bypass: the SAME three-concurrent burst from a genuine loopback peer is NOT
-// enforced (chia: `not is_localhost and not exempt`), and the connection keeps serving.
+// enforced for a localhost or exempt peer, and the connection keeps serving.
 #[tokio::test]
 async fn localhost_peer_bypasses_window_enforcement() {
     let server = spawn_full_node(Arc::new(SlowApi)).await;

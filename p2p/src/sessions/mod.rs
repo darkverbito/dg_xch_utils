@@ -18,11 +18,9 @@ use tokio::time::sleep;
 
 const WATCH: std::time::Duration = std::time::Duration::from_millis(50);
 
-/// Fired once per successful outbound/manual dial, AFTER the handshake completes and the peer is
-/// registered — the seam for chia's on-connect greetings on OUTGOING connections
-/// (chia/server/server.py `start_client` → `await on_connect(connection)`). The daemon installs
-/// its NewPeak + mempool-sync sends here. Bounded work: the hook is awaited inline before the
-/// hold loop starts, so implementations must be short (a few sends, no long waits).
+/// Fired once per successful outbound/manual dial, after the handshake completes and the peer is
+/// registered. The hook is awaited inline before the hold loop starts, so implementations must
+/// be short (a few sends, no long waits).
 pub type OnConnectHook = Arc<
     dyn Fn(Arc<OutboundPeer>) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
         + Send
@@ -115,8 +113,7 @@ async fn outbound_slot(
                     run: peer_run,
                 });
                 registry.register_outbound(peer.clone()).await;
-                // On-connect greetings (chia on_connect for outgoing connections): after the
-                // handshake, before the hold loop.
+                // On-connect greetings: after the handshake, before the hold loop.
                 if let Some(hook) = &on_connect {
                     hook(peer.clone()).await;
                 }
@@ -132,7 +129,7 @@ async fn outbound_slot(
             }
         }
         // Full-jitter defer before every re-dial (clean drop OR failure) so a mass
-        // server-restart does not thundering-herd (libbitcoin 7d5247ed2 / 9483619a7).
+        // server-restart does not thundering-herd.
         if run.load(Ordering::Relaxed) {
             sleep(settings.jittered_backoff(attempt)).await;
         }
@@ -222,10 +219,7 @@ pub async fn seed_once(
     Ok(accepted)
 }
 
-// The introducer-retry backoff ceiling — chia FullNodeDiscovery._connect_to_peers
-// (chia/server/node_discovery.py:289-292): "keep doubling the introducer delay until we reach
-// 5 minutes". The floor is `settings.retry_timeout` (chia starts at 1s; our production default
-// retry_timeout is 1s, so the ladder matches: 1s → 2s → … → 300s cap).
+// Introducer-retry backoff ceiling: doubles from `settings.retry_timeout` up to a 5-minute cap.
 const INTRODUCER_BACKOFF_CAP: std::time::Duration = std::time::Duration::from_secs(300);
 
 // Shutdown-prompt sleep: nap in WATCH slices so a capped introducer backoff (up to 300s) never
@@ -242,14 +236,9 @@ async fn nap(total: std::time::Duration, run: &Arc<AtomicBool>) {
     }
 }
 
-// session_introducer: retry the introducer seed while the node is PEER-STARVED — below the
-// outbound target with an address book that cannot supply a dial candidate. Mirrors chia
-// FullNodeDiscovery._connect_to_peers (chia/server/node_discovery.py:256-292): the introducer is
-// queried when the address pool is empty (`size == 0`) or peer selection cannot produce a usable
-// candidate while peers are needed (`retry_introducers`), on a doubling backoff (1s → ×2 → 300s
-// cap) that resets once the pool supplies addresses again. The production failure this closes — a
-// boot-time DNS error killing the ONE seed attempt, leaving the node peer-poor forever — cannot
-// recur: the empty book keeps this session retrying until the introducer resolves.
+// session_introducer: retry the introducer seed while the node is peer-starved — below the
+// outbound target with an address book that cannot supply a dial candidate. Doubling backoff,
+// reset once the pool supplies addresses again.
 async fn introducer_slot(
     host: String,
     port: u16,
@@ -261,8 +250,8 @@ async fn introducer_slot(
     let mut backoff = settings.retry_timeout;
     while run.load(Ordering::Relaxed) {
         // Starved = below the outbound target AND no pooled candidate to dial. A book holding
-        // addresses (even not-yet-proven ones) supplies the outbound slots first — exactly chia's
-        // `size == 0` gate; a node at its outbound target never contacts the introducer.
+        // addresses (even not-yet-proven ones) supplies the outbound slots first; a node at its
+        // outbound target never contacts the introducer.
         let starving = registry.outbound_count().await < settings.target_outbound
             && book.lock().await.is_empty();
         if !starving {
@@ -344,9 +333,7 @@ impl Supervisor {
         }
     }
 
-    // session_introducer: the RETRYING introducer seed. The one-shot boot seed died on boot-time
-    // DNS-not-ready ("introducer seed failed") and the node stayed peer-poor
-    // forever; this session re-queries whenever the node still needs peers.
+    // session_introducer: re-queries the introducer whenever the node still needs peers.
     pub fn start_introducer(&mut self, host: &str, port: u16) {
         self.tasks.spawn(introducer_slot(
             host.to_string(),

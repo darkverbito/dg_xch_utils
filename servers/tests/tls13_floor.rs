@@ -1,12 +1,6 @@
-// TLS 1.3 minimum — chia CHIA-2102 (e57358aea): `ssl_context_for_server` sets
-// `minimum_version = TLSv1_3` (and drops the explicit 1.2 cipher list), so every CNI server-side
-// socket refuses a TLS 1.2 handshake. The floor is SERVER-side in chia (ssl_context_for_client
-// keeps python defaults); since one end of every p2p link is a server, the network is 1.3-floored.
-//
-// RED before the fix: our `ServerConfig::builder()` accepted rustls' default version set
-// (TLS 1.2 + 1.3), so a 1.2-pinned client completed the handshake below. GREEN: the server is
-// built with `builder_with_protocol_versions(&[&TLS13])` and the 1.2 handshake is refused while
-// the 1.3 path (the stock chia peer shape, `rsa_client_auth_upgrade.rs`) still serves.
+// Every server-side socket refuses TLS below 1.3. rustls' default version set also accepts
+// TLS 1.2, so the listener must pin the protocol versions explicitly or the floor is lost.
+// Since one end of every p2p link is a server, a server-side floor floors the whole network.
 
 use dg_xch_core::constants::{CHIA_CA_CRT, CHIA_CA_KEY};
 use dg_xch_core::ssl::{
@@ -58,7 +52,7 @@ fn spawn_server() -> (u16, Arc<AtomicBool>) {
     (port, run)
 }
 
-// Attempt a TLS handshake pinned to exactly `versions`, with a chia-shaped RSA client cert.
+// Attempt a TLS handshake pinned to exactly `versions`, with an RSA client cert.
 // Returns Ok(()) when the handshake completes.
 async fn handshake_with_versions(
     port: u16,
@@ -98,8 +92,8 @@ async fn handshake_with_versions(
     }
 }
 
-// A TLS 1.2-pinned client must be REFUSED (chia: `minimum_version = TLSv1_3`), while the same
-// client pinned to 1.3 handshakes fine against the same listener.
+// A TLS 1.2-pinned client must be refused, while the same client pinned to 1.3 handshakes fine
+// against the same listener.
 #[tokio::test(flavor = "multi_thread")]
 async fn server_refuses_tls12_and_accepts_tls13() {
     install_test_provider();
@@ -116,6 +110,6 @@ async fn server_refuses_tls12_and_accepts_tls13() {
     run.store(false, Ordering::Relaxed);
     assert!(
         v12.is_err(),
-        "a TLS 1.2-only client must be refused — chia e57358aea floors servers at TLS 1.3"
+        "a TLS 1.2-only client must be refused; the server is floored at TLS 1.3"
     );
 }

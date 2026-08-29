@@ -1,11 +1,10 @@
-// REAL Chia mainnet wire, not our own encoder. Loopback tests round-trip OUR encoder and so never catch a
+// REAL mainnet wire, not our own encoder. Loopback tests round-trip OUR encoder and so never catch a
 // real-wire mismatch; this fixture is a genuine `RespondBlocks` (32 FullBlocks, heights 9,138,873..=9,138,904)
 // captured off a mainnet full node's `RequestBlocks` reply. Block[1] carries a transaction generator that uses
-// CLVM back-references (marker 0xfe) — the exact form that made `SerializedProgram::from_bytes` fail with
-// `InvalidInput "bad encoding"` for every block download in production until the back-reference-aware decode.
+// CLVM back-references (marker 0xfe), which the plain parser rejects.
 //
-// This is the coverage the gate was missing: decode of a real chia-wire FullBlock, and a byte-exact round-trip
-// proving we preserve the generator's on-wire bytes (re-serializing would drop back-refs and change block ids).
+// Coverage: decode of a real wire FullBlock, and a byte-exact round-trip
+// proving the generator's on-wire bytes are preserved (re-serializing would drop back-refs and change block ids).
 
 use dg_xch_core::blockchain::full_block::FullBlock;
 use dg_xch_core::protocols::full_node::RespondBlocks;
@@ -40,8 +39,8 @@ fn real_mainnet_respond_blocks_decodes() {
 #[test]
 fn back_reference_generator_is_decoded_and_present() {
     let resp = decode();
-    // At least one block in a recent mainnet range is a transaction block carrying a generator — the field
-    // whose CLVM back-references broke the old decoder. (Block[1] in this fixture.)
+    // At least one block in a recent mainnet range is a transaction block carrying a generator — a
+    // field carrying CLVM back-references. (Block[1] in this fixture.)
     let with_gen = resp
         .blocks
         .iter()
@@ -57,7 +56,7 @@ fn back_reference_generator_is_decoded_and_present() {
 fn real_wire_round_trips_byte_for_byte() {
     // The strongest real-wire assertion: decode then re-encode reproduces the original mainnet bytes exactly.
     // This only holds if the generator's raw back-referenced bytes are preserved verbatim (no re-serialize)
-    // AND every other FullBlock field's streamable matches chia's — i.e. our wire format IS chia's.
+    // AND every other FullBlock field's streamable framing matches the wire format exactly.
     let resp = decode();
     let reser = resp
         .to_bytes(ChiaProtocolVersion::default())

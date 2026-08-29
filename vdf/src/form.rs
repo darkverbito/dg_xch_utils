@@ -689,9 +689,8 @@ fn pow_window_digit(exponent: &BigInt, nbits: usize, w: usize) -> usize {
 /// the product `x^xe · y^ye` in ONE 4-bit-window chain with the squaring run SHARED between the
 /// two exponents. The Wesolowski check needs exactly this product (`witness^b · x^r`) and never
 /// the individual powers; evaluated separately the two ~264-bit exponentiations cost two full
-/// squaring chains (~673 group ops serially, measured 2 × 8.0 ms on a server-class host at
-/// t_op ≈ 24.6 µs), interleaved they cost one (~411 group ops: 2×14 table multiplies + ~260
-/// shared squarings + ≤2 table multiplies per window) — 0.61× the work. Group-identical result:
+/// squaring chains (~673 group ops serially), interleaved they cost one (~411 group ops: 2×14
+/// table multiplies + ~260 shared squarings + ≤2 table multiplies per window). Group-identical result:
 /// squarings/compositions land on the same group element, and the final reduce yields the unique
 /// reduced representative, exactly the argument the single-exponent windowed loop already relies
 /// on. Used by the SERIAL verify path (saturated window drains, where throughput ≡ work); the
@@ -1057,12 +1056,11 @@ fn xgcd_extract_word(x: &BigInt, shift: i64) -> i128 {
     i64::from_ne_bytes(w.to_ne_bytes()) as i128
 }
 
-/// A faithful port of chiavdf's `mpz_xgcd_partial` (Lehmer partial extended GCD, `xgcd_partial.c`). The
-/// returned cofactor `co1` is the canonical value chiavdf's `bqfc_compress` uses for `t`; a pure-slow
-/// Euclidean version diverges (it stops one step short of chiavdf's word-batched fast path), which is
-/// exactly the bqfc serialization mismatch that broke `serialize_form` round-trips and `get_b` hashes.
-/// The Lehmer word arithmetic uses `i128` (panic-safe); chiavdf's `i64` never overflows on valid inputs,
-/// so the results are identical there.
+/// A faithful port of chiavdf's `mpz_xgcd_partial` (Lehmer partial extended GCD). The returned
+/// cofactor `co1` is the canonical value chiavdf's `bqfc_compress` uses for `t`; a pure-slow
+/// Euclidean version diverges (it stops one step short of the word-batched fast path), a bqfc
+/// serialization mismatch. The Lehmer word arithmetic uses `i128` (panic-safe); chiavdf's `i64`
+/// never overflows on valid inputs, so the results are identical there.
 fn xgcd_partial_co1(r2: &mut BigInt, r1: &mut BigInt, limit: &BigInt) -> BigInt {
     let mut co2 = BigInt::zero();
     let mut co1 = -BigInt::one();

@@ -174,10 +174,8 @@ async fn heavier_branch_reorg_coin_store_equals_replay() {
     );
 }
 
-// Audit G4 (reorg wallet delta): a landed reorg must surface chia's `rolled_back_records`
-// (chia coin_store.rollback_to_block, coin_store.py:705-751 → StateChangeSummary,
-// blockchain.py:489-600) and the re-applied branch, so the daemon can push the post-rollback
-// coin states to wallet subscribers. Pre-report, the engine reverted the coins and told no one.
+// Reorg wallet delta: a landed reorg must surface the rolled-back records and the re-applied
+// branch, so the daemon can push the post-rollback coin states to wallet subscribers.
 #[tokio::test]
 async fn reorg_report_carries_rollback_states_and_the_reapplied_branch() {
     let records = common::load_records();
@@ -240,8 +238,7 @@ async fn reorg_report_carries_rollback_states_and_the_reapplied_branch() {
         "the winning branch fork+1..=tip in height order"
     );
 
-    // Coin X (spent on the abandoned branch, created below the fork) reverts to UNSPENT —
-    // chia's second rollback query (coin_store.py:729-740).
+    // Coin X (spent on the abandoned branch, created below the fork) reverts to UNSPENT.
     let x_state = report
         .rolled_back
         .iter()
@@ -252,7 +249,7 @@ async fn reorg_report_carries_rollback_states_and_the_reapplied_branch() {
     assert_eq!(x_state.confirmed_block_index, 100, "creation stands");
 
     // Every branch-A-only addition reverts to not-on-chain (confirmed_block_index = 0,
-    // timestamp = 0) — chia's first rollback query (coin_store.py:713-724).
+    // timestamp = 0).
     let b_names: std::collections::HashSet<Bytes32> = b1
         .additions
         .iter()
@@ -278,10 +275,9 @@ async fn reorg_report_carries_rollback_states_and_the_reapplied_branch() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// T0-4: reorg atomicity under a mid-reorg crash. chia executes the ENTIRE reorg —
-// rollback_to_block, per-block coin re-applies, the main-chain pointer flips, and the peak — inside
-// ONE `async with self.block_store.transaction():` (chia/consensus/blockchain.py, add_block), so a
-// crash anywhere means the reorg never happened. These tests inject a store fault at the two
+// Reorg atomicity under a mid-reorg crash. The ENTIRE reorg — rollback, per-block coin
+// re-applies, the main-chain pointer flips, and the peak — runs inside one store transaction, so
+// a crash anywhere means the reorg never happened. These tests inject a store fault at the two
 // interior seams (before the first branch re-apply; before the peak flip) and assert the store is
 // left EXACTLY as it was — never "coins reverted above the fork while the peak still points at the
 // old branch". The FaultStore is the daemon.rs precedent: a REAL backend underneath, one call

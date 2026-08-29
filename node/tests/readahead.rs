@@ -1,5 +1,5 @@
-// Readahead bookkeeping — red-first behavioral pins for the K-deep multi-peer window
-// pipeline. The properties that must hold before the follow driver may trust it:
+// Readahead bookkeeping — behavioral pins for the K-deep multi-peer window pipeline. The
+// properties that must hold before the follow driver may trust it:
 //   1. adjacent pending windows dispatch to DISTINCT peers, contiguously ahead of the validator;
 //   2. a slow peer serving window N+3 never stalls the take (hence the confirm) of window N;
 //   3. a failed head fetch falls back (None) but KEEPS the deeper windows in flight;

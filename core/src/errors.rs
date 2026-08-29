@@ -6,11 +6,9 @@ use std::fmt;
 pub enum ClvmError {
     AtomNotValidU64(String),
     BadEncoding,
-    /// A condition parsed successfully but is invalid, carrying the exact chia error code the
+    /// A condition parsed successfully but is invalid, carrying the exact error code the
     /// condition parser assigns (e.g. `RESERVE_FEE_CONDITION_FAILED`, `COIN_AMOUNT_NEGATIVE`).
-    /// chia_rs surfaces these as `ValidationErr(node, ErrorCode)` straight out of `parse_args`
-    /// (chia-consensus 0.42.1 `conditions.rs`); this variant carries the same code through the
-    /// `ClvmError` → `ChiaError` mapping (`map_condition_error`) instead of collapsing it.
+    /// The code is carried through the `ClvmError` → `ChiaError` mapping rather than collapsed.
     ConditionFailure(ChiaError),
     CostExceeded(u64, u64),
     DoubleSpend(String),
@@ -212,8 +210,8 @@ pub enum ChiaError {
     AssertConcurrentPuzzleFailed = 133,
     AssertEphemeralFailed = 140,
     MessageNotSentOrReceived = 147,
-    // chia INVALID_TRANSACTIONS_GENERATOR_ENCODING: the SF9 canonical-serialization rule.
+    // INVALID_TRANSACTIONS_GENERATOR_ENCODING: the SF9 canonical-serialization rule.
     ComplexGeneratorReceived = 148,
-    // chia TOO_MANY_SPENDS: the SF9 6,000-spend block limit.
+    // TOO_MANY_SPENDS: the SF9 6,000-spend block limit.
     TooManySpends = 149,
 }

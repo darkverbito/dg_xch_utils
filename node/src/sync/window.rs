@@ -144,9 +144,7 @@ mod tests {
         // Peer B completes normally.
         w.complete(b.id);
 
-        // Every not-yet-written height (the reclaimed 100..103 plus the still-pending 106..110) is claimable;
-        // the completed 103..106 are gone. Union of all future reservations == exactly the un-written set.
-        // Collect until Drained (nothing left) or Busy (all remaining is now reserved by this loop).
+        // Every not-yet-written height is claimable; the completed 103..106 are gone.
         let mut got: Vec<u32> = Vec::new();
         while let Claim::Reserved(r) = w.reserve(4) {
             got.extend(r.heights);

@@ -1,16 +1,14 @@
-// Phase 2.2 — the unfinished-block cache: chia `full_node_store.py`'s `_unfinished_blocks` +
-// `seen_unfinished_blocks` half. Keyed by the partial (reward-chain) hash, then by foliage hash —
-// several unfinished blocks can share one proof of space with different transaction sets
-// (the post-2.2.0 duplicate-handling from PR #17247), and the "best" of a set is the one with
-// the smallest foliage hash. Entries exist in three states, exactly like chia's
-// `UnfinishedBlockEntry`: requested-but-not-received (`block: None`), received-but-unvalidated,
-// and validated (`required_iters` present).
+// Unfinished-block cache, keyed by the partial (reward-chain) hash, then by foliage hash —
+// several unfinished blocks can share one proof of space with different transaction sets, and the
+// "best" of a set is the one with the smallest foliage hash. Entries exist in three states:
+// requested-but-not-received (`block: None`), received-but-unvalidated, and validated
+// (`required_iters` present).
 
 use dg_xch_core::blockchain::sized_bytes::Bytes32;
 use dg_xch_core::blockchain::unfinished_block::UnfinishedBlock;
 use std::collections::{HashMap, HashSet, VecDeque};
 
-// chia MAX_UNFINISHED_BLOCKS_PER_REWARD_HASH / seen-set LRU size.
+// Per-reward-hash variant cap and seen-set LRU size.
 const MAX_PER_REWARD_HASH: usize = 20;
 const SEEN_CAP: usize = 1_000;
 
@@ -27,13 +25,13 @@ pub struct UnfinishedCache {
     // partial (reward-chain) hash → foliage hash (None = non-tx block or old-protocol announce)
     // → entry.
     blocks: HashMap<Bytes32, HashMap<Option<Bytes32>, UnfinishedBlockEntry>>,
-    // Recently-seen partial hashes, insertion-ordered for LRU eviction (chia LRUSet(1000)).
+    // Recently-seen partial hashes, insertion-ordered for LRU eviction.
     seen: HashSet<Bytes32>,
     seen_order: VecDeque<Bytes32>,
 }
 
-// The "best" of a reward-hash group: prefer entries WITH foliage and a received block, smallest
-// foliage hash first (chia `find_best_block`).
+// The "best" of a reward-hash group: prefer entries with foliage and a received block, smallest
+// foliage hash first.
 fn find_best(
     group: &HashMap<Option<Bytes32>, UnfinishedBlockEntry>,
 ) -> (Option<Bytes32>, Option<&UnfinishedBlock>) {
@@ -77,7 +75,7 @@ impl UnfinishedCache {
     }
 
     /// True if `partial_hash` was already seen recently; marks it seen either way (the announce
-    /// dedup — chia `seen_unfinished_block`).
+    /// dedup).
     pub fn seen(&mut self, partial_hash: Bytes32) -> bool {
         if self.seen.contains(&partial_hash) {
             return true;
@@ -93,8 +91,8 @@ impl UnfinishedCache {
     }
 
     /// Whether a fetch for this exact (reward hash, foliage hash) is already in flight, and how
-    /// many variants of the reward hash we track (chia `is_requesting_unfinished_block` — the
-    /// variant count bounds how many duplicates we will pull).
+    /// many variants of the reward hash we track (the variant count bounds how many duplicates
+    /// we will pull).
     #[must_use]
     pub fn is_requesting(
         &self,
@@ -120,8 +118,7 @@ impl UnfinishedCache {
         evict_worst(group);
     }
 
-    /// Drop a requested-but-never-received placeholder (chia
-    /// `remove_requesting_unfinished_block`); a received block is left alone.
+    /// Drop a requested-but-never-received placeholder; a received block is left alone.
     pub fn remove_requesting(&mut self, reward_hash: &Bytes32, foliage_hash: Option<&Bytes32>) {
         let Some(group) = self.blocks.get_mut(reward_hash) else {
             return;
@@ -135,7 +132,7 @@ impl UnfinishedCache {
         }
     }
 
-    /// Cache a received, pre-validated unfinished block (chia `add_unfinished_block`).
+    /// Cache a received, pre-validated unfinished block.
     pub fn add_block(
         &mut self,
         partial_hash: Bytes32,
@@ -157,14 +154,14 @@ impl UnfinishedCache {
     }
 
     /// The best unfinished block for a reward hash — the old-protocol lookup and the timelord's
-    /// infusion-point path (chia `get_unfinished_block`).
+    /// infusion-point path.
     #[must_use]
     pub fn get_block(&self, reward_hash: &Bytes32) -> Option<&UnfinishedBlock> {
         find_best(self.blocks.get(reward_hash)?).1
     }
 
-    /// The v2 lookup (chia `get_unfinished_block2`): the block at (reward hash, foliage hash),
-    /// the number of variants held, and whether a BETTER variant (smaller foliage hash) exists.
+    /// The v2 lookup: the block at (reward hash, foliage hash), the number of variants held, and
+    /// whether a better variant (smaller foliage hash) exists.
     #[must_use]
     pub fn get_block2(
         &self,
@@ -186,9 +183,8 @@ impl UnfinishedCache {
         }
     }
 
-    /// Every RECEIVED unfinished block cached at exactly `height` — chia
-    /// `full_node_store.get_unfinished_blocks(height)` (full_node_store.py:342), the read behind
-    /// the `get_unfinished_block_headers` RPC (which passes the peak height).
+    /// Every received unfinished block cached at exactly `height` — the read behind the
+    /// `get_unfinished_block_headers` RPC (which passes the peak height).
     #[must_use]
     pub fn blocks_at_height(&self, height: u32) -> Vec<&UnfinishedBlock> {
         self.blocks

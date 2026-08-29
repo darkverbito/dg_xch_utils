@@ -1,32 +1,20 @@
-//! Health-scored peer selection — Component 1 of the three-way
-//! decomposition. Owns the continuously-changing peer set and answers the producer's/recovery's peer
-//! requests with a *lease*, scored by liveness, EWMA request latency, in-flight load, and a reliability
-//! ratio, instead of the blind round-robin the driver shipped.
+//! Health-scored peer selection. Owns the churning peer set and answers peer requests with a
+//! *lease*, scored by liveness, EWMA request latency (RFC 6298 smoothing), in-flight load, and a
+//! reliability ratio. Fetch selection is power-of-two-choices to avoid herding onto the single
+//! fastest peer. Availability uses a 3-strike hysteresis (Fresh → Live → Suspect → Dead). A
+//! RECOVERY lease strictly dominates FETCH: under producer saturation it preempts the lowest-score
+//! FETCH lease so a reorg always obtains a peer in one bounded step.
 //!
-//! Canonical mappings:
-//! - EWMA latency = TCP's smoothed RTT `[CITED: Jacobson 1988; RFC 6298 §2, α = 1/8, β = 1/4]`.
-//! - Selection = the power of two choices `[CITED: Mitzenmacher 2001]`: pick the better of two random
-//!   eligible peers, `O(1)`, and — critically — avoid the herd effect where every tick piles onto the one
-//!   fastest peer (which then becomes the slow one).
-//! - Per-peer in-flight cap = Bitcoin Core `MAX_BLOCKS_IN_TRANSIT_PER_PEER = 16`
-//!   `[CITED: net_processing.cpp]` — the same number `READAHEAD_MAX_PER_PEER` arrived at independently.
-//! - Availability = a 3-strike hysteresis (Fresh → Live → Suspect → Dead), so a single slow response does
-//!   not evict an otherwise-good peer (avoids the churn a raw argmin would cause).
-//! - The **preemptible recovery lease**: a RECOVERY request strictly dominates FETCH — if the
-//!   producer has leased every peer, recovery preempts the lowest-score FETCH lease *unconditionally and
-//!   synchronously*, so a reorg during a producer-saturated fetch always obtains its peer in one bounded
-//!   step (breaking the "no-preemption" Coffman condition for the RECOVERY class).
-//!
-//! The health/scoring/lease logic is keyed purely on `peer_id` (`u64`), so it is unit-tested in full
-//! without a live socket; the driver maps a leased `peer_id` back to its `OutboundPeer` to build a source.
+//! Keyed purely on `peer_id` (`u64`) so the logic is unit-testable without a live socket; the
+//! driver maps a leased `peer_id` back to its `OutboundPeer`.
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 use std::time::Duration;
 
-/// Bitcoin Core `MAX_BLOCKS_IN_TRANSIT_PER_PEER` — the per-peer in-flight cap `[CITED: net_processing.cpp]`.
+/// Per-peer in-flight request cap.
 pub const MAX_IN_TRANSIT_PER_PEER: usize = 16;
-/// RFC 6298 smoothing constants for the SRTT / RTTVAR EWMA `[CITED: RFC 6298 §2]`.
+/// RFC 6298 smoothing constants for the SRTT / RTTVAR EWMA.
 const ALPHA: f64 = 1.0 / 8.0;
 const BETA: f64 = 1.0 / 4.0;
 /// Consecutive failures before a Live peer is demoted to Suspect (the 3-strike hysteresis).
@@ -146,8 +134,7 @@ impl PeerHealth {
     }
 }
 
-/// The churning peer set as an Active Object: mutable per-peer health behind one lock,
-/// answering `lease`/`release`/`observe_live` in `O(1)`/`O(1)`/`O(P)`.
+/// The churning peer set: mutable per-peer health behind one lock.
 pub struct PeerManager {
     inner: Mutex<Inner>,
 }
@@ -155,7 +142,6 @@ pub struct PeerManager {
 struct Inner {
     peers: BTreeMap<u64, PeerHealth>,
     next_lease: u64,
-    rng: u64,
 }
 
 impl Default for PeerManager {
@@ -171,9 +157,6 @@ impl PeerManager {
             inner: Mutex::new(Inner {
                 peers: BTreeMap::new(),
                 next_lease: 1,
-                // A fixed non-zero seed; the P2C sampler only needs decorrelation, not cryptographic
-                // randomness (two samples, O(1)).
-                rng: 0x9E37_79B9_7F4A_7C15,
             }),
         }
     }
@@ -217,10 +200,9 @@ impl PeerManager {
             0 => None,
             1 => Some(candidates[0]),
             n => {
-                // Two DISTINCT samples (the power of two choices samples without replacement, so with
-                // exactly two candidates it compares both and the higher score wins deterministically).
-                let i = Self::next_rng(inner) as usize % n;
-                let mut j = Self::next_rng(inner) as usize % n;
+                // Two distinct samples; with exactly two candidates both are compared.
+                let i = rand::random_range(0..n);
+                let mut j = rand::random_range(0..n);
                 if j == i {
                     j = (j + 1) % n;
                 }
@@ -231,15 +213,6 @@ impl PeerManager {
                 Some(if sa >= sb { a } else { b })
             }
         }
-    }
-
-    fn next_rng(inner: &mut Inner) -> u64 {
-        let mut x = inner.rng;
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        inner.rng = x;
-        x
     }
 
     fn grant(
@@ -264,11 +237,9 @@ impl PeerManager {
     /// Lease the best eligible peer for `priority`, or `None` when none can be obtained.
     ///
     /// - `Fetch`: two-choices over selectable, under-cap peers; `None` if all are saturated/dead.
-    /// - `Recovery`: prefer a free (under-cap) peer, taking the **highest-score** one (recovery wants a
-    ///   fast peer for the latency-sensitive backtrack). If every peer is saturated (producer has leased
-    ///   them all), **preempt** the FETCH lease on the **lowest-score** peer and grant recovery there —
-    ///   bounded, synchronous, independent of the producer. The returned lease carries the
-    ///   preempted `lease_id` so the caller reclaims that peer's in-flight queue range.
+    /// - `Recovery`: prefer the highest-score free peer. If every peer is saturated, preempt the
+    ///   FETCH lease on the lowest-score peer and grant recovery there; the returned lease carries
+    ///   the preempted `lease_id` so the caller reclaims that peer's in-flight queue range.
     pub fn lease(&self, priority: LeasePriority) -> Option<PeerLease> {
         let mut inner = self.lock();
         match priority {
@@ -566,7 +537,7 @@ mod tests {
             pm.lease(LeasePriority::Fetch).is_none(),
             "producer-saturated"
         );
-        // A reorg needs a recovery peer NOW — it must still obtain one by preemption (the exit gate).
+        // Recovery must still obtain a peer by preemption.
         let rec = pm
             .lease(LeasePriority::Recovery)
             .expect("recovery never starves");

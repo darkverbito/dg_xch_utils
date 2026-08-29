@@ -251,9 +251,9 @@ impl RpcServer {
     }
 
     /// Build a server on an ALREADY-CONSTRUCTED rustls [`ServerConfig`] — for callers that need
-    /// a non-default TLS posture (e.g. the full node's chia-parity client-certificate
-    /// enforcement on 8555) while keeping the accept loop and handler plumbing here. The
-    /// `config.ssl_info` field is ignored; only host/port are read.
+    /// a non-default TLS posture (e.g. the full node's client-certificate enforcement on 8555)
+    /// while keeping the accept loop and handler plumbing here. The `config.ssl_info` field is
+    /// ignored; only host/port are read.
     ///
     /// # Errors
     /// Returns an I/O error if the host address fails to parse.
@@ -363,9 +363,8 @@ impl RpcServer {
             })?;
         }
         Ok(Arc::new(
-            // TLS 1.3 floor — chia CHIA-2102 (e57358aea); the RPC listener uses the same
-            // server-side context rules as the p2p listener (chia's RPC server builds its
-            // context via `ssl_context_for_server`).
+            // TLS below 1.3 is refused; the RPC listener follows the same server-side rules
+            // as the p2p listener.
             ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
                 .with_client_cert_verifier(AllowAny::new())
                 .with_single_cert(certs, key)

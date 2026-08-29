@@ -1,17 +1,14 @@
-//! Byte-parity for `BlockRecord` against real chia mainnet records (campaign issue #155,
-//! DIVERGENCES.md "BlockRecord serialization byte-layout").
+//! Byte-parity for `BlockRecord` against real mainnet records.
 //!
-//! Chia oracle: chia_rs 0.42.1 `BlockRecord` (crates/chia-protocol/src/block_record.rs) — the
-//! `challenge_vdf_output` / `infused_challenge_vdf_output` fields are `ClassgroupElement`
+//! The `challenge_vdf_output` / `infused_challenge_vdf_output` fields are `ClassgroupElement`
 //! (bare 100-byte `bytes100`, no length prefix). The fixture blobs are actual
-//! `full_blocks.block_record` rows read from a synced chia-blockchain 2.7.1 mainnet node
-//! (blockchain_v2_mainnet.sqlite), so equality here is equality with what every chia peer
-//! serializes — not a re-derivation from our own encoder.
+//! `full_blocks.block_record` rows read from a synced 2.7.1 mainnet node, so equality here is
+//! equality with what every peer serializes, not a re-derivation from our own encoder.
 //!
 //! Golden set: heights 3000000-3000003 (consecutive main-chain records, transaction and
 //! non-transaction) plus 3000209 (the first record at/after 3000000 carrying a
-//! `sub_epoch_summary_included` — which also pins the 2.7.1 SubEpochSummary embedding: no
-//! post-2.7.1 fields such as chia_rs main's `challenge_merkle_root`).
+//! `sub_epoch_summary_included`, which also pins the 2.7.1 SubEpochSummary embedding: no
+//! post-2.7.1 fields such as `challenge_merkle_root`).
 
 use dg_xch_core::blockchain::block_record::BlockRecord;
 use dg_xch_core::blockchain::sized_bytes::Bytes32;
@@ -63,19 +60,19 @@ fn decode(blob: &[u8]) -> BlockRecord {
     rec
 }
 
-/// Our parser must accept real chia-serialized records and land every field where chia put it.
+/// The parser must accept real serialized records and land every field where the wire put it.
 #[test]
 fn block_record_decodes_chia_mainnet_bytes() {
     for g in goldens() {
         let rec = decode(&g.record);
         assert_eq!(rec.height, g.height);
         assert_eq!(rec.header_hash, g.header_hash);
-        // The stored blob's first 32 bytes are the record's own header_hash (chia layout).
+        // The stored blob's first 32 bytes are the record's own header_hash.
         assert_eq!(&g.record[..32], AsRef::<[u8]>::as_ref(&g.header_hash));
     }
 }
 
-/// And re-emit them byte-identically: encode(decode(chia bytes)) == chia bytes.
+/// And re-emit them byte-identically: encode(decode(bytes)) == bytes.
 #[test]
 fn block_record_reencodes_chia_mainnet_bytes_identically() {
     for g in goldens() {

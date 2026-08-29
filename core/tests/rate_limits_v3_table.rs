@@ -1,5 +1,5 @@
-// RATE_LIMITS_V3 constants pinned against chia `chia/server/rate_limits_v3.py` (a1b12d321,
-// in tag 2.7.1) — every entry copied from chia's table, never defaulted.
+// RATE_LIMITS_V3 constants pinned entry by entry. These are protocol constants: every entry is
+// copied, never defaulted, or the two ends of a link disagree on the window.
 
 use dg_xch_core::protocols::ProtocolMessageTypes;
 use dg_xch_core::protocols::rate_limits_v3::{
@@ -12,7 +12,7 @@ use std::io::Cursor;
 
 use ProtocolMessageTypes as P;
 
-/// chia's 13 request types at window_size = 2.
+/// The 13 request types at window_size = 2.
 const WINDOW_2: [P; 13] = [
     P::RequestBlocks,
     P::RequestBlock,
@@ -29,7 +29,7 @@ const WINDOW_2: [P; 13] = [
     P::RequestPuzzleSolution,
 ];
 
-/// chia's 23 response/reject types at window_size = None (unlimited).
+/// The 23 response/reject types at window_size = None (unlimited).
 const UNLIMITED: [P; 23] = [
     P::RespondBlocks,
     P::RejectBlocks,
@@ -112,8 +112,8 @@ fn configure_message_round_trips_and_parses_to_the_table() {
     }
 }
 
-// chia's validation semantics: empty invalid, oversize invalid, unknown skipped,
-// unlimited-override invalid, 0 = unlimited.
+// Validation semantics: empty invalid, oversize invalid, unknown skipped, unlimited-override
+// invalid, 0 = unlimited.
 #[test]
 fn configure_validation_matches_chia() {
     // Empty → INVALID_HANDSHAKE.

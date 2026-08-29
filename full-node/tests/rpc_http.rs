@@ -1,15 +1,15 @@
-// RPC parity — the chia HTTP envelope and the 8555 TLS posture.
+// The HTTP RPC envelope and the 8555 TLS posture.
 //
 // Envelope: every response is `{"<named_key>": ..., "success": true}` and every application
-// error is an HTTP-200 `{"success": false, "error": ...}` (chia/rpc/util.py:74-97). The
+// error is an HTTP-200 `{"success": false, "error": ...}`. The
 // envelope tests drive `NodeRpcHandler` directly; the shape assertions deserialize through
-// dg_xch_clients' REAL chia response wrappers (the exact structs a chia-shaped Rust client
+// dg_xch_clients' REAL response wrappers (the exact structs a Rust RPC client
 // parses).
 //
-// TLS: `build_rpc_tls_context` serves the chia 8555 posture (chia server.py:54-71) — server
+// TLS: `build_rpc_tls_context` serves the 8555 posture — server
 // cert generated from the CA chain, client certificate REQUIRED and verified against that CA.
 // The end-to-end tests run the real `RpcServer` accept loop and connect with the real
-// `FullnodeClient` (chia-tooling shape: client certs + https + envelope parse); the negative
+// `FullnodeClient` (client certs + https + envelope parse); the negative
 // tests prove a no-cert client and a wrong-CA client are refused at the handshake.
 
 mod common;
@@ -93,7 +93,7 @@ async fn call_raw(
 
 // ---- envelope shape ---------------------------------------------------------------------------
 
-// Success envelope: `{"blockchain_state": {...}, "success": true}` with chia's full state shape
+// Success envelope: `{"blockchain_state": {...}, "success": true}` with the full state shape
 // (peak as a full block record, sync sub-object, mempool gauges, average_block_time).
 #[tokio::test]
 async fn envelope_blockchain_state_named_key_and_success() {
@@ -115,27 +115,27 @@ async fn envelope_blockchain_state_named_key_and_success() {
             .as_object()
             .expect("obj")
             .contains_key("average_block_time"),
-        "chia's average_block_time key is present"
+        "the average_block_time key is present"
     );
     assert!(state.as_object().expect("obj").contains_key("node_id"));
 }
 
 // Error envelope: an application error is HTTP-200 `{"success": false, "error": ...}` with the
-// traceback/structuredError keys chia emits (chia/rpc/util.py:86-97) — never an HTTP 4xx/5xx.
+// traceback/structuredError keys — never an HTTP 4xx/5xx.
 #[tokio::test]
 async fn envelope_errors_are_http_200_success_false() {
     let (rpc, _mp) = seeded_rpc().await;
     let handler = NodeRpcHandler::new(rpc);
     let bogus = Bytes32::from([0x42u8; 32]);
     let (status, v) = call(&handler, "/get_block", json!({"header_hash": bogus})).await;
-    assert_eq!(status, StatusCode::OK, "app errors are HTTP 200 in chia");
+    assert_eq!(status, StatusCode::OK, "app errors are HTTP 200");
     assert_eq!(v["success"], Value::from(false));
     assert!(
         v["error"]
             .as_str()
             .expect("error string")
             .contains("not found"),
-        "the chia error message survives: {v}"
+        "the error message survives: {v}"
     );
     let obj = v.as_object().expect("obj");
     assert!(obj.contains_key("traceback"));
@@ -147,7 +147,7 @@ async fn envelope_errors_are_http_200_success_false() {
     assert_eq!(v["success"], Value::from(false));
 }
 
-// Unknown endpoints are HTTP 404 (chia's aiohttp router behavior).
+// Unknown endpoints are HTTP 404.
 #[tokio::test]
 async fn unknown_endpoint_is_404() {
     let (rpc, _mp) = seeded_rpc().await;
@@ -157,7 +157,7 @@ async fn unknown_endpoint_is_404() {
     assert_eq!(v["success"], Value::from(false));
 }
 
-// An oversize body is refused with 413 (chia's aiohttp client_max_size = 1 MiB).
+// An oversize body is refused with 413 (the 1 MiB body cap).
 #[tokio::test]
 async fn oversize_body_is_413() {
     let (rpc, _mp) = seeded_rpc().await;
@@ -167,7 +167,7 @@ async fn oversize_body_is_413() {
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
 }
 
-// The chia-client-shaped assertion: the coin_records envelope parses through dg_xch_clients'
+// The client-shaped assertion: the coin_records envelope parses through dg_xch_clients'
 // real response wrapper (`response["coin_records"]` + `response["success"]`).
 #[tokio::test]
 async fn envelope_coin_records_parse_as_chia_client_shape() {
@@ -181,13 +181,13 @@ async fn envelope_coin_records_parse_as_chia_client_shape() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let parsed: CoinRecordAryResp = serde_json::from_value(v).expect("chia client shape");
+    let parsed: CoinRecordAryResp = serde_json::from_value(v).expect("client shape");
     assert!(parsed.success);
     assert_eq!(parsed.coin_records.len(), 1);
     assert_eq!(parsed.coin_records[0].coin.name(), name);
 }
 
-// get_block / get_block_record envelopes parse through the chia client wrappers.
+// get_block / get_block_record envelopes parse through the client wrappers.
 #[tokio::test]
 async fn envelope_block_and_record_parse_as_chia_client_shape() {
     let (rpc, _mp) = seeded_rpc().await;
@@ -209,8 +209,8 @@ async fn envelope_block_and_record_parse_as_chia_client_shape() {
     assert_eq!(parsed.block_record.header_hash, hh);
 }
 
-// push_tx answers chia's `{"status": "SUCCESS"}`, idempotent on a duplicate; the status parses
-// through the chia client's TXResp.
+// push_tx answers `{"status": "SUCCESS"}`, idempotent on a duplicate; the status parses
+// through the client's TXResp.
 #[tokio::test]
 async fn envelope_push_tx_status_success_and_idempotent() {
     let (rpc, mempool) = seeded_rpc().await;
@@ -224,7 +224,7 @@ async fn envelope_push_tx_status_success_and_idempotent() {
     let parsed: TXResp = serde_json::from_value(v).expect("tx shape");
     assert!(parsed.success);
     assert_eq!(parsed.status, TXStatus::SUCCESS);
-    // Duplicate: SUCCESS again (chia full_node_rpc_api.py:846-855), still one resident item.
+    // Duplicate: SUCCESS again, still one resident item.
     let (_s, v) = call(&handler, "/push_tx", body).await;
     let parsed: TXResp = serde_json::from_value(v).expect("tx shape");
     assert_eq!(parsed.status, TXStatus::SUCCESS);
@@ -232,7 +232,7 @@ async fn envelope_push_tx_status_success_and_idempotent() {
 }
 
 // The utility endpoints: healthz, get_routes, get_version, get_network_info,
-// get_aggsig_additional_data (plain hex, chia's `.hex()`), get_connections (empty sans live).
+// get_aggsig_additional_data (plain hex, `.hex()`), get_connections (empty sans live).
 #[tokio::test]
 async fn envelope_utility_endpoints() {
     let (rpc, _mp) = seeded_rpc().await;
@@ -255,11 +255,11 @@ async fn envelope_utility_endpoints() {
     assert_eq!(v["network_name"].as_str(), Some("mainnet"));
     assert_eq!(v["network_prefix"].as_str(), Some("xch"));
     let genesis = v["genesis_challenge"].as_str().expect("genesis");
-    assert!(!genesis.starts_with("0x"), "chia serves plain hex here");
+    assert!(!genesis.starts_with("0x"), "plain hex is served here");
 
     let (_s, v) = call(&handler, "/get_aggsig_additional_data", json!({})).await;
     let data = v["additional_data"].as_str().expect("additional data");
-    assert!(!data.starts_with("0x"), "chia's .hex() has no 0x prefix");
+    assert!(!data.starts_with("0x"), "no 0x prefix on this field");
     assert_eq!(
         format!("0x{data}"),
         MAINNET.agg_sig_me_additional_data.to_string()
@@ -294,9 +294,8 @@ fn free_port() -> u16 {
         .port()
 }
 
-// Per-process test SSL dir holding the RPC PRIVATE CA (chia `private_ssl_ca`). Generated ONCE
-// (race-free across the parallel test threads) so every Cni-mode server shares one private CA and
-// `write_client_certs` can sign client certs against it — the CNI-compatible posture the fix ships.
+// Per-process test SSL dir holding the RPC private CA. Generated once so every Cni-mode server
+// shares one private CA and `write_client_certs` can sign client certs against it.
 fn test_ssl_dir() -> std::path::PathBuf {
     std::env::temp_dir().join(format!("rpc_http_ssl_{}", std::process::id()))
 }
@@ -319,8 +318,7 @@ fn ensure_test_private_ca() -> std::path::PathBuf {
 }
 
 fn write_client_certs(tag: &str) -> ClientSSLConfig {
-    // Sign the client cert with the node's per-install PRIVATE CA (NOT the world-public Chia CA) —
-    // exactly what legitimate RPC tooling does once the operator distributes private_ca.crt.
+    // Sign the client cert with the node's per-install private CA, not the world-public Chia CA.
     let ca_dir = ensure_test_private_ca().join("ca");
     let ca_crt = std::fs::read(ca_dir.join("private_ca.crt")).expect("private CA crt");
     let ca_key = std::fs::read(ca_dir.join("private_ca.key")).expect("private CA key");
@@ -382,7 +380,7 @@ async fn spawn_tls_server_mode(
     (port, run, mempool, rpc)
 }
 
-// End-to-end with the REAL chia-shaped Rust RPC client: client cert signed by our CA is
+// End-to-end with the REAL Rust RPC client: client cert signed by our CA is
 // accepted, https + envelope parse round-trips four representative endpoints.
 #[tokio::test]
 async fn tls_e2e_chia_client_four_endpoints() {
@@ -436,8 +434,7 @@ async fn tls_e2e_chia_client_four_endpoints() {
     run.store(false, Ordering::Relaxed);
 }
 
-// chia posture negative: a client with NO certificate is refused at the handshake
-// (chia server.py:70 `verify_mode = ssl.CERT_REQUIRED`).
+// A client with no certificate is refused at the handshake; Cni mode requires one.
 #[tokio::test]
 async fn tls_no_client_cert_is_refused() {
     let (port, run, _mp, _rpc) = spawn_tls_server().await;
@@ -454,7 +451,7 @@ async fn tls_no_client_cert_is_refused() {
     run.store(false, Ordering::Relaxed);
 }
 
-// chia posture negative: a client certificate from the WRONG CA (here: signed by a mere leaf,
+// TLS-posture negative: a client certificate from the WRONG CA (here: signed by a mere leaf,
 // so it cannot chain to the server's root) is refused at the handshake.
 #[tokio::test]
 async fn tls_wrong_ca_client_cert_is_refused() {
@@ -528,20 +525,15 @@ async fn raw_request_fails(port: u16, cfg: Arc<rustls::ClientConfig>) -> bool {
     !String::from_utf8_lossy(&buf).starts_with("HTTP/1.1 200")
 }
 
-// ===== PR #52 SECURITY — F1 regression guard: the world-public Chia CA is NOT a client-auth anchor
-//
-// Finding F1: before the fix, `build_rpc_tls_context` rooted the DEFAULT RPC client-cert verifier at
-// the embedded, world-PUBLIC `CHIA_CA_CRT` (key `CHIA_CA_KEY` in core/src/constants.rs), so ANY
-// attacker could mint a chaining client cert and satisfy the mTLS client-auth — the RPC was
-// effectively unauthenticated. The fix roots Cni-mode client-auth at a per-install PRIVATE CA and
-// refuses the public CA outright. This test presents a cert signed by the world-public Chia CA (an
-// unauthenticated stranger) and requires it to be REFUSED. It FAILED on #51 HEAD (the stranger was
-// accepted); it is GREEN after the fix. CWE-321 (hard-coded key) + CWE-295 (improper cert validation).
+// The world-public Chia CA must never be a client-auth anchor: its private key is public, so a
+// verifier rooted at it lets anyone mint a chaining client cert and satisfy the mTLS client-auth,
+// leaving the RPC effectively unauthenticated. Cni-mode client-auth is rooted at a per-install
+// private CA instead.
 #[tokio::test]
 async fn tls_public_chia_ca_client_is_an_auth_bypass() {
     use dg_xch_core::ssl::{load_certs_from_bytes, load_private_key_from_bytes};
     let (port, run, _mp, _rpc) = spawn_tls_server().await;
-    // The attacker's entire capability: sign a client cert with the PUBLIC, in-repo Chia CA key.
+    // The attacker's entire capability: sign a client cert with the public Chia CA key.
     let (crt, key_bytes) =
         generate_ca_signed_cert_data(CHIA_CA_CRT.as_bytes(), CHIA_CA_KEY.as_bytes())
             .expect("attacker cert signed by the world-public Chia CA");
@@ -556,16 +548,12 @@ async fn tls_public_chia_ca_client_is_an_auth_bypass() {
     let refused = raw_request_fails(port, Arc::new(cfg)).await;
     assert!(
         refused,
-        "SECURITY (CWE-321/CWE-295): a client whose cert merely chains to the WORLD-PUBLIC Chia CA \
-         must NOT reach the RPC. Green here means the Cni private-CA fix rejects it; a failure here \
-         means the F1 public-CA bypass has regressed."
+        "a client whose cert merely chains to the world-public Chia CA must NOT reach the RPC"
     );
     run.store(false, Ordering::Relaxed);
 }
 
-// pr-52 fix, positive: a client cert signed by the node's PRIVATE CA IS accepted in Cni mode —
-// the CNI-compatible authenticated path still works (this is the same cert `write_client_certs`
-// mints, exercised end-to-end by `tls_e2e_chia_client_four_endpoints`).
+// A client cert signed by the node's PRIVATE CA is accepted in Cni mode.
 #[tokio::test]
 async fn tls_private_ca_client_is_accepted() {
     use dg_xch_core::ssl::{load_certs_from_bytes, load_private_key_from_bytes};
@@ -590,8 +578,7 @@ async fn tls_private_ca_client_is_accepted() {
     run.store(false, Ordering::Relaxed);
 }
 
-// pr-52 fix, positive: `--rpc-tls local` on a loopback bind requires NO client cert — the
-// private/local operator posture ("some won't want these certs in the mix").
+// `--rpc-tls local` on a loopback bind requires no client cert.
 #[tokio::test]
 async fn tls_local_mode_allows_no_client_cert_on_loopback() {
     let (port, run, _mp, _rpc) = spawn_tls_server_mode(full_node::RpcTlsMode::Local).await;
@@ -608,8 +595,8 @@ async fn tls_local_mode_allows_no_client_cert_on_loopback() {
     run.store(false, Ordering::Relaxed);
 }
 
-// pr-52 fix, fail-closed: `--rpc-tls local` is unauthenticated, so it must REFUSE to build on a
-// routable (non-loopback) bind — an unauthenticated RPC can never be exposed to the network.
+// `--rpc-tls local` is unauthenticated, so it must refuse to build on a routable (non-loopback)
+// bind: an unauthenticated RPC can never be exposed to the network.
 #[test]
 fn tls_local_mode_refuses_non_loopback_bind() {
     let bind: SocketAddr = "0.0.0.0:8555".parse().expect("addr");
@@ -622,10 +609,9 @@ fn tls_local_mode_refuses_non_loopback_bind() {
     }
 }
 
-// pr-52: the `--rpc-tls local` DEFAULT is non-breaking. A node that passes `--rpc 0.0.0.0` (as our
-// fleet manifests do) must NOT crash and must NOT network-expose an unauthenticated RPC — the bind
-// is downgraded to loopback (port preserved) with a warning. Cni, being authenticated, binds as
-// configured. This is the invariant that lets `local` be the default without breaking existing deploys.
+// A node started with `--rpc 0.0.0.0` in local mode must not network-expose an unauthenticated
+// RPC: the bind is downgraded to loopback with the port preserved. Cni is authenticated and binds
+// as configured.
 #[test]
 fn local_mode_downgrades_routable_bind_to_loopback() {
     use full_node::RpcTlsMode;

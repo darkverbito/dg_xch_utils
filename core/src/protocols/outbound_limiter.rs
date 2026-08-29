@@ -1,37 +1,33 @@
 // Per-connection OUTBOUND self-throttle — the send-side companion to the inbound `RateLimiter`
-// (`rate_limits.rs`). A faithful port of chia 2.7.1 `WSChiaConnection._send_message`'s v2
-// `outbound_rate_limiter` path (chia/server/ws_connection.py:859-885).
+// (`rate_limits.rs`).
 //
-// chia's mechanism: before writing a message, chia runs the SAME `rate_limit_numbers` table through
-// an `outbound_rate_limiter = RateLimiter(incoming=False)` (the peer's negotiated capabilities select
-// v1/v2). If sending now would exceed the PEER's budget chia does NOT drop the message outright — it
-// schedules `_wait_and_retry` (`asyncio.sleep(1)` then re-put on the outgoing queue) and returns, so
-// THIS send is skipped but the message is retried ~1s later. The ONE exception is `respond_peers`:
-// when it is over budget it is dropped WITHOUT re-queue (chia comment: "This function has rate limits
-// which are too low"), because its own cap is so low that re-queuing would spin. `Unlimited` response
-// types (RespondBlocks, RespondBlock, RejectBlocks, …) carry no frequency budget, so our own solicited
-// fetch and serve traffic is NEVER deferred — only the frequency-capped gossip types (compact-VDF
-// re-gossip, transaction announces, NewPeak, …) can be paced. That is the self-safety property that
-// keeps a strict chia peer from banning US for a legitimate re-gossip burst while never throttling our
-// sync into failure.
+// Before writing a message, the SAME rate-limit table is run through an outgoing limiter (the
+// peer's negotiated capabilities select v1/v2). If sending now would exceed the PEER's budget
+// the message is NOT dropped outright — this send is skipped and the message is retried ~1s
+// later. The ONE exception is `respond_peers`: when it is over budget it is dropped WITHOUT
+// re-queue, because its own cap is so low that re-queuing would spin. `Unlimited` response
+// types (RespondBlocks, RespondBlock, RejectBlocks, …) carry no frequency budget, so our own
+// solicited fetch and serve traffic is NEVER deferred — only the frequency-capped gossip types
+// (compact-VDF re-gossip, transaction announces, NewPeak, …) can be paced. That is the
+// self-safety property that keeps a strict peer from banning US for a legitimate re-gossip
+// burst while never throttling our sync into failure.
 //
-// We have no single per-connection send loop draining an outgoing queue; sends are driven directly by
-// the caller task under the connection write lock. So the faithful async analog is to run the throttle
-// in the CALLER's task BEFORE acquiring the write lock — never holding the write lock across a wait,
-// or a deferred gossip type would stall an `Unlimited` RespondBlocks queued behind it on the same lock
-// and break the self-safety guarantee. `admit` sleeps `retry_delay` between re-checks. It is BOUNDED:
-// after `max_attempts` deferrals the message is shed with a `Drop(BackpressureCap)` (chia's outgoing
-// queue is likewise finite — at extreme backpressure the excess is shed rather than buffered without
-// bound). Because the limiter window is 60s, `max_attempts * retry_delay` spans a full window, so a
-// message that is merely ahead of budget is always admitted once the window rolls; only sustained
-// over-budget flooding is shed.
+// There is no single per-connection send loop draining an outgoing queue; sends are driven
+// directly by the caller task under the connection write lock. So the throttle runs in the
+// CALLER's task BEFORE acquiring the write lock — never holding the write lock across a wait,
+// or a deferred gossip type would stall an `Unlimited` RespondBlocks queued behind it on the
+// same lock and break the self-safety guarantee. `admit` sleeps `retry_delay` between
+// re-checks. It is BOUNDED: after `max_attempts` deferrals the message is shed with a
+// `Drop(BackpressureCap)`. Because the limiter window is 60s, `max_attempts * retry_delay`
+// spans a full window, so a message that is merely ahead of budget is always admitted once
+// the window rolls; only sustained over-budget flooding is shed.
 
 use crate::protocols::ProtocolMessageTypes;
 use crate::protocols::rate_limits::RateLimiter;
 use crate::protocols::shared::Capabilities;
 use std::time::Duration;
 
-/// chia `_wait_and_retry` cadence: `asyncio.sleep(1)` between re-queue attempts.
+/// Re-queue cadence: 1s between attempts.
 pub const RETRY_DELAY: Duration = Duration::from_secs(1);
 
 /// Bounded backpressure: the max number of `retry_delay` deferrals before a message is shed. Chosen so
@@ -39,22 +35,20 @@ pub const RETRY_DELAY: Duration = Duration::from_secs(1);
 /// budget always drains once the window rolls; only sustained flooding hits the cap and is dropped.
 pub const MAX_ATTEMPTS: u32 = 65;
 
-/// True for message types chia drops WITHOUT re-queue when they are over budget on the send path
-/// (chia ws_connection.py:880 — `respond_peers`). Every other frequency-capped type is instead
-/// deferred and retried.
+/// True for message types dropped WITHOUT re-queue when they are over budget on the send path
+/// (`respond_peers`). Every other frequency-capped type is instead deferred and retried.
 #[must_use]
 pub fn is_requeue_exempt(msg_type: ProtocolMessageTypes) -> bool {
     matches!(msg_type, ProtocolMessageTypes::RespondPeers)
 }
 
-/// The classification of one outbound message against the peer's budget (chia's branch after
-/// `outbound_rate_limiter.process_msg_and_check`).
+/// The classification of one outbound message against the peer's budget.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OutboundDecision {
     /// Within budget (or an `Unlimited` type within its per-message size cap): send now. The budget
-    /// slot has been committed by this call (chia commits the outgoing counter only when allowed).
+    /// slot has been committed by this call (the outgoing counter is committed only when allowed).
     Send,
-    /// Over budget and NOT re-queue-exempt: wait `retry_delay` and re-check (chia `_wait_and_retry`).
+    /// Over budget and NOT re-queue-exempt: wait `retry_delay` and re-check.
     Defer,
     /// Over budget and re-queue-exempt (`respond_peers`): drop now, no retry.
     DropExempt,
@@ -63,7 +57,7 @@ pub enum OutboundDecision {
 /// Why an outbound message was not sent (the non-`Admit` outcomes of [`OutboundLimiter::admit`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DropReason {
-    /// A re-queue-exempt type (`respond_peers`) over budget — chia drops it without retry.
+    /// A re-queue-exempt type (`respond_peers`) over budget — dropped without retry.
     Exempt,
     /// `max_attempts` deferrals were exhausted without the budget opening — bounded backpressure shed.
     BackpressureCap,
@@ -88,7 +82,7 @@ pub struct OutboundLimiter {
 }
 
 impl OutboundLimiter {
-    /// chia's defaults: a 60-second outbound window at 100% of the published numbers, 1s re-queue
+    /// Defaults: a 60-second outbound window at 100% of the published numbers, 1s re-queue
     /// cadence, bounded at [`MAX_ATTEMPTS`].
     #[must_use]
     pub fn new() -> Self {
@@ -115,7 +109,7 @@ impl OutboundLimiter {
     }
 
     /// Classify one message against the peer's current budget. On [`OutboundDecision::Send`] the
-    /// budget slot is committed (chia commits the outgoing counter only when the message is allowed);
+    /// budget slot is committed (the outgoing counter advances only when the message is allowed);
     /// a `Defer`/`DropExempt` does not advance the counter, so re-checking is free of double-counting.
     #[must_use]
     pub fn decide(
@@ -133,7 +127,7 @@ impl OutboundLimiter {
 
     /// Block the CALLER (holding no connection lock) until the message fits the peer's budget, then
     /// return [`ThrottleOutcome::Admit`] — or shed it ([`ThrottleOutcome::Drop`]) when it is exempt or
-    /// the attempt cap is reached. Faithful to chia `_wait_and_retry`: it defers (does not drop) a
+    /// the attempt cap is reached. It defers (does not drop) a
     /// would-be-oversending message, retrying every `retry_delay`, bounded by `max_attempts`.
     pub async fn admit(
         &self,
@@ -180,10 +174,9 @@ mod tests {
     }
 
     // TEST (1): a burst of a frequency-capped gossip type over the peer's per-minute budget is PACED,
-    // not sent immediately. NewCompactVdf is 100/min (rate_limit_numbers.py:113, no v2 override). With
+    // not sent immediately. NewCompactVdf is 100/min (no v2 override). With
     // a window that never rolls in-test, the first 100 are admitted (this is what a peer allows) and
-    // every further one is Defer — i.e. the fix would delay them rather than send-and-get-banned. On
-    // the OLD code (no outbound limiter) all 110 go out immediately, which is the ban vector.
+    // every further one is Defer — delayed rather than send-and-get-banned.
     #[test]
     fn frequency_capped_burst_is_paced_not_sent_immediately() {
         let ol = OutboundLimiter::with_params(3600, 100, 65, Duration::from_millis(1));
@@ -220,8 +213,8 @@ mod tests {
         }
     }
 
-    // TEST (3) — the re-queue exemption: respond_peers over budget is DROPPED, not deferred (chia
-    // ws_connection.py:880). respond_peers is 10/min (rate_limit_numbers.py:117). The first 10 admit;
+    // TEST (3) — the re-queue exemption: respond_peers over budget is DROPPED, not deferred.
+    // respond_peers is 10/min. The first 10 admit;
     // the 11th is DropExempt (not Defer).
     #[test]
     fn exempt_type_is_dropped_not_deferred_when_over_budget() {

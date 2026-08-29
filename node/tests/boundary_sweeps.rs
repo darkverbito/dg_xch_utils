@@ -1,7 +1,6 @@
-// Geometric-boundary sweeps (test class 3). The era-anchor and ssi-window bugs both died AT
-// boundaries: the fixed-256-window drops at peak % 384 >= ~256 (the f815d8d cache-floor fix) and
-// the --sync-from anchor's epoch-retarget wall at 4,575,744 (the edf019a backfill-depth fix). This
-// file generalizes the landed 384-offset sweep (`computed_depth_suffices_for_every_sub_epoch_offset`,
+// Geometric-boundary sweeps. Boundary bugs cluster AT boundaries: the fixed-256-window drops at
+// peak % 384 >= ~256 and the --sync-from anchor's epoch-retarget wall at 4,575,744. This file
+// generalizes the 384-offset sweep (`computed_depth_suffices_for_every_sub_epoch_offset`,
 // core difficulty_adjustment tests) into offset-class sweeps {B-1, B, B+1, mid-band} for
 // B ∈ {SUB_EPOCH_BLOCKS = 384, EPOCH_BLOCKS = 4608} over each lookback computation on the stage
 // path — and, the crown jewel, over the --sync-from anchor's whole first follow window: an anchor
@@ -33,8 +32,8 @@ fn offset_from(prev_height: u32, boundary: u32) -> i64 {
 // realistic geometry: history summaries below the boundary, the boundary's own summary still
 // pending. The three boundary-adjacent classes are all epoch-retarget triggers
 // (height_can_be_first_in_epoch spans [B, B+384)); the mid-band class takes only the shallow
-// sub-epoch walk. Red side: the trigger classes must reproduce the fixed-256-window failure —
-// the exact at-tip drop band f815d8d fixed — while the mid-band class must not.
+// sub-epoch walk. Red side: the trigger classes must reproduce the fixed-256-window failure
+// while the mid-band class must not.
 #[test]
 fn ssi_difficulty_walk_computes_at_every_epoch_boundary_offset_class() {
     let e = EPOCH_BOUNDARY;
@@ -69,7 +68,7 @@ fn ssi_difficulty_walk_computes_at_every_epoch_boundary_offset_class() {
 // Sweep 1b — the same walk at every SUB-EPOCH-boundary offset class in mid-epoch (no epoch turn
 // reachable), worst case: the boundary's own summary pending, so the can_finish walk runs its full
 // offset depth. Every class must compute inside the per-anchor computed window, and mid-epoch the
-// computed depth must stay in chia's mid-epoch cache band (never the 5,120 epoch-turn depth).
+// computed depth must stay in the mid-epoch cache band (never the 5,120 epoch-turn depth).
 #[test]
 fn ssi_difficulty_walk_computes_at_every_sub_epoch_boundary_offset_class() {
     let s = SUB_EPOCH_BOUNDARY;
@@ -233,7 +232,7 @@ fn epoch_schedule_flips_exactly_at_the_attested_activation_boundaries() {
 // anchor through the pending boundary's full retarget-trigger band, mid-band included — must
 // compute against `epoch_backfill_low` coverage: no NotFound wall anywhere. This is the frozen
 // sync leg (anchor_epoch_gap's one geometry) generalized to every offset class. Red side: the
-// anchor span alone (the pre-fix [H-64, ...] store contents) must reproduce the wall at the first
+// anchor span alone must reproduce the wall at the first
 // deep trigger for every class — the "block record not found" line the pod repeated forever.
 #[test]
 fn sync_from_anchor_reaches_a_computable_state_at_every_boundary_offset_class() {

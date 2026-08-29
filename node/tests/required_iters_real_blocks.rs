@@ -4,14 +4,12 @@
 //
 //   Required iters 0 is not below the sp interval iters 2097152, 134217728 or not > 0.
 //
-// That verbatim message comes from `calculate_ip_iters` and fires ONLY when `required_iters == 0`. But
-// `calculate_iterations_quality` clamps its result with `max(_, 1)` (chia pot_iterations.py), so a real
-// proof of space can NEVER produce 0 — a `required_iters` of 0 is always a fabricated/stored value. The
-// engine's follow path (`Engine::derive_required_iters`) used to store a fabricated 0 for a block whose
-// deep ancestor context was not yet cached (a checkpoint/bootstrap entry point). chia never does this: every
-// BlockRecord carries its true `required_iters`, and `get_next_sub_slot_iters_and_difficulty` reads it back
-// through `prev_b.sp_total_iters()` -> `ip_iters()` -> `calculate_ip_iters()`
-// (chia/consensus/difficulty_adjustment.py::get_next_sub_slot_iters_and_difficulty), which rejects 0.
+// That verbatim message comes from `calculate_ip_iters` and fires ONLY when
+// `required_iters == 0`. But `calculate_iterations_quality` clamps its result with `max(_, 1)`,
+// so a real proof of space can NEVER produce 0 — a `required_iters` of 0 is always a
+// fabricated/stored value. Every BlockRecord must carry its true `required_iters`:
+// `get_next_sub_slot_iters_and_difficulty` reads it back through `prev_b.sp_total_iters()` ->
+// `ip_iters()` -> `calculate_ip_iters()`, which rejects 0.
 //
 // The chain here is the same real mainnet recent chain (heights 9054524..=9054620) the header-validation test uses,
 // sliced from the committed weight proof. `GOLDEN` are the weight-proof recent-block validator's reference
@@ -47,8 +45,8 @@ fn load_chain() -> Vec<HeaderBlock> {
         .recent_chain_data
 }
 
-// The seeding light path (used only to BUILD the ancestor records so the full validator has a chain to walk).
-// It intentionally mirrors weight_proof.py's `_validate_pospace_recent_chain`.
+// The seeding light path (used only to BUILD the ancestor records so the full validator has a
+// chain to walk).
 fn seed_required_iters(
     ancestors: &HashMap<Bytes32, BlockRecord>,
     block: &HeaderBlock,
@@ -160,11 +158,11 @@ fn build_ancestors(chain: &[HeaderBlock]) -> HashMap<Bytes32, BlockRecord> {
     ancestors
 }
 
-// THE FIX. For real mainnet blocks the ancestor-independent pospace computation (what the engine now stores
-// when the deep VDF context is not yet cached) must (a) land in the open interval (0, sp_interval_iters) —
-// never 0, the value that crashes the difficulty retarget — and (b) equal BOTH the full PoW/VDF validator's
-// required_iters AND the weight-proof reference for the same block. If (b) held but the engine still stored 0,
-// the zero-seed crash would recur; if the fix computed a DIFFERENT nonzero value, it would silently corrupt the retarget.
+// For real mainnet blocks the ancestor-independent pospace computation (what the engine stores
+// when the deep VDF context is not yet cached) must (a) land in the open interval
+// (0, sp_interval_iters) — never 0, the value that crashes the difficulty retarget — and
+// (b) equal BOTH the full PoW/VDF validator's required_iters AND the weight-proof reference for
+// the same block. A different nonzero value would silently corrupt the retarget.
 #[test]
 fn pospace_required_iters_matches_full_validation_and_is_in_range() {
     let chain = load_chain();
@@ -186,8 +184,8 @@ fn pospace_required_iters_matches_full_validation_and_is_in_range() {
             .get(&(height - 1))
             .expect("prev record in slice");
 
-        // The difficulty the fix derives (weight increment over prev) is the epoch difficulty chia enforces
-        // with the INVALID_WEIGHT check (block.weight == prev.weight + difficulty).
+        // The derived difficulty (weight increment over prev) is the epoch difficulty the
+        // INVALID_WEIGHT check enforces (block.weight == prev.weight + difficulty).
         assert_eq!(
             u64::try_from(block.weight() - prev.weight).unwrap(),
             DIFF,
@@ -240,7 +238,7 @@ fn stored_zero_required_iters_poisons_the_difficulty_retarget() {
     get_next_sub_slot_iters_and_difficulty(&MAINNET, false, Some(&prev), &ancestors)
         .expect("real required_iters retargets cleanly");
 
-    // Poison it exactly as the old fabricated-0 path did, then re-run the identical read.
+    // Poison it with a fabricated 0, then re-run the identical read.
     let mut poisoned = prev.clone();
     poisoned.required_iters = 0;
     ancestors.insert(poisoned.header_hash, poisoned.clone());

@@ -14,7 +14,7 @@ use dg_xch_core::protocols::wallet::CoinStateFilters;
 /// streamed range delete/update returning a count, never a materialized changed-coin set.
 #[async_trait]
 pub trait CoinStore {
-    /// chia_rs `CoinStore::get_coin_record` — point-get by coin id.
+    /// Point-get a coin record by coin id.
     ///
     /// # Errors
     /// Returns [`StoreError::Backend`] on a query failure.

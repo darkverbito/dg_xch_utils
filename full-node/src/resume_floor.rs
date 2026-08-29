@@ -2,17 +2,16 @@
 // read (`epoch_backfill_low`) be served from the store, or does the resume repair need to fetch a
 // weight proof and backfill headers first?
 //
-// The floor MUST be measured by prev-hash walk from the peak, for two reasons a real
-// anchored-store restart-resume stall exposed:
+// The floor MUST be measured by prev-hash walk from the peak, for two reasons:
 //   1. `get_block_record_by_height` is main-chain-only on every backend (sqlite/postgres
 //      `in_main_chain = 1`; mmap `heights.dat` is populated only by `set_peak`). Epoch-depth
-//      backfill writes CANDIDATE records, which a by-height read never sees — so an anchored leg's
-//      by-height floor sat at the confirmed span base forever, and every restart re-ran the full
-//      weight-proof fetch + multi-minute validation + header backfill it had already done.
+//      backfill writes CANDIDATE records, which a by-height read never sees — a by-height floor
+//      sits at the confirmed span base forever, and every restart re-runs the full weight-proof
+//      fetch + multi-minute validation + header backfill it had already done.
 //   2. A by-height binary search assumes hole-free monotone presence. A mid-span record hole (a
 //      lost candidate link batch on mmap; a `synchronous_commit=off` suffix drop on Postgres)
-//      above the by-height floor read as "nothing to repair" while the stage walk kept dying on
-//      the hole — the MissingRecord livelock.
+//      above the by-height floor reads as "nothing to repair" while the stage walk keeps dying
+//      on the hole — the MissingRecord livelock.
 // The prev-hash walk reads records BY HASH (candidate-visible on every backend) and detects a hole
 // naturally: the walk breaks exactly at the record whose parent is missing.
 
@@ -153,8 +152,7 @@ mod tests {
     // The anchored-leg shape a deployed anchored store is in: the confirmed span [A, P] is
     // main-chain (set_peak ran while nothing below A existed), then the epoch-depth backfill
     // landed CANDIDATE records [L, A). A restart must see those candidates as floor-satisfying —
-    // by-height they are invisible, and the pre-fix decision re-ran the full weight-proof fetch +
-    // validate on EVERY boot. (Postgres shares sqlite's `in_main_chain = 1` by-height SQL
+    // by-height they are invisible. (Postgres shares sqlite's `in_main_chain = 1` by-height SQL
     // verbatim — stores/src/postgres/block.rs — and the walk goes through the same generic
     // `BlockStore::get_block_record`, so sqlite+mmap coverage carries; the postgres contract
     // suite pins the by-hash/by-height visibility semantics themselves.)
@@ -202,7 +200,7 @@ mod tests {
         assert_anchored_reached(&store).await;
     }
 
-    // The mid-span-hole shape (HOLE 3): records main-chain-visible on BOTH sides of a single
+    // The mid-span-hole shape: records main-chain-visible on BOTH sides of a single
     // missing record (a lost mmap link batch / a dropped Postgres candidate batch, later peaks
     // landed). The by-height floor search converges below the hole and reports "nothing to
     // repair" while every stage walk from the peak dies crossing the hole — the livelock. The

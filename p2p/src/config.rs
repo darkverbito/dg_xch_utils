@@ -1,9 +1,6 @@
 use std::time::Duration;
 
-// Slot targets and caps reuse dg_xch's full-node config defaults
-// (core/src/config.rs: target_peer_count 80, target_outbound_peer_count 8,
-// peer_connect_timeout 30, recent_peer_threshold 6000, ping_interval 120).
-// Timeout/backoff knobs start from libbitcoin-network settings.hpp defaults.
+// Slot targets and caps reuse the full-node config defaults.
 #[derive(Debug, Clone, Copy)]
 pub struct P2pSettings {
     pub target_outbound: usize,
@@ -40,8 +37,7 @@ impl Default for P2pSettings {
 }
 
 impl P2pSettings {
-    // Full-jitter backoff: retry_timeout scaled to [jitter_floor, 1.0], the
-    // thundering-herd fix (libbitcoin commits 7d5247ed2 / 9483619a7).
+    // Full-jitter backoff: retry_timeout scaled to [jitter_floor, 1.0].
     #[must_use]
     pub fn jittered_backoff(&self, attempt: u32) -> Duration {
         let capped = attempt.min(6);

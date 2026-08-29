@@ -1,4 +1,4 @@
-// RATE_LIMITS_V3 — chia a1b12d321 (CHIA-3895/3944/3970): window-based (in-flight) rate limits.
+// RATE_LIMITS_V3 — window-based (in-flight) rate limits.
 //
 // When BOTH peers advertise `Capability::RateLimitsV3`, a `ConfigureWindowSizes` message is
 // exchanged immediately after the handshake (each side sends its settings and validates the
@@ -7,16 +7,13 @@
 // `n` requests being processed (receiver side) / in flight (sender side) at once; response and
 // reject types are `None` (unlimited — implicitly bounded by their soliciting requests).
 //
-// The table, the 256-entry configure cap, and the validation rules mirror chia
-// `chia/server/rate_limits_v3.py` exactly — constants copied, never defaulted
-// (`core/tests/rate_limits_v3_table.rs` pins every entry).
+// The table, the 256-entry configure cap, and the validation rules are protocol constants and
+// must be copied, never defaulted; `core/tests/rate_limits_v3_table.rs` pins every entry.
 //
-// Capability posture (chia 2.7.1 parity): v3 is NOT in the default outgoing capability set
-// (`shared_protocol._capabilities` carries BASE/BLOCK_HEADERS/RATE_LIMITS_V2 only) — an
-// INITIATOR advertises it only when explicitly configured. A RESPONDER auto-mirrors: when the
-// inbound handshake advertises v3, chia appends v3 to its reply capabilities and performs the
-// configure exchange (ws_connection.py `perform_handshake`). We mirror that responder behavior;
-// our outbound dials keep the default set, exactly like a stock CNI 2.7.1 node.
+// Capability posture: v3 is NOT in the default outgoing capability set, so an INITIATOR
+// advertises it only when explicitly configured. A RESPONDER auto-mirrors: when the inbound
+// handshake advertises v3, it is appended to the reply capabilities and the configure exchange
+// runs. Our outbound dials keep the default set.
 
 use crate::protocols::ProtocolMessageTypes;
 use crate::protocols::shared::{Capabilities, Capability, ConfigureWindowSizes};
@@ -25,8 +22,8 @@ use std::io::{Error, ErrorKind};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// One message type's v3 setting (chia `RLSettingsV3`): the maximum number of in-flight
-/// messages of this type, `None` = unlimited.
+/// One message type's v3 setting: the maximum number of in-flight messages of this type,
+/// `None` = unlimited.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RlSettingsV3 {
     pub window_size: Option<u16>,
@@ -39,9 +36,9 @@ const fn window(n: u16) -> Option<RlSettingsV3> {
 }
 const UNLIMITED: Option<RlSettingsV3> = Some(RlSettingsV3 { window_size: None });
 
-/// The v3 table — chia `rate_limits_v3` (chia/server/rate_limits_v3.py), all 36 entries: the 13
-/// request types at `window_size = 2`, their responses/rejects unlimited. A type not in this
-/// table stays under the time-based v1/v2 limiter even when v3 is active.
+/// The v3 table, all 36 entries: the 13 request types at `window_size = 2`, their
+/// responses/rejects unlimited. A type not in this table stays under the time-based v1/v2
+/// limiter even when v3 is active.
 #[must_use]
 pub fn v3_setting(t: ProtocolMessageTypes) -> Option<RlSettingsV3> {
     use ProtocolMessageTypes as P;
@@ -86,12 +83,10 @@ pub fn v3_setting(t: ProtocolMessageTypes) -> Option<RlSettingsV3> {
     }
 }
 
-/// Maximum number of entries accepted in a `ConfigureWindowSizes` message — chia
-/// `MAX_CONFIGURE_RATE_LIMITS_ENTRIES`.
+/// Maximum number of entries accepted in a `ConfigureWindowSizes` message.
 pub const MAX_CONFIGURE_RATE_LIMITS_ENTRIES: usize = 256;
 
-/// True when `caps` advertises `RATE_LIMITS_V3` with state "1" (chia
-/// `known_active_capabilities`).
+/// True when `caps` advertises `RATE_LIMITS_V3` with state "1".
 #[must_use]
 pub fn peer_supports_v3(caps: &Capabilities) -> bool {
     let v3 = Capability::RateLimitsV3 as u16;
@@ -99,7 +94,7 @@ pub fn peer_supports_v3(caps: &Capabilities) -> bool {
 }
 
 /// Encode OUR default v3 table into the `ConfigureWindowSizes` message we send after the
-/// handshake — chia `rl_v3_to_configure_message` (window 0 encodes "unlimited").
+/// handshake; window 0 encodes "unlimited".
 #[must_use]
 pub fn configure_message() -> ConfigureWindowSizes {
     let mut settings: Vec<(u8, u16)> = Vec::new();
@@ -116,9 +111,8 @@ pub fn configure_message() -> ConfigureWindowSizes {
     ConfigureWindowSizes { settings }
 }
 
-/// Parse + validate a peer's `ConfigureWindowSizes` — chia
-/// `rl_settings_v3_from_configure_message` + the `perform_handshake` envelope checks:
-/// - an EMPTY settings list is invalid (chia raises INVALID_HANDSHAKE),
+/// Parse + validate a peer's `ConfigureWindowSizes`:
+/// - an EMPTY settings list is an invalid handshake,
 /// - more than [`MAX_CONFIGURE_RATE_LIMITS_ENTRIES`] entries is invalid,
 /// - an unknown message-type code is silently skipped (the peer may know newer types),
 /// - a non-zero window for a type OUR table holds unlimited is invalid — a peer must not
@@ -146,7 +140,7 @@ pub fn settings_from_configure(
     for (code, window_size) in &msg.settings {
         let t = ProtocolMessageTypes::from(*code);
         if t == ProtocolMessageTypes::Unknown {
-            continue; // chia: unknown entries are silently skipped
+            continue; // unknown entries are silently skipped
         }
         if let Some(ours) = v3_setting(t)
             && ours.window_size.is_none()
@@ -190,12 +184,11 @@ pub struct V3Link {
 struct V3Inner {
     /// The PEER's advertised settings — the windows bounding OUR outbound requests.
     peer_settings: HashMap<u8, RlSettingsV3>,
-    /// In-flight inbound requests being processed, per type (chia `receive_window`).
+    /// In-flight inbound requests being processed, per type.
     recv_in_flight: HashMap<u8, u16>,
-    /// Our in-flight outbound requests, per type (chia `in_flight`).
+    /// Our in-flight outbound requests, per type.
     out_in_flight: HashMap<u8, u16>,
-    /// Correlation ids of our outbound requests currently occupying a window → type
-    /// (chia `v3_sent_request_ids`).
+    /// Correlation ids of our outbound requests currently occupying a window, keyed to type.
     out_ids: HashMap<u16, u8>,
 }
 
@@ -234,7 +227,7 @@ impl V3Link {
     /// Receiver side: admit one more in-flight request of `t` under OUR table's window. Returns
     /// `Ok(true)` (admitted, caller must [`V3Link::recv_release`] when processing completes),
     /// `Ok(false)` (type has no bounded window — nothing tracked), or `Err(())` when the window
-    /// is full — chia closes with `RATE_LIMITER_BAN_SECONDS`.
+    /// is full, which the caller answers with the timed rate-limiter ban.
     #[allow(clippy::result_unit_err)]
     pub fn recv_acquire(&self, t: ProtocolMessageTypes) -> Result<bool, ()> {
         let Some(RlSettingsV3 {
@@ -262,8 +255,7 @@ impl V3Link {
     /// Sender side: try to occupy one slot of the PEER's window for a request of type `t` with
     /// correlation id `id`. `Ok(true)`: slot taken (released when the reply/timeout releases
     /// `id`); `Ok(false)`: the type is unbounded/untracked by the peer — send freely;
-    /// `Err(())`: the peer's window is full — the caller must defer the send (chia
-    /// `_wait_and_retry`).
+    /// `Err(())`: the peer's window is full — the caller must defer the send and retry.
     #[allow(clippy::result_unit_err)]
     pub fn out_acquire(&self, t: ProtocolMessageTypes, id: u16) -> Result<bool, ()> {
         let mut inner = self.guard();
@@ -296,7 +288,8 @@ impl V3Link {
 
 /// RAII release of one inbound receive-window slot: the read loop acquires before spawning the
 /// handler task(s) and threads an `Arc<RecvGuard>` into them — the slot frees when the last
-/// clone drops (processing finished), chia's `finally: rl_window.receive_window -= 1`.
+/// clone drops (processing finished). Releasing on every exit path is what keeps a panicking or
+/// early-returning handler from leaking the slot and wedging the window.
 pub struct RecvGuard {
     link: std::sync::Arc<V3Link>,
     t: ProtocolMessageTypes,

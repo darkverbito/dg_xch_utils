@@ -1,12 +1,7 @@
-// Long-reorg AT SCALE — the harvest of chia's `test_long_reorg` family (chia
-// tests/blockchain/test_blockchain.py `TestReorgs::test_long_reorg`, tests/core/full_node/
-// test_full_node.py `test_long_reorg` / `test_long_reorg_nodes`): chia proves reorgs ~1500 deep
-// because there is NO reorg-depth cap — fork choice is weight-only (chia
-// chia/consensus/blockchain.py:495-510) and the coin rollback is unfloored
-// (chia/full_node/coin_store.py:705-727). DIVERGENCE-50 (#193) removed our FABRICATED in-memory
-// reorg horizon and replaced it with the store-backed fork walk; its tests pinned the contract
-// on shallow branches. These suites pin the SAME contract at depth 100 and 1000, on every
-// backend:
+// Long reorgs at scale. There is NO reorg-depth cap: fork choice is weight-only and the coin
+// rollback is unfloored, so a reorg ~1500 deep is legal. A fabricated in-memory reorg horizon
+// would silently refuse valid reorgs; the fork walk is store-backed instead. These suites pin
+// the contract at depth 100 and 1000, on every backend:
 //
 //   - fork choice is weight-only at any depth (no refusal, no cap trip),
 //   - the coin unwind is EXACT: every abandoned-branch coin deleted, every spend of a

@@ -49,11 +49,9 @@ pub struct WebsocketServerConfig {
     pub ssl_info: Option<SslInfo>,
 }
 
-// Connection-error log hygiene: rustls reports a peer that drops the socket without sending
-// TLS close_notify as an error, and public chia peers do this constantly — routine churn on a public
-// listener, not a server fault. That one class is demoted to a DEBOUNCED WARN (one line per
-// window; DEBUG carries every instance when toggled on). Every other connection error stays ERROR,
-// loud — this must never swallow a real TLS or serve fault.
+// rustls reports a peer that drops the socket without sending TLS close_notify as an error, and
+// public peers do this constantly — routine churn, not a server fault. That one class is demoted
+// to a debounced WARN (DEBUG carries every instance); every other connection error stays ERROR.
 fn log_connection_error(context: &str, rendered: &str) {
     if rendered.contains("close_notify") {
         static LAST_WARN_UNIX: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -86,11 +84,10 @@ pub struct WebsocketServer {
     pub server_config: Arc<ServerConfig>,
     pub peers: PeerMap,
     pub message_handlers: Arc<RwLock<HashMap<Uuid, Arc<ChiaMessageHandler>>>>,
-    /// Install the per-connection inbound rate limiter on every accepted connection (chia's
-    /// `inbound_rate_limiter`). Off by default; the full-node daemon turns it on. Farmer/harvester
-    /// servers leave it off, matching chia which only disconnects on the full-node side.
+    /// Install the per-connection inbound rate limiter on every accepted connection. Off by
+    /// default; the full-node daemon turns it on. Farmer/harvester servers leave it off.
     pub rate_limited: bool,
-    /// The server-wide timed ban list (chia `ChiaServer.banned_peers`). The accept path refuses a
+    /// The server-wide timed ban list. The accept path refuses a
     /// host that is banned and not yet expired; the read loop and the message handlers enter a
     /// misbehaving peer's host here (via the registry injected into each [`SocketPeer`]). One
     /// registry per server instance, shared across all its connections.
@@ -264,10 +261,9 @@ impl WebsocketServer {
             })?;
         }
         Ok(Arc::new(
-            // TLS 1.3 floor — chia CHIA-2102 (e57358aea): `ssl_context_for_server` pins
-            // `minimum_version = TLSv1_3` (and drops the 1.2 cipher list), so every CNI
-            // server-side socket refuses a 1.2 handshake. rustls' default builder would accept
-            // 1.2 + 1.3; pin the version set to 1.3 only (`servers/tests/tls13_floor.rs`).
+            // TLS below 1.3 is refused on every server-side socket. rustls' default builder
+            // would accept 1.2 as well, so the version set must be pinned explicitly or the
+            // floor is silently lost (`servers/tests/tls13_floor.rs`).
             ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
                 .with_client_cert_verifier(AllowAny::new())
                 .with_single_cert(certs, key)
@@ -314,11 +310,10 @@ fn connection_handler(
     #[cfg(feature = "metrics")] metrics: Arc<Option<WebSocketMetrics>>,
 ) -> Result<Response<Full<Bytes>>, Error> {
     if is_upgrade_request(&data.req) {
-        // chia `incoming_connection` (server.py:307): refuse a host that is banned and not yet
-        // expired, BEFORE completing the websocket upgrade. Returns HTTP 403 so the dialing client's
-        // handshake fails fast (chia raises `HTTPForbidden`). A banned spammer that closes and
-        // immediately reconnects is turned away here for the rest of its ban window — the piece the
-        // earlier close sites lacked.
+        // Refuse a host that is banned and not yet expired, BEFORE completing the websocket
+        // upgrade. Returns HTTP 403 so the dialing client's handshake fails fast; a banned
+        // spammer that closes and immediately reconnects is turned away for the rest of its
+        // ban window.
         if let Some(addr) = data.addr
             && data.bans.is_banned(&addr.ip())
         {
@@ -331,8 +326,8 @@ fn connection_handler(
                 .body(Full::new(Bytes::from("Peer is banned")))
                 .unwrap_or_else(|_| Response::new(Full::new(Bytes::from("Peer is banned")))));
         }
-        // Match chia's 50 MB message ceiling with headroom: a batch of full blocks (or a weight proof)
-        // exceeds tungstenite's default 16 MiB per-frame cap and would be rejected as `MessageTooLong`.
+        // A batch of full blocks (or a weight proof) exceeds tungstenite's default 16 MiB
+        // per-frame cap and would be rejected as `MessageTooLong`.
         let ws_config = hyper_tungstenite::tungstenite::protocol::WebSocketConfig::default()
             .max_message_size(Some(64 << 20))
             .max_frame_size(Some(64 << 20));
@@ -408,15 +403,15 @@ async fn handle_connection(
     rate_limited: bool,
     bans: Arc<BanRegistry>,
 ) -> Result<(), tungstenite::error::Error> {
-    // A full-node listener (the daemon sets `rate_limited`) installs a fresh per-connection inbound
-    // limiter (chia's `inbound_rate_limiter`); other server roles leave it off.
+    // A full-node listener (the daemon sets `rate_limited`) installs a fresh per-connection
+    // inbound limiter; other server roles leave it off.
     let limiter = if rate_limited {
         Some(Arc::new(RateLimiter::new(true)))
     } else {
         None
     };
-    // The send-side companion (chia's `outbound_rate_limiter`): paces frequency-capped messages WE push
-    // to this inbound peer (farmer/timelord/wallet greetings, re-gossip) against its budget.
+    // The send-side companion: paces frequency-capped messages WE push to this inbound peer
+    // (farmer/timelord/wallet greetings, re-gossip) against its budget.
     let outbound_limiter = if rate_limited {
         Some(Arc::new(OutboundLimiter::new()))
     } else {
@@ -437,9 +432,9 @@ async fn handle_connection(
         protocol_version: Arc::new(RwLock::new(ChiaProtocolVersion::default())),
         capabilities: Arc::new(RwLock::new(Vec::new())),
         websocket: Arc::new(RwLock::new(websocket)),
-        // The peer's REMOTE host is the ban key (chia bans by `peer_info.host`), and the server's
-        // shared registry is injected so a rate-limit/consensus close on this connection enters this
-        // host into the list the accept path consults.
+        // The peer's REMOTE host is the ban key, and the server's shared registry is injected so
+        // a rate-limit/consensus close on this connection enters this host into the list the
+        // accept path consults.
         host: Some(peer_addr.ip()),
         bans: Some(bans),
         outbound_limiter,
@@ -452,12 +447,8 @@ async fn handle_connection(
     }
     stream.run(run).await;
     // The read loop returned: the connection is dead. Release this peer's slot so the shared
-    // inbound PeerMap stays bounded to LIVE connections. Without this teardown the map grows
-    // without bound as inbound peers churn on a public listener — every closed connection
-    // leaks its `SocketPeer` and its dead `WebsocketConnection` (rustls session buffers + the
-    // socket write half), the live-only `allocated` retainer that never shows offline because
-    // the offline replay has no listener. Guard on `Arc` identity so a peer that reconnected
-    // (replacing the map value) keeps its fresh entry.
+    // inbound PeerMap stays bounded to LIVE connections. Guard on `Arc` identity so a peer that
+    // reconnected (replacing the map value) keeps its fresh entry.
     deregister_peer(&peers, peer_id.as_ref(), &socket_peer).await;
     Ok(())
 }
@@ -504,9 +495,8 @@ mod peer_map_tests {
     // real `SocketPeer`.
     type Map = Arc<RwLock<HashMap<Bytes32, Arc<u32>>>>;
 
-    // Red-first: insert-only — the PRE-FIX server path — grows the
-    // inbound map without bound. This documents the leak the teardown closes: one orphaned
-    // `SocketPeer` (and its dead `WebsocketConnection`) per closed connection.
+    // Insert-only grows the inbound map without bound: one orphaned `SocketPeer` (and its dead
+    // `WebsocketConnection`) per closed connection.
     #[tokio::test]
     async fn insert_only_grows_unbounded() {
         let peers: Map = Arc::new(RwLock::new(HashMap::new()));
@@ -520,8 +510,8 @@ mod peer_map_tests {
         );
     }
 
-    // Green: with the teardown, N open/close cycles leave the map flat at baseline — bounded
-    // memory under churn (flat `allocated`), the property the live gauge confirms.
+    // With the teardown, N open/close cycles leave the map flat at baseline — bounded memory
+    // under churn.
     #[tokio::test]
     async fn churn_with_teardown_stays_flat() {
         let peers: Map = Arc::new(RwLock::new(HashMap::new()));

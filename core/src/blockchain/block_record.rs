@@ -16,9 +16,9 @@ pub struct BlockRecord {
     pub weight: u128,
     pub total_iters: u128,
     pub signage_point_index: u8,
-    // chia_rs 0.42.1 `BlockRecord`: both VDF outputs are `ClassgroupElement` — bare fixed
-    // 100-byte values on the wire, no length prefix (byte parity locked by
-    // tests/block_record_wire.rs against real mainnet records; campaign issue #155).
+    // Both VDF outputs are `ClassgroupElement` — bare fixed 100-byte values on the wire, no
+    // length prefix. Byte parity is locked by tests/block_record_wire.rs against real mainnet
+    // records.
     pub challenge_vdf_output: ClassgroupElement,
     pub infused_challenge_vdf_output: Option<ClassgroupElement>,
     pub reward_infusion_new_challenge: Bytes32,
@@ -67,7 +67,7 @@ impl BlockRecord {
         )
     }
 
-    /// chia_rs `BlockRecord::sp_iters` — the signage-point iterations for this record.
+    /// The signage-point iterations for this record.
     ///
     /// # Errors
     /// Returns an error if `calculate_sp_iters` rejects the record's iteration parameters.
@@ -75,7 +75,7 @@ impl BlockRecord {
         calculate_sp_iters(constants, self.sub_slot_iters, self.signage_point_index)
     }
 
-    /// chia_rs `BlockRecord::ip_sub_slot_total_iters` — total iterations at the infusion point of the
+    /// Total iterations at the infusion point of the
     /// sub-slot that contains this record (`total_iters - ip_iters`).
     ///
     /// # Errors
@@ -91,7 +91,7 @@ impl BlockRecord {
             })
     }
 
-    /// chia_rs `BlockRecord::sp_sub_slot_total_iters` — total iterations at the start of the sub-slot
+    /// Total iterations at the start of the sub-slot
     /// that contains this record's signage point. Equal to `ip_sub_slot_total_iters`, less one full
     /// `sub_slot_iters` when this record is an overflow block.
     ///
@@ -112,7 +112,7 @@ impl BlockRecord {
         }
     }
 
-    /// chia_rs `BlockRecord::sp_total_iters` — total iterations at this record's signage point
+    /// Total iterations at this record's signage point
     /// (`sp_sub_slot_total_iters + sp_iters`).
     ///
     /// # Errors

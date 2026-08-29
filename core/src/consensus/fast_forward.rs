@@ -11,11 +11,13 @@
 use crate::blockchain::coin::Coin;
 use crate::blockchain::coin_spend::CoinSpend;
 use crate::blockchain::sized_bytes::Bytes32;
+use crate::curry_and_treehash::{
+    calculate_hash_of_quoted_mod_hash, curry_and_treehash, shatree_atom, shatree_pair,
+};
 use crate::clvm::program::{Program, SerializedProgram};
 use crate::clvm::sexp::SExp;
 use crate::errors::ClvmError;
 use crate::traits::SizedBytes;
-use crate::utils::hash_256;
 use num_traits::ToPrimitive;
 
 /// The tree hash of `singleton_top_layer_v1_1.clsp` — chia_puzzles
@@ -24,36 +26,6 @@ use num_traits::ToPrimitive;
 pub const SINGLETON_TOP_LAYER_V1_1_TREE_HASH: Bytes32 =
     Bytes32::const_hex("7faa3253bfddd1e0decb0906b2dc6247bbc4cf608f58345d173adb63e8b47c9f");
 
-const OP_QUOTE: u8 = 1;
-const OP_APPLY: u8 = 2;
-const OP_CONS: u8 = 4;
-
-fn tree_hash_atom(bytes: &[u8]) -> Bytes32 {
-    let mut buf = Vec::with_capacity(1 + bytes.len());
-    buf.push(1u8);
-    buf.extend_from_slice(bytes);
-    Bytes32::from(hash_256(&buf))
-}
-
-fn tree_hash_pair(first: Bytes32, rest: Bytes32) -> Bytes32 {
-    let mut buf = Vec::with_capacity(65);
-    buf.push(2u8);
-    buf.extend_from_slice(first.bytes().as_slice());
-    buf.extend_from_slice(rest.bytes().as_slice());
-    Bytes32::from(hash_256(&buf))
-}
-
-// chia_rs `curry_single_arg`: the tree hash of `(c (q . <arg>) <rest>)`.
-fn curry_single_arg(arg_hash: Bytes32, rest: Bytes32) -> Bytes32 {
-    tree_hash_pair(
-        tree_hash_atom(&[OP_CONS]),
-        tree_hash_pair(
-            tree_hash_pair(tree_hash_atom(&[OP_QUOTE]), arg_hash),
-            tree_hash_pair(rest, tree_hash_atom(&[])),
-        ),
-    )
-}
-
 // The parsed `SINGLETON_STRUCT` curry argument: `(MOD_HASH . (LAUNCHER_ID . LAUNCHER_PH))`.
 struct SingletonStruct {
     mod_hash: Bytes32,
@@ -61,27 +33,20 @@ struct SingletonStruct {
     launcher_puzzle_hash: Bytes32,
 }
 
-// chia_rs `curry_and_treehash`: the full puzzle hash of the singleton top layer curried with
-// `(SINGLETON_STRUCT inner_puzzle)`, given only the inner puzzle's hash.
-fn curry_and_treehash(inner_puzzle_hash: Bytes32, singleton_struct: &SingletonStruct) -> Bytes32 {
-    let singleton_struct_hash = tree_hash_pair(
-        tree_hash_atom(singleton_struct.mod_hash.bytes().as_slice()),
-        tree_hash_pair(
-            tree_hash_atom(singleton_struct.launcher_id.bytes().as_slice()),
-            tree_hash_atom(singleton_struct.launcher_puzzle_hash.bytes().as_slice()),
+/// The full puzzle hash of the singleton top layer curried with `(SINGLETON_STRUCT inner_puzzle)`,
+/// given only the inner puzzle's hash. The mod-hash inside `SINGLETON_STRUCT` is the module's tree
+/// hash and is quoted directly, not re-hashed as an atom.
+fn singleton_puzzle_hash(inner_puzzle_hash: Bytes32, singleton_struct: &SingletonStruct) -> Bytes32 {
+    let singleton_struct_hash = shatree_pair(
+        &shatree_atom(singleton_struct.mod_hash.bytes().as_slice()),
+        &shatree_pair(
+            &shatree_atom(singleton_struct.launcher_id.bytes().as_slice()),
+            &shatree_atom(singleton_struct.launcher_puzzle_hash.bytes().as_slice()),
         ),
     );
-    let args_hash = tree_hash_atom(&[OP_QUOTE]);
-    let args_hash = curry_single_arg(inner_puzzle_hash, args_hash);
-    let args_hash = curry_single_arg(singleton_struct_hash, args_hash);
-    tree_hash_pair(
-        tree_hash_atom(&[OP_APPLY]),
-        tree_hash_pair(
-            // (1 . <mod>): the mod-hash IS the module's tree hash — used directly, NOT hashed
-            // as an atom (chia_rs: `singleton_struct.mod_hash.into()`).
-            tree_hash_pair(tree_hash_atom(&[OP_QUOTE]), singleton_struct.mod_hash),
-            tree_hash_pair(args_hash, tree_hash_atom(&[])),
-        ),
+    curry_and_treehash(
+        &calculate_hash_of_quoted_mod_hash(&singleton_struct.mod_hash),
+        &[singleton_struct_hash, inner_puzzle_hash],
     )
 }
 
@@ -180,7 +145,7 @@ pub fn fast_forward_singleton(
 
     // with the parent's inner puzzle hash we can reproduce the parent coin, which must be the
     // coin being spent's parent
-    let parent_puzzle_hash = curry_and_treehash(parent_inner_puzzle_hash, &singleton_struct);
+    let parent_puzzle_hash = singleton_puzzle_hash(parent_inner_puzzle_hash, &singleton_struct);
     let parent_coin = Coin {
         parent_coin_info: lineage_parent_parent,
         puzzle_hash: parent_puzzle_hash,

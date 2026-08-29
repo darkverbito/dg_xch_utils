@@ -81,13 +81,19 @@ struct Cli {
     /// across peers as ceil(N / peers) per connection.
     #[arg(long)]
     prefetch_max_inflight: Option<usize>,
+    /// Outbound connections to keep open. Unset = the built-in default.
+    #[arg(long)]
+    target_outbound: Option<usize>,
+    /// Total peers (inbound + outbound) to accept. Unset = the built-in default.
+    #[arg(long)]
+    target_peer_count: Option<usize>,
     /// Cert-hash node id (64 hex chars) granted the TRUSTED tier, repeatable — chia's `trusted_peers`.
     /// A trusted peer gets the larger subscription (2,000,000) and response-item (500,000) caps and
     /// high-priority transaction-queue placement. Empty (default) = every peer untrusted.
     #[arg(long = "trusted-peer")]
     trusted_peer: Vec<String>,
     /// CIDR network (IPv4 or IPv6, e.g. 10.0.0.0/8) whose peers are granted the TRUSTED tier by
-    /// remote IP, repeatable — chia's `trusted_cidrs`. A peer whose host falls in any of these
+    /// remote IP, repeatable. A peer whose host falls in any of these
     /// networks gets the trusted caps + tx priority. Malformed entries are skipped. (Localhost is
     /// auto-trusted regardless.)
     #[arg(long = "trusted-cidr")]
@@ -126,13 +132,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cli.uncompact,
         cli.prefetch_memory_mb,
         cli.prefetch_max_inflight,
+        cli.target_outbound,
+        cli.target_peer_count,
         &cli.trusted_peer,
         &cli.trusted_cidr,
     )
     .map_err(std::io::Error::other)?;
 
-    // Finding F1 remediation: the RPC client-auth trust anchor is chosen here (default CNI
-    // private-CA mTLS), never the world-public Chia CA.
+    // The RPC client-auth trust anchor is chosen here (default CNI private-CA mTLS). It is never
+    // the world-public Chia CA, whose private key authenticates nobody.
     config.rpc_tls =
         full_node::RpcTlsMode::parse(&cli.rpc_tls, &cli.ssl_dir).map_err(std::io::Error::other)?;
     config.debug_endpoints = cli.debug_endpoints;
