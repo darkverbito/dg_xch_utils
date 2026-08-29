@@ -1,8 +1,6 @@
 // The serving (construction) half of the Chia weight proof — the prover-side mirror of this crate's
-// validator, ported from the construction half of `chia/full_node/weight_proof.py`
-// (`WeightProofHandler` plus its module-level construction helpers). Every mirrored function cites its
-// reference span as `chia weight_proof.py:<lines>`; the store surface is the node's own
-// `dg_xch_stores::BlockStore`, so what this builds is exactly what the daemon's p2p arm serves.
+// validator, ported from the reference node's construction half. The store surface is the node's
+// own `dg_xch_stores::BlockStore`, so what this builds is exactly what the daemon's p2p arm serves.
 //
 // Sampling reuses the SAME CPython-`random.Random` port and the SAME `_get_weights_for_sampling` /
 // `_sample_sub_epoch` mirrors the validator uses (`crate::py_random`, `crate::get_weights_for_sampling`,
@@ -32,21 +30,21 @@ use tokio::sync::Mutex;
 use tracing::{debug, info};
 
 // The on-disk encoding version for persisted SubEpochSegments (the store holds the bytes
-// opaquely — chia block_store.py:170 stores `bytes(SubEpochSegments(segments))`). Pinned to the
+// opaquely). Pinned to the
 // same version the store backends pin for record blobs; the segment types serialize identically
 // across current protocol versions, but a pin keeps persisted bytes stable by construction.
 const SEGMENT_STORE_VERSION: ChiaProtocolVersion = ChiaProtocolVersion::Chia0_0_37;
 
-/// Why a proof could not be produced. The two `is_refusal` variants mirror chia's silent no-reply
-/// paths (`chia/full_node/full_node_api.py:359-364` unknown tip, `chia weight_proof.py:86-88` short
-/// chain); everything else is a real build failure worth logging loudly.
+/// Why a proof could not be produced. The `is_refusal` variants mirror the reference node's
+/// silent no-reply paths (unknown tip, short chain); everything else is a real build failure
+/// worth logging loudly.
 #[derive(Debug)]
 pub enum ServeError {
-    /// The requested tip is not a block we hold (chia full_node_api.py:362-364 → no reply).
+    /// The requested tip is not a block we hold (no reply).
     UnknownTip(Bytes32),
-    /// Tip height below `WEIGHT_PROOF_RECENT_BLOCKS` (chia weight_proof.py:86-88 → no reply).
+    /// Tip height below `WEIGHT_PROOF_RECENT_BLOCKS` (no reply).
     ChainTooShort { height: u32, required: u32 },
-    /// Fewer than two sub-epoch summaries at-or-below the tip (chia weight_proof.py:127-129 → no reply).
+    /// Fewer than two sub-epoch summaries at-or-below the tip (no reply).
     NotEnoughSubEpochs,
     /// The store errored.
     Store(StoreError),
@@ -112,7 +110,7 @@ impl ServeError {
 
 // An in-RAM view of one contiguous main-chain span — the counterpart of the reference's
 // `get_block_records_in_range` + `get_header_blocks_in_range(tx_filter=False)` dict pair plus
-// `height_to_hash` (chia weight_proof.py:305-310). Heights that don't resolve in the store are simply
+// `height_to_hash`. Heights that don't resolve in the store are simply
 // absent (chia's range fetch likewise collects only existing hashes); a later lookup miss errors.
 struct ChainCache {
     height_to_hash: HashMap<u32, Bytes32>,
@@ -143,21 +141,18 @@ impl ChainCache {
 
 // The builder's mutable state, all under one async lock (see `WeightProofServer::state`).
 struct ServeState {
-    // Whole-proof cache keyed by tip — chia's `self.tip`/`self.proof` (weight_proof.py:72-73, checked
-    // and refreshed under the lock at weight_proof.py:90-99).
+    // Whole-proof cache keyed by tip, checked and refreshed under the lock.
     proof: Option<(Bytes32, Arc<WeightProof>)>,
     // The sub-epoch-summary index: every main-chain record carrying `sub_epoch_summary_included`,
-    // ascending by height. Chia's `BlockchainInterface.get_ses_heights`/`get_ses` serve this from an
-    // in-RAM height map; our store deliberately has no ses schema, so it is DERIVED by walking records
-    // (the same approach `sub_epoch_summaries_of` takes from a proof) — incrementally, so the full walk
-    // is paid once per server, then only the delta above `walked_to`.
+    // ascending by height. Our store deliberately has no ses schema, so it is DERIVED by walking
+    // records (the same approach `sub_epoch_summaries_of` takes from a proof) — incrementally, so
+    // the full walk is paid once per server, then only the delta above `walked_to`.
     ses_blocks: Vec<BlockRecord>,
     walked_to: Option<u32>,
     // Built segments keyed by the ses block's header hash, LRU-bounded to `MAX_SAMPLES` sub-epochs
-    // — the hot layer over the store's durable `sub_epoch_segments_v3` rows (chia keeps the same
-    // two tiers: `ses_challenge_cache` in block_store.py over the persisted table). A miss here
+    // — the hot layer over the store's durable `sub_epoch_segments_v3` rows. A miss here
     // falls through to `BlockStore::get_sub_epoch_segments` before any block walking; a build
-    // persists through `persist_sub_epoch_segments` (chia weight_proof.py:288-297).
+    // persists through `persist_sub_epoch_segments`.
     segments: VecDeque<(Bytes32, Arc<Vec<SubEpochChallengeSegment>>)>,
 }
 
@@ -179,10 +174,10 @@ impl ServeState {
     }
 }
 
-/// The construction-side `WeightProofHandler` (chia weight_proof.py:61-99): builds — and caches — the
-/// weight proof for a requested tip out of a `BlockStore`. One instance per node; the internal lock is
-/// chia's `self.lock` and doubles as the async single-flight: concurrent requests for the same tip
-/// serialize on it, the first builds, the rest return the cached proof.
+/// The construction-side handler: builds — and caches — the weight proof for a requested tip out
+/// of a `BlockStore`. One instance per node; the internal lock doubles as the async
+/// single-flight: concurrent requests for the same tip serialize on it, the first builds, the
+/// rest return the cached proof.
 pub struct WeightProofServer<S: ?Sized> {
     store: Arc<S>,
     constants: ConsensusConstants,
@@ -207,7 +202,7 @@ where
         }
     }
 
-    /// chia `WeightProofHandler.get_proof_of_weight` (chia weight_proof.py:80-99): refuse an unknown
+    /// Refuse an unknown
     /// tip or a chain shorter than `WEIGHT_PROOF_RECENT_BLOCKS`, then — under the single-flight lock —
     /// return the cached proof when it already attests this tip, else build and cache.
     ///
@@ -215,20 +210,20 @@ where
     /// Returns a refusal variant ([`ServeError::is_refusal`]) on the chia no-reply paths, otherwise a
     /// store/build error.
     pub async fn get_proof_of_weight(&self, tip: Bytes32) -> Result<Arc<WeightProof>, ServeError> {
-        // chia weight_proof.py:81-84 — `try_block_record(tip)` unknown → refuse.
+        // `try_block_record(tip)` unknown → refuse.
         let tip_rec = self
             .store
             .get_block_record(&tip)
             .await?
             .ok_or(ServeError::UnknownTip(tip))?;
-        // chia weight_proof.py:86-88 — tip below WEIGHT_PROOF_RECENT_BLOCKS → refuse.
+        // Tip below WEIGHT_PROOF_RECENT_BLOCKS → refuse.
         if tip_rec.height < self.constants.weight_proof_recent_blocks {
             return Err(ServeError::ChainTooShort {
                 height: tip_rec.height,
                 required: self.constants.weight_proof_recent_blocks,
             });
         }
-        // chia weight_proof.py:90-99 — the lock + tip-keyed cache. Held across the whole build on
+        // The lock + tip-keyed cache. Held across the whole build on
         // purpose: that IS the single-flight (chia holds `self.lock` across `_create_proof_of_weight`
         // the same way), and the builder task is the only latency-tolerant consumer.
         let mut st = self.state.lock().await;
@@ -242,7 +237,7 @@ where
         Ok(wp)
     }
 
-    /// chia `WeightProofHandler._create_proof_of_weight` (chia weight_proof.py:111-175): recent chain,
+    /// Recent chain,
     /// sub-epoch data, seed-derived sampling, and per-sampled-sub-epoch segment construction.
     async fn create_proof_of_weight(
         &self,
@@ -254,22 +249,20 @@ where
         self.extend_ses_index(st, tip_rec.height).await?;
         let ses_blocks = st.ses_blocks.clone();
 
-        // chia weight_proof.py:122-124.
         let recent_chain = self.get_recent_chain(&ses_blocks, tip_rec.height).await?;
 
-        // chia weight_proof.py:126-129 — needs at least two summaries.
+        // Needs at least two summaries.
         if ses_blocks.len() <= 1 {
             return Err(ServeError::NotEnoughSubEpochs);
         }
 
-        // chia weight_proof.py:131-135 — the genesis record opens the first sub-epoch's weight band.
+        // The genesis record opens the first sub-epoch's weight band.
         let mut prev_ses_block = self
             .store
             .get_block_record_by_height(0)
             .await?
             .ok_or(ServeError::MissingBlock(0))?;
 
-        // chia weight_proof.py:136 / get_sub_epoch_data (101-109) / _create_sub_epoch_data (716-725).
         let mut sub_epochs: Vec<SubEpochData> = Vec::new();
         for ses_block in &ses_blocks {
             if ses_block.height > tip_rec.height {
@@ -282,14 +275,14 @@ where
             sub_epochs.push(create_sub_epoch_data(ses));
         }
 
-        // chia weight_proof.py:137-140 — seed from the SECOND-TO-LAST summary at-or-below the tip,
+        // Seed from the SECOND-TO-LAST summary at-or-below the tip,
         // then the sampling draws in the reference's exact rng call order.
         let seed = get_seed_for_proof(&ses_blocks, tip_rec.height)?;
         let mut rng = crate::py_random::PyRandom::new(seed.as_ref());
         let weight_to_check =
             crate::get_weights_for_sampling(&mut rng, tip_rec.weight, &recent_chain)?;
 
-        // chia weight_proof.py:141-173 — sample each sub-epoch's weight band; build (or reuse) the
+        // Sample each sub-epoch's weight band; build (or reuse) the
         // challenge segments for every sampled one, capped at MAX_SAMPLES.
         let mut sample_n = 0usize;
         let mut sub_epoch_segments: Vec<SubEpochChallengeSegment> = Vec::new();
@@ -313,7 +306,7 @@ where
                 let segs = match st.cached_segments(&ses_block.header_hash) {
                     Some(segs) => segs,
                     None => {
-                        // chia __create_persist_segment (weight_proof.py:288-297): the persisted
+                        // The persisted
                         // store is checked BEFORE building; only a miss pays the sub-epoch block
                         // walk, and what it builds is persisted for every later build (and every
                         // later restart — segments below a served tip never change). The LRU
@@ -343,8 +336,8 @@ where
                                         )
                                         .await?,
                                 };
-                                // chia weight_proof.py:296-297 / block_store.py:164-171: persist
-                                // the SubEpochSegments wrapper's bytes under the ses block hash.
+                                // Persist the SubEpochSegments wrapper's bytes under the ses
+                                // block hash.
                                 self.store
                                     .persist_sub_epoch_segments(
                                         &ses_block.header_hash,
@@ -394,14 +387,14 @@ where
         Ok(())
     }
 
-    /// chia `WeightProofHandler._get_recent_chain` (chia weight_proof.py:190-234): headers from the
+    /// Headers from the
     /// block BEFORE the second-to-last sub-epoch summary at-or-below the tip, up to the tip.
     async fn get_recent_chain(
         &self,
         ses_blocks: &[BlockRecord],
         tip_height: u32,
     ) -> Result<Vec<HeaderBlock>, ServeError> {
-        // chia weight_proof.py:193-200 — min_height = (second ses at-or-below tip) - 1.
+        // Min_height = (second ses at-or-below tip) - 1.
         let mut min_height = 0u32;
         let mut count_ses = 0usize;
         for b in ses_blocks.iter().rev() {
@@ -415,7 +408,7 @@ where
         }
         debug!(start = min_height, end = tip_height, "recent chain span");
 
-        // chia weight_proof.py:202-203 — load the span's headers (tx_filter=False) and records. Every
+        // Load the span's headers (tx_filter=False) and records. Every
         // height in the span must resolve (the reference asserts each height_to_hash).
         let span = usize::try_from(tip_height - min_height + 1)
             .map_err(|_| ServeError::Build("recent chain span overflow".into()))?;
@@ -437,7 +430,7 @@ where
         }
         let at = |h: u32| usize::try_from(h - min_height).expect("span bounded above");
 
-        // chia weight_proof.py:204-227 — walk down from the tip until two summaries are collected,
+        // Walk down from the tip until two summaries are collected,
         // then prepend one more block (the block before the second summary).
         let mut recent_chain: VecDeque<HeaderBlock> = VecDeque::new();
         let mut ses_count = 0usize;
@@ -471,7 +464,7 @@ where
         Ok(recent_chain.into())
     }
 
-    /// chia `WeightProofHandler.get_prev_two_slots_height` (chia weight_proof.py:336-352): the height
+    /// The height
     /// two sub-slot starts below the sub-epoch start (the reference's 50-record batches are only its
     /// cache refill; point-gets are semantically identical).
     async fn get_prev_two_slots_height(&self, se_start: &BlockRecord) -> Result<u32, ServeError> {
@@ -491,8 +484,8 @@ where
         Ok(curr_rec.height)
     }
 
-    // Load `[start, end]` as a ChainCache. Chia loads the same span twice (records + tx_filter=False
-    // headers, chia weight_proof.py:305-310); one pass here. Heights past the peak simply don't resolve.
+    // Load `[start, end]` as a ChainCache in one pass (records + tx_filter=False headers).
+    // Heights past the peak simply don't resolve.
     async fn load_chain(&self, start: u32, end: u32) -> Result<ChainCache, ServeError> {
         let mut cache = ChainCache {
             height_to_hash: HashMap::new(),
@@ -515,7 +508,7 @@ where
         Ok(cache)
     }
 
-    /// chia `WeightProofHandler.__create_sub_epoch_segments` (chia weight_proof.py:299-334): scan the
+    /// Scan the
     /// sub-epoch's span for challenge blocks; each yields one challenge segment.
     async fn create_sub_epoch_segments(
         &self,
@@ -561,7 +554,6 @@ where
         Ok(segments)
     }
 
-    /// chia `WeightProofHandler._create_challenge_segment` (chia weight_proof.py:354-399).
     fn create_challenge_segment(
         &self,
         cache: &ChainCache,
@@ -570,16 +562,16 @@ where
         first_segment_in_sub_epoch: bool,
     ) -> Result<(SubEpochChallengeSegment, u32), ServeError> {
         let header_block = cache.header(hh)?;
-        // VDFs from sub slots before the challenge block (chia weight_proof.py:366-373).
+        // VDFs from sub slots before the challenge block.
         let (mut sub_slots, first_rc_end_of_slot_vdf) =
             self.first_sub_slot_vdfs(cache, hh, first_segment_in_sub_epoch)?;
-        // The challenge block's own VDFs (chia weight_proof.py:375-382).
+        // The challenge block's own VDFs.
         sub_slots.push(challenge_block_vdfs(&self.constants, cache, hh)?);
-        // VDFs from the slot after the challenge block to end of slot (chia weight_proof.py:384-393).
+        // VDFs from the slot after the challenge block to end of slot.
         let (end_slots, end_height) =
             self.slot_end_vdf(cache, header_block.height().saturating_add(1))?;
         sub_slots.extend(end_slots);
-        // chia weight_proof.py:394-399 — only a sub-epoch's first segment (past sub-epoch 0) carries
+        // Only a sub-epoch's first segment (past sub-epoch 0) carries
         // the first reward-chain end-of-slot VDF.
         let rc_slot_end_info = if first_segment_in_sub_epoch && sub_epoch_n != 0 {
             first_rc_end_of_slot_vdf
@@ -596,7 +588,7 @@ where
         ))
     }
 
-    /// chia `WeightProofHandler.__first_sub_slot_vdfs` (chia weight_proof.py:402-476): the challenge
+    /// The challenge
     /// chain VDFs from the segment's slot start up to (not including) the challenge block.
     fn first_sub_slot_vdfs(
         &self,
@@ -607,7 +599,7 @@ where
         let header_block = cache.header(hh)?;
         let header_block_sub_rec = cache.record(hh)?;
 
-        // Find the slot start (chia weight_proof.py:411-427).
+        // Find the slot start.
         let mut curr_sub_rec = header_block_sub_rec;
         let mut first_rc_end_of_slot_vdf = None;
         if first_in_sub_epoch && curr_sub_rec.height > 0 {
@@ -638,14 +630,13 @@ where
             }
         }
 
-        // Collect per-block ip VDFs + finished-slot VDFs up to the challenge block
-        // (chia weight_proof.py:429-468).
+        // Collect per-block ip VDFs + finished-slot VDFs up to the challenge block.
         let mut curr = cache.header(&curr_sub_rec.header_hash)?;
         let mut sub_slots_data: Vec<SubSlotData> = Vec::new();
         let mut tmp_sub_slots_data: Vec<SubSlotData> = Vec::new();
         while curr.height() < header_block.height() {
             if curr.first_in_sub_slot() {
-                // If not blue boxed, keep the collected block VDFs (chia weight_proof.py:437-439).
+                // If not blue boxed, keep the collected block VDFs.
                 let first_slot = curr
                     .finished_sub_slots
                     .first()
@@ -661,7 +652,7 @@ where
                 }
                 tmp_sub_slots_data.clear();
             }
-            // chia weight_proof.py:447-462 — a bare ip-VDF entry per block.
+            // A bare ip-VDF entry per block.
             tmp_sub_slots_data.push(SubSlotData {
                 proof_of_space: None,
                 cc_signage_point: None,
@@ -684,7 +675,7 @@ where
             sub_slots_data.append(&mut tmp_sub_slots_data);
         }
 
-        // The challenge block's own finished slots (chia weight_proof.py:470-474).
+        // The challenge block's own finished slots.
         for sub_slot in &header_block.finished_sub_slots {
             let curr_icc_info = sub_slot
                 .infused_challenge_chain
@@ -694,7 +685,7 @@ where
         Ok((sub_slots_data, first_rc_end_of_slot_vdf))
     }
 
-    /// chia `WeightProofHandler.first_rc_end_of_slot_vdf` (chia weight_proof.py:478-487): the
+    /// The
     /// reward-chain end-of-slot VDF of the sub-epoch's opening slot (found by walking back to the
     /// ses-carrying block).
     fn first_rc_end_of_slot_vdf(
@@ -715,7 +706,7 @@ where
             .end_of_slot_vdf)
     }
 
-    /// chia `WeightProofHandler.__slot_end_vdf` (chia weight_proof.py:489-522): all VDFs from the
+    /// All VDFs from the
     /// first sub slot after the challenge block through the last sub slot before the next challenge
     /// block. Returns the collected entries and the next challenge block's height.
     fn slot_end_vdf(
@@ -734,7 +725,7 @@ where
         {
             if curr.first_in_sub_slot() {
                 sub_slots_data.append(&mut tmp_sub_slots_data);
-                // Collected end-of-slot VDFs (chia weight_proof.py:504-512).
+                // Collected end-of-slot VDFs.
                 let curr_prev_header_hash = curr.prev_header_hash();
                 for (idx, sub_slot) in curr.finished_sub_slots.iter().enumerate() {
                     let prev_rec = cache.record(&curr_prev_header_hash)?;
@@ -768,7 +759,7 @@ where
     }
 }
 
-/// chia `WeightProofHandler.handle_block_vdfs` (chia weight_proof.py:524-568): one non-challenge
+/// One non-challenge
 /// block's signage/infusion-point VDFs, with the cc-sp iteration count recomputed from
 /// `get_signage_point_vdf_info` for non-normalized proofs.
 fn handle_block_vdfs(
@@ -839,7 +830,7 @@ fn handle_block_vdfs(
     })
 }
 
-/// chia `_challenge_block_vdfs` (chia weight_proof.py:728-769): the challenge block's entry — proof of
+/// The challenge block's entry — proof of
 /// space plus its signage/infusion-point VDFs.
 fn challenge_block_vdfs(
     constants: &ConsensusConstants,
@@ -853,7 +844,7 @@ fn challenge_block_vdfs(
     } else {
         Some(cache.record(&header_block.prev_header_hash())?)
     };
-    // chia weight_proof.py:734-742 — always recomputed, used only for the non-normalized cc-sp info.
+    // Always recomputed, used only for the non-normalized cc-sp info.
     let (_, _, _, _, cc_vdf_iters, _) = get_signage_point_vdf_info(
         constants,
         &header_block.finished_sub_slots,
@@ -898,7 +889,7 @@ fn challenge_block_vdfs(
     })
 }
 
-/// chia `handle_finished_slots` (chia weight_proof.py:772-795): a finished sub slot as a slot-end entry.
+/// A finished sub slot as a slot-end entry.
 fn handle_finished_slots(
     end_of_slot: &EndOfSubSlotBundle,
     icc_end_of_slot_info: Option<VdfInfo>,
@@ -923,7 +914,7 @@ fn handle_finished_slots(
     }
 }
 
-/// chia `handle_end_of_slot` (chia weight_proof.py:798-836): a collected end-of-slot entry with the
+/// A collected end-of-slot entry with the
 /// cc/icc infos rewritten to the true eos iteration count unless the proofs are normalized.
 fn handle_end_of_slot(
     sub_slot: &EndOfSubSlotBundle,
@@ -984,7 +975,7 @@ fn handle_end_of_slot(
     })
 }
 
-/// chia `blue_boxed_end_of_slot` (chia weight_proof.py:1631-1638): both slot proofs normalized.
+/// Both slot proofs normalized.
 fn blue_boxed_end_of_slot(sub_slot: &EndOfSubSlotBundle) -> bool {
     sub_slot
         .proofs
@@ -997,7 +988,6 @@ fn blue_boxed_end_of_slot(sub_slot: &EndOfSubSlotBundle) -> bool {
             .is_none_or(|p| p.normalized_to_identity)
 }
 
-/// chia `_create_sub_epoch_data` (chia weight_proof.py:716-725).
 fn create_sub_epoch_data(ses: &SubEpochSummary) -> SubEpochData {
     SubEpochData {
         reward_chain_hash: ses.reward_chain_hash,
@@ -1007,7 +997,7 @@ fn create_sub_epoch_data(ses: &SubEpochSummary) -> SubEpochData {
     }
 }
 
-/// chia `WeightProofHandler.get_seed_for_proof` (chia weight_proof.py:177-188): the hash of the
+/// The hash of the
 /// SECOND-TO-LAST sub-epoch summary at-or-below the tip.
 fn get_seed_for_proof(ses_blocks: &[BlockRecord], tip_height: u32) -> Result<Bytes32, ServeError> {
     let mut count = 0usize;
@@ -1398,7 +1388,7 @@ mod tests {
         WeightProofServer::new(Arc::new(build_chain(spec)), MAINNET)
     }
 
-    // Red-first, hand-derived from chia full_node_api.py:362-364: a tip we do not hold is refused
+    // A tip we do not hold is refused
     // (no reply) — never built, never a panic.
     #[tokio::test]
     async fn refuses_unknown_tip() {
@@ -1416,7 +1406,7 @@ mod tests {
         assert!(err.is_refusal());
     }
 
-    // Red-first, hand-derived from chia weight_proof.py:86-88: a known tip below
+    // A known tip below
     // WEIGHT_PROOF_RECENT_BLOCKS (mainnet 1000) is refused.
     #[tokio::test]
     async fn refuses_chain_shorter_than_weight_proof_recent_blocks() {
@@ -1446,10 +1436,10 @@ mod tests {
         assert!(err.is_refusal());
     }
 
-    // Red-first, hand-derived from chia weight_proof.py:190-234: for ses blocks at 400 and 800 and
+    // For ses blocks at 400 and 800 and
     // tip 1050, min_height = 800-1 … no — the walk collects TWO summaries going down (800 then 400),
     // so the chain must span from the block BEFORE the second summary (height 399) to the tip. Every
-    // header must carry the tx_filter=False empty BIP158 filter byte (generator_tools.py:13-51).
+    // header must carry the tx_filter=False empty BIP158 filter byte.
     #[tokio::test]
     async fn recent_chain_spans_block_before_second_last_ses_to_tip() {
         let spec = ChainSpec {
@@ -1477,7 +1467,7 @@ mod tests {
         }
     }
 
-    // Red-first, hand-derived from chia weight_proof.py:336-352: from a start at height 10 with slot
+    // From a start at height 10 with slot
     // starts at 8 and 4, the walk counts the two slot starts and STILL steps below the second — the
     // reference assigns `curr_rec = blocks[height-1]` after the count, so the answer is 3, not 4.
     #[tokio::test]
@@ -1500,7 +1490,7 @@ mod tests {
         );
     }
 
-    // Red-first, hand-derived from chia weight_proof.py:177-188: the sampling seed is the hash of
+    // The sampling seed is the hash of
     // the SECOND-TO-LAST summary at-or-below the tip — for summaries at 400/800/1200 and tip 1050,
     // that is the summary at 400 (1200 is above the tip and must not count).
     #[test]
@@ -1527,21 +1517,19 @@ mod tests {
     // blocks (deficit 15) at 405 and 801, tip 1100. Weights grow by 1 per block, so the recent chain
     // (399..=1100) spans 702/1101 of the total weight: delta≈0.64 ⇒ prob_of_adv_succeeding =
     // 1 - ln(0.5)/ln(delta) < 0 ⇒ `_get_weights_for_sampling` returns None ⇒ EVERY sub-epoch is
-    // sampled (chia weight_proof.py:667-684, 687-712 — the `weight_to_check is None` short-circuit).
+    // sampled (the `weight_to_check is None` short-circuit).
     //
-    // Expected segments, walked by hand through weight_proof.py:299-522:
+    // Expected segments, walked by hand:
     // - sub-epoch 0 (heights 0..400): no challenge blocks ⇒ zero segments.
     // - sub-epoch 1 (heights 400..800): one challenge block at 405 ⇒ ONE segment, sub_epoch_n=1,
-    //   and — being the sub-epoch's first segment past sub-epoch 0 — it carries rc_slot_end_info
-    //   (weight_proof.py:394-399), which is ses0's slot-opening reward-chain end-of-slot VDF
-    //   (weight_proof.py:478-487).
+    //   and — being the sub-epoch's first segment past sub-epoch 0 — it carries rc_slot_end_info,
+    //   which is ses0's slot-opening reward-chain end-of-slot VDF.
     //   Its sub_slots, in order:
-    //   · 1 finished-slot entry for slot start 400 (weight_proof.py:441-445)
-    //   · 5 bare ip entries for blocks 400..=404 (weight_proof.py:447-462)
-    //   · 1 challenge-block entry (proof of space present; weight_proof.py:728-769)
-    //   · then __slot_end_vdf over 406..=800 until the next challenge block at 801
-    //     (weight_proof.py:489-522): a block entry per height (395) plus an end-of-slot entry per
-    //     slot start 410,420,…,800 (40) = 435
+    //   · 1 finished-slot entry for slot start 400
+    //   · 5 bare ip entries for blocks 400..=404
+    //   · 1 challenge-block entry (proof of space present)
+    //   · then __slot_end_vdf over 406..=800 until the next challenge block at 801: a block
+    //     entry per height (395) plus an end-of-slot entry per slot start 410,420,…,800 (40) = 435
     //   ⇒ 442 sub_slots total, exactly one carrying a proof of space, 41 carrying cc_slot_end.
     #[tokio::test]
     async fn builds_one_segment_per_challenge_block_with_hand_derived_shape() {
@@ -1556,7 +1544,7 @@ mod tests {
         let server = WeightProofServer::new(Arc::new(store), MAINNET);
         let wp = server.get_proof_of_weight(tip).await.expect("proof builds");
 
-        // Sub-epoch data mirrors the two summaries at-or-below the tip (weight_proof.py:101-109).
+        // Sub-epoch data mirrors the two summaries at-or-below the tip.
         assert_eq!(wp.sub_epochs.len(), 2);
         assert_eq!(wp.sub_epochs[0], create_sub_epoch_data(&ses(0)));
         assert_eq!(wp.sub_epochs[1], create_sub_epoch_data(&ses(1)));
@@ -1604,7 +1592,7 @@ mod tests {
         );
 
         // The whole-proof cache: a second request for the same tip returns the SAME proof (chia
-        // weight_proof.py:90-99 — `self.proof` under the handler lock).
+        // `self.proof` under the handler lock).
         let again = server.get_proof_of_weight(tip).await.expect("cached");
         assert!(
             Arc::ptr_eq(&wp, &again),
@@ -1612,15 +1600,12 @@ mod tests {
         );
     }
 
-    // The oracle-gate regression: a proof built by the SERVER must pass the VALIDATOR's phase 2 —
-    // this crate's mirror of chia `_validate_sub_epoch_summaries` (chia weight_proof.py:840-870):
-    // `_get_last_ses_hash` (1572-1590) reads the on-chain summary commitment out of the recent
-    // chain's finished sub slots, `_map_sub_epoch_summaries` (873-910) rebuilds the summary chain
+    // The oracle-gate regression: a proof built by the SERVER must pass the VALIDATOR's phase 2:
+    // `_get_last_ses_hash` reads the on-chain summary commitment out of the recent
+    // chain's finished sub slots, `_map_sub_epoch_summaries` rebuilds the summary chain
     // from our emitted SubEpochData anchored on GENESIS_CHALLENGE, and the last reconstructed hash
-    // must equal the commitment. Red on any builder defect in summary selection, ordering, or field
-    // mapping — the exact failure class the live oracle gate checks first. (The 2026-08 oracle RED
-    // at tip 830000 was the DRIVER anchoring on chia's un-overridden DEFAULT_CONSTANTS genesis —
-    // sha256("") — not a builder defect; this test pins our side of that contract permanently.)
+    // must equal the commitment. Red on any builder defect in summary selection, ordering, or
+    // field mapping.
     //
     // The chain carries properly LINKED summaries: ses0.prev = GENESIS_CHALLENGE,
     // ses1.prev = hash(ses0), and the ses blocks' opening slots commit the hashes on chain.
@@ -1666,12 +1651,11 @@ mod tests {
         );
     }
 
-    // Red-first, hand-derived from chia weight_proof.py:288-297 (__create_persist_segment) +
-    // block_store.py:164-171: every sampled sub-epoch's built segments are persisted through the
-    // store, keyed by the ses block's header hash, as the ChiaSerialize bytes of a
-    // SubEpochSegments wrapper (block_store.py:170). On the smoke chain both sub-epochs are
-    // sampled (weight_to_check is None): sub-epoch 0 persists an EMPTY list (chia persists the
-    // empty build result too — only a None build errors), sub-epoch 1 persists its one segment.
+    // Every sampled sub-epoch's built segments are persisted through the store, keyed by the ses
+    // block's header hash, as the ChiaSerialize bytes of a SubEpochSegments wrapper. On the smoke
+    // chain both sub-epochs are sampled (weight_to_check is None): sub-epoch 0 persists an EMPTY
+    // list (the empty build result is persisted too — only a None build errors), sub-epoch 1
+    // persists its one segment.
     #[tokio::test]
     async fn built_segments_are_persisted_keyed_by_ses_hash() {
         use dg_xch_core::blockchain::weight_proof::SubEpochSegments;
@@ -1724,7 +1708,7 @@ mod tests {
         );
     }
 
-    // Red-first, hand-derived from chia weight_proof.py:288-292: get_sub_epoch_challenge_segments
+    // Get_sub_epoch_challenge_segments
     // is checked BEFORE building, so a fresh handler over a store that already holds the segments
     // must not walk the sub-epoch spans again. Restart-shaped: server B is a brand-new instance
     // (empty in-memory LRU) over the same store server A persisted into. The block-read budget

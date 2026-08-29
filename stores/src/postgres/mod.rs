@@ -26,13 +26,10 @@ impl PostgresStore {
     pub async fn open(url: &str) -> Result<Self, StoreError> {
         let pool = PgPoolOptions::new()
             .max_connections(8)
-            // Asynchronous commit (Postgres docs 28.4): COMMIT returns before the WAL fsync. Atomicity
-            // and transaction ORDER are preserved — a crash loses at most the last ~wal_writer_delay of
-            // committed transactions as a clean suffix, never a torn or reordered state. Chain data is
-            // resyncable from the surviving peak by design (the libbitcoin durability posture: losing
-            // recent data is fine, corruption is not), and the measured cost of full durability here is
-            // ~32ms of fsync wait per commit on SAN-backed volumes — 4 commits per block dominated the
-            // whole apply path. Exception: the single-transaction reorg overrides this with
+            // Asynchronous commit: COMMIT returns before the WAL fsync. Atomicity and transaction
+            // ORDER are preserved — a crash loses at most a clean suffix of committed
+            // transactions, never a torn or reordered state, and chain data is resyncable from
+            // the surviving peak. Exception: the single-transaction reorg overrides this with
             // `SET LOCAL synchronous_commit = on` (coin.rs `rollback_to_in`) — rare, must be durable.
             .after_connect(|conn, _meta| {
                 Box::pin(async move {
@@ -57,9 +54,8 @@ async fn migrate(pool: &PgPool) -> Result<(), StoreError> {
         .execute(pool)
         .await?;
     // 0003 (service indexes) and 0006 (reorg indexes) are NOT applied at open: secondary indexes
-    // on coin_record are pure write-amplification during bulk sync (in practice the secondary
-    // indexes see zero scans during sync while the primary key absorbs tens of millions). The
-    // daemon builds them once at the sync->tip transition via `BlockStore::build_indexes`.
+    // on coin_record are pure write-amplification during bulk sync. The daemon builds them once
+    // at the sync->tip transition via `BlockStore::build_indexes`.
     #[cfg(feature = "hint")]
     sqlx::raw_sql(include_str!("../../migrations/postgres/0004_hint.sql"))
         .execute(pool)
@@ -78,8 +74,7 @@ async fn migrate(pool: &PgPool) -> Result<(), StoreError> {
     .await?;
     // coin_record fillfactor=90: reserve page headroom so the insert-once/update-once (spend)
     // stays HOT (no pkey bloat, dead versions reclaimed by HOT-prune not vacuum). Idempotent
-    // ALTER, applied at every open like 0007 — retrofits existing legs on their next roll; a
-    // one-time pg_repack converts already-written rows to the new fillfactor.
+    // ALTER, applied at every open like 0007.
     sqlx::raw_sql(include_str!(
         "../../migrations/postgres/0008_coin_record_fillfactor.sql"
     ))
