@@ -5,24 +5,22 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 
-// Spend-eligibility flags, bit-identical to chia_rs 0.42.1 (chia-consensus conditions.rs:43-62).
-// Computed by the MEMPOOL condition parse only (chia_rs MempoolVisitor); consensus/block runs
-// leave `flags` 0 (chia_rs EmptyVisitor).
+// Spend-eligibility flags, set by the mempool condition parse only; consensus/block runs
+// leave `flags` 0.
 
 /// The spend may be deduplicated against an identical spend of the same coin in another mempool
-/// item (chia_rs `ELIGIBLE_FOR_DEDUP`): no AGG_SIG_* conditions, no message conditions, and the
-/// coin amount does not exceed its own outputs.
+/// item: no AGG_SIG_* conditions, no message conditions, and the coin amount does not exceed
+/// its own outputs.
 pub const ELIGIBLE_FOR_DEDUP: u32 = 1;
 
-/// The spend carried at least one relative seconds/height condition (chia_rs
-/// `HAS_RELATIVE_CONDITION`).
+/// The spend carried at least one relative seconds/height condition.
 pub const HAS_RELATIVE_CONDITION: u32 = 2;
 
-/// The spend may be rebased onto a newer version of the same singleton (chia_rs
-/// `ELIGIBLE_FOR_FF`): odd amount, no parent-committing AGG_SIG conditions, no coin-id/parent-id/
-/// birth/relative/ephemeral commitments (one ASSERT_MY_PARENT_ID as the second condition is the
-/// singleton top layer's own and allowed), an output with the spend's own puzzle hash and amount,
-/// no CREATE_COIN_ANNOUNCEMENT, no parent-mode messages, not referenced by an in-bundle
+/// The spend may be rebased onto a newer version of the same singleton: odd amount, no
+/// parent-committing AGG_SIG conditions, no coin-id/parent-id/birth/relative/ephemeral
+/// commitments (one ASSERT_MY_PARENT_ID as the second condition is the singleton top layer's
+/// own and allowed), an output with the spend's own puzzle hash and amount, no
+/// CREATE_COIN_ANNOUNCEMENT, no parent-mode messages, not referenced by an in-bundle
 /// ASSERT_CONCURRENT_SPEND, and none of its outputs spent by the same bundle.
 pub const ELIGIBLE_FOR_FF: u32 = 4;
 
@@ -61,24 +59,18 @@ pub struct Spend {
     // RECEIVE_MESSAGE (67) emitted by this spend
     pub received_messages: Vec<SpendMessage>,
     pub flags: u32,
-    // This spend's share of the bundle's condition cost (CREATE_COIN/AGG_SIG/etc.) — chia_rs
-    // SpendConditions.condition_cost. With execution_cost it is the per-spend cost the mempool's
-    // dedup accounting saves (chia BundleCoinSpend.cost; byte cost excluded). serde-default so
-    // pre-existing serialized spends still deserialize.
+    // This spend's share of the bundle's condition cost (CREATE_COIN/AGG_SIG/etc.)
     #[serde(default)]
     pub condition_cost: u64,
-    // The CLVM cost of running this spend's puzzle with its solution — chia_rs
-    // SpendConditions.execution_cost. Filled on the per-spend run paths (the spend-bundle
-    // conditions run); a whole-generator run cannot attribute it per spend.
+    // The CLVM cost of running this spend's puzzle with its solution; filled on the per-spend
+    // run paths, a whole-generator run cannot attribute it per spend
     #[serde(default)]
     pub execution_cost: u64,
 }
 
-// A CHIP-25 message emitted by a spend. `mode` packs the sender commitment in
-// bits 3..6 and the receiver commitment in bits 0..3. `args` carries the
-// counterparty commitment parsed from the condition arguments (the destination
-// for SEND_MESSAGE, the source for RECEIVE_MESSAGE); the spend's own side is
-// derived from its coin at validation time.
+// A CHIP-25 message emitted by a spend. `mode` packs the sender commitment in bits 3..6
+// and the receiver commitment in bits 0..3; `args` carries the counterparty commitment
+// (the destination for SEND_MESSAGE, the source for RECEIVE_MESSAGE).
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Debug)]
 pub struct SpendMessage {
     pub mode: u8,

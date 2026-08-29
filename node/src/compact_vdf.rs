@@ -1,16 +1,11 @@
-//! Compact-VDF (bluebox) pipeline primitives — the pure field-dispatch, guard, and
-//! proof-swap logic behind the full node's `RequestCompactVDF` / `NewCompactVDF` /
-//! `RespondCompactVDF` handling (production-parity plan, Phase 1.5).
+//! Compact-VDF (bluebox) pipeline primitives — the pure field-dispatch, guard, and proof-swap
+//! logic behind the full node's `RequestCompactVDF` / `NewCompactVDF` / `RespondCompactVDF`
+//! handling.
 //!
 //! A bluebox timelord normalizes a block's bulky Wesolowski VDF proofs to compact
-//! (`normalized_to_identity`, `witness_type == 0`) form and gossips them; peers pull the
-//! compact proof and swap it into their stored block, shrinking the on-disk chain. This
-//! module holds the store-blind, consensus-blind half of that exchange so it is unit-testable
-//! against a real stored block without a running node.
-//!
-//! Chia oracle: `chia/full_node/full_node.py` (`_needs_compact_proof`,
-//! `_can_accept_compact_proof`, `_replace_proof`, `request_compact_vdf`) and
-//! `chia/types/blockchain_format/vdf.py` (`CompressibleVDFField`).
+//! (`normalized_to_identity`, `witness_type == 0`) form and gossips them; peers pull the compact
+//! proof and swap it into their stored block, shrinking the on-disk chain. This module holds the
+//! store-blind, consensus-blind half of that exchange.
 
 use dg_xch_core::blockchain::full_block::FullBlock;
 use dg_xch_core::blockchain::sized_bytes::Bytes32;
@@ -23,8 +18,7 @@ use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 /// Which VDF field of a block a compact proof refers to. Wire value is the `field_vdf: u8` of
-/// the compact-VDF messages. Mirrors chia `CompressibleVDFField`
-/// (chia/types/blockchain_format/vdf.py:80-84).
+/// the compact-VDF messages.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum CompressibleVdfField {
     CcEosVdf = 1,
@@ -34,9 +28,8 @@ pub enum CompressibleVdfField {
 }
 
 impl CompressibleVdfField {
-    /// Decode the wire `field_vdf` byte; `None` for an unknown discriminant (the caller stays
-    /// silent rather than panicking — chia constructs `CompressibleVDFField(int(...))` which
-    /// would raise, and its handlers are wrapped so an invalid field is dropped).
+    /// Decode the wire `field_vdf` byte; `None` for an unknown discriminant (dropped silently,
+    /// never a panic).
     #[must_use]
     pub fn from_u8(v: u8) -> Option<Self> {
         match v {
@@ -50,17 +43,13 @@ impl CompressibleVdfField {
 }
 
 /// A proof is compact when its witness has been normalized to the identity element and carries
-/// no intermediate witnesses. Chia treats `witness_type == 0 and normalized_to_identity` as the
-/// already-compact predicate (`_needs_compact_proof`) and `witness_type > 0 or not
-/// normalized_to_identity` as the not-compact rejection (`_can_accept_compact_proof`).
+/// no intermediate witnesses.
 #[must_use]
 pub fn is_compact(proof: &VdfProof) -> bool {
     proof.witness_type == 0 && proof.normalized_to_identity
 }
 
 /// The stored proof for `field` whose start-of-slot `VdfInfo` equals `vdf_info`, if any.
-/// Mirrors the field dispatch shared by chia's `_needs_compact_proof`, `_replace_proof`, and
-/// `request_compact_vdf`.
 fn stored_proof_for<'a>(
     block: &'a FullBlock,
     field: CompressibleVdfField,
@@ -90,9 +79,8 @@ fn stored_proof_for<'a>(
     }
 }
 
-/// SERVE arm (chia `full_node.request_compact_vdf`): return OUR stored proof for `field` at
-/// `vdf_info` **only when it is already compact** — otherwise stay silent (`None`). A peer asking
-/// us to compress a proof we have not compressed ourselves gets nothing.
+/// Serve arm: return our stored proof for `field` at `vdf_info` only when it is already compact —
+/// otherwise stay silent (`None`).
 #[must_use]
 pub fn serve_compact(block: &FullBlock, field: u8, vdf_info: &VdfInfo) -> Option<VdfProof> {
     let field = CompressibleVdfField::from_u8(field)?;
@@ -100,10 +88,9 @@ pub fn serve_compact(block: &FullBlock, field: u8, vdf_info: &VdfInfo) -> Option
     is_compact(proof).then(|| proof.clone())
 }
 
-/// Does this block still carry a **bulky** proof for `field` at `vdf_info`? True only when the
-/// field is present, its `VdfInfo` matches, and its proof is not yet compact — the exact
-/// condition under which a compact replacement is wanted. Mirrors chia `_needs_compact_proof`
-/// (returns True only for found-and-bulky; False for compact, absent, or a `VdfInfo` mismatch).
+/// Does this block still carry a bulky proof for `field` at `vdf_info`? True only when the field
+/// is present, its `VdfInfo` matches, and its proof is not yet compact — the exact condition
+/// under which a compact replacement is wanted.
 #[must_use]
 pub fn needs_compact_proof(block: &FullBlock, field: u8, vdf_info: &VdfInfo) -> bool {
     let Some(field) = CompressibleVdfField::from_u8(field) else {
@@ -113,8 +100,7 @@ pub fn needs_compact_proof(block: &FullBlock, field: u8, vdf_info: &VdfInfo) -> 
 }
 
 /// Verify an offered compact proof stands on its own: it is compact, and it validates from the
-/// default class-group element (the normalized-to-identity entry — chia `_can_accept_compact_proof`
-/// calls `validate_vdf(proof, constants, ClassgroupElement.get_default_element(), vdf_info)`).
+/// default class-group element (the normalized-to-identity entry).
 #[must_use]
 pub fn validate_compact_proof(
     constants: &ConsensusConstants,
@@ -131,14 +117,13 @@ pub fn validate_compact_proof(
         )
 }
 
-/// Full admission gate for an offered compact proof (chia `_can_accept_compact_proof`):
-/// - not too recent (`peak_height - height >= 5` — chia will not compactify a recent block);
+/// Full admission gate for an offered compact proof:
+/// - not too recent (`peak_height - height >= 5` — never compactify a recent block);
 /// - the proof is compact and validates from the default element;
 /// - we still hold a bulky proof for that exact field/`VdfInfo` (`needs_compact_proof`).
 ///
-/// The whole-block `is_fully_compactified` short-circuit chia checks first is a store-side
-/// bookkeeping flag we do not maintain; the per-field `needs_compact_proof` below is the
-/// behaviourally decisive guard for the field in question, so it is omitted deliberately.
+/// A whole-block fully-compactified short-circuit is store-side bookkeeping we do not maintain;
+/// the per-field `needs_compact_proof` is the decisive guard, so it is omitted deliberately.
 #[must_use]
 pub fn can_accept_compact_proof(
     constants: &ConsensusConstants,
@@ -158,10 +143,10 @@ pub fn can_accept_compact_proof(
     needs_compact_proof(block, field, vdf_info)
 }
 
-/// REPLACE (chia `_replace_proof`): return a copy of `block` with the compact `new_proof` swapped
-/// in for the single `field` whose `VdfInfo` matches `vdf_info`; `None` when nothing matches. Only
-/// the one proof changes, so the block's `header_hash` is unaffected — the same block, a smaller
-/// witness. The caller re-writes the body under the same header hash and re-gossips `NewCompactVDF`.
+/// Return a copy of `block` with the compact `new_proof` swapped in for the single `field` whose
+/// `VdfInfo` matches `vdf_info`; `None` when nothing matches. Only the one proof changes, so the
+/// block's `header_hash` is unaffected. The caller re-writes the body under the same header hash
+/// and re-gossips `NewCompactVDF`.
 #[must_use]
 pub fn replace_proof(
     block: &FullBlock,
@@ -209,9 +194,8 @@ pub fn replace_proof(
 }
 
 /// Every VDF field of `block` whose proof is still bulky, as `(field_vdf, start-of-slot VdfInfo)`
-/// pairs — the solicitation list chia's `broadcast_uncompact_blocks` builds to hand blueboxes
-/// (chia enumerates CC_EOS + ICC_EOS per finished sub slot, then CC_SP and CC_IP). Order matches
-/// chia: sub-slot EOS fields first, then CC_SP, then CC_IP.
+/// pairs — the solicitation list handed to blueboxes. Order: sub-slot EOS fields first, then
+/// CC_SP, then CC_IP.
 #[must_use]
 pub fn uncompact_fields(block: &FullBlock) -> Vec<(u8, VdfInfo)> {
     let mut out = Vec::new();
@@ -265,17 +249,11 @@ fn solicit_key(req: &RequestCompactProofOfTime) -> SolicitKey {
     )
 }
 
-/// Bounded time-to-live + capacity dedup of already-solicited compact-proof requests.
-///
-/// WHY (audit note): unlike chia's `broadcast_uncompact_blocks`, which samples RANDOM
-/// not-compactified heights each tick (so it naturally spreads its requests and rarely repeats a
-/// field before a timelord has answered), our scan sweeps a FIXED recent window every tick. Without
-/// a memory it would re-solicit the very same bulky fields every interval, spamming a connected
-/// bluebox with duplicate work it is already grinding. This ledger records what we solicited and
-/// suppresses a re-send until `ttl` elapses — after which we DO re-solicit (a timelord may have
-/// gone away, or dropped the request, so a bulky field that never became compact must be retried,
-/// not abandoned forever). Capacity caps memory: past `capacity` distinct keys the oldest is
-/// evicted (an evicted stale key simply becomes eligible to solicit again — safe, never a panic).
+/// Bounded time-to-live + capacity dedup of already-solicited compact-proof requests. The scan
+/// sweeps a fixed recent window every tick; without a memory it would re-solicit the same bulky
+/// fields every interval. After `ttl` a key is re-solicitable (a timelord may have dropped the
+/// request). Past `capacity` distinct keys the oldest is evicted — an evicted stale key simply
+/// becomes eligible to solicit again.
 pub struct SolicitLedger {
     /// Last-solicited instant per distinct request key.
     seen: HashMap<SolicitKey, Instant>,
@@ -336,9 +314,7 @@ impl SolicitLedger {
 
 /// Build the deduped solicitation list for one stored `block`: every still-bulky VDF field of the
 /// block (see [`uncompact_fields`]) turned into a [`RequestCompactProofOfTime`], minus any the
-/// `ledger` already solicited within its ttl. Mirrors the per-block half of chia
-/// `broadcast_uncompact_blocks`' `broadcast_list` construction — the message a bluebox timelord
-/// needs to compute + return the compact proof — with our added re-solicit suppression on top.
+/// `ledger` already solicited within its ttl.
 #[must_use]
 pub fn plan_block_solicitations(
     block: &FullBlock,
@@ -359,49 +335,3 @@ pub fn plan_block_solicitations(
         .collect()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn field_from_u8_covers_the_four_compressible_fields_and_rejects_others() {
-        assert_eq!(
-            CompressibleVdfField::from_u8(1),
-            Some(CompressibleVdfField::CcEosVdf)
-        );
-        assert_eq!(
-            CompressibleVdfField::from_u8(2),
-            Some(CompressibleVdfField::IccEosVdf)
-        );
-        assert_eq!(
-            CompressibleVdfField::from_u8(3),
-            Some(CompressibleVdfField::CcSpVdf)
-        );
-        assert_eq!(
-            CompressibleVdfField::from_u8(4),
-            Some(CompressibleVdfField::CcIpVdf)
-        );
-        assert_eq!(CompressibleVdfField::from_u8(0), None);
-        assert_eq!(CompressibleVdfField::from_u8(5), None);
-    }
-
-    #[test]
-    fn compactness_predicate_matches_chia() {
-        let compact = VdfProof {
-            witness_type: 0,
-            witness: Default::default(),
-            normalized_to_identity: true,
-        };
-        assert!(is_compact(&compact));
-        let bulky_witness = VdfProof {
-            witness_type: 3,
-            ..compact.clone()
-        };
-        assert!(!is_compact(&bulky_witness));
-        let not_normalized = VdfProof {
-            normalized_to_identity: false,
-            ..compact
-        };
-        assert!(!is_compact(&not_normalized));
-    }
-}

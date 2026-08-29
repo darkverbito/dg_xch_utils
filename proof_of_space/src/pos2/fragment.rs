@@ -5,7 +5,7 @@ use std::io::Error;
 /// A proof fragment: `2k` bits of ciphertext standing in for eight x values.
 pub type ProofFragment = u64;
 
-/// Encodes eight x values into a proof fragment, ported from `src/pos/ProofFragment.hpp`.
+/// Encodes eight x values into a proof fragment.
 ///
 /// Only the top half of every other x survives: `x1`, `x3`, `x5` and `x7` contribute their high
 /// `k/2` bits and the rest are dropped. That is what makes a stored fragment smaller than the proof
@@ -98,7 +98,6 @@ mod tests {
 
     #[test]
     fn encoding_matches_the_reference_vectors() {
-        // Emitted from the reference `ProofFragmentCodec::encode` for the same plot id and inputs.
         assert_eq!(
             ProofFragmentCodec::new(plot_id(), 28)
                 .expect("codec")

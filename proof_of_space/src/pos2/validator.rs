@@ -5,7 +5,7 @@ use crate::pos2::params::ProofParams;
 use dg_xch_core::blockchain::sized_bytes::Bytes32;
 use std::io::Error;
 
-/// Verifies a proof of space 2 proof, ported from `src/pos/ProofValidator.hpp`.
+/// Verifies a proof of space 2 proof.
 ///
 /// A proof is 128 x values in sixteen groups of eight. Each group must pair all the way up through
 /// tables 1, 2 and 3, and the sixteen fragments those groups encode to must then form a valid
@@ -106,8 +106,6 @@ mod tests {
 
     #[test]
     fn an_arbitrary_pair_almost_never_validates() {
-        // Pairing is the scarce event the whole format is built on. If random pairs validated at
-        // any appreciable rate, the matching rules would not be doing their job.
         let v = validator();
         let mut paired = 0;
         for i in 0..20_000u32 {
@@ -142,8 +140,7 @@ mod tests {
 
     #[test]
     fn the_levels_are_nested() {
-        // A table 2 pairing can only exist when both of its table 1 pairings do, so failing to
-        // find any table 1 pairing in a range means no table 2 pairing there either.
+        // A table 2 pairing can only exist when both of its table 1 pairings do.
         let v = validator();
         let mut xs = [0u32; 4];
         for i in 0..2000u32 {

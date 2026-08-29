@@ -25,56 +25,49 @@ use std::fmt;
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
-// The minimum absolute fee bump a replacement must pay over the items it evicts — chia's
-// MEMPOOL_MIN_FEE_INCREASE (mempool_manager.py), 0.00001 XCH, an anti-churn floor from PR #1971.
+// The minimum absolute fee bump a replacement must pay over the items it evicts — 0.00001 XCH,
+// an anti-churn floor.
 const MEMPOOL_MIN_FEE_INCREASE: u64 = 10_000_000;
 
-// Bound on bundles parked for an unmet ASSERT_HEIGHT (chia PendingTxCache); lowest
-// fee-per-cost evicts first when full.
+// Bound on bundles parked for an unmet ASSERT_HEIGHT; lowest fee-per-cost evicts first when full.
 const PENDING_CACHE_CAP: usize = 100;
 
 // Bound on bundles rejected for a MEMPOOL_CONFLICT (they double-spend a coin an existing mempool
-// item spends) and set aside for retry — chia `ConflictTxCache(MAX_BLOCK_COST_CLVM * 1, 1000)`
-// (pending_tx_cache.py:12-47, constructed mempool_manager.py:354). Oldest-first (FIFO) eviction
-// once EITHER the summed cost clears one block's cost (`conflict_cache_max_cost`, set in `new`) OR
-// the item count clears this cap. Retried on every new peak: the conflicting resident may have
-// left the pool unconfirmed (expiry / RBF), freeing the coin.
+// item spends) and set aside for retry. Oldest-first (FIFO) eviction once either the summed cost
+// clears one block's cost (`conflict_cache_max_cost`, set in `new`) or the item count clears this
+// cap. Retried on every new peak: the conflicting resident may have left the pool unconfirmed
+// (expiry / RBF), freeing the coin.
 const CONFLICT_CACHE_MAX_SIZE: usize = 1000;
 
-// chia mempool.py MEMPOOL_ITEM_FEE_LIMIT (2^50): no single item may pay more than this, so the sum
-// of all fees stays clear of sqlite's signed-int64 ceiling chia relies on. The companion guard —
-// `SQLITE_INT_MAX - total_mempool_fees() <= fees` (mempool_manager.py:754) — is enforced too, with
-// the same i64::MAX bound.
+// No single item may pay more than this (2^50), so the sum of all fees stays clear of the
+// signed-int64 ceiling. The companion sum guard is enforced too, with the same i64::MAX bound.
 const MEMPOOL_ITEM_FEE_LIMIT: u64 = 1 << 50;
 
-// chia mempool_manager.py:341 `nonzero_fee_minimum_fpc = 5`: the fee-per-cost floor an item must
-// clear to displace anything when the pool is at capacity ("equivalent to 0.055 XCH per block").
+// The fee-per-cost floor an item must clear to displace anything when the pool is at capacity.
 const NONZERO_FEE_MINIMUM_FPC: f64 = 5.0;
 
-// chia mempool.py add_to_pool:406-409 — the expiring-soon window: items whose effective
-// ASSERT_BEFORE bound lands within 48 blocks / 900 seconds of the current peak collectively hold at
-// most ONE block's cost (`max_block_clvm_cost`).
+// The expiring-soon window: items whose effective ASSERT_BEFORE bound lands within 48 blocks /
+// 900 seconds of the current peak collectively hold at most one block's cost.
 const EXPIRING_BLOCK_CUTOFF: u32 = 48;
 const EXPIRING_TIME_CUTOFF: u64 = 900;
 
-// chia SPEND_PENALTY_COST (chia/types/mempool_item.py:13): the per-spend penalty added to CLVM
-// cost when computing virtual cost. Blocks are capped at 6,000 spends besides the cost limit, so
-// pricing spend slots keeps many-spend low-cost bundles from crowding out the spend budget
-// (chia/full_node/mempool.py:64-71).
+// The per-spend penalty added to CLVM cost when computing virtual cost. Blocks are capped at
+// 6,000 spends besides the cost limit, so pricing spend slots keeps many-spend low-cost bundles
+// from crowding out the spend budget.
 const SPEND_PENALTY_COST: u64 = 500_000;
 
-// chia mempool.py:54 PRIORITY_TX_THRESHOLD: once this many items have been skipped during block
-// assembly, items carrying dedup/fast-forward spends are skipped outright — their processing is
-// potentially expensive and the block is nearly full anyway.
+// Once this many items have been skipped during block assembly, items carrying
+// dedup/fast-forward spends are skipped outright — their processing is potentially expensive and
+// the block is nearly full anyway.
 const PRIORITY_TX_THRESHOLD: usize = 3;
 
 // Bound on the FF lineage-lookup candidates scanned at admission; see
 // `CoinStore::get_unspent_lineage_info`.
 
-/// One coin spend of a resident mempool item, joined to its `SpendBundleConditions` spend — chia's
-/// `BundleCoinSpend` (chia/types/mempool_item.py:25-42). Carries the dedup/fast-forward
-/// eligibility the conditions runner computed and, for a fast-forward-capable spend, the
-/// singleton's latest unspent lineage (`None` ⇒ the spend is pinned to its exact coin).
+/// One coin spend of a resident mempool item, joined to its `SpendBundleConditions` spend.
+/// Carries the dedup/fast-forward eligibility the conditions runner computed and, for a
+/// fast-forward-capable spend, the singleton's latest unspent lineage (`None` ⇒ the spend is
+/// pinned to its exact coin).
 #[derive(Clone, Debug)]
 pub struct BundleCoinSpend {
     pub coin_spend: CoinSpend,
@@ -86,8 +79,7 @@ pub struct BundleCoinSpend {
 }
 
 impl BundleCoinSpend {
-    /// chia `BundleCoinSpend.supports_fast_forward`: the spend may be rebased iff a latest
-    /// unspent singleton lineage was resolved for it.
+    /// The spend may be rebased iff a latest unspent singleton lineage was resolved for it.
     #[must_use]
     pub fn supports_fast_forward(&self) -> bool {
         self.latest_singleton_lineage.is_some()
@@ -98,47 +90,44 @@ impl BundleCoinSpend {
     }
 }
 
-// ---- block-assembly constants (chia/full_node/mempool.py, verified against 2.7.1) ---------------
+// ---- block-assembly constants -------------------------------------------------------------------
 
 // Maximum number of mempool items that can be skipped (not considered) during the creation of a
-// block bundle. An item is skipped if it won't fit in the block we're trying to create (chia
-// mempool.py MAX_SKIPPED_ITEMS). chia's loop breaks ON the tenth skip (`if skipped_items <
-// MAX_SKIPPED_ITEMS: continue; break`).
+// block bundle. An item is skipped if it won't fit in the block we're trying to create; the loop
+// breaks ON the tenth skip.
 const MAX_SKIPPED_ITEMS: usize = 10;
 
-// Typical cost of a standard XCH spend — the stop heuristic: once the remaining block budget drops
-// below this, we're unlikely to find anything that fits (chia mempool.py MIN_COST_THRESHOLD).
+// Typical cost of a standard XCH spend — the stop heuristic: once the remaining block budget
+// drops below this, we're unlikely to find anything that fits.
 const MIN_COST_THRESHOLD: u64 = 6_000_000;
 
 // The block overhead the mempool's per-item cost accounting does not carry: the wrapping quote
-// opcode's two serialized bytes' byte-cost plus its execution cost (chia mempool_manager.py
-// `BLOCK_OVERHEAD = QUOTE_BYTES * COST_PER_BYTE + QUOTE_EXECUTION_COST`). The selection budget is
-// `MAX_BLOCK_COST_CLVM - BLOCK_OVERHEAD` (chia `max_block_clvm_cost`), so the assembled generator's
-// true cost — item costs + this overhead, minus the per-item wrapper bytes shared once n > 1 —
-// cannot exceed `MAX_BLOCK_COST_CLVM`.
+// opcode's two serialized bytes' byte-cost plus its execution cost. The selection budget is
+// `MAX_BLOCK_COST_CLVM - BLOCK_OVERHEAD`, so the assembled generator's true cost — item costs +
+// this overhead, minus the per-item wrapper bytes shared once n > 1 — cannot exceed
+// `MAX_BLOCK_COST_CLVM`.
 const QUOTE_BYTES: u64 = 2;
 const QUOTE_EXECUTION_COST: u64 = 20;
 
-// The most restrictive absolute time-lock bounds of a bundle — chia's TimelockConditions,
-// produced by `compute_assert_height` (mempool_manager.py): the bundle-level absolutes plus every
-// per-spend RELATIVE lock resolved against that removal's confirmed coin record. These are what
-// the pending-drain boundary, the resident-expiry sweep, and can_replace's timelock-equality
-// clauses run on — never the raw absolutes.
+// The most restrictive absolute time-lock bounds of a bundle: the bundle-level absolutes plus
+// every per-spend RELATIVE lock resolved against that removal's confirmed coin record. These are
+// what the pending-drain boundary, the resident-expiry sweep, and can_replace's
+// timelock-equality clauses run on — never the raw absolutes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct EffectiveTimelocks {
-    // height_absolute folded with confirmed_height + height_relative per spend (max). chia keeps
-    // this a plain uint32 with 0 = unconstrained, and so do we.
+    // height_absolute folded with confirmed_height + height_relative per spend (max);
+    // 0 = unconstrained.
     pub assert_height: u32,
     pub assert_seconds: u64,
     pub assert_before_height: Option<u32>,
     pub assert_before_seconds: Option<u64>,
 }
 
-// chia `compute_assert_height` (mempool_manager.py): fold each spend's relative locks into the
-// absolute bounds using the removal's (confirmed_height, timestamp). `records` must cover every
-// removal — ephemeral (in-bundle-created) removals carry the synthesized peak+1/peak-timestamp
-// record built in `admit`. Sums saturate where chia's uint32()/uint64() constructors would raise:
-// a saturated assert bound simply never satisfies, which is the same conservative outcome.
+// Fold each spend's relative locks into the absolute bounds using the removal's
+// (confirmed_height, timestamp). `records` must cover every removal — ephemeral
+// (in-bundle-created) removals carry the synthesized peak+1/peak-timestamp record built in
+// `admit`. Sums saturate: a saturated assert bound simply never satisfies, the same conservative
+// outcome as an overflow error.
 fn effective_timelocks(
     conds: &SpendBundleConditions,
     records: &HashMap<Bytes32, (u32, u64)>,
@@ -172,29 +161,28 @@ fn effective_timelocks(
     tl
 }
 
-// The specific failing time-lock condition, named as chia's `Err` member for that condition
-// (chia/util/errors.py; chia_rs `check_time_locks` returns these exact codes). Carried through
-// [`MempoolError`] so the wire-facing rejects — `TransactionAck.error` is chia's `Err.name` string
-// (full_node_api.py:1560 `error.name`) — report the same name chia reports.
+// The specific failing time-lock condition, named as the protocol's error code for that
+// condition. Carried through [`MempoolError`] so the wire-facing rejects report the exact
+// `TransactionAck.error` name string wallets match on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimelockFailure {
-    AssertHeightAbsolute,         // Err.ASSERT_HEIGHT_ABSOLUTE_FAILED (14)
-    AssertHeightRelative,         // Err.ASSERT_HEIGHT_RELATIVE_FAILED (13)
-    AssertSecondsAbsolute,        // Err.ASSERT_SECONDS_ABSOLUTE_FAILED (15)
-    AssertSecondsRelative,        // Err.ASSERT_SECONDS_RELATIVE_FAILED (105)
-    AssertMyBirthHeight,          // Err.ASSERT_MY_BIRTH_HEIGHT_FAILED (139)
-    AssertMyBirthSeconds,         // Err.ASSERT_MY_BIRTH_SECONDS_FAILED (138)
-    AssertBeforeHeightAbsolute,   // Err.ASSERT_BEFORE_HEIGHT_ABSOLUTE_FAILED (130)
-    AssertBeforeHeightRelative,   // Err.ASSERT_BEFORE_HEIGHT_RELATIVE_FAILED (131)
-    AssertBeforeSecondsAbsolute,  // Err.ASSERT_BEFORE_SECONDS_ABSOLUTE_FAILED (128)
-    AssertBeforeSecondsRelative,  // Err.ASSERT_BEFORE_SECONDS_RELATIVE_FAILED (129)
-    ImpossibleHeightConstraints,  // Err.IMPOSSIBLE_HEIGHT_ABSOLUTE_CONSTRAINTS (137)
-    ImpossibleSecondsConstraints, // Err.IMPOSSIBLE_SECONDS_ABSOLUTE_CONSTRAINTS (135)
+    AssertHeightAbsolute,
+    AssertHeightRelative,
+    AssertSecondsAbsolute,
+    AssertSecondsRelative,
+    AssertMyBirthHeight,
+    AssertMyBirthSeconds,
+    AssertBeforeHeightAbsolute,
+    AssertBeforeHeightRelative,
+    AssertBeforeSecondsAbsolute,
+    AssertBeforeSecondsRelative,
+    ImpossibleHeightConstraints,
+    ImpossibleSecondsConstraints,
 }
 
 impl TimelockFailure {
-    /// chia's `Err.name` for this failure — the exact string a chia node puts in
-    /// `TransactionAck.error` (wallets string-match these).
+    /// The exact error-name string put in `TransactionAck.error` for this failure (wallets
+    /// string-match these).
     #[must_use]
     pub fn chia_err_name(self) -> &'static str {
         match self {
@@ -218,25 +206,22 @@ impl TimelockFailure {
     }
 }
 
-// How a time-lock check failed — chia's pend-vs-fail split (mempool_manager.py add_spend_bundle:
-// only ASSERT_HEIGHT_ABSOLUTE_FAILED / ASSERT_HEIGHT_RELATIVE_FAILED get MempoolInclusionStatus
-// PENDING; every other time-lock error is FAILED and the bundle is dropped, never cached). Each
-// variant carries the specific failing condition for the chia-named reject.
+// How a time-lock check failed — the pend-vs-fail split: only unmet height locks get PENDING;
+// every other time-lock error is FAILED and the bundle is dropped, never cached. Each variant
+// carries the specific failing condition for the named reject.
 enum TimelockCheck {
     // An unmet height lock (absolute or relative): park for retry on a future peak.
     Park(TimelockFailure),
     // A passed ASSERT_BEFORE_* bound: dead on arrival.
     Expired(TimelockFailure),
-    // An unmet seconds lock or a birth-assert mismatch: chia FAILS these outright — seconds-based
-    // locks do NOT park (the wallet resubmits).
+    // An unmet seconds lock or a birth-assert mismatch: failed outright — seconds-based locks do
+    // not park (the wallet resubmits).
     NotMet(TimelockFailure),
 }
 
-// chia `check_time_locks` (chia.consensus, the exact port CNI runs at mempool admission): every
-// absolute, birth, and relative time/height condition against the PREVIOUS transaction block's
-// height and timestamp — which, for the mempool, are the current peak's (mempool_manager.py:787-798:
-// "we pass in the current peak's height and timestamp"). Check order mirrors chia so the same
-// condition fails first.
+// Check every absolute, birth, and relative time/height condition against the previous
+// transaction block's height and timestamp — which, for the mempool, are the current peak's.
+// Check order is fixed so the same condition fails first.
 fn check_time_locks(
     conds: &SpendBundleConditions,
     records: &HashMap<Bytes32, (u32, u64)>,
@@ -310,7 +295,7 @@ fn check_time_locks(
 }
 
 // Why a spend bundle could not enter the mempool. Every variant is a stated reason (a
-// double-spend must be rejected *with a reason*); mirrors chia's `Err` mempool rejects.
+// double-spend must be rejected *with a reason*).
 #[derive(Debug)]
 pub enum MempoolError {
     NoPeak,
@@ -319,36 +304,33 @@ pub enum MempoolError {
     UnknownUnspent(Bytes32),
     DoubleSpend(Bytes32),
     Conflict(Bytes32),
-    // Parked for retry: an ASSERT_HEIGHT (absolute or relative) the current peak has not reached
-    // (chia MempoolInclusionStatus.PENDING). Not a failure — the bundle re-admits on a new peak.
-    // Only HEIGHT locks park; chia fails seconds-based locks outright. Carries the failing
-    // condition for the chia-named wire reject.
+    // Parked for retry: an ASSERT_HEIGHT (absolute or relative) the current peak has not reached.
+    // Not a failure — the bundle re-admits on a new peak. Only HEIGHT locks park; seconds-based
+    // locks fail outright. Carries the failing condition for the named wire reject.
     Pending(Bytes32, TimelockFailure),
     // Dead on arrival: an ASSERT_BEFORE bound the chain has already passed.
     Expired(Bytes32, TimelockFailure),
-    // An unmet ASSERT_SECONDS lock or a birth-assert mismatch: chia FAILS these (they never park —
-    // the wallet resubmits once wall-clock time catches up).
+    // An unmet ASSERT_SECONDS lock or a birth-assert mismatch: failed, never parked — the wallet
+    // resubmits once wall-clock time catches up.
     TimelockNotMet(Bytes32, TimelockFailure),
-    // assert_before_* <= assert_*: can never be satisfied at any height/time — chia
-    // IMPOSSIBLE_{HEIGHT,SECONDS}_ABSOLUTE_CONSTRAINTS, rejected outright, never parked.
+    // assert_before_* <= assert_*: can never be satisfied at any height/time — rejected outright,
+    // never parked.
     ImpossibleTimelock(Bytes32, TimelockFailure),
     FeeTooLow,
-    // Pool at capacity and the fee-per-cost is below nonzero_fee_minimum_fpc (5) — chia
-    // Err.INVALID_FEE_TOO_CLOSE_TO_ZERO (mempool_manager.py:759-761), distinct from FeeTooLow.
+    // Pool at capacity and the fee-per-cost is below the nonzero floor — distinct from FeeTooLow.
     FeeNearZero,
     // A single item's fee above MEMPOOL_ITEM_FEE_LIMIT (2^50), or the pool's fee sum would clear
-    // i64::MAX — chia Err.INVALID_BLOCK_FEE_AMOUNT (mempool_manager.py:750-755).
+    // i64::MAX.
     FeeLimitExceeded,
-    // A DEDUP-eligible coin spend whose solution is not canonically serialized — chia
-    // Err.INVALID_COIN_SOLUTION (mempool_manager.py:676-677): dedup identity is byte identity,
-    // so every dedup solution must have exactly one representation.
+    // A DEDUP-eligible coin spend whose solution is not canonically serialized: dedup identity is
+    // byte identity, so every dedup solution must have exactly one representation.
     NonCanonicalSolution(Bytes32),
-    // The bundle id is in the seen cache (recently validated, or known-invalid) — chia
-    // Err.ALREADY_INCLUDING_TRANSACTION (full_node.py:2890-2891): no second validation run.
+    // The bundle id is in the seen cache (recently validated, or known-invalid): no second
+    // validation run.
     AlreadyIncluding(Bytes32),
-    // The bundle is structurally unacceptable: every spend is a fast-forward spend (chia
-    // mempool_manager.py:706-710 — an FF spend can only be evicted alongside a normal spend), or
-    // the bundle doesn't match its own conditions — chia Err.INVALID_SPEND_BUNDLE.
+    // The bundle is structurally unacceptable: every spend is a fast-forward spend (an FF spend
+    // can only be evicted alongside a normal spend), or the bundle doesn't match its own
+    // conditions.
     InvalidSpendBundle(&'static str),
     Name(String),
     Store(StoreError),
@@ -414,33 +396,23 @@ impl fmt::Display for MempoolError {
 }
 
 impl MempoolError {
-    /// chia's `(MempoolInclusionStatus, Err.name)` for this reject — the `TransactionAck` wire
-    /// mapping. full_node_api.py::send_transaction acks `uint8(status.value)` plus `error.name`
-    /// (the `Err` member NAME as a string; wallets match on it), and
-    /// mempool_manager.py::add_spend_bundle makes exactly two reject classes PENDING: an unmet
-    /// ASSERT_HEIGHT lock (parked, :826-827) and a losing MEMPOOL_CONFLICT (conflict-cached,
-    /// :609-613). Every other reject is FAILED.
+    /// The `(status, error name)` for this reject — the `TransactionAck` wire mapping. Exactly
+    /// two reject classes are PENDING: an unmet ASSERT_HEIGHT lock (parked) and a losing
+    /// MEMPOOL_CONFLICT (conflict-cached). Every other reject is FAILED.
     #[must_use]
     pub fn ack(&self) -> (TXStatus, &'static str) {
         match self {
-            // chia holds a losing conflict aside and retries it (PENDING). We have no conflict
-            // cache — the PENDING ack is wire-exact and the wallet's resubmit-on-new-peak covers
-            // the retry.
             MempoolError::Conflict(_) => (TXStatus::PENDING, "MEMPOOL_CONFLICT"),
             MempoolError::Pending(_, tf) => (TXStatus::PENDING, tf.chia_err_name()),
             MempoolError::Expired(_, tf)
             | MempoolError::TimelockNotMet(_, tf)
             | MempoolError::ImpossibleTimelock(_, tf) => (TXStatus::FAILED, tf.chia_err_name()),
-            // chia add_transaction under the blockchain lock: peak is None → MEMPOOL_NOT_INITIALIZED
-            // (full_node.py:2942-2943).
             MempoolError::NoPeak => (TXStatus::FAILED, "MEMPOOL_NOT_INITIALIZED"),
-            // chia pre_validate_spendbundle raises ValueError on a zero-cost bundle and
-            // add_transaction maps every ValueError to INVALID_SPEND_BUNDLE (full_node.py:2907-2911).
+            // A zero-cost bundle maps to INVALID_SPEND_BUNDLE.
             MempoolError::ZeroCost => (TXStatus::FAILED, "INVALID_SPEND_BUNDLE"),
             MempoolError::CostExceedsMax(_) => (TXStatus::FAILED, "BLOCK_COST_EXCEEDS_MAX"),
             MempoolError::UnknownUnspent(_) => (TXStatus::FAILED, "UNKNOWN_UNSPENT"),
             MempoolError::DoubleSpend(_) => (TXStatus::FAILED, "DOUBLE_SPEND"),
-            // chia mempool.add_to_pool at capacity: Err.INVALID_FEE_LOW_FEE → FAILED.
             MempoolError::FeeTooLow => (TXStatus::FAILED, "INVALID_FEE_LOW_FEE"),
             MempoolError::FeeNearZero => (TXStatus::FAILED, "INVALID_FEE_TOO_CLOSE_TO_ZERO"),
             MempoolError::FeeLimitExceeded => (TXStatus::FAILED, "INVALID_BLOCK_FEE_AMOUNT"),
@@ -470,34 +442,31 @@ impl From<StoreError> for MempoolError {
 }
 
 // One mempool item resolved for block assembly: its spends after fast-forward rebasing and
-// identical-spend deduplication (chia eligible_coin_spends.py — SingletonFastForward.
-// process_fast_forward_spends + IdenticalSpendDedup.get_deduplication_info).
+// identical-spend deduplication.
 struct ProcessedItem {
     unique_spends: Vec<CoinSpend>,
     unique_additions: Vec<Coin>,
     // The cost the block saves by not repeating already-included identical spends.
     cost_saving: u64,
     // puzzle hash -> the singleton's lineage AFTER this item's spends — committed by the caller
-    // iff the item is included (chia update_fast_forward_spends).
+    // iff the item is included.
     ff_update: HashMap<Bytes32, UnspentLineageInfo>,
     // Dedup entries discovered in this item: (coin id, solution bytes, per-spend cost) —
-    // committed by the caller as soon as processing succeeds (chia commits them inside
-    // get_deduplication_info, before the fit checks).
+    // committed by the caller as soon as processing succeeds, before the fit checks.
     new_dedup: Vec<(Bytes32, Vec<u8>, u64)>,
 }
 
 enum ProcessError {
-    // chia SkipDedup: the item spends a dedup coin with a different solution than the one the
-    // block is deduplicating on — skip the item WITHOUT charging the skip budget.
+    // The item spends a dedup coin with a different solution than the one the block is
+    // deduplicating on — skip the item WITHOUT charging the skip budget.
     SkipDedup(&'static str),
-    // Any other failure (chia catches Exception): skip the item and charge the skip budget.
+    // Any other failure: skip the item and charge the skip budget.
     Failed(String),
 }
 
-// chia `SingletonFastForward.process_fast_forward_spends` + `IdenticalSpendDedup
-// .get_deduplication_info` for one item: rebase every FF spend onto the latest lineage (the
-// committed block state first, else the item's own resolved lineage), re-validate the rebased
-// bundle, then fold identical dedup spends into the block's dedup state.
+// Fast-forward + dedup processing for one item: rebase every FF spend onto the latest lineage
+// (the committed block state first, else the item's own resolved lineage), re-validate the
+// rebased bundle, then fold identical dedup spends into the block's dedup state.
 fn process_item_spends(
     item: &MempoolItem,
     dedup_spends: &HashMap<Bytes32, (Vec<u8>, u64)>,
@@ -505,7 +474,7 @@ fn process_item_spends(
     constants: &ConsensusConstants,
     height: u32,
 ) -> Result<ProcessedItem, ProcessError> {
-    // ---- fast-forward pass (eligible_coin_spends.py:174-291) ------------------------------------
+    // ---- fast-forward pass ----------------------------------------------------------------------
     let mut post_ff: Vec<(CoinSpend, bool, Vec<Coin>, u64)> = Vec::new();
     let mut ff_update: HashMap<Bytes32, UnspentLineageInfo> = HashMap::new();
     let mut fast_forwarded = 0usize;
@@ -521,7 +490,7 @@ fn process_item_spends(
         }
         let puzzle_hash = bcs.coin_spend.coin.puzzle_hash;
         let amount = bcs.coin_spend.coin.amount;
-        // chia reads only the COMMITTED block state here; absent that, the item's own lineage.
+        // Read only the committed block state here; absent that, the item's own lineage.
         let (target, already_chained) = match ff_state.get(&puzzle_hash) {
             Some(lineage) => (*lineage, true),
             None => {
@@ -533,7 +502,7 @@ fn process_item_spends(
         };
         if !already_chained && target.coin_id == bcs.coin_id() {
             // We ARE the latest version: no rebase; record the NEXT version from our additions
-            // so later FF spends chain (chia set_next_singleton_version).
+            // so later FF spends chain.
             let Some(child) = bcs
                 .additions
                 .iter()
@@ -559,7 +528,7 @@ fn process_item_spends(
             ));
             continue;
         }
-        // Rebase (chia perform_the_fast_forward): spend the latest version instead.
+        // Rebase: spend the latest version instead.
         let new_coin = Coin {
             parent_coin_info: target.parent_id,
             puzzle_hash,
@@ -619,8 +588,7 @@ fn process_item_spends(
         fast_forwarded += 1;
     }
     if fast_forwarded > 0 {
-        // Re-run the rebased bundle to make sure it remains valid (chia
-        // get_conditions_from_spendbundle on the new SpendBundle, :274-291).
+        // Re-run the rebased bundle to make sure it remains valid.
         let new_bundle = SpendBundle {
             coin_spends: post_ff.iter().map(|(spend, ..)| spend.clone()).collect(),
             aggregated_signature: item.bundle.aggregated_signature,
@@ -631,7 +599,7 @@ fn process_item_spends(
             ))
         })?;
     }
-    // ---- dedup pass (eligible_coin_spends.py:118-167) -------------------------------------------
+    // ---- dedup pass -----------------------------------------------------------------------------
     let mut unique_spends: Vec<CoinSpend> = Vec::new();
     let mut unique_additions: Vec<Coin> = Vec::new();
     let mut cost_saving: u64 = 0;
@@ -670,8 +638,8 @@ fn process_item_spends(
 }
 
 // What a peak advance did to the pool: items dropped (spent/invalidated), items expired (an
-// ASSERT_BEFORE bound the new peak passed — chia MempoolRemoveReason.EXPIRED), and parked bundles
-// that became admissible — (name, cost, fee), the re-gossip announcement tuple.
+// ASSERT_BEFORE bound the new peak passed), and parked bundles that became admissible —
+// (name, cost, fee), the re-gossip announcement tuple.
 pub struct NewPeakResult {
     pub dropped: usize,
     pub expired: usize,
@@ -689,16 +657,15 @@ pub struct MempoolItem {
     pub cost: u64,
     pub spends: usize,
     pub removals: Vec<Bytes32>,
-    // Per-coin-spend dedup/FF metadata in the bundle's spend order (chia
-    // MempoolItem.bundle_coin_spends; a Vec, not a map, so block assembly is
-    // byte-deterministic). Empty when the bundle carries no coin spends (test-synthesized
-    // conditions); such items behave as plain spends throughout.
+    // Per-coin-spend dedup/FF metadata in the bundle's spend order (a Vec, not a map, so block
+    // assembly is byte-deterministic). Empty when the bundle carries no coin spends
+    // (test-synthesized conditions); such items behave as plain spends throughout.
     pub bundle_coin_spends: Vec<BundleCoinSpend>,
-    // Effective time-locks computed at admission (chia MempoolItem.assert_height /
-    // assert_before_*): the inputs to can_replace's equality clauses and the new-peak expiry sweep.
+    // Effective time-locks computed at admission: the inputs to can_replace's equality clauses
+    // and the new-peak expiry sweep.
     pub timelocks: EffectiveTimelocks,
-    // The peak height when this item entered the mempool (chia
-    // MempoolItem.height_added_to_mempool): the fee estimator's "blocks waited" reference frame.
+    // The peak height when this item entered the mempool: the fee estimator's "blocks waited"
+    // reference frame.
     pub height_added: u32,
     seq: u64,
 }
@@ -714,7 +681,7 @@ impl MempoolItem {
         }
     }
 
-    /// This item's dedup/FF metadata for `coin_id` — chia `item.bundle_coin_spends.get(coin_id)`.
+    /// This item's dedup/FF metadata for `coin_id`.
     #[must_use]
     pub fn bundle_coin_spend(&self, coin_id: &Bytes32) -> Option<&BundleCoinSpend> {
         self.bundle_coin_spends
@@ -722,9 +689,9 @@ impl MempoolItem {
             .find(|bcs| bcs.coin_id() == *coin_id)
     }
 
-    // The conflict-index keys for this item: each removal coin id, EXCEPT that a fast-forward
+    // The conflict-index keys for this item: each removal coin id, except that a fast-forward
     // spend indexes under its LATEST singleton coin id — that's the coin whose on-chain spend
-    // must reach this item (chia mempool.py:485-492).
+    // must reach this item.
     fn index_keys(&self) -> Vec<Bytes32> {
         self.removals
             .iter()
@@ -736,14 +703,11 @@ impl MempoolItem {
             .collect()
     }
 
-    // The mempool priority key: fee per VIRTUAL cost, where virtual cost adds a per-spend
-    // penalty — chia 481ccb305 "Mempool spend limit (#20703)":
-    // `virtual_cost = cost + num_spends * SPEND_PENALTY_COST` (chia/types/mempool_item.py
-    // ::virtual_cost) and eviction/assembly order by `priority DESC, seq ASC`
-    // (chia/full_node/mempool.py). UNCONDITIONAL: the penalty is mempool policy with no
-    // activation gate — the earlier SF9 gating here was our own invention and diverged below
-    // the SF9 height (many-spend spam stayed competitive that chia deprioritizes; spends per
-    // block are capped, so spend count is the scarcer resource the penalty prices).
+    // The mempool priority key: fee per VIRTUAL cost, where
+    // `virtual_cost = cost + num_spends * SPEND_PENALTY_COST` and eviction/assembly order by
+    // `priority DESC, seq ASC`. Unconditional: the penalty is mempool policy with no activation
+    // gate — spends per block are capped, so spend count is the scarcer resource the penalty
+    // prices.
     #[must_use]
     #[allow(clippy::cast_precision_loss)]
     pub fn fee_per_virtual_cost(&self) -> f64 {
@@ -766,55 +730,50 @@ impl MempoolItem {
 pub struct Mempool {
     // MAX_BLOCK_COST_CLVM * MEMPOOL_BLOCK_BUFFER — the total-cost ceiling that triggers eviction.
     max_total_cost: u64,
-    // per-transaction cost cap — chia's max_tx_clvm_cost = MAX_BLOCK_COST_CLVM // 2
-    // (mempool_manager.py:348-350, enforced :747-748 with BLOCK_COST_EXCEEDS_MAX).
+    // Per-transaction cost cap: half a block's cost.
     max_tx_cost: u64,
-    // MAX_BLOCK_COST_CLVM - BLOCK_OVERHEAD (chia max_block_clvm_cost) — the expiring-soon budget.
+    // MAX_BLOCK_COST_CLVM - BLOCK_OVERHEAD — the expiring-soon budget.
     max_block_clvm_cost: u64,
     total_cost: u64,
-    // Sum of resident fees (chia Mempool._total_fee) — the INVALID_BLOCK_FEE_AMOUNT overflow guard.
+    // Sum of resident fees — the INVALID_BLOCK_FEE_AMOUNT overflow guard.
     total_fee: u64,
-    // The most recent transaction block's (height, timestamp) — what chia's mempool peak is
-    // (mempool_manager.py new_peak: "new_peak should always be the most recent *transaction*
-    // block"). Both are the reference frame for every time-lock check at admission.
+    // The most recent transaction block's (height, timestamp): the reference frame for every
+    // time-lock check at admission.
     peak: Option<(u32, u64)>,
     items: HashMap<Bytes32, MempoolItem>,
-    // index coin id -> owning item names (chia's `spends` table, mempool.py:144-153): a coin may
-    // be spent by SEVERAL resident items (identical dedup spends coexist; multiple FF spends of
-    // one singleton chain), and a fast-forward spend indexes under its LATEST singleton coin id.
+    // index coin id -> owning item names: a coin may be spent by SEVERAL resident items
+    // (identical dedup spends coexist; multiple FF spends of one singleton chain), and a
+    // fast-forward spend indexes under its LATEST singleton coin id.
     by_coin: HashMap<Bytes32, Vec<Bytes32>>,
-    // monotonic insertion counter: FIFO tiebreak at equal priority (chia: priority DESC, seq ASC).
+    // Monotonic insertion counter: FIFO tiebreak at equal priority.
     seq: u64,
     // Bundles parked for an unmet ASSERT_HEIGHT — absolute or relative, keyed by the EFFECTIVE
-    // assert height — chia PendingTxCache; drained by `new_peak` once `assert_height <= peak`.
-    // Only height locks park: chia fails seconds-based locks outright (the pend-vs-fail split
-    // in add_spend_bundle).
+    // assert height; drained by `new_peak` once `assert_height <= peak`. Only height locks park:
+    // seconds-based locks fail outright.
     pending: HashMap<Bytes32, PendingEntry>,
     // Bundles rejected for a MEMPOOL_CONFLICT (double-spend of a coin an existing mempool item
-    // spends) — chia ConflictTxCache. `conflict_order` holds FIFO insertion order (a HashMap has
-    // none) so eviction pops the oldest first; `conflict_cost` tracks the summed cost against
-    // `conflict_cache_max_cost`. Drained WHOLE and re-admitted on each new peak (a resolved
-    // conflict re-admits, a still-conflicting one re-caches, a now-double-spent one drops).
+    // spends). `conflict_order` holds FIFO insertion order so eviction pops the oldest first;
+    // `conflict_cost` tracks the summed cost against `conflict_cache_max_cost`. Drained whole
+    // and re-admitted on each new peak (a resolved conflict re-admits, a still-conflicting one
+    // re-caches, a now-double-spent one drops).
     conflict: HashMap<Bytes32, ConflictEntry>,
     conflict_order: std::collections::VecDeque<Bytes32>,
     conflict_cost: u64,
     conflict_cache_max_cost: u64,
-    // The seen cache — chia seen_bundle_hashes (mempool_manager.py:329, seen_cache_size 10_000):
-    // recently-validated bundle ids (resident) plus KNOWN-INVALID ones (ValidationError rejects),
-    // so a failed bundle isn't revalidated on every re-announce. FIFO-evicting.
+    // The seen cache: recently-validated bundle ids (resident) plus known-invalid ones, so a
+    // failed bundle isn't revalidated on every re-announce. FIFO-evicting.
     seen: HashSet<Bytes32>,
     seen_order: std::collections::VecDeque<Bytes32>,
-    // The bitcoin-core-derived fee estimator (chia mempool.fee_estimator): fed by add_to_pool /
-    // remove (non-block) / new_peak (block inclusion). Answers the `get_fee_estimate` RPC and the
-    // `RequestFeeEstimates` wallet handler. See node/src/fee_estimator.rs.
+    // The bitcoin-core-derived fee estimator: fed by add_to_pool / remove (non-block) / new_peak
+    // (block inclusion). Answers the `get_fee_estimate` RPC and the `RequestFeeEstimates` wallet
+    // handler. See node/src/fee_estimator.rs.
     fee_estimator: FeeEstimator,
 }
 
-// chia MempoolManager.seen_cache_size.
 const SEEN_CACHE_SIZE: usize = 10_000;
 
-// A parked bundle (chia PendingTxCache entry): everything needed to retry admission plus the
-// effective assert height (the drain key) and fee/cost (the re-gossip tuple + eviction order).
+// A parked bundle: everything needed to retry admission plus the effective assert height (the
+// drain key) and fee/cost (the re-gossip tuple + eviction order).
 struct PendingEntry {
     bundle: SpendBundle,
     conds: SpendBundleConditions,
@@ -823,9 +782,9 @@ struct PendingEntry {
     assert_height: u32,
 }
 
-// A conflict-cached bundle (chia ConflictTxCache entry, pending_tx_cache.py:12-47): everything
-// needed to re-run admission plus the fee/cost (the re-gossip tuple + FIFO eviction accounting).
-// Unlike `PendingEntry` there is no drain key — the whole cache is retried on every new peak.
+// A conflict-cached bundle: everything needed to re-run admission plus the fee/cost (the
+// re-gossip tuple + FIFO eviction accounting). Unlike `PendingEntry` there is no drain key — the
+// whole cache is retried on every new peak.
 struct ConflictEntry {
     bundle: SpendBundle,
     conds: SpendBundleConditions,
@@ -836,8 +795,8 @@ struct ConflictEntry {
 impl Mempool {
     #[must_use]
     pub fn new(constants: &ConsensusConstants) -> Self {
-        // chia mempool_manager.py:348-350: a single transaction may cost at most HALF a block —
-        // the pool ceiling stays MAX_BLOCK_COST_CLVM * MEMPOOL_BLOCK_BUFFER.
+        // A single transaction may cost at most half a block; the pool ceiling is
+        // MAX_BLOCK_COST_CLVM * MEMPOOL_BLOCK_BUFFER.
         let max_tx_cost = constants.max_block_cost_clvm / 2;
         let block_overhead = QUOTE_BYTES * constants.cost_per_byte + QUOTE_EXECUTION_COST;
         let max_total_cost = constants
@@ -857,18 +816,15 @@ impl Mempool {
             conflict: HashMap::new(),
             conflict_order: std::collections::VecDeque::new(),
             conflict_cost: 0,
-            // chia `ConflictTxCache(self.constants.MAX_BLOCK_COST_CLVM * 1, 1000)`
-            // (mempool_manager.py:354): the cost cap is exactly one block's cost.
+            // The conflict-cache cost cap is exactly one block's cost.
             conflict_cache_max_cost: constants.max_block_cost_clvm,
             seen: HashSet::new(),
             seen_order: std::collections::VecDeque::new(),
-            // chia BitcoinFeeEstimator.mempool_max_size = mempool max cost.
             fee_estimator: FeeEstimator::new(max_total_cost),
         }
     }
 
-    /// chia `add_and_maybe_pop_seen` (mempool_manager.py:462-466): record a bundle id in the
-    /// bounded seen cache, FIFO-evicting past 10,000 entries.
+    /// Record a bundle id in the bounded seen cache, FIFO-evicting past 10,000 entries.
     pub fn add_seen(&mut self, name: Bytes32) {
         if self.seen.insert(name) {
             self.seen_order.push_back(name);
@@ -880,22 +836,21 @@ impl Mempool {
         }
     }
 
-    /// chia `seen` — whether this bundle id was validated recently (resident or known-invalid).
+    /// Whether this bundle id was validated recently (resident or known-invalid).
     #[must_use]
     pub fn seen(&self, name: &Bytes32) -> bool {
         self.seen.contains(name)
     }
 
-    /// chia `remove_seen`.
     pub fn remove_seen(&mut self, name: &Bytes32) {
         if self.seen.remove(name) {
             self.seen_order.retain(|entry| entry != name);
         }
     }
 
-    // Set the reference frame for time-lock checks: the most recent TRANSACTION block's height and
-    // timestamp (chia's mempool peak — for the next block to be farmed, that peak IS the previous
-    // transaction block the locks validate against).
+    // Set the reference frame for time-lock checks: the most recent TRANSACTION block's height
+    // and timestamp — for the next block to be farmed, that peak IS the previous transaction
+    // block the locks validate against.
     pub fn set_peak(&mut self, height: u32, timestamp: u64) {
         self.peak = Some((height, timestamp));
     }
@@ -915,20 +870,20 @@ impl Mempool {
         self.total_cost
     }
 
-    /// Sum of resident fees (chia `Mempool.total_mempool_fees`).
+    /// Sum of resident fees.
     #[must_use]
     pub fn total_fees(&self) -> u64 {
         self.total_fee
     }
 
     /// Count of bundles held in the conflict cache — rejected for a MEMPOOL_CONFLICT and awaiting
-    /// retry on a future peak (chia `ConflictTxCache` size, `len(self._txs)`).
+    /// retry on a future peak.
     #[must_use]
     pub fn conflict_cache_len(&self) -> usize {
         self.conflict.len()
     }
 
-    /// Summed cost of the conflict-cached bundles (chia `ConflictTxCache.cost()`).
+    /// Summed cost of the conflict-cached bundles.
     #[must_use]
     pub fn conflict_cache_cost(&self) -> u64 {
         self.conflict_cost
@@ -939,8 +894,8 @@ impl Mempool {
         self.max_total_cost
     }
 
-    /// The fee estimator (chia `mempool.fee_estimator`) — read surface for the `get_fee_estimate`
-    /// RPC and the `RequestFeeEstimates` wallet handler.
+    /// The fee estimator — read surface for the `get_fee_estimate` RPC and the
+    /// `RequestFeeEstimates` wallet handler.
     #[must_use]
     pub fn fee_estimator(&self) -> &FeeEstimator {
         &self.fee_estimator
@@ -952,24 +907,22 @@ impl Mempool {
         &mut self.fee_estimator
     }
 
-    /// chia `Mempool.at_full_capacity` (mempool.py:509-514): whether a transaction of `cost`
-    /// cannot fit without eviction.
+    /// Whether a transaction of `cost` cannot fit without eviction.
     #[must_use]
     pub fn at_full_capacity(&self, cost: u64) -> bool {
         self.total_cost.saturating_add(cost) > self.max_total_cost
     }
 
-    /// chia `Mempool.get_min_fee_rate` (mempool.py:301-327): the minimum fee-per-cost a
-    /// transaction of `cost` must beat to get in — 0 while there's room, otherwise the
-    /// fee-per-cost of the last item that would have to be evicted (walking lowest
-    /// fee-per-cost first), `None` if it can't fit even after evicting everything.
+    /// The minimum fee-per-cost a transaction of `cost` must beat to get in — 0 while there's
+    /// room, otherwise the fee-per-cost of the last item that would have to be evicted (walking
+    /// lowest fee-per-cost first), `None` if it can't fit even after evicting everything.
     #[must_use]
     #[allow(clippy::cast_precision_loss)]
     pub fn get_min_fee_rate(&self, cost: u64) -> Option<f64> {
         if !self.at_full_capacity(cost) {
             return Some(0.0);
         }
-        // chia: ORDER BY fee_per_cost ASC, seq DESC.
+        // ORDER BY fee_per_cost ASC, seq DESC.
         let mut candidates: Vec<(f64, u64, u64)> = self
             .items
             .values()
@@ -990,9 +943,9 @@ impl Mempool {
         None
     }
 
-    /// chia `is_fee_enough` (mempool_manager.py:447-460) — the pre-fetch gate for gossiped
-    /// transactions: anything with a cost gets in while there's room; at capacity the advertised
-    /// fee must clear the nonzero floor (5 fpc) AND strictly beat the pool's min fee rate.
+    /// The pre-fetch gate for gossiped transactions: anything with a cost gets in while there's
+    /// room; at capacity the advertised fee must clear the nonzero floor AND strictly beat the
+    /// pool's min fee rate.
     #[must_use]
     #[allow(clippy::cast_precision_loss)]
     pub fn is_fee_enough(&self, fees: u64, cost: u64) -> bool {
@@ -1021,9 +974,9 @@ impl Mempool {
         self.items.get(name).map(|i| i.bundle.clone())
     }
 
-    /// Validate `bundle` (with its pre-run `conds`) against the peak + pool and, if valid, admit it in fee
-    /// order — evicting the lowest fee-per-cost items if it would exceed capacity. Returns the bundle name.
-    /// Mirrors `mempool_manager.py::add_spend_bundle` / `validate_spend_bundle`.
+    /// Validate `bundle` (with its pre-run `conds`) against the peak + pool and, if valid, admit
+    /// it in fee order — evicting the lowest fee-per-cost items if it would exceed capacity.
+    /// Returns the bundle name.
     ///
     /// # Errors
     /// Returns the specific [`MempoolError`] (double-spend, conflict, unknown-unspent, cost, fee-too-low)
@@ -1057,8 +1010,7 @@ impl Mempool {
             .map(Coin::name)
             .collect();
 
-        // 0. Per-spend dedup/FF metadata — chia validate_spend_bundle's bundle_coin_spends build
-        //    (mempool_manager.py:667-710): join each CoinSpend to its conditions spend, enforce
+        // 0. Per-spend dedup/FF metadata: join each CoinSpend to its conditions spend, enforce
         //    canonical solutions on DEDUP-eligible spends, resolve the latest unspent singleton
         //    lineage for FF-eligible spends, and reject all-fast-forward bundles (an FF spend can
         //    only be evicted alongside a normal spend). A bundle with no coin spends
@@ -1071,8 +1023,8 @@ impl Mempool {
         //    that is neither on-chain nor created in-bundle (ephemeral) is unknown-unspent. The
         //    fetched records double as the time-lock reference frame below — one query, both uses.
         let store_records = store.get_coin_records(&removals).await?;
-        // (confirmed_height, timestamp) per removal — the inputs `compute_assert_height` and
-        // `check_time_locks` resolve relative/birth locks against.
+        // (confirmed_height, timestamp) per removal — the inputs the relative/birth locks are
+        // resolved against.
         let mut records: HashMap<Bytes32, (u32, u64)> = store_records
             .iter()
             .map(|r| (r.coin.name(), (r.confirmed_block_index, r.timestamp)))
@@ -1080,9 +1032,9 @@ impl Mempool {
         for coin_id in &removals {
             if !records.contains_key(coin_id) {
                 if created.contains(coin_id) {
-                    // Ephemeral removal: chia synthesizes a coin record confirmed at peak+1 with
-                    // the PEAK's timestamp (mempool_manager.py:721-737) — all spends land
-                    // simultaneously, so an ephemeral ASSERT_SECONDS_RELATIVE 0 still passes.
+                    // Ephemeral removal: synthesize a coin record confirmed at peak+1 with the
+                    // PEAK's timestamp — all spends land simultaneously, so an ephemeral
+                    // ASSERT_SECONDS_RELATIVE 0 still passes.
                     records.insert(*coin_id, (peak_height.saturating_add(1), peak_timestamp));
                 } else {
                     return Err(MempoolError::UnknownUnspent(*coin_id));
@@ -1090,27 +1042,27 @@ impl Mempool {
             }
         }
 
-        // 1b. Fee gates, chia's validate_spend_bundle order (fees right after the removal
-        //     records, BEFORE conflict classification and time-locks — mempool_manager.py:742-766).
+        // 1b. Fee gates: fees right after the removal records, BEFORE conflict classification and
+        //     time-locks.
         let fee = u64::try_from(conds.removal_amount.saturating_sub(conds.addition_amount))
             .unwrap_or(u64::MAX);
-        // chia :750-755: the per-item fee cap (2^50) plus the signed-int64 fee-sum headroom guard.
+        // The per-item fee cap (2^50) plus the signed-int64 fee-sum headroom guard.
         if fee > MEMPOOL_ITEM_FEE_LIMIT
             || u64::try_from(i64::MAX).unwrap_or(u64::MAX) - self.total_fee <= fee
         {
             return Err(MempoolError::FeeLimitExceeded);
         }
-        // chia :757-766: at capacity, the fee must clear the nonzero floor (5 fpc) and strictly
-        // beat the min fee rate — checked BEFORE any expensive work, and regardless of what the
-        // insertion-time eviction would find.
+        // At capacity, the fee must clear the nonzero floor and strictly beat the min fee rate —
+        // checked BEFORE any expensive work, regardless of what the insertion-time eviction would
+        // find.
         if self.at_full_capacity(cost) {
             #[allow(clippy::cast_precision_loss)]
             let fees_per_cost = fee as f64 / cost as f64;
             if fees_per_cost < NONZERO_FEE_MINIMUM_FPC {
                 return Err(MempoolError::FeeNearZero);
             }
-            // chia maps an unfittable cost to INVALID_COST_RESULT; unreachable here since
-            // max_tx_cost (half a block) always fits an emptied pool — fold into FeeTooLow.
+            // Unreachable in practice: max_tx_cost (half a block) always fits an emptied pool —
+            // fold into FeeTooLow.
             let Some(min_fee_rate) = self.get_min_fee_rate(cost) else {
                 return Err(MempoolError::FeeTooLow);
             };
@@ -1119,10 +1071,9 @@ impl Mempool {
             }
         }
 
-        // 1c. Double-spend against the confirmed set — chia check_removals runs AFTER the fee
-        //     gates (mempool_manager.py:770, check at :242): a SPENT removal is fine iff the
-        //     spend supports fast-forward (the singleton has a newer unspent version to rebase
-        //     onto); anything else is a double-spend.
+        // 1c. Double-spend against the confirmed set, AFTER the fee gates: a SPENT removal is
+        //     fine iff the spend supports fast-forward (the singleton has a newer unspent version
+        //     to rebase onto); anything else is a double-spend.
         for r in &store_records {
             if r.spent {
                 let coin_id = r.coin.name();
@@ -1136,16 +1087,15 @@ impl Mempool {
             }
         }
 
-        // 2. Time-locks (chia add_spend_bundle order: compute_assert_height, the impossible-
-        //    constraint rejects, then the check_time_locks pend-vs-fail split — all against the
-        //    peak's height AND timestamp, heights strictly `assert_height <= peak`).
+        // 2. Time-locks: effective bounds, the impossible-constraint rejects, then the
+        //    pend-vs-fail split — all against the peak's height AND timestamp.
         let timelocks = effective_timelocks(&conds, &records);
         if timelocks
             .assert_before_height
             .is_some_and(|b| b <= timelocks.assert_height)
         {
-            // chia IMPOSSIBLE_*_ABSOLUTE_CONSTRAINTS: FAILED outright — never parked, even though
-            // the unmet assert alone would pend (mempool_manager.py:806-810).
+            // Impossible constraints fail outright — never parked, even though the unmet assert
+            // alone would pend.
             return Err(MempoolError::ImpossibleTimelock(
                 name,
                 TimelockFailure::ImpossibleHeightConstraints,
@@ -1170,11 +1120,10 @@ impl Mempool {
             None => {}
         }
 
-        // 3. Conflict against resident items spending the same coins — chia check_removals'
-        //    FF/dedup-aware classification (mempool_manager.py:246-286): a spent coin is NOT a
-        //    conflict when both sides can chain (two FF spends of one singleton) or merge
-        //    (identical DEDUP solutions); everything else falls to replace-by-fee
-        //    (`can_replace`, rules since PR #1971) and, failing that, a Conflict reject.
+        // 3. Conflict against resident items spending the same coins — FF/dedup-aware
+        //    classification: a spent coin is NOT a conflict when both sides can chain (two FF
+        //    spends of one singleton) or merge (identical DEDUP solutions); everything else falls
+        //    to replace-by-fee (`can_replace`) and, failing that, a Conflict reject.
         let mut conflict_names: Vec<Bytes32> = Vec::new();
         for coin_id in &removals {
             let Some(owners) = self.by_coin.get(coin_id) else {
@@ -1191,7 +1140,7 @@ impl Mempool {
                     continue;
                 };
                 // The pool item's spend of this coin: direct, or the FF spend whose latest
-                // singleton version IS this coin (chia :250-261).
+                // singleton version IS this coin.
                 let conflict_bcs = item.bundle_coin_spend(coin_id).or_else(|| {
                     item.bundle_coin_spends.iter().find(|b| {
                         b.latest_singleton_lineage
@@ -1202,7 +1151,7 @@ impl Mempool {
                 let is_conflict = match conflict_bcs {
                     None if item.bundle_coin_spends.is_empty() => true, // plain (synthetic) item
                     None => {
-                        // chia :262-265 — "not expected but handle it gracefully".
+                        // Not expected but handled gracefully.
                         warn!(
                             coin_id = %coin_id, item = %owner,
                             "coin indexed but not found in mempool item"
@@ -1251,11 +1200,11 @@ impl Mempool {
                     .find(|c| self.by_coin.contains_key(*c))
                     .copied()
                     .unwrap_or_default();
-                // chia add_spend_bundle (:609-613): a MEMPOOL_CONFLICT result sets the bundle
-                // aside in the ConflictTxCache rather than dropping it — the conflicting resident
-                // may leave the pool unconfirmed (expire, or be replaced by a higher-fee tx) and
-                // free the coin, at which point new_peak's conflict drain re-admits this bundle.
-                // The wire ack is still PENDING/MEMPOOL_CONFLICT (unchanged).
+                // A MEMPOOL_CONFLICT result sets the bundle aside in the conflict cache rather
+                // than dropping it — the conflicting resident may leave the pool unconfirmed
+                // (expire, or be replaced by a higher-fee tx) and free the coin, at which point
+                // new_peak's conflict drain re-admits this bundle. The wire ack is still
+                // PENDING/MEMPOOL_CONFLICT.
                 self.cache_conflict(name, bundle, conds, fee, cost);
                 return Err(MempoolError::Conflict(first));
             }
@@ -1276,7 +1225,7 @@ impl Mempool {
             removals,
             bundle_coin_spends,
             timelocks,
-            // chia sets height_added_to_mempool to the peak height at admission time.
+            // The peak height at admission time.
             height_added: peak_height,
             seq,
         };
@@ -1285,11 +1234,10 @@ impl Mempool {
         Ok(name)
     }
 
-    // chia validate_spend_bundle's bundle_coin_spends construction
-    // (mempool_manager.py:667-710): join every CoinSpend to its SpendBundleConditions spend,
-    // enforce solution canonicality on DEDUP-eligible spends, resolve the latest unspent
-    // singleton lineage for spends that are FF-eligible AND structurally fast-forwardable, and
-    // reject a bundle whose spends are ALL fast-forward.
+    // Join every CoinSpend to its SpendBundleConditions spend, enforce solution canonicality on
+    // DEDUP-eligible spends, resolve the latest unspent singleton lineage for spends that are
+    // FF-eligible AND structurally fast-forwardable, and reject a bundle whose spends are ALL
+    // fast-forward.
     async fn build_bundle_coin_spends<S: CoinStore + Sync>(
         &self,
         store: &S,
@@ -1317,7 +1265,7 @@ impl Mempool {
             if (spend_conds.flags & ELIGIBLE_FOR_FF) != 0 && supports_fast_forward(coin_spend) {
                 // The singleton must still have an unspent version; if it was fully spent in a
                 // non-FF way this spend can never become valid, so it degrades to a normal spend
-                // requiring its exact coin unspent (chia mempool_manager.py:680-689).
+                // requiring its exact coin unspent.
                 lineage = store
                     .get_unspent_lineage_info(&spend_conds.puzzle_hash)
                     .await?;
@@ -1341,8 +1289,8 @@ impl Mempool {
                 latest_singleton_lineage: lineage,
             });
         }
-        // fast-forward spends are only allowed bundled with other, non-FF spends: to evict an FF
-        // spend it must ride with a normal spend a block can invalidate (chia :706-710).
+        // Fast-forward spends are only allowed bundled with other, non-FF spends: to evict an FF
+        // spend it must ride with a normal spend a block can invalidate.
         if out.iter().all(BundleCoinSpend::supports_fast_forward) {
             return Err(MempoolError::InvalidSpendBundle(
                 "all spends are fast-forward",
@@ -1351,16 +1299,15 @@ impl Mempool {
         Ok(out)
     }
 
-    // chia `Mempool.add_to_pool` (mempool.py:395-502): the expiring-soon budget sweep, then the
-    // POOL_FULL eviction of the lowest-priority items until the incoming item fits. The fee-rate
-    // admission gates already ran (chia's validate_spend_bundle order) — eviction here does NOT
-    // re-compare against the incoming fee.
+    // The expiring-soon budget sweep, then the POOL_FULL eviction of the lowest-priority items
+    // until the incoming item fits. The fee-rate admission gates already ran — eviction here does
+    // NOT re-compare against the incoming fee.
     fn add_to_pool(&mut self, item: MempoolItem) -> Result<(), MempoolError> {
         let (peak_height, peak_timestamp) = self.peak.unwrap_or((0, 0));
-        // chia mempool.py:406-444 — expiring-soon budget: if the incoming item expires within 48
-        // blocks / 900 seconds, all such items together may hold at most one block's cost.
-        // chia's window query = expiring items ordered (priority DESC, seq ASC) with a running
-        // cumulative cost, processed from the LOWEST-priority end (ORDER BY cumulative_cost DESC).
+        // Expiring-soon budget: if the incoming item expires within 48 blocks / 900 seconds, all
+        // such items together may hold at most one block's cost. Expiring items are ordered
+        // (priority DESC, seq ASC) with a running cumulative cost, processed from the
+        // lowest-priority end.
         let block_cutoff = peak_height.saturating_add(EXPIRING_BLOCK_CUTOFF);
         let time_cutoff = peak_timestamp.saturating_add(EXPIRING_TIME_CUTOFF);
         let expires_soon = |tl: &EffectiveTimelocks| {
@@ -1395,7 +1342,7 @@ impl Mempool {
                     break;
                 }
                 // Can't evict a higher-priority expiring item: abort, and do NOT evict what was
-                // set aside (chia returns without removing `to_remove`).
+                // set aside.
                 if priority > incoming_priority {
                     return Err(MempoolError::FeeTooLow);
                 }
@@ -1405,8 +1352,8 @@ impl Mempool {
                 self.remove(&name);
             }
         }
-        // chia mempool.py:446-460 — POOL_FULL: keep the highest-priority prefix whose total cost
-        // fits alongside the incoming item; evict the rest.
+        // POOL_FULL: keep the highest-priority prefix whose total cost fits alongside the
+        // incoming item; evict the rest.
         if self.total_cost.saturating_add(item.cost) > self.max_total_cost {
             let mut by_priority: Vec<(Bytes32, f64, u64, u64)> = self
                 .items
@@ -1418,8 +1365,8 @@ impl Mempool {
                     .unwrap_or(Ordering::Equal)
                     .then(a.2.cmp(&b.2))
             });
-            // chia's window: the running total INCLUDES the current row, so kept is the strict
-            // prefix whose running total stays within budget — everything after is evicted.
+            // The running total INCLUDES the current row, so kept is the strict prefix whose
+            // running total stays within budget — everything after is evicted.
             let budget = self.max_total_cost.saturating_sub(item.cost);
             let mut running: u64 = 0;
             let mut evict: Vec<Bytes32> = Vec::new();
@@ -1434,8 +1381,8 @@ impl Mempool {
             }
         }
         let name = item.name;
-        // Index insertion — FF spends index under their LATEST singleton coin id
-        // (chia mempool.py:485-492); a coin id may map to several owners (dedup / FF chains).
+        // Index insertion — FF spends index under their LATEST singleton coin id; a coin id may
+        // map to several owners (dedup / FF chains).
         for key in item.index_keys() {
             let owners = self.by_coin.entry(key).or_default();
             if !owners.contains(&name) {
@@ -1444,8 +1391,7 @@ impl Mempool {
         }
         self.total_cost += item.cost;
         self.total_fee += item.fee;
-        // chia mempool.py:502-503: feed the estimator AFTER the totals update, with the new
-        // mempool cost (add_mempool_item takes the post-insert FeeMempoolInfo).
+        // Feed the estimator AFTER the totals update, with the new mempool cost.
         let (cost, fee, height_added) = (item.cost, item.fee, item.height_added);
         let total = self.total_cost;
         self.fee_estimator
@@ -1454,14 +1400,12 @@ impl Mempool {
         Ok(())
     }
 
-    // chia's replace-by-fee rules (`mempool_manager.py::can_replace`, shaped by PR #1971): the new
-    // bundle must (a) spend a superset of every coin the conflicting items spend — otherwise replacing
-    // bundle AB with a higher-fee B kicks A out of the pool entirely, (b) strictly increase the
-    // aggregate fee-per-cost, (c) raise the total fee by at least MEMPOOL_MIN_FEE_INCREASE, and
-    // (d) leave the EFFECTIVE ASSERT_HEIGHT / ASSERT_BEFORE time-locks unchanged — chia compares
-    // MempoolItem.assert_height / assert_before_* (the compute_assert_height outputs), never the
-    // raw absolutes, and does not compare assert_seconds at all. chia's dedup and fast-forward
-    // eligibility clauses are omitted — those spend classes are not implemented here yet.
+    // Replace-by-fee rules: the new bundle must (a) spend a superset of every coin the
+    // conflicting items spend — otherwise replacing bundle AB with a higher-fee B kicks A out of
+    // the pool entirely, (b) strictly increase the aggregate fee-per-cost, (c) raise the total
+    // fee by at least MEMPOOL_MIN_FEE_INCREASE, and (d) leave the EFFECTIVE ASSERT_HEIGHT /
+    // ASSERT_BEFORE time-locks unchanged — the comparison runs on the effective bounds, never the
+    // raw absolutes, and does not compare assert_seconds at all.
     fn can_replace(
         &self,
         conflicting: &[Bytes32],
@@ -1473,13 +1417,13 @@ impl Mempool {
     ) -> bool {
         let mut conflicting_fees: u64 = 0;
         let mut conflicting_cost: u64 = 0;
-        // chia folds with optional_max over plain uint32s (0 = unconstrained) for assert_height
-        // and optional_min for the before-bounds.
+        // Fold with max over plain u32s (0 = unconstrained) for assert_height and min for the
+        // before-bounds.
         let mut assert_height: u32 = 0;
         let mut assert_before_height: Option<u32> = None;
         let mut assert_before_seconds: Option<u64> = None;
         // Replacements may not strip dedup/fast-forward eligibility from a coin spend — doing so
-        // could deny such spends from operating as intended (chia can_replace:1109-1132).
+        // could deny such spends from operating as intended.
         let mut existing_ff_spends: HashSet<Bytes32> = HashSet::new();
         let mut existing_dedup_spends: HashSet<Bytes32> = HashSet::new();
         for name in conflicting {
@@ -1513,8 +1457,7 @@ impl Mempool {
                     (a, b) => a.or(b),
                 };
         }
-        // Strictly higher fee-per-cost, compared exactly by cross-multiplication (chia uses float
-        // division; the inequality is identical for positive costs).
+        // Strictly higher fee-per-cost, compared exactly by cross-multiplication.
         if u128::from(new_fee) * u128::from(conflicting_cost)
             <= u128::from(conflicting_fees) * u128::from(new_cost)
         {
@@ -1529,9 +1472,9 @@ impl Mempool {
         {
             return false;
         }
-        // Eligibility preservation (chia can_replace:1178-1186): every coin the evicted items
-        // spent as FF/dedup must stay FF/dedup in the replacement. (The superset rule above
-        // guarantees the replacement spends these coins at all.)
+        // Eligibility preservation: every coin the evicted items spent as FF/dedup must stay
+        // FF/dedup in the replacement. (The superset rule above guarantees the replacement
+        // spends these coins at all.)
         let new_bcs_for = |coin_id: &Bytes32| {
             new_bundle_coin_spends
                 .iter()
@@ -1550,9 +1493,8 @@ impl Mempool {
         true
     }
 
-    // Park a height-locked bundle for retry (chia PendingTxCache), evicting the entry with the
-    // HIGHEST effective assert height at capacity (pending_tx_cache.py: "we start removing items
-    // with the highest assert_height first" — the furthest-from-admissible goes first).
+    // Park a height-locked bundle for retry, evicting the entry with the HIGHEST effective
+    // assert height at capacity — the furthest-from-admissible goes first.
     fn park_pending(
         &mut self,
         name: Bytes32,
@@ -1585,11 +1527,10 @@ impl Mempool {
         );
     }
 
-    // Set aside a bundle rejected for a MEMPOOL_CONFLICT so a later peak can retry it — chia
-    // `ConflictTxCache.add` (pending_tx_cache.py:22-38). Dedups by name (chia: an already-cached
-    // name is a no-op, no double-counted cost), records it as newest in the FIFO order, then
-    // evicts oldest-first while the summed cost clears one block's cost OR the item count clears
-    // the cap. `fee`/`cost` are the admission-time values already in scope at the conflict reject.
+    // Set aside a bundle rejected for a MEMPOOL_CONFLICT so a later peak can retry it. Dedups by
+    // name (an already-cached name is a no-op, no double-counted cost), records it as newest in
+    // the FIFO order, then evicts oldest-first while the summed cost clears one block's cost OR
+    // the item count clears the cap.
     fn cache_conflict(
         &mut self,
         name: Bytes32,
@@ -1612,8 +1553,8 @@ impl Mempool {
         );
         self.conflict_order.push_back(name);
         self.conflict_cost = self.conflict_cost.saturating_add(cost);
-        // chia `while cost > max_total_cost or len > max_size: pop the first-inserted`. A single
-        // over-cap entry evicts itself (it is also the oldest once alone), leaving an empty cache.
+        // A single over-cap entry evicts itself (it is also the oldest once alone), leaving an
+        // empty cache.
         while self.conflict_cost > self.conflict_cache_max_cost
             || self.conflict.len() > CONFLICT_CACHE_MAX_SIZE
         {
@@ -1626,9 +1567,9 @@ impl Mempool {
         }
     }
 
-    // Take every conflict-cached bundle out and reset the accounting — chia `ConflictTxCache.drain`
-    // (pending_tx_cache.py:40-44). The caller re-runs admission on each; anything that still
-    // conflicts re-populates the (now-empty) cache via `cache_conflict`.
+    // Take every conflict-cached bundle out and reset the accounting. The caller re-runs
+    // admission on each; anything that still conflicts re-populates the (now-empty) cache via
+    // `cache_conflict`.
     fn drain_conflict(&mut self) -> Vec<(Bytes32, ConflictEntry)> {
         self.conflict_order.clear();
         self.conflict_cost = 0;
@@ -1636,8 +1577,8 @@ impl Mempool {
     }
 
     // The pure index/accounting removal — no fee-estimator signal. Used for BLOCK_INCLUSION
-    // removals in `new_peak` (those feed the estimator as confirmations via `process_block`, never
-    // as `remove_tx` — chia mempool.py:386 excludes BLOCK_INCLUSION from remove_mempool_item).
+    // removals in `new_peak` (those feed the estimator as confirmations via `process_block`,
+    // never as `remove_tx`).
     fn remove_inner(&mut self, name: &Bytes32) -> Option<MempoolItem> {
         let item = self.items.remove(name)?;
         self.total_cost = self.total_cost.saturating_sub(item.cost);
@@ -1654,8 +1595,7 @@ impl Mempool {
     }
 
     // A NON-block removal (eviction / expiry / replacement / reorg): index bookkeeping plus the
-    // estimator's `remove_tx` signal — chia remove_from_pool for every reason except
-    // BLOCK_INCLUSION (mempool.py:386-391).
+    // estimator's `remove_tx` signal.
     fn remove(&mut self, name: &Bytes32) -> Option<MempoolItem> {
         let item = self.remove_inner(name)?;
         let total = self.total_cost;
@@ -1665,8 +1605,7 @@ impl Mempool {
     }
 
     /// Priority-ordered view (highest fee per VIRTUAL cost first, FIFO on ties) — the
-    /// block-builder feed, chia `ORDER BY priority DESC, seq ASC`
-    /// (chia/full_node/mempool.py:605, :722).
+    /// block-builder feed.
     #[must_use]
     pub fn items_by_fee(&self) -> Vec<&MempoolItem> {
         let mut v: Vec<&MempoolItem> = self.items.values().collect();
@@ -1679,10 +1618,8 @@ impl Mempool {
         v
     }
 
-    /// RAW fee-per-cost view — chia `Mempool.items_by_feerate` (chia/full_node/mempool.py:257-260
-    /// `ORDER BY fee_per_cost DESC, seq ASC`), the `request_mempool_transactions` serve order via
-    /// `get_items_not_in_filter` (mempool_manager.py:1066-1082). The one ordering 481ccb305 left
-    /// on the RAW key: assembly and eviction use the virtual-cost priority, serving does not.
+    /// RAW fee-per-cost view (`fee_per_cost DESC, seq ASC`) — the `request_mempool_transactions`
+    /// serve order. Assembly and eviction use the virtual-cost priority; serving does not.
     #[must_use]
     pub fn items_by_feerate(&self) -> Vec<&MempoolItem> {
         let mut v: Vec<&MempoolItem> = self.items.values().collect();
@@ -1696,54 +1633,42 @@ impl Mempool {
     }
 
     /// The mempool's reference frame — the most recent TRANSACTION block's `(height, timestamp)`,
-    /// `None` until the first [`Mempool::set_peak`]/[`Mempool::new_peak`]. The producer gates block
-    /// assembly on this matching the candidate's previous transaction block (chia
-    /// `mempool_manager.create_block_generator2`: `self.peak.header_hash != last_tb_header_hash →
-    /// None`; dg_xch's mempool is height-keyed, see [`Mempool::create_block_generator`]).
+    /// `None` until the first [`Mempool::set_peak`]/[`Mempool::new_peak`]. The producer gates
+    /// block assembly on this matching the candidate's previous transaction block (see
+    /// [`Mempool::create_block_generator`]).
     #[must_use]
     pub fn peak(&self) -> Option<(u32, u64)> {
         self.peak
     }
 
-    /// Assemble a block generator from the resident mempool items — the produce-path feed, chia
-    /// 2.7.1's `mempool.create_block_generator2` (chia/full_node/mempool.py; the `block_creation=1`
-    /// default path `full_node_api.declare_proof_of_space` farms with). Selection mirrors chia:
-    /// fee-priority order ([`Mempool::items_by_fee`] = chia `ORDER BY priority DESC, seq ASC`), the
-    /// fee-sum overflow guard, the [`MAX_SPENDS_PER_BLOCK`] cap, the skip heuristic
-    /// ([`MAX_SKIPPED_ITEMS`], break ON the tenth skip), the low-budget stop
-    /// ([`MIN_COST_THRESHOLD`]), and a wall-clock `timeout` (chia `block_creation_timeout`, default
-    /// 2s). The cost budget is `max_block_cost_clvm - BLOCK_OVERHEAD` (chia `max_block_clvm_cost`),
-    /// spent per item at the item's admission cost (its conditions + execution + plain-serialized
-    /// byte cost — chia's identical accounting, mempool_manager.py validate → `conds.cost`).
+    /// Assemble a block generator from the resident mempool items — the produce-path feed.
+    /// Selection: fee-priority order ([`Mempool::items_by_fee`]), the fee-sum overflow guard, the
+    /// [`MAX_SPENDS_PER_BLOCK`] cap, the skip heuristic ([`MAX_SKIPPED_ITEMS`], break ON the tenth
+    /// skip), the low-budget stop ([`MIN_COST_THRESHOLD`]), and a wall-clock `timeout`. The cost
+    /// budget is `max_block_cost_clvm - BLOCK_OVERHEAD`, spent per item at the item's admission
+    /// cost (its conditions + execution + plain-serialized byte cost).
     ///
-    /// The emitted generator is the chia_rs `solution_generator_backrefs` BACK-REFERENCE-COMPRESSED
-    /// byte format (the quoted spend list, spends in chia's reversed order, subtree-deduplicated,
-    /// canonical serialization, empty ref list — post-SF9 legal), matching chia 2.7.1's
-    /// `create_block_generator2` → `BlockBuilder`. Cost accounting follows suit: while the plain
-    /// per-item sum fits the budget an item is admitted directly (compressed ≤ plain), and only when
-    /// that sum would overflow is the true COMPRESSED size measured and re-checked — so back-ref
-    /// compression lets extra transactions in near the cost limit (chia mempool.py:539-559 /
-    /// build_compressed_block.rs). One remaining conservative delta vs chia's incremental builder: we
-    /// re-serialize the whole (compressed) spend set at the fit boundary rather than resuming a
-    /// sentinel-based incremental `Serializer` — same admission decision, more work near the limit
-    /// (out of scope: the incremental serializer is a perf refinement, not a correctness one).
+    /// The emitted generator is the back-reference-compressed byte format (the quoted spend list,
+    /// reversed spend order, subtree-deduplicated, canonical serialization, empty ref list).
+    /// While the plain per-item sum fits the budget an item is admitted directly
+    /// (compressed ≤ plain); only when that sum would overflow is the true compressed size
+    /// measured and re-checked — back-ref compression lets extra transactions in near the cost
+    /// limit. One conservative delta vs an incremental builder: we re-serialize the whole
+    /// (compressed) spend set at the fit boundary — same admission decision, more work near the
+    /// limit.
     ///
     /// After selection the generator is RE-RUN through our own validator
-    /// ([`execute_block_generator_result`], `height`-keyed flags — chia mempool.py:549-559 re-runs
-    /// via `run_block_generator2` and takes the re-run cost); the re-run cost is the authoritative
-    /// `BlockTransactions::cost` the candidate's `TransactionsInfo` carries. A re-run failure is an
-    /// assertion-failure-grade bug (chia logs and returns `None`) — we do the same.
+    /// ([`execute_block_generator_result`], `height`-keyed flags); the re-run cost is the
+    /// authoritative `BlockTransactions::cost` the candidate's `TransactionsInfo` carries. A
+    /// re-run failure is an assertion-failure-grade bug — log and return `None`.
     ///
     /// Resident ⇒ includable: every resident item's effective time-locks were validated against
     /// this pool's peak — the SAME previous-transaction-block frame the assembled block validates
-    /// under (`assert_height <= peak`, `assert_before_height > peak` via the new-peak expiry
-    /// sweep; t060 `assert_pool_valid_at_peak` pins it) — so no per-item re-check is needed here.
-    /// The CALLER must gate on [`Mempool::peak`] matching the candidate's previous transaction
-    /// block; `height` is the height of the block being built (the CLVM flag-ladder key: chia
-    /// keys the flag ladder off the block's OWN height).
+    /// under — so no per-item re-check is needed here. The CALLER must gate on [`Mempool::peak`]
+    /// matching the candidate's previous transaction block; `height` is the height of the block
+    /// being built (the CLVM flag-ladder key).
     ///
-    /// Returns `None` when nothing is includable (chia: `if removals == []: return None`) — the
-    /// candidate stays a valid empty block.
+    /// Returns `None` when nothing is includable — the candidate stays a valid empty block.
     #[must_use]
     pub fn create_block_generator(
         &self,
@@ -1759,14 +1684,11 @@ impl Mempool {
         // `cost_sum` tracks the PLAIN (uncompressed) accounting — item.cost already carries each
         // item's plain generator byte cost, so it's a sound UPPER BOUND on the true (back-ref
         // compressed) block cost. While the plain sum stays under budget the compressed block
-        // certainly fits, so we admit cheaply. Only when the plain sum would OVERFLOW do we measure
-        // the actual compressed size (`compressed_solution_generator_from_coin_spends`) and re-check
-        // against the full budget — this is where back-ref compression lets extra spends in
-        // (chia create_block_generator2 / BlockBuilder: byte cost is the compressed size, not the
-        // sum of per-item plain byte costs, mempool.py:539-559 re-run-and-take-compressed-cost).
+        // certainly fits, so we admit cheaply. Only when the plain sum would overflow do we
+        // measure the actual compressed size and re-check against the full budget.
         // `exec_cond_sum` is the block's execution + condition cost (item.cost minus each item's
-        // plain byte cost) — chia's BlockBuilder `block_cost`, the non-byte term the compressed
-        // check adds to the measured compressed byte cost.
+        // plain byte cost) — the non-byte term the compressed check adds to the measured
+        // compressed byte cost.
         let mut cost_sum: u64 = 0;
         let mut exec_cond_sum: u64 = 0;
         let mut fee_sum: u64 = 0;
@@ -1776,29 +1698,29 @@ impl Mempool {
         let mut sigs: Vec<Bytes96> = Vec::new();
         let mut additions: Vec<Coin> = Vec::new();
         let mut removals: Vec<Coin> = Vec::new();
-        // Dedup state (chia IdenticalSpendDedup): coin id -> (solution bytes, per-spend cost)
-        // of the first-selected spend of that coin; later identical spends save that cost.
+        // Dedup state: coin id -> (solution bytes, per-spend cost) of the first-selected spend of
+        // that coin; later identical spends save that cost.
         let mut dedup_spends: HashMap<Bytes32, (Vec<u8>, u64)> = HashMap::new();
-        // Fast-forward state committed so far (chia SingletonFastForward): puzzle hash -> the
-        // latest lineage after the spends already included, so FF spends chain within the block.
+        // Fast-forward state committed so far: puzzle hash -> the latest lineage after the spends
+        // already included, so FF spends chain within the block.
         let mut ff_state: HashMap<Bytes32, UnspentLineageInfo> = HashMap::new();
 
         for item in self.items_by_fee() {
-            // chia mempool.py:612-615 — the wall-clock budget for the whole selection.
+            // The wall-clock budget for the whole selection.
             if start.elapsed() >= timeout {
                 info!("block assembly: timeout reached, stopping selection");
                 break;
             }
-            // chia mempool.py:649-653 — the fee sum must stay a representable coin amount.
+            // The fee sum must stay a representable coin amount.
             let Some(new_fee_sum) = fee_sum.checked_add(item.fee) else {
                 break;
             };
             if new_fee_sum > constants.max_coin_amount {
                 break;
             }
-            // Resolve this item's spends: fast-forward rebases + identical-spend dedup (chia
-            // mempool.py:616-645 + eligible_coin_spends.py). Past PRIORITY_TX_THRESHOLD skips,
-            // items with dedup/FF spends are passed over and the rest assemble at full cost.
+            // Resolve this item's spends: fast-forward rebases + identical-spend dedup. Past
+            // PRIORITY_TX_THRESHOLD skips, items with dedup/FF spends are passed over and the
+            // rest assemble at full cost.
             let has_special = item
                 .bundle_coin_spends
                 .iter()
@@ -1836,7 +1758,7 @@ impl Mempool {
                 match process_item_spends(item, &dedup_spends, &ff_state, constants, height) {
                     Ok(processed) => processed,
                     Err(ProcessError::SkipDedup(why)) => {
-                        // chia SkipDedup: not counted against the skip budget.
+                        // Not counted against the skip budget.
                         info!(item = %item.name, why, "block assembly: dedup skip");
                         continue;
                     }
@@ -1847,18 +1769,16 @@ impl Mempool {
                     }
                 }
             };
-            // chia commits new dedup entries as soon as they're discovered
-            // (IdenticalSpendDedup.get_deduplication_info), before the fit checks.
+            // New dedup entries commit as soon as they're discovered, before the fit checks.
             for (coin_id, solution, spend_cost) in &processed.new_dedup {
                 dedup_spends.insert(*coin_id, (solution.clone(), *spend_cost));
             }
             let item_cost = item.cost.saturating_sub(processed.cost_saving);
             let new_cost_sum = cost_sum.saturating_add(item_cost);
             let new_spend_count = spend_count + processed.unique_spends.len();
-            // This item's execution + condition cost = its effective cost minus the PLAIN byte cost
-            // of its own unique spends (chia BlockBuilder passes `cost - (calculate_generator_length
-            // - 2)*cost_per_byte`, build_compressed_block.rs). The byte term is dropped here and
-            // re-added as the measured COMPRESSED size below.
+            // This item's execution + condition cost = its effective cost minus the PLAIN byte
+            // cost of its own unique spends. The byte term is dropped here and re-added as the
+            // measured COMPRESSED size below.
             let item_plain_byte_cost = if processed.unique_spends.is_empty() {
                 0
             } else {
@@ -1867,11 +1787,10 @@ impl Mempool {
                     .saturating_mul(constants.cost_per_byte)
             };
             let item_exec_cond = item_cost.saturating_sub(item_plain_byte_cost);
-            // Fit decision. The SF9 6,000-spend cap is hard. For cost: if the PLAIN sum fits, the
-            // compressed block certainly fits (compressed ≤ plain), so admit without measuring. Only
-            // when the plain sum would overflow do we serialize the tentative spend set WITH
-            // back-references and re-check the true compressed cost — the packing win, matching chia
-            // create_block_generator2's compressed accounting.
+            // Fit decision. The 6,000-spend cap is hard. For cost: if the PLAIN sum fits, the
+            // compressed block certainly fits (compressed ≤ plain), so admit without measuring.
+            // Only when the plain sum would overflow do we serialize the tentative spend set with
+            // back-references and re-check the true compressed cost.
             let fits = if new_spend_count > MAX_SPENDS_PER_BLOCK {
                 false
             } else if new_cost_sum <= max_cost {
@@ -1885,9 +1804,8 @@ impl Mempool {
                     Ok(program) => {
                         let byte_cost =
                             (program.as_ref().len() as u64).saturating_mul(constants.cost_per_byte);
-                        // block_cost = compressed byte cost + quote-execution + Σ exec/cond costs
-                        // (chia BlockBuilder cost() = byte_cost + block_cost; block_cost seeds at the
-                        // quote execution cost). Compared to the FULL block budget.
+                        // block_cost = compressed byte cost + quote-execution + Σ exec/cond
+                        // costs, compared to the FULL block budget.
                         let total = byte_cost
                             .saturating_add(QUOTE_EXECUTION_COST)
                             .saturating_add(exec_cond_sum)
@@ -1900,8 +1818,8 @@ impl Mempool {
                     }
                 }
             };
-            // chia mempool.py:656-667 — doesn't fit: skip it and keep looking for smaller items, up
-            // to MAX_SKIPPED_ITEMS (break ON the tenth skip).
+            // Doesn't fit: skip it and keep looking for smaller items, up to MAX_SKIPPED_ITEMS
+            // (break ON the tenth skip).
             if !fits {
                 skipped_items += 1;
                 if skipped_items < MAX_SKIPPED_ITEMS {
@@ -1909,7 +1827,7 @@ impl Mempool {
                 }
                 break;
             }
-            // Included: commit the fast-forward chain state (chia update_fast_forward_spends).
+            // Included: commit the fast-forward chain state.
             for (puzzle_hash, lineage) in processed.ff_update {
                 ff_state.insert(puzzle_hash, lineage);
             }
@@ -1921,7 +1839,7 @@ impl Mempool {
             exec_cond_sum = exec_cond_sum.saturating_add(item_exec_cond);
             fee_sum = new_fee_sum;
             spend_count = new_spend_count;
-            // chia mempool.py:676-684 — stop once the remaining budget is below a typical spend.
+            // Stop once the remaining budget is below a typical spend.
             // `cost_sum` is the plain upper bound; once a compression-only admit pushes it past
             // `max_cost` the remaining plain budget saturates to 0 (we're effectively full) and we
             // stop — the compressed block still validates under the true limit via the re-run below.
@@ -1935,10 +1853,10 @@ impl Mempool {
             return None;
         }
 
-        // chia create_block_generator2 emits the BACK-REFERENCE-COMPRESSED generator (chia_rs
-        // BlockBuilder / solution_generator_backrefs): the reversed spend list, subtree-deduplicated.
-        // Same program as the plain form (identical run output, conditions, tree hash), fewer bytes —
-        // so the re-run cost below is the compressed byte cost and the block packs more transactions.
+        // Emit the back-reference-compressed generator: the reversed spend list,
+        // subtree-deduplicated. Same program as the plain form (identical run output, conditions,
+        // tree hash), fewer bytes — so the re-run cost below is the compressed byte cost and the
+        // block packs more transactions.
         let program = match compressed_solution_generator_from_coin_spends(&coin_spends) {
             Ok(program) => program,
             Err(e) => {
@@ -1947,7 +1865,7 @@ impl Mempool {
                 return None;
             }
         };
-        // chia AugSchemeMPL.aggregate(sigs) — the included items' aggregate signatures combined.
+        // The included items' aggregate signatures combined.
         let aggregated_signature = match aggregate_signatures(sigs.iter()) {
             Ok(sig) => sig,
             Err(e) => {
@@ -1955,8 +1873,8 @@ impl Mempool {
                 return None;
             }
         };
-        // The re-run cost check (chia mempool.py:549-571): run the emitted generator through our
-        // OWN validator and take ITS cost — "this should not happen" on failure.
+        // The re-run cost check: run the emitted generator through our own validator and take
+        // ITS cost.
         let rerun = execute_block_generator_result(&BlockGeneratorInput {
             transactions_generator: program.clone(),
             generator_refs: Vec::new(),
@@ -1975,8 +1893,7 @@ impl Mempool {
             }
         };
         if conds.cost > constants.max_block_cost_clvm {
-            // Unreachable given the budgeted selection; defense in depth like chia's finalize
-            // assert (chia_rs build_compressed_block.rs).
+            // Unreachable given the budgeted selection; defense in depth.
             warn!(
                 "block assembly: re-run cost {} exceeds MAX_BLOCK_COST_CLVM; dropping generator",
                 conds.cost
@@ -2001,10 +1918,10 @@ impl Mempool {
     }
 
     /// Rebuild the pool for a new peak (the most recent TRANSACTION block, with its timestamp):
-    /// expire every resident item whose effective `ASSERT_BEFORE` bound the new peak passed (chia
-    /// `mempool.new_tx_block` `EXPIRED` sweep), drop every item whose removals the new peak spent
-    /// (its transaction is either in the new block or invalidated by it), then retry parked bundles
-    /// whose effective assert height the peak reached. Mirrors `mempool_manager.py::new_peak`.
+    /// expire every resident item whose effective `ASSERT_BEFORE` bound the new peak passed, drop
+    /// every item whose removals the new peak spent (its transaction is either in the new block
+    /// or invalidated by it), then retry parked bundles whose effective assert height the peak
+    /// reached.
     ///
     /// # Errors
     /// Returns [`MempoolError::Store`] on a store failure.
@@ -2016,9 +1933,8 @@ impl Mempool {
         spent: &[Bytes32],
     ) -> Result<NewPeakResult, MempoolError> {
         self.peak = Some((height, timestamp));
-        // Expiry sweep first, exactly chia's boundary (mempool.py new_tx_block:
-        // `assert_before_seconds <= timestamp OR assert_before_height <= block_height`) on the
-        // EFFECTIVE bounds computed at admission.
+        // Expiry sweep first (`assert_before_seconds <= timestamp OR assert_before_height <=
+        // block_height`) on the EFFECTIVE bounds computed at admission.
         let expired_names: Vec<Bytes32> = self
             .items
             .values()
@@ -2036,20 +1952,19 @@ impl Mempool {
         for name in &expired_names {
             self.remove(name);
         }
-        // O(delta) fast path (chia mempool_manager.py:902-987): only items INDEXED by the
-        // block's spent coins are touched — no store re-query per resident item. A spent coin
-        // reaching a plain spend evicts its item (the transaction is in the block, or
-        // invalidated by it); a spent coin reaching a fast-forward spend gets the item REBASED
-        // onto the singleton's new latest version, or evicted if the singleton has no unspent
-        // version left. Out-of-band store changes (a reorg) go through
-        // [`Mempool::revalidate_for_reorg`] — chia's slow path.
+        // O(delta) fast path: only items INDEXED by the block's spent coins are touched — no
+        // store re-query per resident item. A spent coin reaching a plain spend evicts its item
+        // (the transaction is in the block, or invalidated by it); a spent coin reaching a
+        // fast-forward spend gets the item REBASED onto the singleton's new latest version, or
+        // evicted if the singleton has no unspent version left. Out-of-band store changes (a
+        // reorg) go through [`Mempool::revalidate_for_reorg`] — the slow path.
         let mut to_remove: HashSet<Bytes32> = HashSet::new();
-        // The items a plain (non-FF) coin spend put into THIS block — chia's `included_items`
-        // (mempool_manager.py:930-931). These feed the fee estimator as CONFIRMATIONS
-        // (`new_block`/`process_block`), the positive signal; FF-evicted items are NOT included
-        // here (they left without confirming, and BLOCK_INCLUSION removals skip `remove_tx`).
+        // The items a plain (non-FF) coin spend put into THIS block. These feed the fee
+        // estimator as CONFIRMATIONS (`new_block`/`process_block`), the positive signal;
+        // FF-evicted items are NOT included here (they left without confirming, and
+        // BLOCK_INCLUSION removals skip `remove_tx`).
         let mut included: Vec<(u64, u64, u32)> = Vec::new();
-        // FF rebases deferred until all plain evictions are decided (chia :910-936).
+        // FF rebases deferred until all plain evictions are decided.
         let mut deferred_ff: Vec<(Bytes32, Bytes32)> = Vec::new();
         for spend in spent {
             let Some(owners) = self.by_coin.get(spend) else {
@@ -2067,8 +1982,8 @@ impl Mempool {
                         deferred_ff.push((*spend, owner));
                     }
                     Some(_) => {
-                        // A regular coin spend that just made it into a block — chia counts it as
-                        // an included/confirmed item (mempool_manager.py:922-931).
+                        // A regular coin spend that just made it into a block — counted as an
+                        // included/confirmed item.
                         included.push((item.cost, item.fee, item.height_added));
                         to_remove.insert(owner);
                     }
@@ -2110,13 +2025,13 @@ impl Mempool {
                 }
             }
             if !found {
-                // chia :970-980 — defensive: indexed as spending this coin but no matching
-                // spend; evict rather than leave a wedged item.
+                // Defensive: indexed as spending this coin but no matching spend; evict rather
+                // than leave a wedged item.
                 warn!(item = %owner, coin = %spend, "FF-indexed item has no matching spend; evicting");
                 to_remove.insert(*owner);
             }
         }
-        // Phase B: resolve each puzzle hash's new lineage once (chia LineageInfoCache).
+        // Phase B: resolve each puzzle hash's new lineage once.
         let mut lineage_cache: HashMap<Bytes32, Option<UnspentLineageInfo>> = HashMap::new();
         for (_, _, puzzle_hash) in &ff_lookups {
             if !lineage_cache.contains_key(puzzle_hash) {
@@ -2124,8 +2039,7 @@ impl Mempool {
                 lineage_cache.insert(*puzzle_hash, lineage);
             }
         }
-        // Rebase or evict, then move the index entries in bulk
-        // (chia mempool.update_spend_index).
+        // Rebase or evict, then move the index entries in bulk.
         let mut index_updates: Vec<(Bytes32, Bytes32, Bytes32)> = Vec::new();
         for (owner, spend, puzzle_hash) in ff_lookups {
             if to_remove.contains(&owner) {
@@ -2169,24 +2083,20 @@ impl Mempool {
         }
         let dropped = to_remove.len();
         for name in &to_remove {
-            // chia :932 — a block-included item leaves the seen cache too, so a reorg can
-            // resubmit it.
+            // A block-included item leaves the seen cache too, so a reorg can resubmit it.
             self.remove_seen(name);
             // BLOCK_INCLUSION removal: pure bookkeeping, NO `remove_tx` — these items are fed to
-            // the estimator as confirmations below (chia mempool.py:386 skips the estimator's
-            // remove path for block-inclusion; the confirmation signal is `new_block`).
+            // the estimator as confirmations below.
             self.remove_inner(name);
         }
-        // Feed the fee estimator this block's confirmations (chia
-        // mempool_manager.py:1061 `fee_estimator.new_block(FeeBlockInfo(height, included_items))`).
-        // Runs even for an empty `included` so the tracker's block history / decay advances in
-        // lock-step with the chain, exactly as chia's does on every transaction block.
+        // Feed the fee estimator this block's confirmations. Runs even for an empty `included`
+        // so the tracker's block history / decay advances in lock-step with the chain.
         let total = self.total_cost;
         self.fee_estimator.new_block(height, &included, total);
-        // Retry parked bundles whose EFFECTIVE assert height the new peak reached — chia
-        // PendingTxCache.drain releases `assert_height <= peak.height`, strictly: an assert of
-        // peak+1 stays parked (a block built on this peak could not carry it). Newly admitted
-        // names return so the caller can re-gossip them.
+        // Retry parked bundles whose EFFECTIVE assert height the new peak reached
+        // (`assert_height <= peak.height`, strictly: an assert of peak+1 stays parked — a block
+        // built on this peak could not carry it). Newly admitted names return so the caller can
+        // re-gossip them.
         let eligible: Vec<Bytes32> = self
             .pending
             .iter()
@@ -2203,12 +2113,11 @@ impl Mempool {
                 admitted.push((name, cost, fee));
             }
         }
-        // Retry every conflict-cached bundle — chia new_peak merges the conflict drain into the
-        // pending drain and re-runs add_spend_bundle on each (:1042-1055). Ordered AFTER the
-        // spent-coin removal + expiry sweep above so a coin freed by the winner LEAVING the pool
-        // is already visible: the loser re-admits (conflict resolved), or re-caches (winner still
-        // resident → cache_conflict on the fresh Conflict reject), or drops (winner CONFIRMED →
-        // the coin is spent on-chain → DOUBLE_SPEND, which never routes to the conflict cache).
+        // Retry every conflict-cached bundle. Ordered AFTER the spent-coin removal + expiry
+        // sweep above so a coin freed by the winner LEAVING the pool is already visible: the
+        // loser re-admits (conflict resolved), or re-caches (winner still resident), or drops
+        // (winner confirmed → the coin is spent on-chain → DOUBLE_SPEND, which never routes to
+        // the conflict cache).
         for (name, entry) in self.drain_conflict() {
             let (fee, cost) = (entry.fee, entry.cost);
             if self.admit(store, entry.bundle, entry.conds).await.is_ok() {
@@ -2222,10 +2131,9 @@ impl Mempool {
         })
     }
 
-    /// The reorg slow path — chia `new_peak`'s pool rebuild when the new peak is NOT a child of
-    /// the old one (mempool_manager.py:988-1039): every resident item is re-checked against the
-    /// store. Items whose removals ceased to exist (rolled back — chia re-admission fails
-    /// UNKNOWN_UNSPENT), were spent without fast-forward support, or whose singleton lost its
+    /// The reorg slow path — the pool rebuild when the new peak is NOT a child of the old one:
+    /// every resident item is re-checked against the store. Items whose removals ceased to exist
+    /// (rolled back), were spent without fast-forward support, or whose singleton lost its
     /// unspent version, are dropped; surviving FF spends are rebased onto the singleton's
     /// current lineage. Returns the number of dropped items. O(pool) store work — reorgs only.
     ///
@@ -2235,8 +2143,8 @@ impl Mempool {
         &mut self,
         store: &S,
     ) -> Result<usize, MempoolError> {
-        // chia's slow path resets the seen cache wholesale (mempool_manager.py:997) — after a
-        // reorg, previously-failed bundles may be valid on the new branch.
+        // The slow path resets the seen cache wholesale — after a reorg, previously-failed
+        // bundles may be valid on the new branch.
         self.seen.clear();
         self.seen_order.clear();
         let snapshot: Vec<(Bytes32, Vec<Bytes32>)> = self

@@ -1,20 +1,6 @@
-//! CLVM BLS operators — opcodes 49..=59, ported from clvmr 0.17.7 `src/bls_ops.rs`.
-//!
-//! These are BASE dialect operators in clvmr (`src/chia_dialect.rs` dispatches 49..=59
-//! unconditionally — the 2.0 hard fork made the BLS extension available outside the
-//! `softfork` guard, and clvmr replays ALL heights with them wired). Before this port the
-//! dispatch fell through to `op_unknown`, which returns nil for a token cost — the exact
-//! shape of the live wedge: mainnet 9,179,161 spends a puzzle that does an in-puzzle
-//! pairing check (`bls_g2_negate` + `bls_map_to_g1` + `bls_pairing_identity`, clvmr cost
-//! 5,597,944), our run under-counted by 5,597,941 and the node rejected the block with
-//! `InvalidBlockCost`. Worse than the cost: `bls_pairing_identity`/`bls_verify` must RAISE
-//! on a failed check — the unknown-op no-op silently accepted whatever the puzzle asserted.
-//!
-//! Cost constants, argument traversal (including clvmr's `Allocator::next` silent stop on a
-//! non-pair tail for the n-ary operators), `check_cost` placement, and the strict/relaxed
-//! point-validation split (`RELAXED_BLS`, hard fork 2) are mirrored 1:1 from clvmr 0.17.7.
-//! Point parsing/arithmetic mirrors chia_rs `chia-bls` 0.42.1 (`PublicKey`/`Signature`) over
-//! raw `blst`, the same layer the existing `point_add`/`pubkey_for_exp` operators use.
+//! CLVM BLS operators — opcodes 49..=59, dispatched unconditionally in the base dialect
+//! (the 2.0 hard fork made the BLS extension available outside the `softfork` guard).
+//! `bls_pairing_identity`/`bls_verify` must RAISE on a failed check.
 
 use crate::clvm::arena::{Arena, NodePtr};
 use crate::clvm::dialect::Dialect;
@@ -27,7 +13,7 @@ use crate::clvm::utils::{LIMITS, RELAXED_BLS, atom, check_cost, int_atom, split}
 #[cfg(feature = "bls")]
 use crate::formatting::number_from_slice;
 
-// clvmr 0.17.7 src/bls_ops.rs cost constants, verbatim.
+// cost constants
 #[cfg(feature = "bls")]
 const BLS_G1_SUBTRACT_BASE_COST: u64 = 101_094;
 #[cfg(feature = "bls")]
@@ -74,11 +60,9 @@ const DST_G1: &[u8; 43] = b"BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_AUG_";
 #[cfg(feature = "bls")]
 const DST_G2: &[u8; 43] = b"BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_AUG_";
 
-/// G2 primitives over raw `blst` FFI — chia_rs `chia-bls` 0.42.1 `Signature`
-/// (crates/chia-bls/src/signature.rs): `from_bytes`/`is_valid` (infinity accepted, relic
-/// compat), projective add/sub/negate/scalar-multiply, compressed encoding, hash-to-curve,
-/// and the two pairing verifiers (`aggregate_pairing`, `aggregate_verify`) the pairing
-/// operators call. Points are held projective (`blst_p2`) exactly as chia-bls holds them.
+/// G2 primitives over raw `blst` FFI: parse/validate (infinity accepted), projective
+/// add/sub/negate/scalar-multiply, compressed encoding, hash-to-curve, and the two pairing
+/// verifiers the pairing operators call. Points are held projective (`blst_p2`).
 #[cfg(feature = "bls")]
 mod bls_g2 {
     use blst::{
@@ -91,14 +75,13 @@ mod bls_g2 {
     };
     use std::mem::MaybeUninit;
 
-    /// The point at infinity — chia-bls `Signature::default()` (all-zero projective point).
+    /// The point at infinity (all-zero projective point).
     pub(super) fn identity() -> blst_p2 {
         blst_p2::default()
     }
 
-    /// Parse a 96-byte compressed G2 element — chia-bls `Signature::from_bytes`:
-    /// `blst_p2_uncompress` (flag/encoding validation), then `is_valid` = infinity OR
-    /// in-subgroup (infinity kept valid for relic compatibility). `None` on any failure.
+    /// Parse a 96-byte compressed G2 element: `blst_p2_uncompress` (flag/encoding
+    /// validation), then `is_valid` = infinity OR in-subgroup. `None` on any failure.
     pub(super) fn parse_g2_compressed(bytes: &[u8; 96]) -> Option<blst_p2> {
         // SAFETY: `bytes` is a valid 96-byte buffer; on BLST_SUCCESS `affine` is initialized,
         // and `blst_p2_from_affine` fully initializes `p2` from it.
@@ -114,7 +97,7 @@ mod bls_g2 {
         if is_valid(&p2) { Some(p2) } else { None }
     }
 
-    /// chia-bls `Signature::is_valid`: infinity OR subgroup member.
+    /// Infinity OR subgroup member.
     pub(super) fn is_valid(p: &blst_p2) -> bool {
         // SAFETY: `p` is a valid initialized point.
         unsafe { blst_p2_is_inf(&raw const *p) || blst_p2_in_g2(&raw const *p) }
@@ -125,7 +108,7 @@ mod bls_g2 {
         unsafe { blst_p2_is_inf(&raw const *p) }
     }
 
-    /// `acc += p` — chia-bls `AddAssign` (`blst_p2_add_or_double`).
+    /// `acc += p` (`blst_p2_add_or_double`).
     pub(super) fn add_assign(acc: &mut blst_p2, p: &blst_p2) {
         // SAFETY: both operands are valid initialized points.
         unsafe {
@@ -133,7 +116,7 @@ mod bls_g2 {
         }
     }
 
-    /// `acc -= p` — chia-bls `SubAssign` (negate a copy, then add-or-double).
+    /// `acc -= p` (negate a copy, then add-or-double).
     pub(super) fn sub_assign(acc: &mut blst_p2, p: &blst_p2) {
         // SAFETY: both operands are valid initialized points; `neg` is a local copy.
         unsafe {
@@ -143,8 +126,8 @@ mod bls_g2 {
         }
     }
 
-    /// `p *= n` for a big-endian, group-order-reduced, non-negative integer — chia-bls
-    /// `Signature::scalar_multiply` (256-bit blst scalar width, as chia-bls passes).
+    /// `p *= n` for a big-endian, group-order-reduced, non-negative integer
+    /// (256-bit blst scalar width).
     pub(super) fn scalar_multiply(p: &mut blst_p2, n_be: &[u8]) {
         debug_assert!(!n_be.is_empty() && n_be.len() <= 32);
         // SAFETY: `blst_scalar_from_be_bytes` fully initializes `scalar` for 1..=32 input
@@ -161,8 +144,7 @@ mod bls_g2 {
         }
     }
 
-    /// Compressed encoding — chia-bls `to_bytes` (`blst_p2_compress`); infinity encodes as
-    /// `0xc0 || 0^95`.
+    /// Compressed encoding via `blst_p2_compress`; infinity encodes as `0xc0 || 0^95`.
     pub(super) fn to_compressed(p: &blst_p2) -> [u8; 96] {
         // SAFETY: `p` is a valid initialized point; `blst_p2_compress` writes all 96 bytes.
         unsafe {
@@ -172,7 +154,7 @@ mod bls_g2 {
         }
     }
 
-    /// chia-bls `hash_to_g2_with_dst` (`blst_hash_to_g2`, empty aug).
+    /// Hash to G2 (`blst_hash_to_g2`, empty aug).
     pub(super) fn hash_to_g2(msg: &[u8], dst: &[u8]) -> blst_p2 {
         // SAFETY: all pointers are valid for their lengths; `blst_hash_to_g2` fully
         // initializes the output point.
@@ -191,10 +173,9 @@ mod bls_g2 {
         }
     }
 
-    /// chia-bls `aggregate_pairing` (crates/chia-bls/src/signature.rs): raw-aggregate every
-    /// `(G1, G2)` pair into one pairing context and final-verify against the identity. The
-    /// per-item `is_valid` re-checks are elided: every point here was parsed by the strict
-    /// operator argument path, which already enforced them.
+    /// Raw-aggregate every `(G1, G2)` pair into one pairing context and final-verify
+    /// against the identity. Per-item `is_valid` re-checks are elided: every point here
+    /// was parsed by the strict operator argument path, which already enforced them.
     pub(super) fn aggregate_pairing(items: &[(blst_p1, blst_p2)]) -> bool {
         if items.is_empty() {
             return true;
@@ -217,10 +198,10 @@ mod bls_g2 {
         }
     }
 
-    /// chia-bls `aggregate_verify` (crates/chia-bls/src/signature.rs): AUG-scheme verify of
-    /// `sig` against `(pk, msg)` pairs — each message is prepended with its public key's
-    /// compressed bytes and aggregated under the G2 AUG DST. The empty set verifies iff the
-    /// signature is the identity. Per-item `is_valid` re-checks elided as above.
+    /// AUG-scheme verify of `sig` against `(pk, msg)` pairs — each message is prepended
+    /// with its public key's compressed bytes and aggregated under the G2 AUG DST. The
+    /// empty set verifies iff the signature is the identity. Per-item `is_valid` re-checks
+    /// elided as above.
     pub(super) fn aggregate_verify(sig: &blst_p2, items: &[(blst_p1, Vec<u8>)]) -> bool {
         if items.is_empty() {
             return is_inf(sig);
@@ -265,14 +246,14 @@ mod bls_g2 {
     }
 }
 
-/// Compressed encoding of a projective G1 point — chia-bls `PublicKey::to_bytes`.
+/// Compressed encoding of a projective G1 point.
 #[cfg(feature = "bls")]
 fn g1_to_compressed_projective(p: &blst::blst_p1) -> [u8; 48] {
     bls_g1::to_compressed(p)
 }
 
 /// Affine → projective — the parsed argument form (`bls_g1::parse_g1_compressed` returns
-/// affine) lifted into the arithmetic form chia-bls holds.
+/// affine) lifted into the arithmetic form.
 #[cfg(feature = "bls")]
 fn g1_projective(p: &blst::blst_p1_affine) -> blst::blst_p1 {
     // SAFETY: `p` is a valid initialized affine point; `blst_p1_from_affine` fully
@@ -284,7 +265,7 @@ fn g1_projective(p: &blst::blst_p1_affine) -> blst::blst_p1 {
     }
 }
 
-/// `acc -= p` on projective G1 — chia-bls `SubAssign` (negate a copy, add-or-double).
+/// `acc -= p` on projective G1 (negate a copy, add-or-double).
 #[cfg(feature = "bls")]
 fn g1_sub_assign(acc: &mut blst::blst_p1, p: &blst::blst_p1) {
     // SAFETY: both operands valid initialized points; `neg` is a local copy.
@@ -295,8 +276,7 @@ fn g1_sub_assign(acc: &mut blst::blst_p1, p: &blst::blst_p1) {
     }
 }
 
-/// `p *= n` for a big-endian, group-order-reduced integer — chia-bls
-/// `PublicKey::scalar_multiply`.
+/// `p *= n` for a big-endian, group-order-reduced integer.
 #[cfg(feature = "bls")]
 fn g1_scalar_multiply(p: &mut blst::blst_p1, n_be: &[u8]) {
     debug_assert!(!n_be.is_empty() && n_be.len() <= 32);
@@ -313,7 +293,7 @@ fn g1_scalar_multiply(p: &mut blst::blst_p1, n_be: &[u8]) {
     }
 }
 
-/// chia-bls `hash_to_g1_with_dst` (`blst_hash_to_g1`, empty aug).
+/// Hash to G1 (`blst_hash_to_g1`, empty aug).
 #[cfg(feature = "bls")]
 fn g1_hash_to_g1(msg: &[u8], dst: &[u8]) -> blst::blst_p1 {
     // SAFETY: all pointers valid for their lengths; output fully initialized.
@@ -332,8 +312,7 @@ fn g1_hash_to_g1(msg: &[u8], dst: &[u8]) -> blst::blst_p1 {
     }
 }
 
-/// Strict G1 argument parse — clvmr `Allocator::g1` (48-byte atom, chia-bls
-/// `PublicKey::from_bytes` validation), erroring the operator on anything else.
+/// Strict G1 argument parse: a valid 48-byte atom, erroring the operator on anything else.
 #[cfg(feature = "bls")]
 fn g1_arg(arena: &Arena, node: NodePtr, op_name: &str) -> Result<blst::blst_p1_affine, ClvmError> {
     let blob = atom(arena, node, op_name)?;
@@ -348,8 +327,7 @@ fn g1_arg(arena: &Arena, node: NodePtr, op_name: &str) -> Result<blst::blst_p1_a
     })
 }
 
-/// Strict G2 argument parse — clvmr `Allocator::g2` (96-byte atom, chia-bls
-/// `Signature::from_bytes` validation), erroring the operator on anything else.
+/// Strict G2 argument parse: a valid 96-byte atom, erroring the operator on anything else.
 #[cfg(feature = "bls")]
 fn g2_arg(arena: &Arena, node: NodePtr, op_name: &str) -> Result<blst::blst_p2, ClvmError> {
     let blob = atom(arena, node, op_name)?;
@@ -364,8 +342,7 @@ fn g2_arg(arena: &Arena, node: NodePtr, op_name: &str) -> Result<blst::blst_p2, 
     })
 }
 
-/// Exactly-N proper argument list — clvmr `get_args::<N>` (improper tails and wrong counts
-/// error).
+/// Exactly-N proper argument list (improper tails and wrong counts error).
 #[cfg(feature = "bls")]
 fn get_args<const N: usize>(
     arena: &Arena,
@@ -386,8 +363,7 @@ fn get_args<const N: usize>(
     }
 }
 
-/// Up-to-N argument list with actual count — clvmr `get_varargs::<N>` (silent stop on a
-/// non-pair tail, error past N).
+/// Up-to-N argument list with actual count (silent stop on a non-pair tail, error past N).
 #[cfg(feature = "bls")]
 fn get_varargs<const N: usize>(
     arena: &Arena,
@@ -408,7 +384,7 @@ fn get_varargs<const N: usize>(
     Ok((out, count))
 }
 
-/// clvmr `op_bls_g1_subtract`: first argument minus the rest; empty input is the identity.
+/// First argument minus the rest; empty input is the identity.
 #[cfg(feature = "bls")]
 pub fn op_bls_g1_subtract<D: Dialect>(
     arena: &mut Arena,
@@ -421,7 +397,7 @@ pub fn op_bls_g1_subtract<D: Dialect>(
     let mut total = bls_g1::identity();
     let mut is_first = true;
     let mut input = args;
-    // clvmr iterates with `Allocator::next` — a non-pair tail ends the list silently.
+    // a non-pair tail ends the list silently
     while let Some((arg, rest)) = arena.next(input) {
         input = rest;
         let point = g1_arg(arena, arg, "g1_subtract")?;
@@ -437,7 +413,7 @@ pub fn op_bls_g1_subtract<D: Dialect>(
     new_atom_and_cost(arena, cost, &bls_g1::to_compressed(&total))
 }
 
-/// clvmr `op_bls_g1_multiply`: point times a (group-order-reduced) integer scalar.
+/// Point times a (group-order-reduced) integer scalar.
 #[cfg(feature = "bls")]
 pub fn op_bls_g1_multiply<D: Dialect>(
     arena: &mut Arena,
@@ -465,8 +441,8 @@ pub fn op_bls_g1_multiply<D: Dialect>(
     new_atom_and_cost(arena, cost, &bls_g1::to_compressed(&total))
 }
 
-/// clvmr `op_bls_g1_negate`: flip the compressed sign bit; the point is validated unless
-/// `RELAXED_BLS` (hard fork 2) is set; compressed infinity passes through unchanged.
+/// Flip the compressed sign bit; the point is validated unless `RELAXED_BLS` (hard fork 2)
+/// is set; compressed infinity passes through unchanged.
 #[cfg(feature = "bls")]
 pub fn op_bls_g1_negate<D: Dialect>(
     arena: &mut Arena,
@@ -489,8 +465,8 @@ pub fn op_bls_g1_negate<D: Dialect>(
         )));
     }
     if (blob[0] & 0xe0) == 0xc0 {
-        // Compressed infinity: negation is a no-op; pass the argument through, charging the
-        // allocation cost anyway for consistency (clvmr does the same).
+        // Compressed infinity: negation is a no-op; pass the argument through, charging
+        // the allocation cost anyway.
         Ok((BLS_G1_NEGATE_BASE_COST + 48 * MALLOC_COST_PER_BYTE, point))
     } else {
         blob[0] ^= 0x20;
@@ -498,7 +474,7 @@ pub fn op_bls_g1_negate<D: Dialect>(
     }
 }
 
-/// clvmr `op_bls_g2_add`: n-ary G2 sum; empty input is the identity.
+/// N-ary G2 sum; empty input is the identity.
 #[cfg(feature = "bls")]
 pub fn op_bls_g2_add<D: Dialect>(
     arena: &mut Arena,
@@ -520,7 +496,7 @@ pub fn op_bls_g2_add<D: Dialect>(
     new_atom_and_cost(arena, cost, &bls_g2::to_compressed(&total))
 }
 
-/// clvmr `op_bls_g2_subtract`: first argument minus the rest; empty input is the identity.
+/// First argument minus the rest; empty input is the identity.
 #[cfg(feature = "bls")]
 pub fn op_bls_g2_subtract<D: Dialect>(
     arena: &mut Arena,
@@ -548,7 +524,7 @@ pub fn op_bls_g2_subtract<D: Dialect>(
     new_atom_and_cost(arena, cost, &bls_g2::to_compressed(&total))
 }
 
-/// clvmr `op_bls_g2_multiply`: point times a (group-order-reduced) integer scalar.
+/// Point times a (group-order-reduced) integer scalar.
 #[cfg(feature = "bls")]
 pub fn op_bls_g2_multiply<D: Dialect>(
     arena: &mut Arena,
@@ -576,8 +552,8 @@ pub fn op_bls_g2_multiply<D: Dialect>(
     new_atom_and_cost(arena, cost, &bls_g2::to_compressed(&total))
 }
 
-/// clvmr `op_bls_g2_negate`: flip the compressed sign bit; validated unless `RELAXED_BLS`;
-/// compressed infinity passes through unchanged.
+/// Flip the compressed sign bit; validated unless `RELAXED_BLS`; compressed infinity
+/// passes through unchanged.
 #[cfg(feature = "bls")]
 pub fn op_bls_g2_negate<D: Dialect>(
     arena: &mut Arena,
@@ -607,8 +583,7 @@ pub fn op_bls_g2_negate<D: Dialect>(
     }
 }
 
-/// clvmr `op_bls_map_to_g1` (`g1_map`): hash a message to G1 with an optional explicit DST
-/// (default: the G1 AUG-scheme DST).
+/// Hash a message to G1 with an optional explicit DST (default: the G1 AUG-scheme DST).
 #[cfg(feature = "bls")]
 pub fn op_bls_map_to_g1<D: Dialect>(
     arena: &mut Arena,
@@ -638,9 +613,8 @@ pub fn op_bls_map_to_g1<D: Dialect>(
     new_atom_and_cost(arena, cost, &bls_g1::to_compressed(&point))
 }
 
-/// clvmr `op_bls_map_to_g2` (`g2_map`): hash a message to G2 with an optional explicit DST
-/// (default: the G2 AUG-scheme DST). Note clvmr's cost-check placement: no interim check
-/// between the message and DST byte charges.
+/// Hash a message to G2 with an optional explicit DST (default: the G2 AUG-scheme DST).
+/// No interim cost check between the message and DST byte charges.
 #[cfg(feature = "bls")]
 pub fn op_bls_map_to_g2<D: Dialect>(
     arena: &mut Arena,
@@ -669,8 +643,8 @@ pub fn op_bls_map_to_g2<D: Dialect>(
     new_atom_and_cost(arena, cost, &bls_g2::to_compressed(&point))
 }
 
-/// clvmr `op_bls_pairing_identity`: a flat list of `(G1, G2)` pairs; returns nil iff the
-/// aggregated pairing is the identity, otherwise the program TERMINATES with an error.
+/// A flat list of `(G1, G2)` pairs; returns nil iff the aggregated pairing is the
+/// identity, otherwise the program TERMINATES with an error.
 #[cfg(feature = "bls")]
 pub fn op_bls_pairing_identity<D: Dialect>(
     arena: &mut Arena,
@@ -701,8 +675,8 @@ pub fn op_bls_pairing_identity<D: Dialect>(
     }
 }
 
-/// clvmr `op_bls_verify`: `(sig pk1 msg1 pk2 msg2 ...)` — AUG-scheme aggregate verify;
-/// returns nil on success, otherwise the program TERMINATES with an error.
+/// `(sig pk1 msg1 pk2 msg2 ...)` — AUG-scheme aggregate verify; returns nil on success,
+/// otherwise the program TERMINATES with an error.
 #[cfg(feature = "bls")]
 pub fn op_bls_verify<D: Dialect>(
     arena: &mut Arena,
@@ -736,9 +710,8 @@ pub fn op_bls_verify<D: Dialect>(
     }
 }
 
-// ---- bls-feature-less stubs: the VM stays available, the operators error, exactly like
-// ---- the existing `point_add`/`pubkey_for_exp` stubs. A `bls`-less build is NOT
-// ---- consensus-capable.
+// ---- bls-feature-less stubs: the VM stays available, the operators error.
+// ---- A `bls`-less build is NOT consensus-capable.
 
 #[cfg(not(feature = "bls"))]
 macro_rules! bls_stub {

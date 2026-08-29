@@ -1,15 +1,15 @@
-//! A drop-in simulated full node a wallet dials. It serves the peer/wallet protocol from its own
-//! chain and chia's simulator RPC (`farm_block` / `set_auto_farming` / `get_auto_farming`), so a test
-//! harness farms coins to any address on demand — the same shape as chia's `FullNodeSimulator`.
+//! A simulated full node a wallet dials. It serves the peer/wallet protocol from its own chain and
+//! the simulator RPC (`farm_block` / `set_auto_farming` / `get_auto_farming`), so a test harness
+//! farms coins to any address on demand.
 //!
 //! ```text
 //! sim_node --listen 0.0.0.0:8444 --rpc 127.0.0.1:8555 --network mainnet \
 //!          --db sim-node.sqlite --plots-dir sim-plots --interval-secs 2
 //! ```
 //!
-//! Coins are minted by calling the `farm_block` RPC with a target address — there is no startup
-//! reward address. The simulator carries mainnet's genesis challenge, so a stock mainnet wallet syncs
-//! and spends against it with no realignment.
+//! Coins are minted by calling the `farm_block` RPC with a target address; there is no startup
+//! reward address. The chain carries mainnet's genesis challenge, so a mainnet wallet syncs and
+//! spends against it unchanged.
 
 use dg_xch_simulator_lib::pos2::PlotSet;
 use dg_xch_simulator_lib::server::{SimulatorServer, simulator_constants};
@@ -18,8 +18,8 @@ use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // The peer port matches the chia 2.7.1 simulator (58444); the control port matches its
-    // nginx-fronted /farm_block (5050); the handshake network is `simulator0` over mainnet genesis.
+    // Simulator defaults: peer 58444, control 5050, handshake network `simulator0` over the
+    // mainnet genesis challenge.
     let mut listen = "0.0.0.0:58444".to_string();
     let mut rpc = "127.0.0.1:8555".to_string();
     let mut control = "0.0.0.0:5050".to_string();

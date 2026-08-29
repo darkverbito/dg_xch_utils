@@ -1,15 +1,10 @@
-//! Phase 3 — the farmer interface (node/consensus side).
+//! The farmer interface (node/consensus side): validating a farmer's declared proof of space
+//! against a signage point we have accepted, holding the accepted declaration as a candidate, and
+//! assembling the unfinished block from an accepted proof.
 //!
-//! Mirrors chia `full_node_api.declare_proof_of_space` (chia/full_node/full_node_api.py:873-940)
-//! for the part that is Phase 3: validating a farmer's declared proof of space against a signage
-//! point WE have accepted, and holding the accepted declaration as a candidate. Building the
-//! unfinished block from an accepted proof (the generator, foliage, required-iters, and the
-//! `RequestSignedValues` round trip) is Phase 4 and deliberately NOT here — chia does that work
-//! only after `verify_and_get_quality_string` returns, and so will we.
-//!
-//! This module is pure (no store, no locks): [`validate_declared_proof`] takes closures for the two
-//! slot-state lookups so the full chia early-return ladder is unit-testable offline. The daemon
-//! passes `SlotState`-backed closures.
+//! This module is pure (no store, no locks): [`validate_declared_proof`] takes closures for the
+//! two slot-state lookups so the early-return ladder is unit-testable offline. The daemon passes
+//! `SlotState`-backed closures.
 
 use dg_xch_core::blockchain::block_record::BlockRecord;
 use dg_xch_core::blockchain::pool_target::PoolTarget;
@@ -33,19 +28,19 @@ use dg_xch_core::protocols::farmer::{
 use dg_xch_pos::verify_and_get_quality_string;
 use std::collections::{HashMap, VecDeque};
 
-/// The outcome of validating a `DeclareProofOfSpace`, mirroring chia's early-return ladder.
+/// The outcome of validating a `DeclareProofOfSpace`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeclareVerdict {
-    /// No accepted signage point matches `challenge_chain_sp` (chia:889 "unknown signage point").
+    /// No accepted signage point matches `challenge_chain_sp`.
     UnknownSignagePoint,
     /// index > 0 and the SP's reward-chain output no longer matches — a stale point that has been
-    /// superseded (chia:892-897 "potentially old signage point").
+    /// superseded.
     StaleSignagePoint,
-    /// The SP's challenge sits in no sub slot we hold (chia:915-920 "unknown sub slot").
+    /// The SP's challenge sits in no sub slot we hold.
     UnknownSubSlot,
-    /// `verify_and_get_quality_string` rejected the proof (chia:945 "invalid proof of space").
+    /// `verify_and_get_quality_string` rejected the proof.
     InvalidProof,
-    /// Accepted; carries the quality string chia computes for the proof.
+    /// Accepted; carries the proof's quality string.
     Accepted(Bytes32),
 }
 
@@ -65,30 +60,29 @@ impl DeclareVerdict {
     }
 }
 
-/// The challenge-chain challenge a declared proof is filtered/validated against — chia:906-912:
-/// the SP hash itself at signage-point index 0, otherwise the SP's challenge-chain VDF challenge.
+/// The challenge-chain challenge a declared proof is filtered/validated against: the SP hash
+/// itself at signage-point index 0, otherwise the SP's challenge-chain VDF challenge.
 #[must_use]
 pub fn cc_challenge_hash(declare: &DeclareProofOfSpace, sp: &SignagePoint) -> Bytes32 {
     if declare.signage_point_index == 0 {
-        // chia declare:900-901 — the sub-slot-start SP has no cc VDF; the cc challenge IS the SP hash.
+        // The sub-slot-start SP has no cc VDF; the cc challenge IS the SP hash.
         declare.challenge_chain_sp
     } else {
-        // index > 0 always carries a real cc VDF (chia asserts sp_vdfs.cc_vdf is not None); the fallback
-        // to the SP hash only guards a malformed all-None SP reaching here, which the accept ladder rejects.
+        // index > 0 always carries a real cc VDF; the fallback to the SP hash only guards a
+        // malformed all-None SP reaching here, which the accept ladder rejects.
         sp.cc_vdf
             .as_ref()
             .map_or(declare.challenge_chain_sp, |v| v.challenge)
     }
 }
 
-/// Validate a farmer's `DeclareProofOfSpace` against our slot state — the Phase 3 gate. Returns the
-/// quality string on accept. `lookup_sp(cc_sp)` resolves an accepted signage point by its
-/// challenge-chain SP hash (chia `full_node_store.get_signage_point`); `sub_slot_present(cc)` reports
-/// whether we hold the sub slot for challenge `cc` (chia `full_node_store.get_sub_slot`). `height` is
-/// the current peak height (0 pre-genesis), feeding the plot filter.
+/// Validate a farmer's `DeclareProofOfSpace` against our slot state. Returns the quality string
+/// on accept. `lookup_sp(cc_sp)` resolves an accepted signage point by its challenge-chain SP
+/// hash; `sub_slot_present(cc)` reports whether we hold the sub slot for challenge `cc`. `height`
+/// is the current peak height (0 pre-genesis), feeding the plot filter.
 ///
 /// The caller (daemon) is expected to have already dropped the message if the node is syncing —
-/// chia:881, tip-context objects cannot validate mid-sync.
+/// tip-context objects cannot validate mid-sync.
 pub fn validate_declared_proof(
     constants: &ConsensusConstants,
     declare: &DeclareProofOfSpace,
@@ -96,23 +90,23 @@ pub fn validate_declared_proof(
     lookup_sp: impl Fn(&Bytes32) -> Option<SignagePoint>,
     sub_slot_present: impl Fn(&Bytes32) -> bool,
 ) -> DeclareVerdict {
-    // chia:886-890 — the proof must be for a signage point we have accepted.
+    // The proof must be for a signage point we have accepted.
     let Some(sp) = lookup_sp(&declare.challenge_chain_sp) else {
         return DeclareVerdict::UnknownSignagePoint;
     };
-    // chia:891-897 — for index > 0, the SP's reward-chain output must still be the current one;
-    // a mismatch means the farmer is answering a superseded signage point.
+    // For index > 0, the SP's reward-chain output must still be the current one; a mismatch means
+    // the farmer is answering a superseded signage point.
     if declare.signage_point_index > 0
         && sp.rc_vdf.as_ref().and_then(|v| v.output.hash().ok()) != Some(declare.reward_chain_sp)
     {
         return DeclareVerdict::StaleSignagePoint;
     }
     let cc_hash = cc_challenge_hash(declare, &sp);
-    // chia:915-922 — a non-genesis SP must belong to a sub slot we hold.
+    // A non-genesis SP must belong to a sub slot we hold.
     if declare.challenge_hash != constants.genesis_challenge && !sub_slot_present(&cc_hash) {
         return DeclareVerdict::UnknownSubSlot;
     }
-    // chia:938-945 — the proof of space itself must verify against OUR checker.
+    // The proof of space itself must verify against our checker.
     match verify_and_get_quality_string(
         &declare.proof_of_space,
         constants,
@@ -126,9 +120,9 @@ pub fn validate_declared_proof(
 }
 
 /// Build the farmer-protocol `NewSignagePoint` we push to farming peers when we accept a signage
-/// point — chia `full_node.py` new_signage_point → farmer_protocol.NewSignagePoint. Distinct from
-/// the full-node `NewSignagePointOrEndOfSubSlot` gossip: this carries the difficulty/SSI context a
-/// farmer needs to look up plots. `None` only if the SP's VDF outputs fail to hash.
+/// point. Distinct from the full-node `NewSignagePointOrEndOfSubSlot` gossip: this carries the
+/// difficulty/SSI context a farmer needs to look up plots. `None` only if the SP's VDF outputs
+/// fail to hash.
 #[must_use]
 pub fn new_signage_point_for_farmers(
     sp: &SignagePoint,
@@ -139,8 +133,8 @@ pub fn new_signage_point_for_farmers(
     peak_height: u32,
     last_tx_height: u32,
 ) -> Option<NewSignagePoint> {
-    // chia full_node.py:1926-1927 — a normal (index > 0) signage point carries its cc/rc SP-VDF
-    // outputs as sp_source_data.vdf_data so a farmer/harvester can reconstruct what it signs.
+    // A normal (index > 0) signage point carries its cc/rc SP-VDF outputs as
+    // sp_source_data.vdf_data so a farmer/harvester can reconstruct what it signs.
     let cc_vdf = sp.cc_vdf.as_ref()?;
     let rc_vdf = sp.rc_vdf.as_ref()?;
     Some(NewSignagePoint {
@@ -162,14 +156,14 @@ pub fn new_signage_point_for_farmers(
     })
 }
 
-/// The `rc_prev` for a `NewUnfinishedBlockTimelord` — chia `full_node.add_unfinished_block`
-/// (chia/full_node/full_node.py:2609-2622): the last reward-chain infusion before this block's signage
-/// point. At signage-point index 0 it is the pos sub-slot's reward-chain hash (chia `get_sub_slot(
-/// pos_ss_cc_challenge_hash)[0].reward_chain.get_hash()`), falling back to the genesis challenge when the
-/// pos sub-slot IS genesis and is not held as a finished sub-slot; `None` when we hold no such sub slot
-/// (chia logs "Do not have sub slot" and returns). At index > 0 it is the SP's reward-chain VDF challenge.
+/// The `rc_prev` for a `NewUnfinishedBlockTimelord`: the last reward-chain infusion before this
+/// block's signage point. At signage-point index 0 it is the pos sub-slot's reward-chain hash,
+/// falling back to the genesis challenge when the pos sub-slot IS genesis and is not held as a
+/// finished sub-slot; `None` when we hold no such sub slot. At index > 0 it is the SP's
+/// reward-chain VDF challenge.
 ///
-/// `pos_sub_slot_rc_hash` is resolved by the caller from the slot state (index 0 only) so this stays pure.
+/// `pos_sub_slot_rc_hash` is resolved by the caller from the slot state (index 0 only) so this
+/// stays pure.
 #[must_use]
 pub fn timelord_rc_prev(
     genesis_challenge: Bytes32,
@@ -187,7 +181,7 @@ pub fn timelord_rc_prev(
     }
 }
 
-/// An accepted declaration, held until Phase 4 assembles a block from it (or it ages out).
+/// An accepted declaration, held until a block is assembled from it (or it ages out).
 #[derive(Debug, Clone)]
 pub struct AcceptedProof {
     pub declare: DeclareProofOfSpace,
@@ -254,28 +248,22 @@ impl Default for ProofCandidateStore {
     }
 }
 
-/// A candidate unfinished block awaiting the farmer's foliage signatures — chia
-/// `full_node_store.add_candidate_block` / `get_candidate_block`. At `declare_proof_of_space` time the
-/// node builds the block with placeholder foliage signatures and stores it here keyed by the proof's
-/// quality string; at `signed_values` time it is retrieved, its placeholder foliage signatures are
-/// spliced with the farmer's real ones, and the finished block is propagated.
+/// A candidate unfinished block awaiting the farmer's foliage signatures. At
+/// `declare_proof_of_space` time the node builds the block with placeholder foliage signatures
+/// and stores it here keyed by the proof's quality string; at `signed_values` time it is
+/// retrieved, its placeholder foliage signatures are spliced with the farmer's real ones, and the
+/// finished block is propagated.
 ///
-/// Bounded FIFO like [`ProofCandidateStore`]: evicting an un-signed candidate is harmless (the farmer
-/// simply gets no block from that one proof; the next signage point brings fresh candidates). The
-/// `height` is carried alongside because chia's `get_candidate_block` returns `(uint32, UnfinishedBlock)`
-/// and the caller logs/uses it.
+/// Bounded FIFO like [`ProofCandidateStore`]: evicting an un-signed candidate is harmless (the
+/// farmer simply gets no block from that one proof; the next signage point brings fresh
+/// candidates). `height` is carried alongside for the caller's logging.
 ///
-/// NOTE (deferred vs chia): chia keeps a SECOND "backup" candidate per quality string
-/// (`add_candidate_block(..., backup=True)`) — an EMPTY (`new_block_gen=None`) variant it falls back
-/// to in `signed_values` when farming the transaction candidate raises (chia re-registers the backup
-/// and re-requests farmer signatures for ITS foliage). dg_xch now builds transaction candidates, but
-/// its self-farmed-block validation is DEFERRED to the driver (`ub_inbox` →
-/// `process_ub_inbox`), not synchronous inside `signed_values` as chia's `add_unfinished_block` is —
-/// so the fallback needs a driver→farmer re-request seam that does not exist yet. The producer's
-/// re-run gate (`Mempool::create_block_generator` re-executes the emitted generator through our own
-/// validator before attaching it) closes the generator-bug half of what the backup guards against;
-/// the remaining consensus-edge failures lose the single farm win, exactly as chia's non-retryable
-/// (`NO_OVERFLOWS_IN_FIRST_SUB_SLOT_NEW_EPOCH`) branch does.
+/// No "backup" empty candidate is kept per quality string: self-farmed-block validation is
+/// deferred to the driver (`ub_inbox` → `process_ub_inbox`), so a backup fallback would need a
+/// driver→farmer re-request seam that does not exist. The producer's re-run gate
+/// (`Mempool::create_block_generator` re-executes the emitted generator through our own
+/// validator) covers the generator-bug case; remaining consensus-edge failures lose the single
+/// farm win.
 #[derive(Debug)]
 pub struct CandidateBlockStore {
     map: HashMap<
@@ -319,7 +307,7 @@ impl CandidateBlockStore {
         }
     }
 
-    /// The candidate for `quality_string` (chia `get_candidate_block`).
+    /// The candidate for `quality_string`.
     #[must_use]
     pub fn get(
         &self,
@@ -348,15 +336,12 @@ impl Default for CandidateBlockStore {
     }
 }
 
-// ---------------------------------------------------------------------------------------------------
-// Phase 4 candidate assembly (pure). The daemon resolves the store/slot-derived inputs (peak, prev-block
-// backtrack, finished sub-slots, reward-claim walk) and hands them to these functions, mirroring chia
-// `full_node_api.declare_proof_of_space` (chia/full_node/full_node_api.py:1043-1174) +
-// `block_creation.create_unfinished_block`. Kept pure (no store, no locks) so the consensus arithmetic is
-// unit-testable offline, exactly like `validate_declared_proof` above.
-// ---------------------------------------------------------------------------------------------------
+// Candidate assembly (pure). The daemon resolves the store/slot-derived inputs (peak, prev-block
+// backtrack, finished sub-slots, reward-claim walk) and hands them to these functions. Kept pure
+// (no store, no locks) so the consensus arithmetic is unit-testable offline, like
+// `validate_declared_proof` above.
 
-/// Difficulty + sub-slot-iters at the candidate's sub-slot — chia declare_proof_of_space:1057-1067.
+/// Difficulty + sub-slot-iters at the candidate's sub-slot.
 /// Pre-hard-fork / near-genesis (`peak` is `None` or `peak.height <= MAX_SUB_SLOT_BLOCKS`) uses the
 /// starting constants; otherwise the peak's own difficulty (`peak.weight - prev_weight`) and
 /// `peak.sub_slot_iters`, each overridden by any epoch transition carried in the finished sub-slots being
@@ -372,8 +357,8 @@ pub fn candidate_difficulty_and_ssi(
 ) -> (u64, u64) {
     match peak {
         Some((peak, prev_weight)) if peak.height > constants.max_sub_slot_blocks => {
-            // chia: uint64(peak.weight - block_record(peak.prev_hash).weight). The difference is a single
-            // block's difficulty and fits u64 by consensus; clamp defensively rather than panic.
+            // The weight difference is a single block's difficulty and fits u64 by consensus;
+            // clamp defensively rather than panic.
             let mut difficulty =
                 u64::try_from(peak.weight.saturating_sub(prev_weight)).unwrap_or(u64::MAX);
             let mut sub_slot_iters = peak.sub_slot_iters;
@@ -394,31 +379,27 @@ pub fn candidate_difficulty_and_ssi(
     }
 }
 
-/// The candidate's iteration positions — chia declare_proof_of_space:1069-1105.
+/// The candidate's iteration positions.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub struct CandidateIters {
     pub required_iters: u64,
     pub sp_iters: u64,
     pub ip_iters: u64,
-    /// chia `infusion_point_total_iters` — becomes `RewardChainBlockUnfinished.total_iters`.
+    /// Becomes `RewardChainBlockUnfinished.total_iters`.
     pub infusion_point_total_iters: u128,
-    /// chia `candidate_sp_total_iters = total_iters_pos_slot + sp_iters` — the empty-block-coercion key.
+    /// `total_iters_pos_slot + sp_iters` — the empty-block-coercion key.
     pub candidate_sp_total_iters: u128,
 }
 
-/// Resolve `required_iters` / `sp_iters` / `ip_iters` / `infusion_point_total_iters` — chia
-/// declare_proof_of_space:1069-1105, reusing the SAME `calculate_iterations_quality` /
-/// `calculate_sp_iters` / `calculate_ip_iters` / `calculate_infusion_point_total_iters` the validator
-/// uses (no reimplemented consensus math).
+/// Resolve `required_iters` / `sp_iters` / `ip_iters` / `infusion_point_total_iters`, reusing the
+/// same `calculate_*` functions the validator uses (no reimplemented consensus math).
 ///
 /// Returns `None` when the proof does not pass the iters filter: `calculate_ip_iters` errors when
-/// `required_iters == 0` or `required_iters >= sp_interval_iters` (chia's pospace filter gate — the
-/// proof is too weak to infuse), so we bail with no block rather than build an invalid candidate. This
-/// mirrors "Bail if required_iters is None / pospace doesn't pass the filter."
+/// `required_iters == 0` or `required_iters >= sp_interval_iters` (the pospace filter gate — the
+/// proof is too weak to infuse), so we bail with no block rather than build an invalid candidate.
 #[must_use]
-// chia's pospace-to-candidate-iters computation binds this many independent inputs (quality, pos
-// size, difficulty, ssi, sp index, cc-sp hash, slot iters); grouping them into a struct would only
-// diverge from the chia signature it mirrors, so allow the arity here.
+// The pospace-to-candidate-iters computation binds this many independent inputs (quality, pos
+// size, difficulty, ssi, sp index, cc-sp hash, slot iters); allow the arity.
 #[allow(clippy::too_many_arguments)]
 pub fn resolve_candidate_iters(
     constants: &ConsensusConstants,
@@ -427,7 +408,7 @@ pub fn resolve_candidate_iters(
     difficulty: u64,
     sub_slot_iters: u64,
     signage_point_index: u8,
-    // chia `request.challenge_chain_sp` — the cc SP output hash the quality is bound to.
+    // The cc SP output hash the quality is bound to.
     cc_sp_hash: Bytes32,
     total_iters_pos_slot: u128,
 ) -> Option<CandidateIters> {
@@ -462,54 +443,45 @@ pub fn resolve_candidate_iters(
     })
 }
 
-/// The block-store-derived previous-block linkage for a candidate — the values chia
-/// `block_creation.create_foliage` reads off `prev_block` / `get_prev_transaction_block` /
-/// the reward-claim walk. The daemon resolves these from the store and passes them in.
+/// The block-store-derived previous-block linkage for a candidate. The daemon resolves these from
+/// the store and passes them in.
 #[derive(Clone, Debug)]
 pub struct CandidatePrev {
-    /// chia `get_prev_transaction_block(prev_b, blocks, total_iters_sp)[0]` — always `true` for genesis.
+    /// Always `true` for genesis.
     pub is_transaction_block: bool,
-    /// chia `foliage.prev_block_hash` — `GENESIS_CHALLENGE` at height 0, else `prev_b.header_hash`.
+    /// `foliage.prev_block_hash` — `GENESIS_CHALLENGE` at height 0, else `prev_b.header_hash`.
     pub prev_block_hash: Bytes32,
-    /// chia `foliage_transaction_block.prev_transaction_block_hash` — `GENESIS_CHALLENGE` when the
-    /// previous transaction block is genesis, else that block's `header_hash`. Only consumed for a tx
-    /// block.
+    /// `foliage_transaction_block.prev_transaction_block_hash` — `GENESIS_CHALLENGE` when the
+    /// previous transaction block is genesis, else that block's `header_hash`. Only consumed for
+    /// a tx block.
     pub prev_transaction_block_hash: Bytes32,
-    /// The previous transaction block's HEIGHT — the produce-path mempool gate: the mempool's peak
-    /// (its time-lock reference frame) must be exactly this block before its items may be assembled
-    /// into the candidate (chia `mempool_manager.create_block_generator2` gates on
-    /// `peak.header_hash == last_tb_header_hash`; dg_xch's mempool frame is height-keyed and every
-    /// resident item is re-validated against the store on each new peak, so the height gate carries
-    /// the same guarantee — a mismatch yields an empty block, the conservative outcome). `0` at
-    /// genesis (no previous transaction block; the mempool has no peak yet, so the gate fails
-    /// closed).
+    /// The previous transaction block's height — the produce-path mempool gate: the mempool's
+    /// peak (its time-lock reference frame) must be exactly this block before its items may be
+    /// assembled into the candidate; a mismatch yields an empty block, the conservative outcome.
+    /// `0` at genesis (the mempool has no peak yet, so the gate fails closed).
     pub prev_transaction_block_height: u32,
-    /// chia `reward_claims_incorporated` inputs — the prev transaction block (with its `fees`) followed
-    /// by the non-transaction blocks between it and the transaction block before it (`fees == 0`). Empty
-    /// for a non-tx candidate and for genesis.
+    /// `reward_claims_incorporated` inputs — the prev transaction block (with its `fees`)
+    /// followed by the non-transaction blocks between it and the transaction block before it
+    /// (`fees == 0`). Empty for a non-tx candidate and for genesis.
     pub reward_claims: Vec<RewardBlockClaim>,
 }
 
-/// Assemble the candidate `UnfinishedBlock` + the `RequestSignedValues` the farmer must sign — chia
-/// declare_proof_of_space:1123-1174. Reuses [`create_unfinished_block_with_sigs`] (the farmer-signature
-/// producer path); the two signage-point signatures come VERBATIM from `declare` and the two foliage
-/// signatures are [`g2_infinity`] placeholders spliced later at `signed_values`.
+/// Assemble the candidate `UnfinishedBlock` + the `RequestSignedValues` the farmer must sign.
+/// Reuses [`create_unfinished_block_with_sigs`]; the two signage-point signatures come verbatim
+/// from `declare` and the two foliage signatures are [`g2_infinity`] placeholders spliced later
+/// at `signed_values`.
 ///
-/// `transactions` is the mempool-assembled block generator payload (chia's `new_block_gen` from
-/// `mempool_manager.create_block_generator2`, built here by `Mempool::create_block_generator`), or
-/// `None` for an empty block. The daemon passes `Some` only when the candidate IS a transaction
-/// block, the empty-block coercion (chia declare:1104-1112, `candidate_sp_total_iters <=
-/// tx_peak.total_iters`) did not fire, and the mempool's peak matches the candidate's previous
-/// transaction block. (chia attaches the generator to non-tx unfinished candidates too and strips
-/// it in `unfinished_block_to_full_block`; dg_xch never attaches it — the foliage and every
-/// consensus artifact are byte-identical, and a non-tx unfinished block never carries a dangling
-/// generator on the wire.)
+/// `transactions` is the mempool-assembled block generator payload (built by
+/// `Mempool::create_block_generator`), or `None` for an empty block. The daemon passes `Some`
+/// only when the candidate IS a transaction block, the empty-block coercion
+/// (`candidate_sp_total_iters <= tx_peak.total_iters`) did not fire, and the mempool's peak
+/// matches the candidate's previous transaction block. The generator is never attached to a
+/// non-tx unfinished candidate, so it never carries a dangling generator on the wire.
 ///
-/// `sp` is the signage point's VDFs: `Some` for signage-point index > 0, `None` at index 0 (the sub-slot
-/// start / genesis first SP), where chia nulls the VDFs to `SignagePoint(None, None, None, None)`.
+/// `sp` is the signage point's VDFs: `Some` for signage-point index > 0, `None` at index 0 (the
+/// sub-slot start / genesis first SP), where the VDFs are nulled.
 ///
-/// Returns `None` only if the assembled foliage/reward block fails to serialize for hashing (propagated
-/// from `create_unfinished_block_with_sigs`).
+/// Returns `None` only if the assembled foliage/reward block fails to serialize for hashing.
 #[allow(clippy::too_many_arguments)]
 #[must_use]
 pub fn assemble_candidate(
@@ -521,22 +493,21 @@ pub fn assemble_candidate(
     iters: &CandidateIters,
     height: u32,
     prev: &CandidatePrev,
-    // chia `new_block_gen` — the mempool-assembled transactions, None for an empty block.
+    // The mempool-assembled transactions, None for an empty block.
     transactions: Option<&dg_xch_core::consensus::producer::BlockTransactions>,
-    // chia `pool_target` — GENESIS_PRE_FARM at genesis, else pos.pool_contract_puzzle_hash / declare.
+    // GENESIS_PRE_FARM at genesis, else pos.pool_contract_puzzle_hash / declare.
     pool_target: PoolTarget,
-    // chia `farmer_ph` — GENESIS_PRE_FARM_FARMER at genesis, else declare.farmer_puzzle_hash.
+    // GENESIS_PRE_FARM_FARMER at genesis, else declare.farmer_puzzle_hash.
     farmer_reward_puzzle_hash: Bytes32,
     timestamp: u64,
-    // chia `cc_challenge_hash` / `slot_cc_challenge` — the candidate's `pos_ss_cc_challenge_hash`.
+    // The candidate's `pos_ss_cc_challenge_hash`.
     cc_challenge_hash: Bytes32,
 ) -> Option<(UnfinishedBlock, RequestSignedValues)> {
-    // chia's non-testing path nulls the VDFs at index 0 (SignagePoint(None, None, None, None)); index > 0
-    // carries the real signage-point VDFs/proofs into the reward block + unfinished block.
+    // Index 0 nulls the VDFs; index > 0 carries the real signage-point VDFs/proofs into the
+    // reward block + unfinished block.
     let (cc_sp_vdf, cc_sp_proof, rc_sp_vdf, rc_sp_proof) = match sp {
-        // The SP fields are ALREADY `Option` (chia's `SignagePoint(cc_vdf, cc_proof, rc_vdf, rc_proof)`),
-        // so an index-0 sub-slot-start SP (all-None) naturally threads `None` into the reward/unfinished
-        // block — chia's index-0 null-out. Index > 0 carries the real signage VDFs through.
+        // The SP fields are already `Option`, so an index-0 sub-slot-start SP (all-None)
+        // naturally threads `None` into the reward/unfinished block.
         Some(sp) => (
             sp.cc_vdf,
             sp.cc_proof.clone(),
@@ -545,8 +516,8 @@ pub fn assemble_candidate(
         ),
         None => (None, None, None, None),
     };
-    // chia get_plot_sig: cc_sp_hash -> declare.challenge_chain_sp_signature; rc_sp_hash ->
-    // declare.reward_chain_sp_signature; foliage hashes -> G2Element() placeholder (spliced at
+    // cc_sp_hash -> declare.challenge_chain_sp_signature; rc_sp_hash ->
+    // declare.reward_chain_sp_signature; foliage hashes -> infinity placeholder (spliced at
     // signed_values). The node never holds the plot key.
     let farmer_sigs = FarmerSignatures {
         challenge_chain_sp_signature: declare.challenge_chain_sp_signature,
@@ -568,8 +539,8 @@ pub fn assemble_candidate(
         height,
         prev.is_transaction_block,
         &prev.reward_claims,
-        // chia: new_block_gen — Some(..) farms the mempool's transactions into this candidate; None
-        // is a valid empty transaction block with reward coins only.
+        // Some(..) farms the mempool's transactions into this candidate; None is a valid empty
+        // transaction block with reward coins only.
         transactions,
         prev.prev_block_hash,
         prev.prev_transaction_block_hash,
@@ -582,15 +553,15 @@ pub fn assemble_candidate(
     )
     .ok()?;
 
-    // chia RequestSignedValues (declare_proof_of_space:1151-1174): the two foliage hashes the farmer
-    // signs. foliage_transaction_block_hash is `bytes32.zeros` for a non-transaction block.
+    // RequestSignedValues carries the two foliage hashes the farmer signs.
+    // foliage_transaction_block_hash is zeros for a non-transaction block.
     let foliage_block_data_hash = block.foliage.foliage_block_data.hash().ok()?;
     let foliage_transaction_block_hash = block
         .foliage
         .foliage_transaction_block_hash
         .unwrap_or_default();
-    // chia populates the signature-source-data fields only when the farmer asked for them
-    // (include_signature_source_data). Cheap to mirror; lets a source-data farmer verify what it signs.
+    // The signature-source-data fields are populated only when the farmer asked for them
+    // (include_signature_source_data); lets a source-data farmer verify what it signs.
     let (foliage_block_data, foliage_transaction_block_data, rc_block_unfinished) =
         if declare.include_signature_source_data {
             (
@@ -735,10 +706,9 @@ mod tests {
 
     #[test]
     fn index_zero_declare_validates_against_the_sub_slot() {
-        // chia declare_proof_of_space index-0 path: get_signage_point_by_index_and_cc_output returns the
-        // all-None sub-slot-start SP, the rc-recency check is skipped, cc_hash == challenge_chain_sp, and
-        // the sub-slot presence check (here: present) passes — reaching (and here failing) the PoSpace
-        // verify. The point: an index-0 declare is no longer dropped at UnknownSignagePoint.
+        // Index-0 path: the all-None sub-slot-start SP resolves, the rc-recency check is skipped,
+        // cc_hash == challenge_chain_sp, and the sub-slot presence check passes — reaching (and
+        // here failing) the PoSpace verify, never UnknownSignagePoint.
         let d = declare(0, 5, Bytes32::from([7; 32]));
         let sub_slot_start = SignagePoint::sub_slot_start();
         let v = validate_declared_proof(
@@ -757,7 +727,7 @@ mod tests {
 
     #[test]
     fn timelord_rc_prev_index_gt_0_uses_sp_reward_chain_challenge() {
-        // chia full_node.add_unfinished_block:2622 — index > 0: rc_prev = reward_chain_sp_vdf.challenge.
+        // index > 0: rc_prev = reward_chain_sp_vdf.challenge.
         let rc = vdf(9);
         let got = timelord_rc_prev(
             MAINNET.genesis_challenge,
@@ -771,7 +741,7 @@ mod tests {
 
     #[test]
     fn timelord_rc_prev_index_0_uses_resolved_sub_slot_rc_hash() {
-        // chia :2619 — index 0 with the pos sub-slot held: rc_prev = that sub-slot's reward-chain hash.
+        // index 0 with the pos sub-slot held: rc_prev = that sub-slot's reward-chain hash.
         let resolved = Bytes32::from([44; 32]);
         let got = timelord_rc_prev(
             MAINNET.genesis_challenge,
@@ -785,7 +755,7 @@ mod tests {
 
     #[test]
     fn timelord_rc_prev_index_0_genesis_falls_back_to_genesis_challenge() {
-        // chia :2612-2614 — index 0, pos sub-slot NOT held but it IS the genesis challenge: rc_prev = genesis.
+        // index 0, pos sub-slot not held but it IS the genesis challenge: rc_prev = genesis.
         let got = timelord_rc_prev(
             MAINNET.genesis_challenge,
             0,
@@ -798,7 +768,7 @@ mod tests {
 
     #[test]
     fn timelord_rc_prev_index_0_missing_non_genesis_sub_slot_is_none() {
-        // chia :2615-2617 — index 0, pos sub-slot unknown and not genesis: "Do not have sub slot" -> None.
+        // index 0, pos sub-slot unknown and not genesis -> None.
         let got = timelord_rc_prev(
             MAINNET.genesis_challenge,
             0,
@@ -811,8 +781,8 @@ mod tests {
 
     #[test]
     fn assemble_index_zero_candidate_nulls_the_sp_vdfs() {
-        // chia declare:1123-1174 index-0: the reward/unfinished block carries no signage VDFs
-        // (SignagePoint(None, None, None, None)). Passing sp=None threads that through.
+        // Index-0: the reward/unfinished block carries no signage VDFs. Passing sp=None threads
+        // that through.
         let declare = declare(0, 5, MAINNET.genesis_challenge);
         let prev = CandidatePrev {
             is_transaction_block: true,
@@ -868,8 +838,6 @@ mod tests {
         );
     }
 
-    // ---- Phase 4 candidate assembly ----
-
     // A minimal BlockRecord with only the fields the difficulty selection reads set meaningfully.
     fn br(height: u32, weight: u128, sub_slot_iters: u64) -> BlockRecord {
         BlockRecord {
@@ -905,7 +873,7 @@ mod tests {
 
     #[test]
     fn difficulty_starting_when_no_peak_or_near_genesis() {
-        // chia declare:1057 — no peak, or peak height <= MAX_SUB_SLOT_BLOCKS, uses the starting consts.
+        // No peak, or peak height <= MAX_SUB_SLOT_BLOCKS, uses the starting consts.
         assert_eq!(
             candidate_difficulty_and_ssi(&MAINNET, None, &[]),
             (MAINNET.difficulty_starting, MAINNET.sub_slot_iters_starting)
@@ -919,7 +887,7 @@ mod tests {
 
     #[test]
     fn difficulty_is_peak_weight_delta_past_the_starting_window() {
-        // chia declare:1060-1062 — difficulty = peak.weight - prev.weight; ssi = peak.sub_slot_iters.
+        // difficulty = peak.weight - prev.weight; ssi = peak.sub_slot_iters.
         let peak = br(MAINNET.max_sub_slot_blocks + 72, 1_000, 12_345);
         assert_eq!(
             candidate_difficulty_and_ssi(&MAINNET, Some((&peak, 940)), &[]),
@@ -929,8 +897,8 @@ mod tests {
 
     #[test]
     fn iters_filter_rejects_an_out_of_range_required_iters() {
-        // chia declare:1069-1082 — an impossibly hard difficulty pushes required_iters to u64::MAX, so
-        // calculate_ip_iters errors (required_iters >= sp_interval_iters) and we bail with no candidate.
+        // An impossibly hard difficulty pushes required_iters to u64::MAX, so calculate_ip_iters
+        // errors (required_iters >= sp_interval_iters) and we bail with no candidate.
         let pos = ProofOfSpace::v1(
             Bytes32::from([9; 32]),
             Some(Bytes48::from([1; 48])),
@@ -965,7 +933,7 @@ mod tests {
 
     #[test]
     fn assemble_genesis_candidate_is_a_transaction_block() {
-        // Item F — genesis: prev_b None, height 0, transaction block, pre-farm targets.
+        // Genesis: prev_b None, height 0, transaction block, pre-farm targets.
         let declare = declare(2, 5, MAINNET.genesis_challenge);
         let sp = sp(5);
         let prev = CandidatePrev {
@@ -1030,8 +998,8 @@ mod tests {
 
     #[test]
     fn assemble_non_transaction_candidate_has_zeroed_ftb_hash() {
-        // A non-transaction candidate builds no foliage transaction block; chia sends bytes32.zeros for
-        // its hash in RequestSignedValues.
+        // A non-transaction candidate builds no foliage transaction block; its hash in
+        // RequestSignedValues is zeros.
         let declare = declare(3, 5, Bytes32::from([7; 32]));
         let sp = sp(5);
         let prev = CandidatePrev {
@@ -1066,8 +1034,8 @@ mod tests {
         assert_eq!(request.foliage_transaction_block_hash, Bytes32::default());
     }
 
-    // sp_source_data parity (chia full_node.py:1926): a normal-index farmer signage point must
-    // carry vdf_data (the cc/rc SP-VDF outputs), never sub_slot_data, and survive a wire round-trip.
+    // A normal-index farmer signage point must carry vdf_data (the cc/rc SP-VDF outputs), never
+    // sub_slot_data, and survive a wire round-trip.
     #[test]
     fn normal_signage_point_carries_vdf_source_data() {
         use dg_xch_serialize::{ChiaProtocolVersion, ChiaSerialize};

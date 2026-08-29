@@ -7,10 +7,9 @@ use std::path::{Path, PathBuf};
 
 /// Plots a simulated chain farms against.
 ///
-/// The shape follows chia's own test harness: a fixed set of small plots with deterministic ids,
-/// written once into a directory and reused on later runs. Because the id and the filename both
-/// come from `(campaign_seed, plot_index)`, a second run of the same campaign finds its plots
-/// already on disk instead of spending the time to make them again.
+/// A fixed set of small plots with deterministic ids, written once into a directory and reused on
+/// later runs. The id and the filename both come from `(campaign_seed, plot_index)`, so a second
+/// run of the same campaign finds its plots already on disk.
 #[derive(Debug, Clone)]
 pub struct PlotSet {
     pub dir: PathBuf,
@@ -177,8 +176,7 @@ mod tests {
 
     #[test]
     fn farming_produces_a_proof_the_validator_accepts() {
-        // The whole point of the plot set: a challenge that hits yields a proof which passes the
-        // consensus verifier. This is the simulator's farming path end to end.
+        // A challenge that hits yields a proof the consensus verifier accepts.
         let dir = scratch("farm");
         let set = PlotSet::setup(&dir, 7, 8, K, STRENGTH, false).expect("setup");
 
@@ -222,10 +220,8 @@ mod tests {
 
     #[test]
     fn a_farmed_proof_passes_the_consensus_verifier() {
-        // The full consensus gate on a farmed proof: derive the pos challenge the way a signage
-        // point does, farm it, wrap the result in a v2 ProofOfSpace, and let
-        // verify_and_get_quality_string re-derive the plot id, check the challenge binding, run the
-        // v2 plot filter, and validate the proof.
+        // Derive the pos challenge as a signage point does, farm it, wrap the result in a v2
+        // ProofOfSpace, and run it through verify_and_get_quality_string.
         use dg_xch_core::blockchain::proof_of_space::ProofBytes;
         use dg_xch_core::blockchain::proof_of_space::{
             ProofOfSpace, calculate_pos_challenge, calculate_prefix_bits_v2, passes_plot_filter,

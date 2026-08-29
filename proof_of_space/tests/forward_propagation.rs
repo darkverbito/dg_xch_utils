@@ -38,9 +38,6 @@ fn every_table_is_populated_and_sorted() {
 
 #[test]
 fn a_table_seven_entry_yields_a_proof_the_verifier_accepts() {
-    // The whole forward propagation half in one assertion: if the 64 x values behind an f7
-    // re-derive that same f7 through the verifier's own f1 and fx chain, the matching, the
-    // metadata widths and the pair ordering are all correct.
     let tables = forward_propagate(K, plot_id()).expect("forward propagation");
     let id = plot_id().bytes();
     let mut checked = 0;

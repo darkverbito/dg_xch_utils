@@ -1,9 +1,9 @@
-// A1 — the sync-end transition (chia `_finish_sync`, full_node.py:1823-1853).
+// A1 — the sync-end transition (`_finish_sync`, ).
 //
 // A bulk/fast-sync band confirms through `sync_range` → `engine.add_block` directly, bypassing the
 // per-block follow side effects: no mempool revalidation, no wallet push, no peer broadcast fire
-// until the NEXT follow-step block. chia closes this by running peak-post-processing ONCE at
-// `_finish_sync` with an EMPTY StateChangeSummary — mempool revalidation against the (tx) peak,
+// until the NEXT follow-step block. The sync-end transition closes this by running
+// peak-post-processing ONCE with empty coin deltas — mempool revalidation against the (tx) peak,
 // NewPeak to full-node peers, `send_peak_to_timelords`, and NewPeakWallet to wallet peers (NO
 // per-coin CoinStateUpdate: `lookup_coin_ids` is empty). `Node::finish_sync_transition` mirrors
 // that; this drives it against live peers and asserts each send.
@@ -46,6 +46,8 @@ fn config(listen: SocketAddr, rpc: SocketAddr) -> Config {
         std::process::id()
     ));
     Config {
+        target_outbound: None,
+        target_peer_count: None,
         listen,
         rpc,
         introducer: None,
@@ -88,7 +90,7 @@ impl FullNodeApi for PeerSideApi {
     }
 }
 
-// A one-peer OutboundPeers seam over a real dialed link (chia sends NewPeak to full-node peers).
+// A one-peer OutboundPeers seam over a real dialed link (NewPeak goes to full-node peers).
 struct OneOutbound(Arc<OutboundPeer>);
 
 #[async_trait]
@@ -191,7 +193,7 @@ async fn dial_wallet(port: u16, handlers: HandlerMap) -> WsClient {
     .expect("wallet dial")
 }
 
-// The band-exit transition fires all of chia _finish_sync's peak-post-processing sends at once.
+// The band-exit transition fires all of `_finish_sync`'s peak-post-processing sends at once.
 #[tokio::test]
 async fn finish_sync_transition_fires_mempool_and_peer_and_wallet_sends() {
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -234,7 +236,7 @@ async fn finish_sync_transition_fires_mempool_and_peer_and_wallet_sends() {
     });
     let registry: Arc<dyn OutboundPeers> = Arc::new(OneOutbound(outbound));
 
-    // The mempool starts frameless — the transition sets it (chia mempool_manager.new_peak).
+    // The mempool starts frameless — the transition sets it (`mempool_manager`).
     assert!(
         node.mempool.lock().await.peak().is_none(),
         "mempool has no peak frame before the transition"
@@ -265,7 +267,7 @@ async fn finish_sync_transition_fires_mempool_and_peer_and_wallet_sends() {
     assert_eq!(
         np.fork_point_with_previous_peak,
         common::PEAK_HEIGHT - 1,
-        "sync-end wallet fork point is height-1 (chia _finish_sync, not the on-connect convention)"
+        "sync-end wallet fork point is height-1 (not the on-connect convention)"
     );
 
     // The outbound full-node peer received NewPeak of the landed tip.
@@ -283,7 +285,7 @@ async fn finish_sync_transition_fires_mempool_and_peer_and_wallet_sends() {
     assert_eq!(
         got.fork_point_with_previous_peak,
         common::PEAK_HEIGHT - 1,
-        "sync-end NewPeak fork point is height-1 (chia _finish_sync fork_point default)"
+        "sync-end NewPeak fork point is height-1 (the sync-end fork_point default)"
     );
 
     peer_run.store(false, Ordering::Relaxed);

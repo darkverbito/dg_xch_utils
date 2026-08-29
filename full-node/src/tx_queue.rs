@@ -1,28 +1,14 @@
-// The gossip-transaction admission queue with a trusted priority lane — chia `TransactionQueue`
-// (chia/full_node/tx_processing_queue.py). This is the bounded inbox `on_transaction` fills off the
-// websocket read loop and `spawn_tx_validator` drains; it replaced the raw `Vec<(peer, bundle)>`
-// so a trusted peer's bundle can jump the untrusted backlog.
+// The gossip-transaction admission queue with a trusted priority lane — the bounded inbox
+// `on_transaction` fills off the websocket read loop and `spawn_tx_validator` drains.
 //
-// Chia priority semantics (mirrored here): `TransactionQueue.put(tx, peer_id, high_priority)` routes
-// a high-priority (trusted, or local `peer_id=None`) entry into `_high_priority_queue` — an UNBOUNDED
-// SimpleQueue — and `pop()` drains that queue ENTIRELY before it ever touches the per-peer untrusted
-// queues (tx_processing_queue.py:118-121, 168-170). So high priority is a separate lane that is
-// serviced first, not a reordering within one lane.
+// A high-priority (trusted, or local) entry lands in an unbounded lane that drains ENTIRELY
+// before the untrusted backlog — high priority is a separate lane serviced first, not a
+// reordering within one lane. The untrusted lane orders by advertised fee-per-cost (highest
+// first, unknown-cost last) under aggregate + per-peer caps.
 //
-// UNTRUSTED-LANE ORDERING (chia parity): chia's untrusted side is a per-peer
-// `PriorityQueue` keyed on `-fee_per_cost` (tx_processing_queue.py:133-146 — highest advertised
-// fee-per-cost popped first, no-cost-info entries last at `+inf`), and chia additionally nices the
-// pre-validation itself by advertised fpc (full_node.py:2898-2901 → `pre_validate_spendbundle(
-// fee_per_cost=...)`, mempool_manager.py:513). Ours orders the single untrusted lane by advertised
-// fee-per-cost (highest first, unknown-cost last), matching that validation-priority nicing under the
-// same aggregate + per-peer caps.
-//
-// REMAINING DELTA from chia (documented, not a gap): chia ALSO deficit-round-robins ACROSS peers by
-// cost (tx_processing_queue.py:159-205) so one peer cannot monopolize validation even with the
-// highest fees. Our single fee-ordered lane keeps only the per-peer admission cap (TX_INBOX_PER_PEER),
-// not the cross-peer round-robin, so a peer that fills its share with high-fpc bundles is validated
-// ahead of a peer with lower-fpc bundles. The advertised fpc affects ONLY queue order, never
-// admission (every bundle is validated at its TRUE fee), so this is a fairness-ordering delta, not a
+// There is no cross-peer round-robin: a peer that fills its share with high-fpc bundles is
+// validated ahead of a peer with lower-fpc bundles. The advertised fpc affects ONLY queue order,
+// never admission (every bundle is validated at its TRUE fee) — a fairness-ordering delta, not a
 // correctness one.
 
 use dg_xch_core::blockchain::sized_bytes::Bytes32;
@@ -30,9 +16,9 @@ use dg_xch_core::blockchain::spend_bundle::SpendBundle;
 use std::cmp::Ordering;
 use std::collections::VecDeque;
 
-// One untrusted-lane entry: the peer it came from, the bundle, and the ADVERTISED fee + cost (from
-// the peer's `NewTransaction`, chia's `PeerWithTx`) the lane orders on. Advertised values order the
-// queue only — admission always re-validates at the bundle's true fee.
+// One untrusted-lane entry: the peer it came from, the bundle, and the ADVERTISED fee + cost
+// (from the peer's `NewTransaction`) the lane orders on. Advertised values order the queue only —
+// admission always re-validates at the bundle's true fee.
 struct UntrustedTx {
     peer: Bytes32,
     bundle: SpendBundle,
@@ -40,10 +26,10 @@ struct UntrustedTx {
     advertised_cost: u64,
 }
 
-// Order two untrusted entries by advertised fee-per-cost, HIGHEST first (chia `-fee_per_cost` in a
-// lowest-first PriorityQueue). fpc = fee/cost compared without division via cross-multiplication in
-// u128 (advertised_fee ≤ ~2^50, advertised_cost < 2^33, so the product never overflows u128). An
-// entry with zero/unknown advertised cost has no fpc and sorts LAST (chia's `+inf` priority).
+// Order two untrusted entries by advertised fee-per-cost, HIGHEST first. fpc = fee/cost compared
+// without division via cross-multiplication in u128 (advertised_fee ≤ ~2^50, advertised_cost
+// < 2^33, so the product never overflows u128). An entry with zero/unknown advertised cost has
+// no fpc and sorts LAST.
 fn fee_per_cost_desc(a: &UntrustedTx, b: &UntrustedTx) -> Ordering {
     match (a.advertised_cost, b.advertised_cost) {
         (0, 0) => Ordering::Equal,
@@ -58,27 +44,24 @@ fn fee_per_cost_desc(a: &UntrustedTx, b: &UntrustedTx) -> Ordering {
     }
 }
 
-/// A bounded gossip-transaction inbox with a trusted high-priority lane. Trusted-peer bundles land in
-/// the unbounded `high` lane (chia `_high_priority_queue`, drained first); untrusted-peer bundles land
-/// in the capped `normal` lane under an aggregate + per-peer bound and drain highest-fee-per-cost
-/// first.
+/// A bounded gossip-transaction inbox with a trusted high-priority lane. Trusted-peer bundles
+/// land in the unbounded `high` lane (drained first); untrusted-peer bundles land in the capped
+/// `normal` lane under an aggregate + per-peer bound and drain highest-fee-per-cost first.
 pub struct TxQueue {
-    // chia `_high_priority_queue`: trusted (and local) transactions, drained in full before `normal`.
-    // Unbounded, exactly as chia ("we don't limit the number of high priority transactions") — trust
-    // is the admission control, so a trusted peer is not throttled here. FIFO, unchanged.
+    // Trusted (and local) transactions, drained in full before `normal`. Unbounded — trust is
+    // the admission control, so a trusted peer is not throttled here. FIFO.
     high: VecDeque<(Bytes32, SpendBundle)>,
     // The untrusted backlog under `cap` (aggregate) + `per_peer` (anti-spam) bounds, drained by
-    // advertised fee-per-cost (highest first — chia's per-peer PriorityQueue nicing).
+    // advertised fee-per-cost (highest first).
     normal: Vec<UntrustedTx>,
-    // Aggregate cap on the untrusted lane (chia's per-peer `peer_size_limit`, applied here as the
-    // pre-tier node's global `TX_INBOX_CAP`).
+    // Aggregate cap on the untrusted lane (`TX_INBOX_CAP`).
     cap: usize,
     // Per-peer cap on the untrusted lane — a single flooding peer cannot fill the backlog.
     per_peer: usize,
 }
 
 impl TxQueue {
-    /// A queue with the given untrusted-lane bounds. The high-priority lane is unbounded (chia).
+    /// A queue with the given untrusted-lane bounds. The high-priority lane is unbounded.
     #[must_use]
     pub fn new(cap: usize, per_peer: usize) -> Self {
         Self {
@@ -89,12 +72,12 @@ impl TxQueue {
         }
     }
 
-    /// Enqueue `bundle` from `peer`. `high_priority` (a trusted peer) routes to the unbounded priority
-    /// lane and always succeeds (advertised fee/cost ignored — the trusted lane is FIFO); an untrusted
-    /// bundle is admitted to the capped lane only if BOTH the aggregate and this peer's share have
-    /// room — otherwise it is dropped on the floor (chia `TransactionQueueFull` for the peer, mapped
-    /// here to a silent drop as the pre-tier inbox did). `advertised_fee`/`advertised_cost` are the
-    /// peer's `NewTransaction` values the untrusted lane orders on. Returns whether it was admitted.
+    /// Enqueue `bundle` from `peer`. `high_priority` (a trusted peer) routes to the unbounded
+    /// priority lane and always succeeds (advertised fee/cost ignored — the trusted lane is
+    /// FIFO); an untrusted bundle is admitted to the capped lane only if BOTH the aggregate and
+    /// this peer's share have room — otherwise it is dropped on the floor.
+    /// `advertised_fee`/`advertised_cost` are the peer's `NewTransaction` values the untrusted
+    /// lane orders on. Returns whether it was admitted.
     pub fn push(
         &mut self,
         peer: Bytes32,
@@ -122,11 +105,10 @@ impl TxQueue {
         true
     }
 
-    /// Drain the whole queue for the validator worker's batch pass — the high-priority lane first (in
-    /// FIFO order), then the untrusted backlog ordered by advertised fee-per-cost (highest first,
-    /// unknown-cost last). Mirrors repeated chia `pop()`: every high entry is returned before any
-    /// normal one, and within the untrusted lane the higher-fpc bundle validates first. The sort is
-    /// stable, so equal-fpc untrusted entries keep insertion (FIFO) order — chia's tie behavior.
+    /// Drain the whole queue for the validator worker's batch pass — the high-priority lane
+    /// first (in FIFO order), then the untrusted backlog ordered by advertised fee-per-cost
+    /// (highest first, unknown-cost last). The sort is stable, so equal-fpc untrusted entries
+    /// keep insertion (FIFO) order.
     pub fn drain_batch(&mut self) -> Vec<(Bytes32, SpendBundle)> {
         let mut out = Vec::with_capacity(self.high.len() + self.normal.len());
         out.extend(self.high.drain(..));
@@ -136,8 +118,8 @@ impl TxQueue {
         out
     }
 
-    /// Drop every queued bundle — the not-synced transition flush (chia
-    /// `NO_TRANSACTIONS_WHILE_SYNCING`, the worker clears the inbox rather than validate stale spends).
+    /// Drop every queued bundle — the not-synced transition flush (the worker clears the inbox
+    /// rather than validate stale spends).
     pub fn clear(&mut self) {
         self.high.clear();
         self.normal.clear();
@@ -172,9 +154,8 @@ mod tests {
         Bytes32::from([byte; 32])
     }
 
-    // Gate 3: a trusted peer's bundle jumps an already-queued untrusted bundle — chia high_priority
-    // routes to the separate lane pop() drains first. Enqueue untrusted FIRST, trusted SECOND, and
-    // assert the trusted one comes back FIRST.
+    // A trusted peer's bundle jumps an already-queued untrusted bundle. Enqueue untrusted FIRST,
+    // trusted SECOND, and assert the trusted one comes back FIRST.
     #[test]
     fn trusted_bundle_jumps_untrusted_backlog() {
         let mut q = TxQueue::new(256, 32);
@@ -189,10 +170,10 @@ mod tests {
         assert!(q.is_empty());
     }
 
-    // The untrusted lane drains by advertised fee-per-cost, highest FIRST.
-    // Insert the LOW-fpc bundle first and the HIGH-fpc bundle second — a FIFO lane would drain the low
-    // one first (the RED behavior); the fee-ordered lane drains the high one first. The trusted lane
-    // still jumps both regardless of fee.
+    // The untrusted lane drains by advertised fee-per-cost, highest FIRST. Insert the LOW-fpc
+    // bundle first and the HIGH-fpc bundle second — a FIFO lane would drain the low one first;
+    // the fee-ordered lane drains the high one first. The trusted lane still jumps both
+    // regardless of fee.
     #[test]
     fn untrusted_lane_drains_highest_fee_per_cost_first() {
         let mut q = TxQueue::new(256, 32);
@@ -217,8 +198,7 @@ mod tests {
         assert_eq!(batch[2].0, low, "untrusted: lower fee-per-cost follows");
     }
 
-    // A zero/unknown advertised cost has no fee-per-cost and sorts LAST among untrusted entries
-    // (chia's `+inf` priority for a peer that advertised no cost).
+    // A zero/unknown advertised cost has no fee-per-cost and sorts LAST among untrusted entries.
     #[test]
     fn unknown_cost_untrusted_entry_drains_last() {
         let mut q = TxQueue::new(256, 32);
@@ -267,7 +247,7 @@ mod tests {
         assert_eq!(q.len(), 12);
     }
 
-    // Multiple high-priority entries drain in FIFO order among themselves (chia SimpleQueue).
+    // Multiple high-priority entries drain in FIFO order among themselves.
     #[test]
     fn high_priority_lane_is_fifo() {
         let mut q = TxQueue::new(256, 32);

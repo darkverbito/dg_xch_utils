@@ -118,8 +118,8 @@ impl<S: BlockStore + CoinStore + Sync> ChainBuilder<S> {
         &self.constants
     }
 
-    /// Retarget the farmer reward: subsequent blocks pay their rewards to `ph`. This is how a
-    /// simulator farms a coin to a chosen address (chia `farm_block(target_puzzle_hash)`).
+    /// Retarget the farmer reward: subsequent blocks pay their rewards to `ph`, which is how a
+    /// coin is farmed to a chosen address.
     pub fn set_reward_ph(&mut self, ph: Bytes32) {
         self.farmer_reward_puzzle_hash = ph;
     }
@@ -208,7 +208,7 @@ impl<S: BlockStore + CoinStore + Sync> ChainBuilder<S> {
 
     /// Reorg: fork at `fork_height` and farm `new_blocks` on a competing branch seeded by `seed`.
     /// The branch differs from the incumbent and, being longer, outweighs it, so the engine reorgs
-    /// onto it. This is chia `reorg_from_index_to_new_index`.
+    /// onto it.
     pub async fn reorg(
         &mut self,
         fork_height: u32,
@@ -252,28 +252,25 @@ impl<S: BlockStore + CoinStore + Sync> ChainBuilder<S> {
         self.confirm(full).await
     }
 
-    /// Farm and confirm the next block within the current (first) sub-slot.
+    /// Farm and confirm the next block within the current sub-slot, as a non-transaction block.
     ///
-    /// A within-sub-slot successor keeps the sub-slot challenge, advances the signage point, chains
-    /// the challenge-chain VDF from the previous block's output and starts the reward-chain VDF from
-    /// the previous block's reward-infusion challenge. The signage-point and foliage signatures are
-    /// real plot signatures, which is what the header validator checks past signage point zero.
-    /// Farm and confirm the next block as a non-transaction block.
+    /// The successor keeps the sub-slot challenge, advances the signage point, chains the
+    /// challenge-chain VDF from the previous block's output and starts the reward-chain VDF from the
+    /// previous block's reward-infusion challenge.
     pub async fn farm_next(&mut self) -> Result<AddBlockOutcome, SimError> {
         self.farm_next_inner(Some(false), None, None).await
     }
 
     /// Farm and confirm the next block as a transaction block. It incorporates the reward coins of
-    /// the previous transaction block and any non-transaction blocks since, and (once wired) any
-    /// mempool spends. This is chia `farm_new_transaction_block`.
+    /// the previous transaction block and any non-transaction blocks since, and any mempool spends.
     pub async fn farm_next_tx(&mut self) -> Result<AddBlockOutcome, SimError> {
         self.farm_next_inner(Some(true), None, None).await
     }
 
     /// Farm and confirm the next transaction block, carrying a real spend bundle. The bundle is
     /// admitted to a fresh mempool at the current peak and assembled into a block generator through
-    /// the production `create_block_generator` path, exactly as chia's farmer builds a transaction
-    /// block from the mempool. The spent coins leave the coin store and the created coins enter it.
+    /// the production `create_block_generator` path. The spent coins leave the coin store and the
+    /// created coins enter it.
     pub async fn farm_next_tx_with_bundle(
         &mut self,
         bundle: SpendBundle,
@@ -307,15 +304,10 @@ impl<S: BlockStore + CoinStore + Sync> ChainBuilder<S> {
         self.last_delta.take()
     }
 
-    /// Farm the next block, sealing whatever a shared mempool holds into it — the seam a peer server
-    /// uses so a wallet's submitted `SendTransaction`s land in the chain. With an empty mempool it
-    /// farms a plain successor to advance the peak.
     /// Farm the next block, sealing whatever a shared mempool holds when the block is a transaction
-    /// block. With `guarantee_tx` the signage point is advanced until a transaction block lands (chia
-    /// `farm_block(guarantee_tx_block=True)` — how a reward is minted and a spend forced to confirm).
-    /// Without it the block type is whatever the position naturally yields, so a background farmer
-    /// produces the real chia mix of transaction and non-transaction blocks; a pending spend simply
-    /// waits in the mempool for the next transaction block.
+    /// block. With `guarantee_tx` the signage point is advanced until a transaction block lands;
+    /// without it the block type is whatever the position yields and a pending spend waits in the
+    /// mempool for the next transaction block.
     pub async fn farm_next_from_shared_mempool(
         &mut self,
         mempool: &Arc<Mutex<Mempool>>,
@@ -1347,8 +1339,7 @@ mod tests {
         use std::collections::HashMap;
         use std::sync::Arc;
 
-        // A block source over an in-memory height -> block map, exactly the shape the mainnet
-        // replay harness serves a recorded corpus through. A fresh node cannot tell it from a peer.
+        // A block source over an in-memory height -> block map.
         struct FarmedSource {
             blocks: HashMap<u32, FullBlock>,
         }
@@ -1389,8 +1380,8 @@ mod tests {
             .collect();
         let last = *corpus.keys().max().expect("nonempty");
 
-        // Consumer: a fresh node with an empty store follows the same blocks through the production
-        // sync pipeline, window by window, exactly like syncing from a peer.
+        // Consumer: a fresh node with an empty store follows the same blocks through the sync
+        // pipeline, window by window.
         let consumer_store = Arc::new(store().await);
         let engine = Engine::new(consumer_store.clone(), NativePrimitives, constants());
         let mut chaser = Chaser::new(engine, SyncConfig::default());
@@ -1405,8 +1396,7 @@ mod tests {
             next = to + 1;
         }
 
-        // The synced node reached the producer's peak, and holds the identical chain: the same
-        // block at every height. That is a full-chain agreement between two independent nodes.
+        // The synced node reached the producer's peak and holds the same block at every height.
         let producer_store = producer.engine().store();
         let producer_peak = producer_store.get_peak().await.expect("producer peak");
         let consumer_peak = consumer_store.get_peak().await.expect("consumer peak");

@@ -5,8 +5,7 @@
 //
 // Two probes:
 //  * repeated-challenge verify: the depth-0 chia vdf.txt fixture verified N times with the SAME
-//    challenge — models the measured genesis-era recurrence (5,098 derivations / 1,094 unique
-//    challenges over mainnet blocks 0..=1023; hottest challenge derived 110x).
+//    challenge — models the genesis-era challenge recurrence.
 //  * distinct-seed discriminants: create_discriminant_bytes over N unique seeds — the uncached
 //    hash_prime cost itself (reps / primality-path changes show up here).
 

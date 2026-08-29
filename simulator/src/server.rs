@@ -1,14 +1,12 @@
-//! Serve the peer/wallet protocol AND chia's simulator RPC endpoints from the simulator's own chain,
-//! so a real wallet (Sage) dials the simulator exactly as it would a mainnet full node, and a test
-//! harness drives it through the same `farm_block` / `set_auto_farming` / `get_auto_farming` RPC
-//! endpoints chia's simulator serves.
+//! Serve the peer/wallet protocol and the simulator RPC endpoints (`farm_block`,
+//! `set_auto_farming`, `get_auto_farming`) from the simulator's own chain, so a wallet dials the
+//! simulator as it would a full node.
 //!
-//! The reuse is deliberate: the simulator reimplements no serving logic. It boots the real
-//! [`full_node::Node`] over the simulator's store ([`Node::boot_with_store_constants`]) and reuses
-//! [`Node::spawn_peer_server`] + [`Node::spawn_rpc_server`] verbatim. The simulator endpoints are the
-//! node's own RPC surface plus a [`SimControl`] hook the node calls back into. [`Node::run`] is never
-//! started — the [`ChainBuilder`] is the sole block producer, and farming is driven by `farm_block`
-//! (RPC) or the auto-farm loop.
+//! The simulator boots [`full_node::Node`] over its own store ([`Node::boot_with_store_constants`])
+//! and reuses [`Node::spawn_peer_server`] + [`Node::spawn_rpc_server`]; the simulator endpoints are
+//! the node's RPC surface plus a [`SimControl`] hook the node calls back into. [`Node::run`] is
+//! never started: the [`ChainBuilder`] is the sole block producer, driven by `farm_block` or the
+//! auto-farm loop.
 
 use crate::chain::ChainBuilder;
 use crate::error::SimError;
@@ -26,10 +24,9 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 
 /// The consensus constants a served simulator runs under: the `SIMULATOR` base (pos2 active from
-/// height 0) with a small plot size, a permissive plot filter, and a tiny 16-bit-discriminant VDF
-/// over a small sub-slot, so blocks farm in microseconds — but carrying **mainnet's genesis challenge
-/// and `AGG_SIG_ME` data**, so a stock mainnet wallet syncs and spends against it with no network
-/// realignment. Only the consensus arithmetic a light wallet never checks is sped up.
+/// height 0) with a small plot size, a permissive plot filter, and a 16-bit-discriminant VDF over a
+/// small sub-slot. The genesis challenge and `AGG_SIG_ME` data stay at their mainnet values, so a
+/// mainnet wallet syncs and spends against it unchanged.
 #[must_use]
 pub fn simulator_constants() -> ConsensusConstants {
     use dg_xch_core::consensus::constants::{MAINNET, SIMULATOR};
@@ -108,7 +105,7 @@ impl SimControl for SimControlImpl {
     }
 }
 
-/// A running simulator that serves the peer/wallet protocol and chia's simulator RPC from its chain.
+/// A running simulator that serves the peer/wallet protocol and the simulator RPC from its chain.
 pub struct SimulatorServer {
     node: Arc<Node<SqliteStore>>,
     chain: SharedChain,
@@ -237,9 +234,8 @@ impl SimulatorServer {
                 if !auto_farm.load(Ordering::Relaxed) {
                     continue;
                 }
-                // A continuous ticker (the 2.7.1 sim's background farmer): seal any pending wallet
-                // transactions AND advance the peak every tick, so confirmations never race a stalled
-                // chain. The block is a transaction block, so it carries whatever the mempool holds.
+                // Seal any pending wallet transactions and advance the peak every tick, so
+                // confirmations never race a stalled chain.
                 let mut c = chain.lock().await;
                 if c.farm_next_from_shared_mempool(&node.mempool, false)
                     .await

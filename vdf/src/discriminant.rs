@@ -9,11 +9,9 @@ const MAX_DISCRIMINANT_SIZE_BITS: usize = 1024;
 
 /// Bounded challenge→prime memo for the discriminant derivation. Within a sub-slot every VDF on a
 /// chain shares that chain's challenge, so the identical ~1024-bit Fiat-Shamir prime search recurs
-/// per proof check (measured on mainnet blocks 0..=1023: 5,098 derivations collapse to 1,094
-/// unique seeds — 4.7x redundancy, the hottest challenge derived 110 times, ~381 primality
-/// candidates each). Mirrors the reference node's `@lru_cache(maxsize=200)` on `get_discriminant`
-/// (chia-blockchain, chia/types/blockchain_format/vdf.py). `get_b`'s 264-bit hash_prime inputs
-/// hash the proof forms themselves and were measured ~90% unique — deliberately NOT cached.
+/// per proof check. Capacity matches the reference node's discriminant lru_cache. `get_b`'s
+/// 264-bit hash_prime inputs hash the proof forms themselves and are mostly unique —
+/// deliberately NOT cached.
 const DISCRIMINANT_CACHE_CAPACITY: usize = 200;
 
 /// `(seed, size_bits, prime)`, least-recently-used at the front. Linear scan + Vec rotate: at 200
@@ -146,13 +144,11 @@ fn increment_big_endian(bytes: &mut [u8]) {
 
 fn is_probable_prime(n: &BigUint) -> bool {
     // GMP mpz_probab_prime_p with reps=24: small-prime screen + Baillie-PSW exactly (MR base 2 +
-    // strong Lucas) — extra random-base MR rounds run only for reps > 24 (vendored
-    // gmp-6.3.0-c/mpz/millerrabin.c: `reps -= 24; if (reps > 0)`). This matches the consensus
-    // reference: chiavdf's `integer::prime()` is `is_prime_bpsw` (chiavdf src/integer_common.h →
-    // src/primetest.h, a "strengthened Baillie-PSW" with no extra MR rounds). Exceeding the
-    // reference is not extra safety here: a BPSW pseudoprime (none known) that chiavdf accepts
-    // but an extra round rejects would make this search continue to a DIFFERENT prime — a
-    // consensus fork. Parity means exactly BPSW.
+    // strong Lucas, no extra random-base rounds at reps=24) — the same test as the consensus
+    // reference (chiavdf is strengthened Baillie-PSW with no extra MR rounds). Exceeding the
+    // reference is not extra safety: a BPSW pseudoprime (none known) the reference accepts but
+    // an extra round rejects would make this search continue to a DIFFERENT prime — a consensus
+    // fork. Parity means exactly BPSW.
     let g = rug::Integer::from_digits(&n.to_bytes_be(), rug::integer::Order::MsfBe);
     g.is_probably_prime(24) != rug::integer::IsPrime::No
 }

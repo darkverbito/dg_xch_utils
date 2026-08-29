@@ -1,13 +1,10 @@
-//! Coin-store body validation on the live add-block path — chia
-//! `chia/consensus/block_body_validation.py::validate_block_body` rules 3, 5, 10, 11, 13-21.
+//! Coin-store body validation on the live add-block path — body rules 3, 5, 10, 11, 13-21.
 //!
-//! chia runs `validate_block_body` for EVERY block added, in both the singleton path
-//! (`full_node.py::add_block` -> `Blockchain.add_block`) and the long-sync batch path
-//! (`add_block_batch` -> `add_prevalidated_blocks` -> `Blockchain.add_block`); `skip_blocks` only
-//! skips blocks already validated below the fork point. There is no body-validation skip window.
-//! dg_xch mirrors that on every transaction block, gated only on FULL COIN HISTORY (a
+//! Body validation runs for EVERY block added, on both the single-block and batch paths.
+//! There is no body-validation skip window.
+//! dg_xch runs them on every transaction block, gated only on FULL COIN HISTORY (a
 //! `--sync-from` anchored store has no coin set below its anchor, so the store-backed rules are
-//! undefined there — chia has no such mode; the pure structural rules still run).
+//! undefined there; the pure structural rules still run).
 //!
 //! Vehicle: real mainnet block 5,000,004 validated on top of the confirmed fixture records
 //! 5,000,000..=5,000,003, with its 223 removals seeded as unspent coin rows at their real heights
@@ -228,7 +225,7 @@ fn probe_removal() -> Bytes32 {
         .name()
 }
 
-// RED 1 — chia rule 15, DOUBLE_SPEND: one of the block's removals is already spent at an
+// RED 1 — rule 15, DOUBLE_SPEND: one of the block's removals is already spent at an
 // ancestor height (at or below the fork point). Pre-fix the engine never consulted the coin
 // store and accepted the block.
 #[tokio::test]
@@ -244,7 +241,7 @@ async fn spending_an_already_spent_coin_is_rejected() {
     assert_eq!(consensus_err(err), ChiaError::DoubleSpend);
 }
 
-// RED 2 — chia rule 15, UNKNOWN_UNSPENT: one of the block's removals does not exist anywhere
+// RED 2 — rule 15, UNKNOWN_UNSPENT: one of the block's removals does not exist anywhere
 // (store, fork, or this block). Pre-fix: accepted.
 #[tokio::test]
 async fn spending_a_nonexistent_coin_is_rejected() {
@@ -274,7 +271,7 @@ fn rebind_foliage(block: &mut FullBlock) {
     block.foliage.foliage_transaction_block_hash = Some(ftb_hash);
 }
 
-// RED 3 — chia rule 5, INVALID_REWARD_COINS: a tampered reward claim (one mojo added to a claim
+// RED 3 — rule 5, INVALID_REWARD_COINS: a tampered reward claim (one mojo added to a claim
 // coin). Pre-fix the engine trusted ti.reward_claims_incorporated wholesale.
 #[tokio::test]
 async fn tampered_reward_claims_are_rejected() {
@@ -295,7 +292,7 @@ async fn tampered_reward_claims_are_rejected() {
     assert_eq!(consensus_err(err), ChiaError::InvalidRewardCoins);
 }
 
-// RED 4 — chia rule 19, INVALID_BLOCK_FEE_AMOUNT: the declared fee differs from the computed
+// RED 4 — rule 19, INVALID_BLOCK_FEE_AMOUNT: the declared fee differs from the computed
 // removals-minus-additions. Pre-fix: never computed on the live path.
 #[tokio::test]
 async fn tampered_fee_amount_is_rejected() {
@@ -311,7 +308,7 @@ async fn tampered_fee_amount_is_rejected() {
     assert_eq!(consensus_err(err), ChiaError::InvalidBlockFeeAmount);
 }
 
-// RED 5 — chia rule 11, BAD_ADDITION_ROOT / BAD_REMOVAL_ROOT: the foliage merkle roots must
+// RED 5 — rule 11, BAD_ADDITION_ROOT / BAD_REMOVAL_ROOT: the foliage merkle roots must
 // commit to the actual coin delta. Pre-fix: never recomputed on the live path.
 #[tokio::test]
 async fn tampered_addition_and_removal_roots_are_rejected() {
@@ -343,7 +340,7 @@ async fn tampered_addition_and_removal_roots_are_rejected() {
     assert_eq!(consensus_err(err), ChiaError::BadRemovalRoot);
 }
 
-// RED — chia rule 12, INVALID_TRANSACTIONS_FILTER_HASH: the foliage BIP158 filter must commit
+// RED — rule 12, INVALID_TRANSACTIONS_FILTER_HASH: the foliage BIP158 filter must commit
 // to the actual additions/removals. Pre-fix: never recomputed on the live path.
 #[tokio::test]
 async fn tampered_filter_hash_is_rejected() {
@@ -362,7 +359,7 @@ async fn tampered_filter_hash_is_rejected() {
     assert_eq!(consensus_err(err), ChiaError::InvalidTransactionsFilterHash);
 }
 
-// RED 6 — chia rule 3, INVALID_TRANSACTIONS_INFO_HASH: the foliage transaction block must bind
+// RED 6 — rule 3, INVALID_TRANSACTIONS_INFO_HASH: the foliage transaction block must bind
 // the transactions_info by hash. Pre-fix: unchecked on the live path.
 #[tokio::test]
 async fn tampered_transactions_info_hash_is_rejected() {
@@ -412,7 +409,7 @@ fn tx_record(
     r
 }
 
-/// The exact reward claims chia expects a child transaction block to incorporate for `record`
+/// The exact reward claims a child transaction block must incorporate for `record`
 /// (a transaction block directly on top of another transaction block).
 fn claims_for(record: &BlockRecord) -> Vec<Coin> {
     vec![
@@ -481,7 +478,7 @@ fn synth_tx_block(
         cost: conds.cost,
         reward_claims_incorporated: claims,
     };
-    // The BIP158 filter over every addition's puzzle hash + every removal id (chia rule 12).
+    // The BIP158 filter over every addition's puzzle hash + every removal id (rule 12).
     let all_additions = additions_for_conditions(&conds, &ti.reward_claims_incorporated);
     let all_removals = removals_for_conditions(&conds);
     let mut filter_items: Vec<Vec<u8>> = Vec::new();
@@ -585,7 +582,7 @@ async fn honest_synthetic_spend_is_accepted() {
     );
 }
 
-// RED 7 — chia rule 16, MINTING_COIN: additions exceed removals. Pre-fix the engine never
+// RED 7 — rule 16, MINTING_COIN: additions exceed removals. Pre-fix the engine never
 // compared them (no store lookup, no amounts).
 #[tokio::test]
 async fn minting_block_is_rejected() {
@@ -596,7 +593,7 @@ async fn minting_block_is_rejected() {
     assert_eq!(consensus_err(err), ChiaError::MintingCoin);
 }
 
-// RED 8 — chia rule 10, COIN_AMOUNT_EXCEEDS_MAXIMUM: a created coin above the consensus cap
+// RED 8 — rule 10, COIN_AMOUNT_EXCEEDS_MAXIMUM: a created coin above the consensus cap
 // (exercised with a lowered cap; mainnet's is u64::MAX, unreachable by construction).
 #[tokio::test]
 async fn oversized_coin_amount_is_rejected() {
@@ -610,7 +607,7 @@ async fn oversized_coin_amount_is_rejected() {
     assert_eq!(consensus_err(err), ChiaError::CoinAmountExceedsMaximum);
 }
 
-// RED 9 — rule-21 coin context (chia check_time_locks): ASSERT_MY_BIRTH_HEIGHT against the spent
+// RED 9 — rule-21 coin context (time-lock checks): ASSERT_MY_BIRTH_HEIGHT against the spent
 // coin's actual birth height. Pre-fix the coin context was always empty, so the assert never ran.
 #[tokio::test]
 async fn wrong_birth_height_assert_is_rejected() {
@@ -624,7 +621,7 @@ async fn wrong_birth_height_assert_is_rejected() {
     assert_eq!(consensus_err(err), ChiaError::InvalidCondition);
 }
 
-// RED 10 — chia rule 15 with ForkInfo semantics, DOUBLE_SPEND_IN_FORK: a reorg-candidate branch
+// RED 10 — rule 15 with ForkInfo semantics, DOUBLE_SPEND_IN_FORK: a reorg-candidate branch
 // block spending a coin ALREADY SPENT EARLIER ON THE SAME BRANCH is rejected at arrival — the
 // fork view must carry the branch's own removals, not just the main chain's. Pre-fix: accepted
 // into the branch, poisoning any later reorg replay.
@@ -690,7 +687,7 @@ async fn fork_branch_double_spend_is_rejected() {
         }
     );
 
-    // Branch block A1 (already-validated delta, chia's fork_info role) spends the coin.
+    // Branch block A1 (already-validated delta, the fork-view role) spends the coin.
     let a1 = tx_record(
         template,
         0xa1,

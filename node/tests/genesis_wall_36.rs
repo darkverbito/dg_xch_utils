@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 // Offline repro of the genesis long-sync wall at mainnet height 36 (`io error: ip_iters`):
-// real mainnet blocks 0..=1023 fetched via the chia full-node RPC oracle, driven
+// real mainnet blocks 0..=1023 fetched via the full-node RPC oracle, driven
 // through the exact from-empty follow the --genesis-sync daemon runs — no weight proof, no
 // headers-first candidates, every block fully validated against its confirmed ancestry.
 // Env-gated on the uncommitted corpus (/path/to/corpus):

@@ -29,8 +29,7 @@ fn mask64(bits: u32) -> u64 {
     }
 }
 
-/// The hashing layer between the plot parameters and the raw AES and BLAKE3 primitives, ported
-/// from `src/pos/ProofHashing.hpp`.
+/// The hashing layer between the plot parameters and the raw AES and BLAKE3 primitives.
 #[derive(Debug, Clone)]
 pub struct ProofHashing {
     params: ProofParams,

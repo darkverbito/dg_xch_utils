@@ -2,7 +2,7 @@ use dg_xch_core::blockchain::sized_bytes::Bytes32;
 use dg_xch_core::traits::SizedBytes;
 use std::io::{Error, ErrorKind};
 
-/// Feistel rounds the reference uses unless told otherwise.
+/// Feistel rounds, unless told otherwise.
 pub const FEISTEL_ROUNDS: u32 = 4;
 
 /// Low `bits` set, saturating rather than shifting by the word width.
@@ -14,8 +14,7 @@ fn mask(bits: u32) -> u64 {
     }
 }
 
-/// The block cipher that turns bit dropped x values into a proof fragment, ported from
-/// `src/pos/FeistelCipher.hpp`.
+/// The block cipher that turns bit dropped x values into a proof fragment.
 ///
 /// The block is `2k` bits split into two `k` bit halves, and each round mixes them with a
 /// ChaCha20 style quarter round keyed by a `3k` bit slice of the plot id.
@@ -62,8 +61,8 @@ impl FeistelCipher {
         ((value << shift) & m) | (value >> (bit_length - shift))
     }
 
-    /// A big endian slice of the plot id. The reference builds the segment in a 64 bit register, so
-    /// a slice wider than 64 bits keeps only its low word; that truncation is part of the format.
+    /// A big endian slice of the plot id. The segment is built in a 64 bit register, so a slice
+    /// wider than 64 bits keeps only its low word; that truncation is part of the format.
     fn slice_key(&self, start_bit: usize, num_bits: usize) -> u64 {
         let start_byte = start_bit / 8;
         let bit_offset = start_bit % 8;
@@ -92,8 +91,8 @@ impl FeistelCipher {
 
     fn round(&self, left: u64, right: u64, round_key: u64) -> (u64, u64) {
         let m = mask(self.k);
-        // `wrapping_shr` mirrors the shift-modulo-width the reference relies on when `2k` reaches
-        // the register width at k32.
+        // `wrapping_shr` keeps the shift-modulo-width behaviour the format depends on when `2k`
+        // reaches the register width at k32.
         let mut a = right;
         let mut b = round_key & m;
         let mut c = round_key.wrapping_shr(self.k) & m;
@@ -154,7 +153,7 @@ mod tests {
         Bytes32::from(bytes)
     }
 
-    /// `(k, input, ciphertext)` emitted from the reference `FeistelCipher` for the plot id above.
+    /// `(k, input, ciphertext)` for the plot id above.
     const FEISTEL_VECTORS: &[(u32, u64, u64)] = &[
         (28, 0, 680_663_352_959_931),
         (28, 1, 53_950_537_582_426_653),

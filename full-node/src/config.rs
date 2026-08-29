@@ -82,6 +82,10 @@ pub struct Config {
     // connection, never flooding one. Only takes effect alongside `--prefetch-memory-mb` (or on its
     // own, on the default budget).
     pub prefetch_max_inflight: Option<usize>,
+    /// Outbound connections the node keeps open. Unset = the p2p default.
+    pub target_outbound: Option<usize>,
+    /// Total peers (inbound + outbound) the node accepts. Unset = the p2p default.
+    pub target_peer_count: Option<usize>,
     // `--trusted-peer <node-id-hex>` (repeatable): the cert-hash node ids granted the trusted tier —
     // chia's `trusted_peers` config map, keyed on `node_id.hex()`. A trusted peer gets the larger
     // subscription / response-item caps and high-priority transaction-queue placement.
@@ -117,6 +121,8 @@ impl Config {
         uncompact: bool,
         prefetch_memory_mb: Option<u64>,
         prefetch_max_inflight: Option<usize>,
+        target_outbound: Option<usize>,
+        target_peer_count: Option<usize>,
         trusted_peers: &[String],
         trusted_cidrs: &[String],
     ) -> Result<Self, String> {
@@ -146,6 +152,8 @@ impl Config {
             uncompact,
             prefetch_memory_mb,
             prefetch_max_inflight,
+            target_outbound,
+            target_peer_count,
             trusted_peers: trusted_peers.to_vec(),
             trusted_cidrs: trusted_cidrs.to_vec(),
         })
@@ -193,6 +201,8 @@ mod tests {
             false,
             None,
             None,
+            None,
+            None,
             &[],
             &[],
         )
@@ -215,6 +225,8 @@ mod tests {
             false,
             0,
             false,
+            None,
+            None,
             None,
             None,
             &["aa".repeat(32)],

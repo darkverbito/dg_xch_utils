@@ -45,38 +45,19 @@ pub struct BlockGeneratorFlags {
 }
 
 impl BlockGeneratorFlags {
-    // chia_rs `get_flags_for_height_and_constants`, keyed on the block's OWN height — NOT the
-    // previous transaction block's. The proof is mainnet 5,496,002 (first tx
-    // block past the hard fork, prev tx 5,495,999 pre-fork) carries ti.cost 398,155,295 =
-    // chia's generator2/post-fork accounting; prev-tx keying ran the pre-fork regime and
-    // overcharged to 411,338,833. The ladder is CUMULATIVE:
-    // - hard fork 1 (mainnet 5,496,000): run_block_generator2 (`simple_generator`) plus this
-    //   engine's post-fork condition accounting (`COST_CONDITIONS` here switches announcement
-    //   limits to per-condition costing — our structural equivalent of chia's post-hard-fork
-    //   parse-time costing, NOT chia_rs's hard-fork-2 flag of the same name) and keccak.
-    // - soft fork 8 (mainnet 8,655,000, chia 2.7.1): op_modpow disabled and division-family
+    // CLVM flag ladder, keyed on the block's OWN height. The ladder is CUMULATIVE:
+    // - hard fork 1 (mainnet 5,496,000): the simple generator plus post-fork condition
+    //   accounting (`COST_CONDITIONS` switches announcement limits to per-condition
+    //   costing) and keccak.
+    // - soft fork 8 (mainnet 8,655,000): op_modpow disabled and division-family
     //   operand caps (DISABLE_OP | LIMITS).
-    // - hard fork 2 ("Chia 3.0", unscheduled): the bounded NEW_COST_MODEL; the dialect neuters
-    //   DISABLE_OP/LIMITS once NEW_COST_MODEL is set, matching clvmr's `DISABLE_OP && !NCM` gate.
-    // - soft fork 9 (mainnet 8,655,000, chia 2.7.1 — SAME height as soft fork 8): the SF9
-    //   consensus-flag set is (SIMPLE_GENERATOR | CANONICAL_INTS | LIMIT_SPENDS)
-    //   (chia_rs get_flags_for_height_and_constants; docs.rs chia-consensus
-    //   `spendbundle_validation.rs`, `if prev_tx_height >= constants.soft_fork9_height`). Only
-    //   CANONICAL_INTS is a clvm_rs VM flag (0x0001; the other two are consensus-only, upper-byte
-    //   bits with no clvm effect — chia-consensus `flags.rs`), so it is the ONLY member wired into
-    //   `clvm_flags` here. SIMPLE_GENERATOR (generator-ref ban + canonical-serialization + simple
-    //   quote shape) and LIMIT_SPENDS (6,000-spend cap) are enforced as BODY rules in
-    //   `validate_transaction_block`, keyed on prev-tx height per chia block_body_validation.
-    //
-    // KEYING NOTE (consensus-critical): chia keys the CLVM flag set on the PREVIOUS transaction
-    // block height (`get_flags_for_height_and_constants(prev_tx_height, ...)`,
-    // chia/consensus/multiprocess_validation.py `_run_block`), while the generator VERSION keys on
-    // the block's OWN height (`block.height >= HARD_FORK_HEIGHT`). This ladder keys the whole set on
-    // the block's own height (proven at the hard-fork boundary). The two keyings
-    // differ only at the single boundary block whose prev-tx straddles the activation height; for
-    // CANONICAL_INTS the sole on-chain consumer is the `softfork` operator (unused by real mainnet
-    // generators), so the choice is observationally inert. On mainnet SF9 shares soft fork 8's
-    // height, so this activates at the same, already boundary-proven block.
+    // - hard fork 2 (unscheduled): the bounded NEW_COST_MODEL; the dialect neuters
+    //   DISABLE_OP/LIMITS once NEW_COST_MODEL is set.
+    // - soft fork 9 (mainnet 8,655,000 — SAME height as soft fork 8): of the SF9 set only
+    //   CANONICAL_INTS is a VM flag, so it is the ONLY member wired into `clvm_flags` here.
+    //   SIMPLE_GENERATOR (generator-ref ban + canonical-serialization + simple quote shape)
+    //   and LIMIT_SPENDS (6,000-spend cap) are enforced as BODY rules in
+    //   `validate_transaction_block`, keyed on prev-tx height.
     #[must_use]
     pub fn for_height(constants: &ConsensusConstants, height: u32) -> Self {
         let mut clvm_flags = 0u32;
@@ -90,8 +71,8 @@ impl BlockGeneratorFlags {
             clvm_flags |= CANONICAL_INTS;
         }
         if height >= constants.hard_fork2_height {
-            // chia_rs hard-fork-2 additions (get_flags_for_height_and_constants): the bounded
-            // NEW_COST_MODEL and RELAXED_BLS (BLS negate operators accept invalid points).
+            // hard-fork-2 additions: the bounded NEW_COST_MODEL and RELAXED_BLS (BLS negate
+            // operators accept invalid points).
             clvm_flags |= NEW_COST_MODEL | RELAXED_BLS;
         }
         Self {
@@ -138,9 +119,8 @@ pub struct TransactionBlockValidationInput<'a> {
     pub transactions_info: &'a TransactionsInfo,
     pub foliage_transaction_block: Option<&'a FoliageTransactionBlock>,
     pub condition_context: Option<&'a ConditionValidationContext>,
-    // The previous TRANSACTION block's height: the SF9 body rules key on it (chia
-    // block_body_validation), UNLIKE the CLVM flag ladder which keys on the block's own
-    // height. Two different regimes, two different keys — deliberate.
+    // The previous TRANSACTION block's height: the SF9 body rules key on it, UNLIKE the
+    // CLVM flag ladder which keys on the block's own height.
     pub prev_transaction_block_height: u32,
 }
 
@@ -167,9 +147,7 @@ pub fn execute_block_generator(input: &BlockGeneratorInput) -> NPCResult {
     }
 }
 
-// Blocks past soft fork 9 are limited to this many spends besides the CLVM cost ceiling
-// (chia mempool.py MAX_SPENDS_PER_BLOCK, enforced in body validation via chia_rs
-// LIMIT_SPENDS).
+// Blocks past soft fork 9 are limited to this many spends besides the CLVM cost ceiling.
 pub const MAX_SPENDS_PER_BLOCK: usize = 6_000;
 
 pub fn validate_transaction_block(
@@ -177,12 +155,11 @@ pub fn validate_transaction_block(
 ) -> Result<TransactionBlockValidationResult, ChiaError> {
     let sf9 =
         input.prev_transaction_block_height >= input.generator_input.constants.soft_fork9_height;
-    // SF9 rule 1 (chia TOO_MANY_GENERATOR_REFS): generator back-reference lists are banned.
+    // SF9 rule 1: generator back-reference lists are banned.
     if sf9 && !input.generator_input.generator_refs.is_empty() {
         return Err(ChiaError::TooManyGeneratorRefs);
     }
-    // SF9 rule 2 (chia INVALID_TRANSACTIONS_GENERATOR_ENCODING): the generator must use
-    // canonical CLVM serialization.
+    // SF9 rule 2: the generator must use canonical CLVM serialization.
     if sf9
         && !crate::clvm::parser::is_canonical_serialization(
             input.generator_input.transactions_generator.as_ref(),
@@ -191,7 +168,7 @@ pub fn validate_transaction_block(
         return Err(ChiaError::ComplexGeneratorReceived);
     }
     let conds = execute_block_generator_result(&input.generator_input)?;
-    // SF9 rule 3 (chia TOO_MANY_SPENDS): at most 6,000 spends per block.
+    // SF9 rule 3: at most 6,000 spends per block.
     if sf9 && conds.spends.len() > MAX_SPENDS_PER_BLOCK {
         return Err(ChiaError::TooManySpends);
     }
@@ -260,16 +237,11 @@ pub fn validate_transaction_block(
     })
 }
 
-/// The generator identity root: `sha256` of the generator's **raw serialized bytes**, exactly as chia
-/// computes it. See `chia/consensus/block_body_validation.py` (`std_hash(bytes(block.transactions_generator))
-/// != block.transactions_info.generator_root`) and the producer side
-/// `chia/consensus/block_creation.py::create_foliage` (`generator_hash = std_hash(new_block_gen.program)`).
+/// The generator identity root: `sha256` of the generator's **raw serialized bytes**.
 ///
-/// There is **no height gate and no tree hash**: chia hashes the on-wire generator bytes (which may carry
-/// CLVM back-references) verbatim, never the decompressed program's `sha256tree`. A prior implementation
-/// tree-hashed `to_program_backrefs()` for `height >= hard_fork_height`, which rejected every real
-/// post-hard-fork mainnet block with `InvalidTransactionsGeneratorHash`. `SerializedProgram::as_ref()`
-/// is those raw wire bytes.
+/// There is **no height gate and no tree hash**: the on-wire generator bytes (which may
+/// carry CLVM back-references) are hashed verbatim, never the decompressed program's
+/// `sha256tree`. `SerializedProgram::as_ref()` is those raw wire bytes.
 pub fn transactions_generator_root(generator: &SerializedProgram) -> Bytes32 {
     Bytes32::new(hash_256(generator.as_ref()))
 }
@@ -361,13 +333,10 @@ pub fn execute_block_generator_result(
         .ok_or(ChiaError::InvalidCostResult)?;
     if input.flags.simple_generator {
         // Dedup puzzle-reveal tree-hashing within the block. The generator is a
-        // verified `(q . REST)` (check_simple_generator above), so the run's output is
-        // REST verbatim — spend i of the PARSED tree is spend i of the output. The
-        // parsed tree still carries the back-reference `Arc` sharing the serializer
-        // put there (the run's import/export flattens it), so the reveal hashes are
-        // computed on the parsed tree with a pointer-keyed cache, mirroring chia_rs
-        // run_block_generator2's TreeCache pre-pass + tree_hash_cached (chia_rs
-        // 0.47.0, chia-consensus/src/run_block_generator.rs).
+        // verified `(q . REST)`, so the run's output is REST verbatim — spend i of the
+        // PARSED tree is spend i of the output. The parsed tree still carries the
+        // back-reference `Arc` sharing the serializer put there, so the reveal hashes
+        // are computed on the parsed tree with a pointer-keyed cache.
         let reveal_hashes = simple_generator_reveal_hashes(generator.sexp());
         conditions_from_generator_output(
             output.sexp(),
@@ -381,11 +350,9 @@ pub fn execute_block_generator_result(
         conditions_from_processed_generator_output(output.sexp(), cost, max_cost, &input.constants)
     }
     .map_err(|error| {
-        // Permanent instrumentation: never discard the underlying ClvmError.
-        // The blanket `InvalidBlockSolution` swallow is what hid a rejected REMARK
-        // condition defect for so long, so the true cause — which
-        // spend / condition / cost — is logged at error level and mapped to the
-        // most faithful ChiaError code below rather than collapsed.
+        // Never discard the underlying ClvmError: the true cause — which spend /
+        // condition / cost — is logged at error level and mapped to the most faithful
+        // ChiaError code below.
         log::error!(
             "execute_block_generator: condition extraction failed at height {} (simple_generator={}): {error:?}",
             input.height,
@@ -402,8 +369,8 @@ fn generator_run_error(error: ClvmError) -> ChiaError {
     }
 }
 
-// Map a condition-extraction ClvmError to the ChiaError chia would report for
-// that cause. Recognizable failures get their faithful code; anything
+// Map a condition-extraction ClvmError to the corresponding ChiaError.
+// Recognizable failures get their faithful code; anything
 // structurally malformed (a spend not in `(parent puzzle amount solution)` form,
 // a non-atom where an atom is required, an amount that is not a valid u64) falls
 // through to InvalidBlockSolution, so a genuinely corrupt generator is still
@@ -411,8 +378,7 @@ fn generator_run_error(error: ClvmError) -> ChiaError {
 fn map_condition_error(error: ClvmError) -> ChiaError {
     match error {
         // A disallowed AGG_SIG_* public key (the G1 infinity element) is an
-        // invalid condition, not a malformed block solution — chia reports it as
-        // Err.INVALID_CONDITION.
+        // invalid condition, not a malformed block solution.
         ClvmError::InvalidPublicKey(_) => ChiaError::InvalidCondition,
         ClvmError::CostExceeded(_, _) => ChiaError::BlockCostExceedsMax,
         ClvmError::DoubleSpend(_) => ChiaError::DoubleSpend,
@@ -439,8 +405,8 @@ fn check_simple_generator(
 }
 
 // Per-spend puzzle-reveal tree hashes computed from the PARSED simple generator
-// `(q . REST)` with a shared-subtree memo (chia_rs TreeCache mirror — see
-// `crate::clvm::tree_hash_cache`). Returns hashes for the leading well-formed spends;
+// `(q . REST)` with a shared-subtree memo (see `crate::clvm::tree_hash_cache`).
+// Returns hashes for the leading well-formed spends;
 // iteration stops at the first spend that is not `(parent puzzle amount solution . extra)`
 // — `conditions_from_generator_output` errors on that same spend before it would need the
 // missing hash, and it falls back to a direct `tree_hash()` for any index not covered.
@@ -482,10 +448,8 @@ pub fn validate_block_aggregate_signature(
 ) -> Result<(), ChiaError> {
     let mut keys = Vec::<Bytes48>::new();
     let mut messages = Vec::<Message>::new();
-    // Bundle-level AGG_SIG_UNSAFE pairs (chia_rs pkm_pairs: the unsafe pairs come from
-    // SpendBundleConditions itself, not any spend, and sign their raw message with no coin or
-    // additional-data suffix). Omitting them rejected every real block containing an
-    // AGG_SIG_UNSAFE condition (mainnet 2,272,201).
+    // Bundle-level AGG_SIG_UNSAFE pairs come from the conditions set itself, not any
+    // spend, and sign their raw message with no coin or additional-data suffix.
     for (pk, msg) in &conds.agg_sig_unsafe {
         keys.push(Bytes48::parse(pk.as_slice()).map_err(|_| ChiaError::InvalidCondition)?);
         messages
@@ -523,38 +487,21 @@ pub fn validate_block_aggregate_signature(
 
 // Aggregate-verify a block's AGG_SIG pair set, validating each DISTINCT public key once.
 //
-// blst's per-pair path (`blst_pairing_chk_n_aggr_pk_in_g1` -> `PAIRING_Aggregate_PK_in_G1`,
-// blst-0.3.17 aggregate.c) re-checks the public key on EVERY pair occurrence: an unconditional
-// infinity rejection plus (under `pks_validate`) a `POINTonE1_in_G1` subgroup check — and the
-// caller re-uncompressed the 48-byte key per occurrence too. Wallet key reuse makes those checks
-// mostly redundant: on a post-hard-fork mainnet corpus (heights 5,493,999–5,500,143, 1,733 tx
-// blocks) 76.5% of the 33,350 pair occurrences repeat a key already seen in the same block (mean
-// 20.6 pairs but only 4.9 distinct keys per block), and the pk-side work was ~3.8% of total sync
-// CPU on a profiling flamegraph.
+// Verdict-preserving: identical key bytes yield identical uncompress/infinity/subgroup
+// verdicts, so checking once per distinct key cannot change the accept/reject outcome.
+// `PublicKey::validate()` performs the same two checks the per-occurrence path performs
+// per pair (infinity, then in-group), and the deduped pairing runs with
+// `pks_validate = false` since every key it receives has already passed them. A malformed
+// key is rejected at deserialize — the same verdict the per-occurrence path reaches via
+// its decoy infinity point.
 //
-// Verdict-preserving by construction: identical key bytes yield identical uncompress/infinity/
-// subgroup verdicts, so checking once per distinct key cannot change the accept/reject outcome.
-// `PublicKey::validate()` performs exactly the two checks chk_n_aggr performs per pair
-// (infinity, then in-group), and the deduped pairing runs with `pks_validate = false` since
-// every key it receives has already passed them. A malformed key previously decayed to the
-// default (infinity) point via `From<Bytes48> for PublicKey`'s `unwrap_or_default` and was
-// rejected as `BLST_PK_IS_INFINITY`; the dedup branch rejects the deserialize failure directly
-// — the same verdict, without constructing the decoy point.
-//
-// The dedup branch validates the distinct keys on the CALLING thread, while blst's own path
-// spreads the per-occurrence checks across its worker pool. Serial validation of a large
-// distinct-key set would trade sync CPU for tip wall-latency (bench: 532 distinct keys add
-// ~100ms serial, ~189us/key on a representative host), so the dedup branch engages only where it
-// provably pays — at least half the occurrences are repeats and the distinct set is small (the
-// corpus shape above passes with room: 4.9 distinct / 20.6 pairs). Everything else takes the legacy
-// per-occurrence path, bit-for-bit the previous behavior. Sync throughput comes from the small/
-// medium repeated-key blocks that dominate the corpus; the fallback exists so no block shape
-// ever validates slower than before.
+// The dedup branch validates the distinct keys on the CALLING thread, so it engages only
+// where it pays: at least half the occurrences are repeats and the distinct set is small.
+// Everything else takes the per-occurrence path.
 const DEDUP_MAX_DISTINCT_KEYS: usize = 64;
 
 fn aggregate_verify_deduped(keys: &[Bytes48], messages: &[Message], signature: &Signature) -> bool {
-    // AUG scheme: each pair verifies pk || msg with an empty aug, exactly as
-    // `bls_bindings::aggregate_verify_signature` (the previous callee) builds it.
+    // AUG scheme: each pair verifies pk || msg with an empty aug.
     let augmented = keys
         .iter()
         .zip(messages)
@@ -596,8 +543,8 @@ fn aggregate_verify_deduped(keys: &[Bytes48], messages: &[Message], signature: &
             BLST_ERROR::BLST_SUCCESS
         )
     } else {
-        // Legacy branch: per-occurrence conversion (`unwrap_or_default`, matching
-        // `From<Bytes48> for PublicKey`) and per-occurrence validation inside blst's workers.
+        // Per-occurrence conversion (`unwrap_or_default`, matching `From<Bytes48> for
+        // PublicKey`) and per-occurrence validation inside blst's workers.
         let converted = keys
             .iter()
             .map(|key| PublicKey::from_bytes(key.as_ref()).unwrap_or_default())
@@ -631,19 +578,15 @@ pub fn removals_for_conditions(conds: &SpendBundleConditions) -> Vec<Bytes32> {
     conds.spends.iter().map(|spend| spend.coin_id).collect()
 }
 
-/// The create-coin hints for one block's spends: `(hint, created_coin_id)` pairs feeding the
-/// `coin_hint` index. Mirrors chia's hint-store population
-/// (`chia/full_node/hint_management.py::get_hints_and_subscription_coin_ids`), which emits
-/// `(coin_name, hint)` for every non-reward addition carrying a hint — the hint being the first
-/// memo of its `CreateCoin` condition (`chia/consensus/block_body_validation.py::include_spends`
-/// pulls `hint` straight off `spend.create_coin`). Reward coins never carry a hint.
+/// The create-coin hints for one block's spends: `(hint, created_coin_id)` pairs feeding
+/// the `coin_hint` index — one pair for every non-reward addition carrying a hint, the
+/// hint being the first memo of its `CreateCoin` condition. Reward coins never carry a
+/// hint.
 ///
-/// chia stores hints of length 1..=32 bytes; this index is keyed on a fixed 32-byte hint because
-/// the entire chia read/subscription surface is 32-byte — `get_coin_records_by_hint` takes a
-/// `bytes32`, and a puzzle-hash subscription fires only when the hint is exactly 32 bytes
-/// (`hint_management.py`: `if len(hint) == 32`). A hint that is not exactly 32 bytes is therefore
-/// unreachable through any query and is skipped here (a deliberate table-CONTENTS difference; the
-/// query behaviour is identical to chia's `hint_management.py`).
+/// The index is keyed on a fixed 32-byte hint: the entire read/subscription surface is
+/// 32-byte (`get_coin_records_by_hint` takes a `bytes32`, and a puzzle-hash subscription
+/// fires only for a 32-byte hint), so a hint of any other length is unreachable through
+/// any query and is skipped here.
 #[must_use]
 pub fn hints_for_conditions(conds: &SpendBundleConditions) -> Vec<(Bytes32, Bytes32)> {
     let mut out = Vec::new();
@@ -672,20 +615,16 @@ pub fn hints_for_conditions(conds: &SpendBundleConditions) -> Vec<(Bytes32, Byte
 /// Extract the [`CoinSpend`] (coin + raw puzzle reveal + solution) for `coin_id` from a block's
 /// transactions generator, reusing the exact CLVM run the body validator drives — no second VM.
 ///
-/// This is the storage-free half of chia's `get_puzzle_and_solution`
-/// (`chia/full_node/full_node_rpc_api.py:871` → `chia_rs get_puzzle_and_solution_for_coin2`): the
-/// generator is decompressed and run, and the spend whose derived coin id equals `coin_id` yields
-/// its `(puzzle_reveal, solution)` programs verbatim. `Ok(None)` when the generator spends no such
-/// coin.
+/// The generator is decompressed and run, and the spend whose derived coin id equals
+/// `coin_id` yields its `(puzzle_reveal, solution)` programs verbatim. `Ok(None)` when the
+/// generator spends no such coin.
 ///
 /// Post-hard-fork blocks (`simple_generator`, height ≥ `hard_fork_height`) carry the reveal and
 /// solution directly in the generator's output — the same `(parent puzzle_reveal amount solution)`
 /// spend list [`conditions_from_generator_output`] parses — so extraction is exact. A pre-hard-fork
 /// ROM generator evaluates each puzzle internally and surfaces only the puzzle HASH plus conditions
 /// ([`conditions_from_processed_generator_output`]), never the reveal; extraction there returns
-/// [`ChiaError::GeneratorRuntimeError`]. The entire live-wallet range is post-hard-fork; pre-fork
-/// reveal extraction is a tracked follow-up (needs a reveal-preserving ROM run — a CLVM-semantics
-/// task, not plumbing).
+/// [`ChiaError::GeneratorRuntimeError`].
 ///
 /// # Errors
 /// [`ChiaError::GeneratorRuntimeError`] for a pre-hard-fork (ROM) generator; the generator's own
@@ -755,10 +694,9 @@ pub fn coin_spend_from_generator(
     Ok(None)
 }
 
-/// One parsed condition of a spend's puzzle run — the raw `(opcode, atom vars...)` shape chia's
-/// `ConditionWithArgs` carries (chia/types/condition_with_args.py:9: `opcode` bytes + `vars`
-/// atom list; non-atom tail elements — e.g. a CREATE_COIN memo list — are not vars, matching
-/// clvm `as_atom_list`'s stop-at-first-pair contract).
+/// One parsed condition of a spend's puzzle run — the raw `(opcode, atom vars...)` shape:
+/// `opcode` bytes + `vars` atom list; non-atom tail elements (e.g. a CREATE_COIN memo
+/// list) are not vars.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RawCondition {
     pub opcode: Vec<u8>,
@@ -766,7 +704,7 @@ pub struct RawCondition {
 }
 
 /// Every [`CoinSpend`] a block's transactions generator produces, in generator order — the
-/// storage-free core of chia_rs `get_spends_for_trusted_block` (the `get_block_spends` RPC).
+/// storage-free core of the `get_block_spends` RPC.
 /// Same simple-generator contract as [`coin_spend_from_generator`]: post-hard-fork blocks carry
 /// `(parent puzzle_reveal amount solution)` verbatim; a pre-hard-fork ROM generator surfaces no
 /// reveals and errors [`ChiaError::GeneratorRuntimeError`].
@@ -785,8 +723,8 @@ pub fn coin_spends_from_generator(
     })
 }
 
-/// Every [`CoinSpend`] plus that spend's parsed condition list — chia_rs
-/// `get_spends_for_trusted_block_with_conditions` (the `get_block_spends_with_conditions` RPC):
+/// Every [`CoinSpend`] plus that spend's parsed condition list — the
+/// `get_block_spends_with_conditions` RPC:
 /// each puzzle reveal is re-run with its solution (trusted context — the block already
 /// validated, so each run gets the full block cost budget) and the output list is parsed to
 /// `(opcode, atom vars...)` conditions.
@@ -855,7 +793,7 @@ fn run_simple_generator_spends(
         };
         let solution = Program::new_ref(parts[3]);
         let conditions = if with_conditions {
-            // Trusted context (chia_rs run_puzzle over an already-validated block): full budget.
+            // Trusted context (already-validated block): full budget.
             let (_spend_cost, cond_out) = puzzle_reveal
                 .run(cost_left, input.flags.clvm_flags, &solution)
                 .map_err(generator_run_error)?;
@@ -880,8 +818,8 @@ fn run_simple_generator_spends(
 }
 
 // Parse a puzzle run's output list into raw conditions: for each condition list, the first
-// element's atom is the opcode and the vars are the FOLLOWING ATOMS, stopping at the first pair
-// (chia `parse_sexp_to_condition` / clvm `as_atom_list` — a CREATE_COIN memo list is dropped).
+// element's atom is the opcode and the vars are the FOLLOWING ATOMS, stopping at the first
+// pair (a CREATE_COIN memo list is dropped).
 fn parse_raw_conditions(output: &SExp) -> Result<Vec<RawCondition>, ChiaError> {
     let mut conditions = Vec::new();
     for cond_sexp in output.ref_list() {
@@ -917,11 +855,9 @@ pub fn canonical_removals_root(removals: &[Bytes32]) -> Bytes32 {
     merkle_set_root(removals.iter().map(|v| v.bytes()).collect())
 }
 
-/// chia's addition merkle-set leaves: for every puzzle hash, BOTH the puzzle hash and
-/// `hash_coin_ids(coin_ids)` are leaves — including single-coin puzzle hashes. Mirrors
-/// `chia/consensus/block_body_validation.py::validate_block_merkle_roots` (and the identical producer
-/// side in `chia/consensus/block_creation.py`), which unconditionally appends `puzzle` and
-/// `hash_coin_ids(coin_ids)`. The merkle set is order-independent, so grouping order is irrelevant.
+/// Addition merkle-set leaves: for every puzzle hash, BOTH the puzzle hash and
+/// `hash_coin_ids(coin_ids)` are leaves — including single-coin puzzle hashes. The merkle
+/// set is order-independent, so grouping order is irrelevant.
 pub fn canonical_additions_root(additions: &[Coin]) -> Result<Bytes32, ClvmError> {
     let mut by_puzzle_hash = BTreeMap::<[u8; 32], Vec<[u8; 32]>>::new();
     for coin in additions {
@@ -938,12 +874,11 @@ pub fn canonical_additions_root(additions: &[Coin]) -> Result<Bytes32, ClvmError
     Ok(merkle_set_root(merkle_items))
 }
 
-/// chia's `hash_coin_ids` (`chia/types/blockchain_format/coin.py`): a single coin id hashes to
-/// `std_hash(coin_id)` with **no** length/type prefix; multiple coin ids are sorted **descending**
-/// (`sort(reverse=True)`), concatenated, then `std_hash`ed. Matching the descending sort is essential —
-/// an ascending or unsorted concatenation yields a different leaf and thus `BadAdditionRoot`.
-/// Public because `request_additions` proof serving builds the same `[puzzle_hash,
-/// hash_coin_ids(coin names)]` leaf pairs (CNI `full_node_api.py:1426-1431`).
+/// A single coin id hashes to `std_hash(coin_id)` with **no** length/type prefix; multiple
+/// coin ids are sorted **descending**, concatenated, then `std_hash`ed. The descending sort
+/// is essential — an ascending or unsorted concatenation yields a different leaf and thus
+/// `BadAdditionRoot`. Public because `request_additions` proof serving builds the same
+/// `[puzzle_hash, hash_coin_ids(coin names)]` leaf pairs.
 #[must_use]
 pub fn hash_coin_ids(coin_ids: &[[u8; 32]]) -> [u8; 32] {
     if coin_ids.len() == 1 {
@@ -1006,11 +941,9 @@ pub fn validate_block_conditions(
     let mut asserted_coin_announcements = Vec::<Bytes32>::new();
     let mut asserted_puzzle_announcements = Vec::<Bytes32>::new();
 
-    // NO announcement-count cap here: the 1024-announcement limit is chia's MEMPOOL rule
-    // (chia_rs TOO_MANY_ANNOUNCEMENTS fires in mempool mode only) — consensus accepts
-    // announcement-heavy blocks, and mainnet carries them (4,693,324, an
-    // 830-spend dust-sweep block this cap rejected). The mempool-side cap lives in
-    // `spend_bundle` validation, where it belongs.
+    // NO announcement-count cap here: the 1024-announcement limit is a MEMPOOL rule —
+    // consensus accepts announcement-heavy blocks. The mempool-side cap lives in
+    // `spend_bundle` validation.
     for (index, spend) in conds.spends.iter().enumerate() {
         if !spent.insert(spend.coin_id) {
             return Err(ChiaError::DoubleSpend);
@@ -1096,7 +1029,7 @@ pub fn validate_block_conditions(
 
 // A coin is ephemeral when its parent coin is also spent in this block and that
 // parent spend creates a coin with this coin's puzzle hash and amount. The hint
-// is not part of a coin's identity, so it is ignored, matching chia-consensus.
+// is not part of a coin's identity, so it is ignored.
 fn is_ephemeral(spend: &Spend, coin_index: &HashMap<Bytes32, usize>, spends: &[Spend]) -> bool {
     let Some(&idx) = coin_index.get(&spend.parent_id) else {
         return false;
@@ -1107,8 +1040,8 @@ fn is_ephemeral(spend: &Spend, coin_index: &HashMap<Bytes32, usize>, spends: &[S
         .any(|coin| coin.puzzle_hash == spend.puzzle_hash && coin.amount == spend.coin_amount)
 }
 
-// Serialize a spend's own commitment for the given 3-bit message mode, mirroring
-// chia-consensus SpendId::make_key: a tag byte followed by the committed fields.
+// Serialize a spend's own commitment for the given 3-bit message mode: a tag byte
+// followed by the committed fields.
 fn own_message_id(out: &mut Vec<u8>, bits: u8, spend: &Spend) {
     match bits & 0b111 {
         0b000 => out.push(0),
@@ -1191,15 +1124,13 @@ fn args_message_id(out: &mut Vec<u8>, args: &MessageArgs) {
     }
 }
 
-/// Assemble a plain (uncompressed) block generator from a set of coin spends — the producer side of
-/// Phase 4, mirroring chia's `simple_solution_generator` (chia_rs solution_generator.rs). The result
+/// Assemble a plain (uncompressed) block generator from a set of coin spends. The result
 /// is `(q . SPENDS)` where SPENDS is the proper list `((parent-id puzzle-reveal amount solution) …)`.
 /// Because `q` (quote) returns its argument verbatim, running the generator yields SPENDS directly —
 /// exactly the shape [`execute_block_generator_result`] consumes, so a producer built here round-trips
-/// through our own validator. Byte-compatible with chia (minimal-signed amount atom via `bigint_to_bytes`,
-/// canonical serialization via `sexp_to_bytes`) so the generator hash and byte cost match. This is a
-/// SIMPLE generator (`0xff 0x01` prefix, quote operator) — back-reference compression is a later phase;
-/// a plain generator is fully consensus-legal.
+/// through our own validator. Minimal-signed amount atom via `bigint_to_bytes`, canonical
+/// serialization via `sexp_to_bytes`. This is a SIMPLE generator (`0xff 0x01` prefix, quote
+/// operator); a plain generator is fully consensus-legal.
 pub fn simple_solution_generator(spends: &[CoinSpend]) -> Result<SerializedProgram, ClvmError> {
     Ok(sexp_to_bytes(&build_generator_tree(spends)?)?)
 }
@@ -1224,7 +1155,7 @@ fn build_generator_tree(spends: &[CoinSpend]) -> Result<SExp<'static>, ClvmError
     let spends_list = SExp::from(items);
     // The validator reads the generator's OUTPUT via `.first()`, so the output must be `(SPENDS . _)`
     // — the spend list wrapped one level. So we quote a one-element list `(SPENDS)`: the empty case
-    // is `(q . (()))` = ff01ff8080, matching chia's solution_generator byte for byte.
+    // is `(q . (()))` = ff01ff8080.
     let output = SExp::from(vec![spends_list]);
     // (q . (SPENDS)): the quote operator (atom 0x01) returns `(SPENDS)` when run.
     Ok(SExp::Pair(PairBuf::Owned((
@@ -1233,19 +1164,14 @@ fn build_generator_tree(spends: &[CoinSpend]) -> Result<SExp<'static>, ClvmError
     ))))
 }
 
-/// The exact byte format chia_rs `solution_generator(spends)` emits for an ORDERED spend sequence
-/// — the block producer's plain (uncompressed) generator. chia_rs `build_generator`
-/// (chia-consensus src/solution_generator.rs) PREPENDS each spend onto the CLVM list
-/// (`spend_list = a.new_pair(item, spend_list)`), so the emitted list holds the spends in REVERSE
-/// input order; [`simple_solution_generator`] preserves input order, so this wrapper reverses
-/// before assembling. Byte-parity is pinned by `chia_rs_solution_generator_byte_parity` below
-/// against chia_rs 0.42.1's own `test_solution_generator` vector.
+/// The block producer's plain (uncompressed) generator for an ORDERED spend sequence. The
+/// wire format holds the spends in REVERSE input order; [`simple_solution_generator`]
+/// preserves input order, so this wrapper reverses before assembling. Byte-parity is
+/// pinned by `chia_rs_solution_generator_byte_parity` below.
 ///
-/// This is the uncompressed sibling of what chia 2.7.1 emits at farm time (`create_block_generator2`
-/// → chia_rs `BlockBuilder`, whose `Serializer` back-reference-compresses the SAME tree). dg_xch has
-/// no back-reference serializer yet, so the producer emits the plain form: identical tree, identical
-/// consensus validity (post-SF9: starts `ff01`, canonical serialization, parses under the backrefs
-/// parser), higher byte cost (the residual delta being the back-reference compression not yet done).
+/// The plain form is the uncompressed sibling of the back-reference-compressed generator:
+/// identical tree, identical consensus validity (post-SF9: starts `ff01`, canonical
+/// serialization, parses under the backrefs parser), higher byte cost.
 ///
 /// # Errors
 /// Propagates [`simple_solution_generator`]'s CLVM parse/serialize errors.
@@ -1256,10 +1182,9 @@ pub fn solution_generator_from_coin_spends(
     simple_solution_generator(&reversed)
 }
 
-/// The BACK-REFERENCE-COMPRESSED block generator for `spends` — the byte format chia 2.7.1 emits at
-/// farm time (`create_block_generator2` → chia_rs `BlockBuilder`/`solution_generator_backrefs`). It
+/// The BACK-REFERENCE-COMPRESSED block generator for `spends`. It
 /// builds the IDENTICAL `(q . (SPENDS))` tree as [`solution_generator_from_coin_spends`] (spends in
-/// chia's reversed input order) and serializes it with [`sexp_to_bytes_backrefs`], deduplicating
+/// reversed input order) and serializes it with [`sexp_to_bytes_backrefs`], deduplicating
 /// repeated subtrees (identical puzzle reveals, shared puzzle hashes) via CLVM back-references
 /// (`0xfe`). The result:
 /// - decodes (our `sexp_from_bytes_backrefs`, the same decoder validation uses) to the SAME program
@@ -1267,9 +1192,7 @@ pub fn solution_generator_from_coin_spends(
 /// - is never larger than the plain form, and strictly smaller whenever a ≥4-byte subtree repeats —
 ///   which is what lets a block pack more spends under `MAX_BLOCK_COST_CLVM`.
 ///
-/// Byte-parity with chia_rs 0.42.1 `solution_generator_backrefs` is pinned by
-/// `compressed_generator_matches_chia_rs_backrefs` below against that function's own committed test
-/// vector (`test_solution_generator_backre`).
+/// Byte-parity is pinned by `compressed_generator_matches_chia_rs_backrefs` below.
 ///
 /// # Errors
 /// Propagates [`build_generator_tree`]'s CLVM parse errors and the serializer's `io::Error`.
@@ -1283,9 +1206,8 @@ pub fn compressed_solution_generator_from_coin_spends(
 }
 
 /// Serialized length of `spends` wrapped as a PLAIN (uncompressed) `solution_generator` program —
-/// the byte cost a bundle is charged as if it were a block generator. Mirrors chia_rs
-/// `calculate_generator_length` + `clvm_bytes_len` (chia-consensus src/solution_generator.rs) byte
-/// for byte. This is the plain length; the compressed generator (back-references) is never larger,
+/// the byte cost a bundle is charged as if it were a block generator.
+/// This is the plain length; the compressed generator (back-references) is never larger,
 /// so this is a sound upper bound on the compressed byte cost — the block producer uses it to gate
 /// cheaply and only measures the true compressed size at the cost limit.
 #[must_use]
@@ -1324,8 +1246,7 @@ pub fn spend_bundle_generator_length(spends: &[crate::blockchain::coin_spend::Co
 }
 
 /// Conditions for a SPEND BUNDLE run standalone — mempool admission's analog of the block
-/// generator run. Mirrors chia_rs `run_spendbundle` / `get_conditions_from_spendbundle`
-/// (chia-consensus src/spendbundle_conditions.rs): each spend's puzzle runs against its
+/// generator run: each spend's puzzle runs against its
 /// solution under the height's flag ladder plus MEMPOOL_MODE, the puzzle reveal must hash to
 /// the spent coin's puzzle hash, and the byte cost is charged as if the bundle were wrapped by
 /// `solution_generator` minus the quote bytes it doesn't pay for. The aggregate signature is
@@ -1432,7 +1353,7 @@ pub fn conditions_from_spend_bundle(
     if conds.cost > max_cost {
         return Err(ChiaError::BlockCostExceedsMax);
     }
-    // chia_rs MempoolVisitor::post_process — bundle-level fast-forward disqualifiers.
+    // bundle-level fast-forward disqualifiers
     clear_ff_for_bundle_commitments(&mut conds);
     Ok(conds)
 }
@@ -1606,12 +1527,10 @@ fn conditions_from_processed_generator_output(
     Ok(conds)
 }
 
-// chia_rs MempoolVisitor's per-condition eligibility clearing (chia-consensus conditions.rs
-// 0.42.1, `impl SpendVisitor for MempoolVisitor::condition`): given a parsed condition and its
-// position in the spend's condition list, clear the DEDUP/FF bits the condition forfeits.
-// `condition_index` mirrors chia_rs's `condition_counter` — the singleton top layer emits
-// ASSERT_MY_PARENT_ID as exactly the SECOND condition, so any other position marks an
-// inner-puzzle commitment to the specific coin and kills fast-forward.
+// Per-condition eligibility clearing: given a parsed condition and its position in the
+// spend's condition list, clear the DEDUP/FF bits the condition forfeits. The singleton
+// top layer emits ASSERT_MY_PARENT_ID as exactly the SECOND condition, so any other
+// position marks an inner-puzzle commitment to the specific coin and kills fast-forward.
 fn clear_eligibility_for_condition(flags: &mut u32, condition: &ConditionWithArgs, index: usize) {
     match condition {
         ConditionWithArgs::AssertMyCoinId(_)
@@ -1671,8 +1590,8 @@ fn spend_from_conditions(
     conds: &mut SpendBundleConditions,
     constants: &ConsensusConstants,
     extra_cost: &mut u64,
-    // Compute chia_rs MempoolVisitor eligibility flags (the mempool conditions run); consensus
-    // runs pass false and leave `flags` 0 (chia_rs EmptyVisitor).
+    // Compute mempool eligibility flags (the mempool conditions run); consensus runs pass
+    // false and leave `flags` 0.
     mempool: bool,
 ) -> Result<Spend, ClvmError> {
     let condition_cost_start = *extra_cost;
@@ -1704,9 +1623,8 @@ fn spend_from_conditions(
         assert_ephemeral: false,
         sent_messages: Vec::new(),
         received_messages: Vec::new(),
-        // chia_rs MempoolVisitor::new_spend: assume dedup-eligible; fast-forward candidates must
-        // be singletons, which use odd amounts. Cleared per condition below; consensus runs
-        // (EmptyVisitor) leave flags 0.
+        // Assume dedup-eligible; fast-forward candidates must be singletons, which use odd
+        // amounts. Cleared per condition below; consensus runs leave flags 0.
         flags: if mempool {
             ELIGIBLE_FOR_DEDUP
                 | if coin.amount & 1 == 1 {
@@ -1728,11 +1646,10 @@ fn spend_from_conditions(
         if mempool {
             clear_eligibility_for_condition(&mut spend.flags, &condition, condition_index);
         }
-        // chia rejects the BLS G1 infinity/identity element as an AGG_SIG_*
-        // public key with Err.INVALID_CONDITION (soft-fork-5, enforced at every
-        // current mainnet height). Reject it here, during condition aggregation
-        // and before signature verification, so the block is refused on
-        // condition validity rather than a deferred aggregate-signature failure.
+        // The BLS G1 infinity/identity element is an invalid AGG_SIG_* public key.
+        // Reject it here, during condition aggregation and before signature
+        // verification, so the block is refused on condition validity rather than a
+        // deferred aggregate-signature failure.
         if let Some(public_key) = condition.agg_sig_infinity_pubkey() {
             return Err(ClvmError::InvalidPublicKey(public_key));
         }
@@ -1939,12 +1856,12 @@ fn spend_from_conditions(
             _ => {}
         }
     }
-    // This spend's share of the accumulated condition cost (chia_rs SpendConditions
-    // .condition_cost) — the delta the loop above added to the bundle-wide accumulator.
+    // This spend's share of the accumulated condition cost — the delta the loop above
+    // added to the bundle-wide accumulator.
     spend.condition_cost = extra_cost.saturating_sub(condition_cost_start);
     if mempool {
-        // chia_rs MempoolVisitor::post_spend: a fast-forward candidate must actually look like a
-        // singleton — an output coin with the spend's own puzzle hash and amount.
+        // A fast-forward candidate must actually look like a singleton — an output coin
+        // with the spend's own puzzle hash and amount.
         if (spend.flags & ELIGIBLE_FOR_FF) != 0
             && !spend
                 .create_coin
@@ -1966,7 +1883,7 @@ fn spend_from_conditions(
     Ok(spend)
 }
 
-// chia_rs MempoolVisitor::post_process (chia-consensus conditions.rs 0.42.1): the bundle-level
+// The bundle-level
 // fast-forward disqualifiers that only resolve once every spend is parsed. (a) a coin referenced
 // by an in-bundle ASSERT_CONCURRENT_SPEND is committed to its exact id; (b) a spend whose output
 // is itself spent by this bundle (an ephemeral child) is likewise committed — rebasing the parent
@@ -2141,19 +2058,17 @@ fn collect_announcements(
     asserted_puzzle_announcements.extend(spend.assert_puzzle_announcements.iter().copied());
 }
 
-// chia's merkle-set node-type tags. Mirrors chia_rs `chia-consensus/src/merkle_tree.rs`
-// (`NodeType`) and the pure-python reference exercised by `chia/_tests/core/test_merkle_set.py`
-// (`hashdown(buf) = sha256(bytes([0]*30) + buf)`, terminal root `sha256(b"\1" + key)`, empty root
-// `bytes32.zeros`).
+// Merkle-set node-type tags: hashdown(buf) = sha256(bytes([0]*30) + buf), terminal root
+// sha256(b"\1" + key), empty root all-zeros.
 const MERKLE_NODE_EMPTY: u8 = 0;
 const MERKLE_NODE_TERMINAL: u8 = 1;
 const MERKLE_NODE_MIDDLE: u8 = 2;
 const MERKLE_BLANK: [u8; 32] = [0u8; 32];
 
-/// The structural kind of a subtree, tracked so the parent knows which type byte to feed `hashdown`
-/// and — critically — whether an all-on-one-side level collapses. chia forwards a `Terminal` or a
-/// terminal *pair* (`MiddleDbl`) up through empty levels unchanged, but wraps a genuine `Middle` in an
-/// empty-sibling node. This is the exact rule in chia_rs `generate_merkle_tree_recurse`.
+/// The structural kind of a subtree, tracked so the parent knows which type byte to feed
+/// `hashdown` and — critically — whether an all-on-one-side level collapses: a `Terminal`
+/// or a terminal *pair* (`MiddleDbl`) forwards up through empty levels unchanged, but a
+/// genuine `Middle` is wrapped in an empty-sibling node.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum MerkleNodeType {
     Terminal,
@@ -2164,8 +2079,7 @@ enum MerkleNodeType {
 impl MerkleNodeType {
     /// The type byte a node contributes to its parent's `hashdown`: terminals are `1`, and both
     /// `Middle` and `MiddleDbl` are `2` (the double-terminal distinction only affects collapsing,
-    /// never the wire tag). Confirmed by `test_merkle_set_5`, where a `MiddleDbl` `{e,c}` feeds a `\2`
-    /// prefix into its parent.
+    /// never the wire tag).
     fn tag(self) -> u8 {
         match self {
             MerkleNodeType::Terminal => MERKLE_NODE_TERMINAL,
@@ -2174,8 +2088,7 @@ impl MerkleNodeType {
     }
 }
 
-/// `hashdown` from chia's merkle set: `sha256([0u8; 30] ++ ltag ++ rtag ++ lhash ++ rhash)`. The 30
-/// zero bytes are chia's fixed prefix (`sha256(bytes([0] * 30) + buf)` in the reference `hashdown`).
+/// `hashdown`: `sha256([0u8; 30] ++ ltag ++ rtag ++ lhash ++ rhash)`.
 fn merkle_hashdown(ltag: u8, rtag: u8, left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
     let mut buf = [0u8; 96];
     buf[30] = ltag;
@@ -2185,16 +2098,15 @@ fn merkle_hashdown(ltag: u8, rtag: u8, left: &[u8; 32], right: &[u8; 32]) -> [u8
     hash_256(buf)
 }
 
-/// Compute chia's merkle-set root over `items` (already-hashed 32-byte leaves). Order-independent: the
-/// items are sorted and de-duplicated, then the radix tree is built by big-endian bit traversal.
-///
-/// Reference: `chia/_tests/core/test_merkle_set.py` (empty ⇒ `bytes32.zeros`, single ⇒
-/// `sha256(b"\1" + key)`, interior via `hashdown`) and chia_rs `chia-consensus/src/merkle_tree.rs`.
+/// Compute the merkle-set root over `items` (already-hashed 32-byte leaves).
+/// Order-independent: the items are sorted and de-duplicated, then the radix tree is built
+/// by big-endian bit traversal. Empty ⇒ all-zeros, single ⇒ `sha256(b"\1" + key)`,
+/// interior via `hashdown`.
 fn merkle_set_root(mut items: Vec<[u8; 32]>) -> Bytes32 {
     items.sort_unstable();
     items.dedup();
     if items.is_empty() {
-        // Empty set ⇒ all-zero root (NOT sha256 of the empty string). `test_merkle_set_0`.
+        // Empty set ⇒ all-zero root (NOT sha256 of the empty string).
         return Bytes32::new(MERKLE_BLANK);
     }
     let (hash, node_type) = merkle_set_recurse(&items, 0);
@@ -2229,7 +2141,7 @@ fn merkle_set_recurse(items: &[[u8; 32]], depth: usize) -> ([u8; 32], MerkleNode
     let (left, right) = items.split_at(split);
     match (left.is_empty(), right.is_empty()) {
         // All leaves have this bit set: recurse right. A `Middle` child is wrapped in an empty-left
-        // node; a `Terminal`/`MiddleDbl` child is forwarded up unchanged (chia's collapse rule).
+        // node; a `Terminal`/`MiddleDbl` child is forwarded up unchanged (the collapse rule).
         (true, false) => {
             let (child, child_type) = merkle_set_recurse(right, depth + 1);
             if child_type == MerkleNodeType::Middle {
@@ -2330,8 +2242,7 @@ mod merkle_set_tests {
     use super::{hash_coin_ids, merkle_set_root};
     use crate::traits::SizedBytes;
 
-    // chia's reference `hashdown(buf) = sha256(bytes([0] * 30) + buf)`
-    // (`chia/_tests/core/test_merkle_set.py`).
+    // hashdown(buf) = sha256(bytes([0] * 30) + buf)
     fn hashdown(buf: &[u8]) -> [u8; 32] {
         let mut input = vec![0u8; 30];
         input.extend_from_slice(buf);
@@ -2344,13 +2255,13 @@ mod merkle_set_tests {
         v
     }
 
-    // `test_merkle_set_0`: the empty set roots to all-zero bytes32.
+    // the empty set roots to all-zero bytes32
     #[test]
     fn empty_set_root_is_zero() {
         assert_eq!(merkle_set_root(vec![]).bytes(), [0u8; 32]);
     }
 
-    // `test_merkle_set_1`: a single leaf roots to sha256(b"\1" + key).
+    // a single leaf roots to sha256(b"\1" + key)
     #[test]
     fn single_leaf_root() {
         let a = leaf(0x80);
@@ -2359,7 +2270,7 @@ mod merkle_set_tests {
         assert_eq!(merkle_set_root(vec![a]).bytes(), super::hash_256(buf));
     }
 
-    // `test_merkle_set_duplicate`: duplicates collapse to the single-leaf root.
+    // duplicates collapse to the single-leaf root
     #[test]
     fn duplicate_leaf_root() {
         let a = leaf(0x80);
@@ -2368,7 +2279,7 @@ mod merkle_set_tests {
         assert_eq!(merkle_set_root(vec![a, a]).bytes(), super::hash_256(buf));
     }
 
-    // `test_merkle_set_2`: two leaves -> hashdown(\1\1 + b + a) (b's bit clear -> left; order-independent).
+    // two leaves -> hashdown(\1\1 + b + a) (b's bit clear -> left; order-independent)
     #[test]
     fn two_leaf_root() {
         let a = leaf(0x80);
@@ -2381,7 +2292,7 @@ mod merkle_set_tests {
         assert_eq!(merkle_set_root(vec![b, a]).bytes(), expected);
     }
 
-    // `test_merkle_set_3`: hashdown(\2\1 + hashdown(\1\1 + b + c) + a) — a MiddleDbl {b,c} collapses through
+    // hashdown(\2\1 + hashdown(\1\1 + b + c) + a) — a MiddleDbl {b,c} collapses through
     // the shared-bit levels rather than emitting empty children.
     #[test]
     fn three_leaf_root_collapses_pair() {
@@ -2400,7 +2311,7 @@ mod merkle_set_tests {
         assert_eq!(merkle_set_root(vec![c, b, a]).bytes(), expected);
     }
 
-    // `test_merkle_set_4`: two MiddleDbl subtrees -> hashdown(\2\2 + hashdown(\1\1+b+c) + hashdown(\1\1+a+d)).
+    // two MiddleDbl subtrees -> hashdown(\2\2 + hashdown(\1\1+b+c) + hashdown(\1\1+a+d))
     #[test]
     fn four_leaf_root() {
         let a = leaf(0x80);
@@ -2421,8 +2332,8 @@ mod merkle_set_tests {
         assert_eq!(merkle_set_root(vec![a, b, c, d]).bytes(), hashdown(&top));
     }
 
-    // `test_merkle_set_5`: exercises the empty-child chain a genuine `Middle` subtree emits through
-    // shared-bit levels (the case a `MiddleDbl` collapses but a `Middle` does not).
+    // exercises the empty-child chain a genuine `Middle` subtree emits through
+    // shared-bit levels (the case a `MiddleDbl` collapses but a `Middle` does not)
     #[test]
     fn five_leaf_root_emits_empty_children() {
         const BLANK: [u8; 32] = [0u8; 32];
@@ -2451,8 +2362,7 @@ mod merkle_set_tests {
         assert_eq!(merkle_set_root(vec![e, d, c, b, a]).bytes(), expected);
     }
 
-    // chia `hash_coin_ids` (`chia/types/blockchain_format/coin.py`): single -> sha256(id); multiple ->
-    // sort descending, concat, sha256.
+    // hash_coin_ids: single -> sha256(id); multiple -> sort descending, concat, sha256.
     #[test]
     fn hash_coin_ids_matches_chia() {
         let x = leaf(0x11);
@@ -2480,9 +2390,8 @@ mod agg_sig_tests {
     use crate::traits::SizedBytes;
     use blst::min_pk::SecretKey;
 
-    // Mainnet 2,272,201: AGG_SIG_UNSAFE pairs live on SpendBundleConditions
-    // itself, not on any spend — a verifier that only walks per-spend pairs rejects every real
-    // block containing one. A bundle whose only signature is a real AGG_SIG_UNSAFE must verify.
+    // AGG_SIG_UNSAFE pairs live on the bundle conditions, not on any spend. A bundle
+    // whose only signature is a real AGG_SIG_UNSAFE must verify.
     #[test]
     fn bundle_level_agg_sig_unsafe_pairs_join_the_aggregate() {
         let sk = SecretKey::key_gen_v3(&[7u8; 32], &[]).expect("sk");
@@ -2521,8 +2430,7 @@ mod producer_tests {
 
     // The producer's output MUST round-trip through our own validator: assemble a plain generator
     // from a coin spend whose puzzle creates a coin, run it through execute_block_generator_result,
-    // and get exactly that spend + created coin back. This is the Phase-4 safety property — the
-    // producer is gated by the already-proven consumer.
+    // and get exactly that spend + created coin back.
     #[test]
     fn simple_generator_round_trips_through_our_validator() {
         let created_ph = Bytes32::from([0x11u8; 32]);
@@ -2589,11 +2497,9 @@ mod producer_tests {
         );
     }
 
-    // Byte-parity with chia_rs `solution_generator` — the EXACT two-spend vector from chia_rs
-    // 0.42.1's own `test_solution_generator` (chia-consensus src/solution_generator.rs). chia_rs
-    // builds the CLVM spend list by PREPENDING, so the emitted generator carries the spends in
-    // REVERSE input order; `solution_generator_from_coin_spends` must reproduce those bytes for the
-    // same ordered input. This pins the producer's emitted-generator byte format to chia's.
+    // Byte-parity vector for the plain generator: the reference bytes carry the spends in
+    // REVERSE input order; `solution_generator_from_coin_spends` must reproduce them for
+    // the same ordered input.
     #[test]
     fn chia_rs_solution_generator_byte_parity() {
         use crate::consensus::block_generator::solution_generator_from_coin_spends;
@@ -2705,13 +2611,10 @@ mod producer_tests {
         );
     }
 
-    // Byte-parity with chia_rs `solution_generator_backrefs` — the EXACT two-spend compressed vector
-    // from chia_rs 0.42.1's own `test_solution_generator_backre` (chia-consensus
-    // src/solution_generator.rs). Same two spends as the plain vector above; the compressed form
-    // replaces the two repeated puzzle-hash subtrees with `0xfe`-prefixed back-references
-    // (`fe3b`, `fe8401 6b6b7f...`, `fe820d b7...`, and the `ff0180` quote-tail refs). Committed,
-    // deterministic — no oracle. This pins the producer's compressed generator to chia's, byte for
-    // byte, and (with the plain vector) proves the two forms encode the SAME program.
+    // Byte-parity vector for the compressed generator: same two spends as the plain vector
+    // above; the compressed form replaces the two repeated puzzle-hash subtrees with
+    // `0xfe`-prefixed back-references. With the plain vector this proves the two forms
+    // encode the SAME program.
     #[test]
     fn compressed_generator_matches_chia_rs_backrefs() {
         use crate::consensus::block_generator::compressed_solution_generator_from_coin_spends;
@@ -2762,7 +2665,7 @@ mod producer_tests {
         );
     }
 
-    // The two chia_rs test spends (shared by the plain and compressed byte-parity vectors).
+    // The two test spends shared by the plain and compressed byte-parity vectors.
     fn chia_rs_backref_fixture_spends() -> Vec<CoinSpend> {
         use crate::clvm::program::SerializedProgram;
         let puzzle1 = hex::decode(concat!(

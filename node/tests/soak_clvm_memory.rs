@@ -10,7 +10,7 @@
 // This test wires a deterministic counting allocator (System-backed; unlike jemalloc's cached stats
 // it has no arena/purge noise, so the flatness epsilon is tight) and replays a REAL tx-era block's
 // body validation (CLVM generator parse + run — the exact path a prior bug leaked) many times, asserting
-// live bytes do not grow per run. Before the fix this retained 156,320 B/run; after, ~0.
+// live bytes do not grow per run.
 //
 // It runs in the normal `cargo test -p dg_xch_node` gate — no DB, no corpus, no network.
 
@@ -89,9 +89,9 @@ fn clvm_body_validation_is_steady_state() {
     }
     let base = LIVE.load(Ordering::Relaxed);
 
-    // 200 is ample: the counting allocator is exact (no jitter), so the pre-fix 156,320 B/run bug
-    // would show ~31 MB retained here while a correct arena shows ~0 — a landslide either way. Kept
-    // low so the gate stays fast in `cargo test`.
+    // 200 is ample: the counting allocator is exact (no jitter), so a per-run leak of ~156 KB
+    // would show ~31 MB retained here while a correct arena shows ~0 — a landslide either way.
+    // Kept low so the gate stays fast in `cargo test`.
     const ITERS: usize = 200;
     for _ in 0..ITERS {
         // Drop each result immediately; a correct arena releases everything on runtime drop.

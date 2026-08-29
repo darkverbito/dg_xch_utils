@@ -18,7 +18,7 @@ dg_xch_pos = { path = "../proof_of_space", version = "3.0.0" }
 dg_xch_serialize = { path = "../serialize", version = "3.0.0" }
 # The serving half (serve.rs) builds proofs out of a node's BlockStore — the same query-shaped trait the
 # daemon runs on, so a built proof is exactly what the p2p arm serves. tokio is `sync`-only: the whole-proof
-# cache mirrors chia's `WeightProofHandler.lock` (an async single-flight), nothing else of the runtime.
+# cache is an async single-flight, nothing else of the runtime.
 dg_xch_stores = { path = "../stores", version = "3.0.0" }
 tokio = { version = "1.50.0", features = ["sync"] }
 # Sha512 for CPython-compatible MT19937 seeding (phase 1 sampling RNG); Sha256 comes via dg_xch_core.
@@ -27,7 +27,7 @@ sha2 = { version = "0.10.9", features = ["oid"] }
 # foliage signatures). Same pin/features as dg_xch_core; the Bytes48->PublicKey / Bytes96->Signature
 # conversions and the AugScheme `verify_signature` glue live in dg_xch_core.
 blst = { version = "0.3.16", features = ["portable"] }
-# Phase-4 fans the independent sampled-segment VDF/PoSpace verifications across cores (the measured serial
+# Phase-4 fans the independent sampled-segment VDF/PoSpace verifications across cores (the serial
 # hotspot). rayon's global pool is core-count bounded, so parallelism is capped at the machine width.
 # Same major as proof_of_space already pins (one resolved rayon in the lock).
 rayon = "1.11"

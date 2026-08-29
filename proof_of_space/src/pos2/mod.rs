@@ -1,4 +1,4 @@
-//! Proof of space 2, ported from the reference implementation in Chia's pos2-chip.
+//! Proof of space 2 proving and verification.
 
 pub mod aes_hash;
 pub mod bits;

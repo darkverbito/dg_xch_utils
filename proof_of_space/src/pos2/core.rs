@@ -35,7 +35,7 @@ pub struct SelectedChallengeSets {
     pub ranges: [Range; NUM_CHALLENGE_SETS],
 }
 
-/// The matching rules, ported from `src/pos/ProofCore.hpp`.
+/// The matching rules.
 ///
 /// Two entries pair when three things hold: their sections are the matching pair for that table,
 /// the right entry's `match_target` equals the target the left one's metadata projects, and the
@@ -245,8 +245,7 @@ mod tests {
 
     #[test]
     fn pairings_survive_only_when_their_filter_bits_are_zero() {
-        // With two filter bits roughly a quarter of pairs should survive, which is what makes
-        // plotting work at all. Assert the rate is in the right region rather than exact.
+        // Two filter bits, so roughly a quarter of pairs survive.
         let c = core(28, 2);
         let mut survived = 0;
         let total = 4000u32;

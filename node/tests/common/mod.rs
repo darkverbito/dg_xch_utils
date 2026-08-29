@@ -253,7 +253,7 @@ pub enum Misbehavior {
     /// Rejects every requested range (`RejectBlocks` on everything).
     RejectAllRanges,
     /// Honest but outdated: serves ranges wholly at or below its stale tip, rejects anything above
-    /// (a chia peer answers `RequestBlocks` past its peak with `RejectBlocks`).
+    /// (a peer answers `RequestBlocks` past its peak with `RejectBlocks`).
     StalePeak { tip: u32 },
     /// Serves the first half of its first range, then the connection drops: every later fetch
     /// errors and `is_closed` reports the drop.

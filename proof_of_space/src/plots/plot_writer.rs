@@ -18,11 +18,8 @@ pub struct FpEntry {
     pub right: u32,
 }
 
-/// Tables 1 through 7 held in memory, each sorted by `y`.
-///
-/// This is the shape a plotter needs before it can lay anything out on disk. Holding every table
-/// in memory is what a small `k` buys: the disk backed bucket sort that dominates a production
-/// plotter exists to plot k32 in a few gigabytes, and is unnecessary here.
+/// Tables 1 through 7 held in memory, each sorted by `y`. Only viable at a small `k`; a
+/// production-size plot needs the disk backed bucket sort instead.
 pub struct ForwardTables {
     pub k: u8,
     pub plot_id: Bytes32,

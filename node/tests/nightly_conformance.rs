@@ -36,7 +36,7 @@ async fn full_mainnet_slice_replays_and_every_header_validates() {
     // The full committed corpus: 285 real mainnet headers crossing the 9,054,336 sub-epoch
     // boundary, and the real 14 MB weight proof whose summary chain attests the epoch schedule.
     let bytes = include_bytes!("fixtures/recent_chain_mainnet_9054336_9054620.bin");
-    let chain = RecentChainData::from_bytes_full(bytes, ChiaProtocolVersion::default())
+    let chain = RecentChainData::from_bytes_exact(bytes, ChiaProtocolVersion::default())
         .expect("corpus slice decodes with exact-fit framing")
         .recent_chain_data;
     assert!(chain.len() > 280, "the full slice is present");

@@ -1,9 +1,7 @@
-// Per-connection, bidirectional rate limiting — a faithful port of chia 2.7.1
-// `chia/server/rate_limits.py` (the enforcement machinery) + `chia/server/rate_limit_numbers.py`
-// (the v1 table, the v2 overlay, `get_rate_limits_to_use`, and the non-tx aggregate window).
+// Per-connection, bidirectional rate limiting.
 //
-// One `RateLimiter` instance lives per connection (chia keeps a separate `inbound_rate_limiter`
-// and `outbound_rate_limiter` on each `WSChiaConnection`). Every message is checked against three
+// One `RateLimiter` instance lives per connection (separate inbound and outbound limiters).
+// Every message is checked against three
 // budgets per 60-second window, selected per connection from the capabilities both peers negotiated
 // at handshake:
 //   1. a per-message-type frequency (max messages / window),
@@ -12,8 +10,8 @@
 // plus a cross-type NON-TX AGGREGATE window (1000 msgs / 60s and 100 MiB shared by every
 // `aggregate_limit=true` type) so a flood spread across many distinct types is still bounded.
 //
-// v1 vs v2 selection mirrors `get_rate_limits_to_use`: when BOTH peers advertise `RATE_LIMITS_V2`
-// the v2 overlay is applied on top of v1 (`{**rate_limits[1], **rate_limits[2]}`) — v2 raises the
+// v1 vs v2 selection: when BOTH peers advertise `RATE_LIMITS_V2`
+// the v2 overlay is applied on top of v1 — v2 raises the
 // frequency of the light-wallet/sync query types and moves several of them OUT of the aggregate
 // window (`aggregate_limit` flips true→false). Otherwise the v1 numbers apply. We always advertise
 // v2 (`shared::CAPABILITIES`), so "both v2" reduces to "the peer advertised v2".
@@ -28,7 +26,7 @@ use std::time::Instant;
 const MIB: u64 = 1024 * 1024;
 const KIB: u64 = 1024;
 
-/// A time-based rate limit for one message type (chia `RLSettings`). Counts and sizes are per
+/// A time-based rate limit for one message type. Counts and sizes are per
 /// `reset_seconds` (60s) window.
 #[derive(Clone, Copy, Debug)]
 pub struct RlSettings {
@@ -43,8 +41,8 @@ pub struct RlSettings {
     pub max_total_size: Option<u64>,
 }
 
-/// A message type that is exempt from the rate limit but still bounded by a per-message size cap
-/// (chia `Unlimited`). Used for response messages implicitly bounded by their request; these are
+/// A message type that is exempt from the rate limit but still bounded by a per-message size cap.
+/// Used for response messages implicitly bounded by their request; these are
 /// also outside the aggregate window (like "tx" types).
 #[derive(Clone, Copy, Debug)]
 pub struct Unlimited {
@@ -85,7 +83,7 @@ const fn unlimited(max_size: u64) -> Limit {
     Limit::Unlimited(Unlimited { max_size })
 }
 
-/// The cross-type non-tx aggregate window (chia `aggregate_limit`, rate_limit_numbers.py:35-39):
+/// The cross-type non-tx aggregate window:
 /// 1000 messages / 60s and 100 MiB shared by every `aggregate_limit=true` message type.
 const AGGREGATE: RlSettings = RlSettings {
     aggregate_limit: false,
@@ -94,7 +92,7 @@ const AGGREGATE: RlSettings = RlSettings {
     max_total_size: Some(100 * MIB),
 };
 
-/// True when the peer advertises `RATE_LIMITS_V2` with state "1" (chia `known_active_capabilities`).
+/// True when the peer advertises `RATE_LIMITS_V2` with state "1".
 /// We always advertise v2 ourselves (`shared::CAPABILITIES`), so this is the whole "both peers v2"
 /// test that selects the v2 numbers.
 #[must_use]
@@ -103,7 +101,7 @@ pub fn peer_supports_v2(peer_caps: &Capabilities) -> bool {
     peer_caps.iter().any(|(v, state)| *v == v2 && state == "1")
 }
 
-/// The v2 overlay (chia `rate_limits[2]`, rate_limit_numbers.py:181-202). Applied on top of v1 when
+/// The v2 overlay. Applied on top of v1 when
 /// both peers advertise v2. `None` means the type keeps its v1 limit.
 fn v2_override(t: ProtocolMessageTypes) -> Option<Limit> {
     use ProtocolMessageTypes as P;
@@ -132,8 +130,7 @@ fn v2_override(t: ProtocolMessageTypes) -> Option<Limit> {
     })
 }
 
-/// The v1 table (chia `rate_limits[1]`, rate_limit_numbers.py:66-180). Every message type chia
-/// version 1.0-1.4 knows. Types our enum does not model (configure_window_sizes, error, solve,
+/// The v1 table. Types our enum does not model (configure_window_sizes, error, solve,
 /// solution_response, partial_proofs) fall to a conservative aggregate-limited default so an
 /// unknown/unhandled type can never be used to bypass the limits.
 #[allow(clippy::too_many_lines)]
@@ -247,14 +244,14 @@ fn v1_limit(t: ProtocolMessageTypes) -> Limit {
         P::RequestFeeEstimates => rl(true, 10, 100),
         P::RespondFeeEstimates => rl(true, 10, 100),
         // Types our enum does not model (configure_window_sizes, error, solve, solution_response,
-        // partial_proofs) and the Unknown sentinel: a conservative aggregate-limited default. chia
-        // would KeyError; we refuse to leave an unhandled code as a limit bypass.
+        // partial_proofs) and the Unknown sentinel: a conservative aggregate-limited default —
+        // an unhandled code must not become a limit bypass.
         P::Unknown => rl(true, 100, 1024),
     }
 }
 
-/// Select the composed limit for a message type given whether the peer negotiated v2 — chia
-/// `get_rate_limits_to_use` + the `{**v1, **v2}` overlay, evaluated per type.
+/// Select the composed limit for a message type given whether the peer negotiated v2 — the
+/// v2 overlay evaluated per type.
 #[must_use]
 pub fn composed_limit(t: ProtocolMessageTypes, both_v2: bool) -> Limit {
     if both_v2 && let Some(l) = v2_override(t) {
@@ -272,7 +269,7 @@ struct Window {
     non_tx_size: u64,
 }
 
-/// A per-connection rate limiter (chia `RateLimiter`). `incoming` limiters commit their counters
+/// A per-connection rate limiter. `incoming` limiters commit their counters
 /// unconditionally (the bytes were already received); outgoing limiters commit only when the message
 /// is allowed to be sent.
 pub struct RateLimiter {
@@ -284,7 +281,7 @@ pub struct RateLimiter {
 }
 
 impl RateLimiter {
-    /// A limiter with chia's defaults: a 60-second window at 100% of the published numbers.
+    /// A limiter with the defaults: a 60-second window at 100% of the published numbers.
     #[must_use]
     pub fn new(incoming: bool) -> Self {
         Self::with_params(incoming, 60, 100)
@@ -302,9 +299,9 @@ impl RateLimiter {
     }
 
     /// Check one message against the composed limits for this connection. Returns `Some(reason)` when
-    /// a limit is exceeded (the caller closes the connection — chia `close(RATE_LIMITER_BAN_SECONDS)`);
-    /// `None` when the message is within budget. Faithful to chia `process_msg_and_check`, including
-    /// the aggregate-before-per-type check order and the incoming-commits-unconditionally semantics.
+    /// a limit is exceeded (the caller closes the connection);
+    /// `None` when the message is within budget. The aggregate check runs before the per-type
+    /// check, and incoming counters commit unconditionally.
     pub fn process_and_check(
         &self,
         msg_type: ProtocolMessageTypes,
@@ -379,7 +376,7 @@ impl RateLimiter {
             }
         };
 
-        // chia: for INCOMING messages the counters advance unconditionally (the bytes are already
+        // For INCOMING messages the counters advance unconditionally (the bytes are already
         // received), so a peer that keeps violating keeps climbing the window. For OUTGOING, only
         // advance when we actually send (allowed).
         if self.incoming || allowed {
@@ -416,8 +413,8 @@ mod tests {
         ]
     }
 
-    // GREEN #1: request_puzzle_solution is 1000/min in v1 (rate_limit_numbers.py:118) and 5000/min in
-    // v2 (:197). A v2 peer exceeding the v1 cap is admitted; a v1-only peer is cut at 1000.
+    // GREEN #1: request_puzzle_solution is 1000/min in v1 and 5000/min in v2.
+    // A v2 peer exceeding the v1 cap is admitted; a v1-only peer is cut at 1000.
     #[test]
     fn v2_selection_lifts_request_puzzle_solution_to_5000() {
         let v2 = RateLimiter::new(true);
@@ -450,8 +447,8 @@ mod tests {
         );
     }
 
-    // GREEN #2: a single oversized message is a violation on its own (chia checks
-    // len(data) > max_size). RequestBlock max_size is 100 bytes.
+    // GREEN #2: a single oversized message is a violation on its own.
+    // RequestBlock max_size is 100 bytes.
     #[test]
     fn oversize_single_message_is_a_violation() {
         let rl = RateLimiter::new(true);

@@ -1,24 +1,12 @@
-//! Progress watchdog for the decoupled fetch/confirm pipeline (sync-decoupling liveness backstop).
+//! Progress watchdog for the decoupled fetch/confirm pipeline.
 //!
-//! The bulk/fast-sync path has an explicit stall reclaim: a `download_worker` whose peer misses the
-//! request timeout reclaims its reservation to the pool ([`crate::sync::ReservationWindow::reclaim`],
-//! counted in `SyncMetrics::reclaimed`). The DECOUPLED genesis/follow pipeline
-//! ([`crate::sync::WindowReadahead`] + [`crate::sync::queue::BlockQueue`]) has **no** analogous
-//! reclaim — every individual fetch is timeout-bounded, but nothing detects the pipeline as a WHOLE
-//! ceasing to make progress. So an unforeseen wedge anywhere in the consumer chain (a stalled
-//! announcer back-pressuring the confirm loop, a lost wakeup, a peer set that all went quiet at once)
-//! leaves `low_water` frozen with no bound and no recovery — the hard-stall this type closes.
+//! Individual fetches are timeout-bounded, but nothing else detects the pipeline as a whole ceasing
+//! to make progress. If the queue's `low_water` stops advancing for `timeout` while there is work to
+//! do, peers are live, and no confirm is in flight, force a [`BlockQueue::rebase`] to the current
+//! `low_water`: the generation bump is the `fetch_scheduler`'s abort-and-replan signal, and any
+//! producer parked on `wait_space` is woken. The reclaim is counted in `SyncMetrics::reclaimed`.
 //!
-//! The guarantee: if the queue's `low_water` (the confirmed-peak frontier) stops advancing for
-//! `timeout` **while there is work to do, peers are live, and no confirm is legitimately in flight**,
-//! force a [`BlockQueue::rebase`] to the current `low_water`. That bumps the queue generation — the
-//! `fetch_scheduler` reads the bump as its abort-and-replan signal and re-fetches from the frontier —
-//! and wakes any producer parked on `wait_space` (rebase zeroes the byte charge and signals `space`).
-//! The reclaim is counted in `SyncMetrics::reclaimed`, so a stuck decoupled pipeline is now VISIBLE in
-//! the same gauge the bulk path uses, and — the point — BOUNDED: any stall is broken within `timeout`.
-//!
-//! Keyed purely on `Height`/`Instant`/booleans, so the decision is unit-tested deterministically with
-//! injected clock values, and the reclaim action is tested against a live `BlockQueue`.
+//! Keyed purely on `Height`/`Instant`/booleans so the decision is unit-testable with injected clocks.
 
 use crate::sync::SyncMetrics;
 use crate::sync::queue::{BlockQueue, Height};
@@ -46,13 +34,9 @@ impl StallWatchdog {
         }
     }
 
-    /// The pure decision (see the module docs). Returns `true` exactly when the frontier has not
-    /// advanced for `>= timeout` AND the stall is actionable: work remains, peers are live, and no
-    /// confirm is legitimately in flight. Every other case — a forward advance, or a not-actionable
-    /// state (caught up, no peers, a confirm in flight) — resets the clock and returns `false`, so the
-    /// timer only ever accrues during a *true* stall we can do something about. On a fire it resets the
-    /// clock, so a persistent wedge is reclaimed again after another full `timeout` (bounded, repeatable
-    /// — never a one-shot that gives up).
+    /// Returns `true` exactly when the frontier has not advanced for `>= timeout` AND the stall is
+    /// actionable: work remains, peers are live, no confirm in flight. Every other case resets the
+    /// clock. A fire also resets the clock, so a persistent wedge is reclaimed repeatedly.
     pub fn poll(
         &mut self,
         low_water: Height,
@@ -79,10 +63,8 @@ impl StallWatchdog {
     }
 
     /// One driver-tick evaluation against the live queue and metrics. When [`StallWatchdog::poll`]
-    /// fires, force `queue.rebase(low_water)` (bump the generation → producer aborts + replans + is
-    /// woken off `wait_space`) and count the reclaim in `metrics.reclaimed`. Returns whether a reclaim
-    /// was performed. `sync_target` is the heaviest claimed height (the work frontier); `has_work` is
-    /// `sync_target > low_water`.
+    /// fires, force `queue.rebase(low_water)` and count the reclaim in `metrics.reclaimed`.
+    /// Returns whether a reclaim was performed. `sync_target` is the heaviest claimed height.
     pub fn tick(
         &mut self,
         queue: &BlockQueue,
@@ -181,11 +163,8 @@ mod tests {
         );
     }
 
-    // The live action against a real BlockQueue: a wedged frontier (frozen low_water, work far ahead)
-    // is force-rebased — the generation bumps (the fetch_scheduler's abort-and-replan signal) and
-    // reservations_reclaimed increments. (That the rebase also WAKES a producer parked on wait_space is
-    // proven end-to-end in node/tests/block_queue.rs, where the mainnet-body fixture can fill the queue
-    // to its budget so a genuine park occurs.)
+    // Rebase-on-wedge against a real BlockQueue. That the rebase also wakes a producer parked on
+    // wait_space is covered in node/tests/block_queue.rs.
     #[test]
     fn tick_rebases_a_wedged_queue_and_increments_reclaimed() {
         let metrics = Arc::new(SyncMetrics::default());

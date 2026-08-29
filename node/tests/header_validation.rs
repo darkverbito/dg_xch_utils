@@ -35,7 +35,7 @@ fn load_chain() -> Vec<HeaderBlock> {
 }
 
 // Light-path (proof-of-space only, no VDF) required_iters — used to seed ancestor records so a target's
-// full validation reads a correct pb.ip_iters. Mirrors weight_proof.py's _validate_pospace_recent_chain.
+// full validation reads a correct pb.ip_iters.
 fn light_required_iters(
     ancestors: &HashMap<Bytes32, BlockRecord>,
     block: &HeaderBlock,

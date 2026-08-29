@@ -13,9 +13,8 @@ const FORM_BYTES: usize = 100;
 
 /// Run one VDF and return what a block needs to carry it.
 ///
-/// `discriminant_size_bits` is what makes a simulated chain cheap: the real prover and the real
-/// verifier run unchanged, over a group small enough that a proof takes microseconds instead of
-/// the seconds a mainnet-sized discriminant costs.
+/// `discriminant_size_bits` sets the group size the prover and verifier run over; a simulated
+/// chain shrinks it so a proof costs microseconds rather than seconds.
 pub fn prove_vdf(
     challenge: Bytes32,
     input: &ClassgroupElement,
@@ -71,8 +70,7 @@ mod tests {
 
     #[test]
     fn a_tiny_discriminant_proof_validates_through_the_real_verifier() {
-        // The premise the fast tier rests on: shrinking the discriminant does not put the chain on
-        // a different code path, it just makes the same prover and verifier cheap.
+        // Shrinking the discriminant keeps the same prover and verifier path.
         for bits in [16i64, 32, 64, 512] {
             let constants = constants_at(bits);
             let challenge = Bytes32::from([7u8; 32]);
@@ -121,8 +119,7 @@ mod tests {
 
     #[test]
     fn chaining_a_proof_onto_the_previous_output_validates() {
-        // How a timelord actually runs: each infusion continues from the last output rather than
-        // restarting from the identity element.
+        // Each infusion continues from the last output rather than restarting from the identity.
         let constants = constants_at(16);
         let challenge = Bytes32::from([3u8; 32]);
         let first_input = ClassgroupElement::get_default_element();

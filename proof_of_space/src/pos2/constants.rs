@@ -1,4 +1,4 @@
-//! Fixed sizes of a proof of space 2 proof, ported from `src/pos/ProofConstants.hpp`.
+//! Fixed sizes of a proof of space 2 proof.
 
 /// A proof carries 128 x values, paired up through three tables.
 pub const TOTAL_XS_IN_PROOF: usize = 128;

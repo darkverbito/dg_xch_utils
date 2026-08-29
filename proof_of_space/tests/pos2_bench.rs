@@ -10,8 +10,7 @@ fn plot_id() -> Bytes32 {
     Bytes32::from(bytes)
 }
 
-/// Throughput of the plot hash, for comparison against the reference implementation. Ignored by
-/// default: it is a measurement, not an assertion.
+/// Throughput of the plot hash. Ignored by default: it is a measurement, not an assertion.
 #[test]
 #[ignore = "benchmark"]
 fn aes_hash_throughput() {

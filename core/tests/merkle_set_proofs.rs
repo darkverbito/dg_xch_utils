@@ -1,13 +1,11 @@
-//! Byte-parity gate for the wallet-facing `MerkleSet` proof encoding: every proof our port
-//! generates must be BYTE-EQUAL to the proof emitted by the real `chia_rs` 0.42.1 `MerkleSet`
-//! (the exact pin CNI 2.7.1 imports — a light wallet verifies these bytes against the block
-//! header's foliage roots, so near-enough is not enough).
+//! Byte-parity gate for the wallet-facing `MerkleSet` proof encoding: every proof this
+//! implementation generates must be BYTE-EQUAL to the reference proofs in the vendored
+//! fixture — a light wallet verifies these bytes against the block header's foliage roots,
+//! so near-enough is not enough.
 //!
-//! Fixture provenance: `fixtures/merkle_set_proofs_chia_rs_0_42_1.txt` was emitted by a scratch
-//! oracle script driving `chia_rs==0.42.1`'s `MerkleSet(leafs).is_included_already_hashed(item)`
-//! over the fixed leaf sets below (chia_rs's own test corpus shapes + deterministic xorshift64
-//! leaves). Line format: `case <name>` / `leaf <hex>`* / `root <hex>` / `probe <item> <0|1>
-//! <proof-hex>`*.
+//! Fixture: `fixtures/merkle_set_proofs_chia_rs_0_42_1.txt`, emitted by an oracle script
+//! over the fixed leaf sets below. Line format: `case <name>` / `leaf <hex>`* /
+//! `root <hex>` / `probe <item> <0|1> <proof-hex>`*.
 
 use dg_xch_core::consensus::merkle_set::{MerkleSet, validate_merkle_proof};
 
@@ -67,9 +65,9 @@ fn load_cases() -> Vec<Case> {
     cases
 }
 
-// Every case: our root equals chia_rs's root; every probe: our (included, proof-bytes) equals
-// chia_rs's is_included_already_hashed output EXACTLY, and the proof round-trip verifies against
-// the root (inclusion AND exclusion).
+// Every case: our root equals the fixture root; every probe: our (included, proof-bytes)
+// equals the fixture output EXACTLY, and the proof round-trip verifies against the root
+// (inclusion AND exclusion).
 #[test]
 fn proofs_are_byte_equal_to_chia_rs_0_42_1() {
     let mut probes_checked = 0usize;

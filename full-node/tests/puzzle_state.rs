@@ -9,16 +9,15 @@
 //   RequestRemoveCoinSubscriptions (96)  → RespondRemoveCoinSubscriptions (97)
 //   NewPeakWallet (50)                   → pushed on wallet connect + on every peak advance
 //
-// chia semantics mirrored (chia-blockchain 2.7.1): `full_node_api.py::request_puzzle_state`
-// (:2002-2078) / `request_coin_state` (:2085-2141) — the `previous_height`/`header_hash`
-// reorg-consistency check against `height_to_hash` (previous_height=None compares against the
-// GENESIS_CHALLENGE) rejecting `RejectStateReason.REORG` on mismatch; `CoinStateFilters` and
-// paging via `coin_store.batch_coin_states_by_puzzle_hashes` (`coin_store.py:590`); the
-// subscribe side effect counting against `max_subscriptions`; `request_remove_*_subscriptions`
-// (:1961/:1981) with `None` = remove-all returning the removed set. NO sync gate: chia serves
-// these from whatever chain state it has (there is no `synced` check in either handler).
-// `full_node.py::on_connect` (:1000-1008) greets a WALLET peer with the current peak as
-// `NewPeakWallet` (fork_point = peak height), and `update_wallets` (:1561-1571) broadcasts
+// Semantics under test: `request_puzzle_state` / `request_coin_state` — the
+// `previous_height`/`header_hash` reorg-consistency check against `height_to_hash`
+// (previous_height=None compares against the GENESIS_CHALLENGE) rejecting
+// `RejectStateReason.REORG` on mismatch; `CoinStateFilters` and paging; the subscribe side
+// effect counting against `max_subscriptions`; `request_remove_*_subscriptions` with `None` =
+// remove-all returning the removed set. NO sync gate: these serve from whatever chain state the
+// node has (there is no `synced` check in either handler).
+// on_connect` greets a WALLET peer with the current peak as
+// `NewPeakWallet` (fork_point = peak height), and `update_wallets` broadcasts
 // `NewPeakWallet` to every wallet peer on a peak advance. Sage DROPS a peer that stays silent
 // for 2s after the handshake (sage-wallet sync_manager/peer_discovery.rs `try_add_peer`,
 // options.rs `initial_peak = 2s`), so without the on-connect push the query surface is
@@ -65,6 +64,8 @@ fn config(listen: SocketAddr, rpc: SocketAddr) -> Config {
         std::process::id()
     ));
     Config {
+        target_outbound: None,
+        target_peer_count: None,
         listen,
         rpc,
         introducer: None,
@@ -175,9 +176,8 @@ async fn rig(synced: bool) -> (Arc<Node>, WsClient, mpsc::Receiver<Arc<ChiaMessa
     (node, client, rx)
 }
 
-// Send `body` as `req_type` and await the correlated reply (the chia request/response contract:
-// EVERY one of these four requests is answered — the silent drop is exactly the bug this suite
-// was written RED against).
+// Send `body` as `req_type` and await the correlated reply (EVERY one of these four requests
+// is answered — a silent drop is the failure mode this suite guards).
 async fn request<T: ChiaSerialize>(
     connection: &Arc<RwLock<WebsocketConnection>>,
     req_type: ProtocolMessageTypes,
@@ -242,7 +242,7 @@ async fn request_puzzle_state_is_answered() {
         },
     )
     .await
-    .expect("a RespondPuzzleState reply (chia never silently drops request_puzzle_state)");
+    .expect("a RespondPuzzleState reply (request_puzzle_state is never silently dropped)");
     let resp: RespondPuzzleState = decode_reply(&reply, ProtocolMessageTypes::RespondPuzzleState);
 
     assert_eq!(
@@ -296,7 +296,7 @@ async fn request_coin_state_is_answered() {
         &client.connection,
         ProtocolMessageTypes::RequestCoinState,
         &RequestCoinState {
-            // the in-request duplicate must be deduped in the echo (chia :2093 dict.fromkeys)
+            // the in-request duplicate must be deduped in the echo
             coin_ids: vec![coin.name(), coin.name(), missing],
             previous_height: None,
             header_hash: MAINNET.genesis_challenge,
@@ -357,7 +357,7 @@ async fn remove_subscription_requests_are_answered() {
     drop(node);
 }
 
-// ── 2. Reorg-consistency: chia :2014-2023 — header_hash must equal height_to_hash(previous_height)
+// ── 2. Reorg-consistency: header_hash must equal height_to_hash(previous_height)
 // (GENESIS_CHALLENGE when previous_height=None); a mismatch is the client's chain forked from ours
 // → RejectStateReason::REORG. A matching previous peak serves (empty page above min_height).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -439,7 +439,7 @@ async fn mismatched_previous_header_hash_rejects_reorg() {
     drop(node);
 }
 
-// ── 3. NO sync gate: chia request_puzzle_state/request_coin_state serve regardless of sync state
+// ── 3. NO sync gate: `request_puzzle_state`/request_coin_state serve regardless of sync state
 // (no `synced` check in either handler — unlike send_transaction). A catching-up node answers from
 // the chain it has.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -457,13 +457,13 @@ async fn unsynced_node_still_serves_puzzle_state() {
         },
     )
     .await
-    .expect("served while not synced (chia has no sync gate here)");
+    .expect("served while not synced (no sync gate here)");
     let resp: RespondPuzzleState = decode_reply(&reply, ProtocolMessageTypes::RespondPuzzleState);
     assert!(resp.is_finished);
     drop(node);
 }
 
-// ── 4. The connect greeting: chia full_node.py on_connect (:1000-1008) sends the current peak as
+// ── 4. The connect greeting: `on_connect` sends the current peak as
 // NewPeakWallet (fork_point_with_previous_peak = the peak height) to a WALLET-type peer. Sage
 // gives a fresh peer 2 SECONDS to produce exactly this message before dropping it
 // (peer_discovery.rs try_add_peer, options.rs initial_peak) — the assert budget below IS Sage's.
@@ -483,12 +483,12 @@ async fn wallet_handshake_is_greeted_with_new_peak_wallet_within_sage_budget() {
     assert_eq!(
         peak.fork_point_with_previous_peak,
         common::PEAK_HEIGHT,
-        "on connect chia reports fork_point = the peak height itself (full_node.py:1006)"
+        "on connect fork_point = the peak height itself"
     );
 }
 
-// ── 5. Peak advance → every wallet-type peer receives NewPeakWallet (chia update_wallets
-// :1561-1571 broadcasts to NodeType.WALLET after the per-subscriber CoinStateUpdate deltas).
+// ── 5. Peak advance → every wallet-type peer receives NewPeakWallet (broadcast after the
+// per-subscriber CoinStateUpdate deltas).
 // A full-node-type inbound peer must NOT receive it. The advance is a REAL confirm: the node
 // syncs mainnet block 5,000,000 from a loopback peer through the production follow path.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -726,8 +726,8 @@ async fn sage_sync_sequence_end_to_end() {
     assert_eq!(update.height, common::PEAK_HEIGHT + 1);
     assert!(update.items.iter().any(|cs| cs.coin.name() == fresh.name()));
 
-    // [unsubscribe] — remove-all returns exactly what was subscribed (wallet_peer.rs:225-238;
-    // chia :1967-1969 clear + return the prior set).
+    // [unsubscribe] — remove-all returns exactly what was subscribed (clear + return the
+    // prior set).
     let reply = request(
         &client.connection,
         ProtocolMessageTypes::RequestRemovePuzzleSubscriptions,
@@ -776,8 +776,8 @@ async fn sage_sync_sequence_end_to_end() {
 }
 
 // (The over-cap ExceededSubscriptionLimit reject and the paging/filter matrix are proven at the
-// api level in `daemon.rs`'s test module, where chia's 100k response budget and 200k subscription
+// api level in `daemon.rs`'s test module, where the 100k response budget and 200k subscription
 // cap are injectable — seeding 200k+ live subscriptions over the wire is impractical. CNI
 // additionally truncates the request LISTS at parse time via its `list_limits` decorator
-// (api_protocol.py:84-89 → streamable.py parse_list_limited); our handlers apply the identical
+// (→ parse_list_limited); our handlers apply the identical
 // truncation after decode, which is byte-stream- and semantics-equivalent.)

@@ -132,9 +132,9 @@ pub fn farm_genesis(
 
 /// Assemble the genesis unfinished block from a farmed proof.
 ///
-/// The farmer signatures are `g2_infinity` placeholders, as the genesis reference does: the
-/// producer embeds them without checking, and a simulated chain does not gate on them. The signage
-/// point VDFs are `None` because the first signage point coincides with the sub-slot start.
+/// The farmer signatures are `g2_infinity` placeholders: the producer embeds them without checking
+/// and a simulated chain does not gate on them. The signage point VDFs are `None` because the first
+/// signage point coincides with the sub-slot start.
 pub fn build_genesis_unfinished(
     constants: &ConsensusConstants,
     farmed: &FarmedProof,
@@ -241,9 +241,9 @@ mod tests {
             &ConsensusOverrides {
                 plot_size_v2: Some(K),
                 number_zero_bits_plot_filter_v2: Some(0),
-                // chia's test constant. With the mainnet 2^67 factor a k18 proof's required-iters
-                // sits far above the infusion range and never wins; 2^25 brings the lottery into a
-                // range where a small plot set finds a genesis proof.
+                // With the mainnet 2^67 factor a k18 proof's required-iters sits far above the
+                // infusion range and never wins; 2^25 brings it into a range where a small plot
+                // set finds a genesis proof.
                 difficulty_constant_factor: Some(2u128.pow(25)),
                 difficulty_starting: Some(7),
                 // A tiny discriminant makes the real VDF finish in microseconds and validate
@@ -307,8 +307,8 @@ mod tests {
         let full = build_genesis_full(&c, &ub, &farmed).expect("finish");
         assert_eq!(full.reward_chain_block.height, 0, "genesis is height 0");
 
-        // The whole point: a block farmed and finished from scratch clears live consensus and
-        // becomes the peak. The tiny-discriminant VDFs are real, so add_block's VDF gates pass.
+        // A block farmed and finished from scratch clears consensus and becomes the peak; the
+        // small-discriminant VDFs are real, so add_block's VDF gates run.
         let db = tempfile::tempdir().expect("tempdir");
         let store = SqliteStore::open(&db.path().join("sim.sqlite"))
             .await

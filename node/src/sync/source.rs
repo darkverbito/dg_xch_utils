@@ -18,9 +18,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// A peer that serves a contiguous block range — the download seam the reservation window splits work across.
-/// The production impl issues `RequestBlocks` over a `dg_xch_p2p` outbound channel; tests back it in-memory,
-/// so the pipeline's window/write-through/reclaim logic is exercised without a socket.
+/// A peer that serves a contiguous block range. The production impl issues `RequestBlocks` over a
+/// `dg_xch_p2p` outbound channel; tests back it in-memory.
 #[async_trait]
 pub trait BlockRangeSource: Send + Sync {
     /// Stable identity for reservation bookkeeping and slow-peer eviction.
@@ -36,8 +35,8 @@ pub trait BlockRangeSource: Send + Sync {
     async fn fetch_range(&self, start: u32, end: u32) -> Result<Vec<FullBlock>, SyncError>;
 }
 
-/// The cross-crate contract in the flesh: one `dg_xch_p2p::OutboundPeer` = one reservation slot.
-/// `fetch_range` issues `RequestBlocks` over the peer's `WsClient` and awaits the matching `RespondBlocks`.
+/// One `dg_xch_p2p::OutboundPeer` = one reservation slot. `fetch_range` issues `RequestBlocks`
+/// over the peer's `WsClient` and awaits the matching `RespondBlocks`.
 pub struct OutboundPeerSource {
     peer: Arc<OutboundPeer>,
     id: u64,
@@ -70,10 +69,9 @@ impl BlockRangeSource for OutboundPeerSource {
     }
 
     async fn fetch_range(&self, start: u32, end: u32) -> Result<Vec<FullBlock>, SyncError> {
-        // The correlation id is now minted by the connection ([`WebsocketConnection::register_request`]),
-        // not by this (per-tick-rebuilt) source — `id: None` here defers to it. Wait for EITHER
-        // RespondBlocks or RejectBlocks (both echo the id); a reject resolves immediately with a named
-        // error instead of hanging the worker until its request timeout.
+        // `id: None` defers correlation-id minting to the connection. Wait for either RespondBlocks
+        // or RejectBlocks (both echo the id); a reject resolves immediately instead of hanging the
+        // worker until its request timeout.
         let msg = ChiaMessage::new(
             ProtocolMessageTypes::RequestBlocks,
             self.version,
@@ -99,10 +97,8 @@ impl BlockRangeSource for OutboundPeerSource {
                 let resp = RespondBlocks::from_bytes(&mut cursor, version).map_err(|e| {
                     SyncError::Io(std::io::Error::other(format!("decode RespondBlocks: {e}")))
                 })?;
-                // Defense in depth on the demux: the reply is routed by id, but verify the peer echoed
-                // the range we asked for — exactly `end - start + 1` blocks, ascending and contiguous
-                // over `start..=end` — before handing them to the consumer. A mismatch is treated like
-                // a reject (reclaimed for another peer), never silently confirmed as the wrong heights.
+                // Verify the peer echoed the requested range — exactly `end - start + 1` blocks,
+                // ascending and contiguous — before handing them on. A mismatch is treated as a reject.
                 let expected_len = (end.saturating_sub(start).saturating_add(1)) as usize;
                 let covers_range = resp.blocks.len() == expected_len
                     && resp
@@ -119,8 +115,8 @@ impl BlockRangeSource for OutboundPeerSource {
                 }
                 Ok(resp.blocks)
             }
-            // The peer explicitly cannot serve this range (behind our height, or missing bodies) — surface it
-            // as a distinct, non-fatal reject so the worker reclaims for another peer and the log names it.
+            // The peer cannot serve this range: a distinct, non-fatal reject so the worker
+            // reclaims for another peer.
             _ => {
                 let _ = RejectBlocks::from_bytes(&mut cursor, version);
                 Err(SyncError::RangeRejected { start, end })
@@ -130,9 +126,8 @@ impl BlockRangeSource for OutboundPeerSource {
 }
 
 /// Wraps a [`BlockRangeSource`] and writes every fetched range to disk as a `RespondBlocks` blob
-/// (`blocks_<start>_<end>.bin`) before returning it. Used to capture a real recent-chain corpus from a live
-/// peer so the full fast-sync pipeline can be replayed offline (fixture-backed, no socket). Capture happens at
-/// fetch time, so the range is saved even if downstream confirmation later fails.
+/// (`blocks_<start>_<end>.bin`) before returning it, for offline replay. Capture happens at fetch
+/// time, so the range is saved even if downstream confirmation later fails.
 pub struct CapturingSource {
     inner: Arc<dyn BlockRangeSource>,
     dir: PathBuf,
@@ -182,9 +177,8 @@ impl BlockRangeSource for CapturingSource {
     }
 }
 
-/// Request a weight proof to `tip` from an outbound peer — the fast-sync entry. `total_blocks` is the
-/// peer's claimed tip height (the reference uses it to size the proof). Issues `RequestProofOfWeight` over the
-/// peer's `WsClient` and awaits the matching `RespondProofOfWeight`.
+/// Request a weight proof to `tip` from an outbound peer — the fast-sync entry. `total_blocks` is
+/// the peer's claimed tip height, used to size the proof.
 ///
 /// # Errors
 /// Returns [`SyncError`] if the peer rejects the request, the response fails to decode, or it times out.

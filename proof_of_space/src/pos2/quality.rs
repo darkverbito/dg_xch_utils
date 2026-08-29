@@ -37,7 +37,7 @@ mod tests {
         let out = serialize_quality(&fragments, 2);
         assert_eq!(out.len(), 129);
         assert_eq!(out[0], 2);
-        // The first fragment from the reference farming run, as its wrapper serializes it.
+        // The fragment, little endian.
         assert_eq!(
             &out[1..9],
             &[0xb1, 0x37, 0xd0, 0xd6, 0x05, 0x00, 0x00, 0x00]

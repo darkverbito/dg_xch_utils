@@ -20,10 +20,8 @@ enum Operation {
     SwapEval,
 }
 
-/// The CLVM evaluator over the compact node [`Arena`]. The public surface is
-/// unchanged — `new(max_cost, flags)` + `run(program, args)` — but every eval
-/// intermediate now lives in the arena's typed pools as a u32 handle instead of a
-/// deep-copied `SExp` tree in a bump arena: `cons` is an 8-byte pair-pool push, a
+/// The CLVM evaluator over the compact node [`Arena`]: every eval intermediate lives in
+/// the arena's typed pools as a u32 handle — `cons` is an 8-byte pair-pool push, a
 /// path-traversal result is a handle copy, and an op result is allocated exactly once.
 pub struct ClvmRuntime {
     dialect: ChiaDialect,
@@ -209,7 +207,7 @@ impl ClvmRuntime {
         let args = self.value_stack.pop().ok_or(ClvmError::ValueStackEmpty)?;
         self.value_stack.push(v2_index);
         // Cons must be queued before the operand eval so the accumulated operand list is
-        // rebuilt in clvmr's eval_pair ordering.
+        // rebuilt in the correct order.
         self.op_stack.push(Operation::Cons);
         self.eval_pair(program, args)
     }
@@ -279,18 +277,16 @@ const fn first_non_zero(buf: &[u8]) -> usize {
 
 #[cfg(test)]
 mod tests {
-    //! Eval-loop, environment-traversal and cost-accounting tests.
-    //! The factorial run mirrors chia-blockchain's
-    //! `chia/_tests/clvm/test_clvm_step.py::test_simple_program_run` (result 120).
-    //! The traversal-cost constants are the canonical CLVM path-lookup costs
-    //! (TRAVERSE_BASE_COST 40 + 4 per zero byte + 4 per bit).
+    //! Eval-loop, environment-traversal and cost-accounting tests. The traversal-cost
+    //! constants are the canonical CLVM path-lookup costs (TRAVERSE_BASE_COST 40 +
+    //! 4 per zero byte + 4 per bit).
     use super::*;
     use crate::clvm::program::{Program, SerializedProgram};
     use crate::clvm::sexp::SExp;
     use crate::clvm::utils::INFINITE_COST;
     use num_bigint::BigInt;
 
-    // factorial, from test_clvm_step.py
+    // factorial
     const FACTORIAL_HEX: &str = "ff02ffff01ff02ff02ffff04ff02ffff04ff05ff80808080ffff04ffff01ff02\
 ffff03ffff09ff05ffff010180ffff01ff0101ffff01ff12ff05ffff02ff02ff\
 ff04ff02ffff04ffff11ff05ffff010180ff808080808080ff0180ff018080";
@@ -349,7 +345,7 @@ ff04ff02ffff04ffff11ff05ffff010180ff808080808080ff0180ff018080";
         assert!(matches!(err, ClvmError::CostExceeded(_, _)), "got {err:?}");
     }
 
-    // test_clvm_step.py::test_simple_program_run — factorial(5) == 120.
+    // factorial(5) == 120
     #[test]
     fn factorial_of_five_is_120() {
         let serial = SerializedProgram::from_hex(FACTORIAL_HEX).unwrap();

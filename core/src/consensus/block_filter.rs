@@ -1,82 +1,64 @@
-//! chia's BIP158 block transaction filter — the `PyBIP158(byte_array_tx).GetEncoded()` a producer feeds
-//! into `FoliageTransactionBlock.filter_hash = std_hash(encoded)`
-//! (`chia/consensus/block_creation.py:205-206`).
+//! BIP158 block transaction filter — the encoded filter behind
+//! `FoliageTransactionBlock.filter_hash = std_hash(encoded)`.
 //!
-//! chia does NOT use standard BIP158 parameters. `chiabip158`'s `PyBIP158` constructor builds the
-//! Golomb-coded set with a fixed, chia-specific `GCSFilter::Params`:
+//! The parameters are NOT standard BIP158: the Golomb-coded set is built with
+//! `siphash_k0 = 0`, `siphash_k1 = 0`, `P = 20`, `M = 1 << 20 = 1_048_576`. Bitcoin Core
+//! uses `P = 19` / `M = 784931` and keys siphash off the block hash; here siphash uses a
+//! fixed all-zero key and no block hash, so the encoding depends only on the element set.
 //!
-//! ```cpp
-//! // chiabip158/python-bindings/PyBIP158.cpp
-//! filter = new GCSFilter({0, 0, 20, 1 << 20}, elements);
-//! //                       k0 k1  P   M
-//! ```
-//!
-//! i.e. `siphash_k0 = 0`, `siphash_k1 = 0`, `P = 20`, `M = 1 << 20 = 1_048_576`. This differs from
-//! Bitcoin Core's `BASIC_FILTER_P = 19` / `BASIC_FILTER_M = 784931` (`chiabip158/src/blockfilter.h`), and
-//! from `rust-bitcoin`'s `bip158`, which keys siphash off the block hash. chia keys siphash with a fixed
-//! all-zero key and passes NO block hash — so the encoding depends only on the element set.
-//!
-//! The GCS encode/hash algorithm itself is the unmodified Bitcoin Core implementation
-//! (`chiabip158/src/blockfilter.cpp`): dedup the raw elements, siphash-2-4 each into `[0, N*M)` via
-//! Lemire's multiply-shift `MapIntoRange`, sort, then Golomb-Rice encode the deltas behind a
-//! `WriteCompactSize(N)` prefix, MSB-first (`BitStreamWriter`, `chiabip158/src/streams.h`).
-//!
-//! Ported (not FFI-bound): `chiabip158` ships only as a compiled C++ extension with a bindgen Rust
-//! shim (`chiabip158/rust-bindings`), which would drag a C++ toolchain into the dg_xch build. The GCS
-//! core is ~100 lines of fixed consensus math, so we port it faithfully and pin it byte-for-byte against
-//! `chiabip158`'s own harvested test vector (see `chia_block_filter_matches_chiabip158_vector`).
+//! The GCS encode/hash algorithm itself is the unmodified Bitcoin Core construction: dedup
+//! the raw elements, siphash-2-4 each into `[0, N*M)` via Lemire's multiply-shift
+//! map-into-range, sort, then Golomb-Rice encode the deltas behind a compact-size `N`
+//! prefix, MSB-first.
 
-/// chia's Golomb-Rice parameter `P` (`chiabip158/python-bindings/PyBIP158.cpp`: `{0, 0, 20, 1 << 20}`).
+/// Golomb-Rice parameter `P`.
 const GCS_P: u32 = 20;
 
-/// chia's inverse false-positive rate `M` (`chiabip158/python-bindings/PyBIP158.cpp`: `1 << 20`).
+/// Inverse false-positive rate `M`.
 const GCS_M: u64 = 1 << 20;
 
-/// SipHash-2-4 key half `k0` for chia's filter — fixed `0` (`PyBIP158.cpp` params).
+/// SipHash-2-4 key half `k0` — fixed `0`.
 const SIPHASH_K0: u64 = 0;
 
-/// SipHash-2-4 key half `k1` for chia's filter — fixed `0` (`PyBIP158.cpp` params).
+/// SipHash-2-4 key half `k1` — fixed `0`.
 const SIPHASH_K1: u64 = 0;
 
-/// Encode a chia BIP158 block transaction filter over `items` (the `byte_array_tx` list: each addition's
-/// puzzle hash, then each removal's coin name), byte-identical to
-/// `chiabip158`'s `PyBIP158(items).GetEncoded()`.
+/// Encode a BIP158 block transaction filter over `items` (each addition's puzzle hash,
+/// then each removal's coin name).
 ///
-/// The empty-item case returns the single byte `[0]` (the `WriteCompactSize(0)` element count with no GCS
-/// body) — the same constant genesis / no-tx-content blocks carry, so
+/// The empty-item case returns the single byte `[0]` (the compact-size 0 element count with
+/// no GCS body) — the constant genesis / no-tx-content blocks carry, so
 /// `filter_hash == std_hash([0]) == sha256([0])`.
 ///
-/// Elements are deduplicated by raw bytes first: `chiabip158` inserts into a
-/// `std::unordered_set<Element>` (`GCSFilter(params, elements)` in `src/blockfilter.cpp`), so repeated
-/// puzzle hashes / coin names collapse to a single set member and `N` counts distinct elements only.
+/// Elements are deduplicated by raw bytes first: repeated puzzle hashes / coin names
+/// collapse to a single set member and `N` counts distinct elements only.
 #[must_use]
 pub fn chia_block_filter(items: &[Vec<u8>]) -> Vec<u8> {
-    // chia: GCSFilter::ElementSet is std::unordered_set<Element> — dedup the raw element bytes.
-    // Sort+dedup on the raw bytes reproduces the set membership (encode order is set by the sorted
-    // hashes below, not by element order, so any stable dedup is equivalent).
+    // Dedup the raw element bytes. Encode order is set by the sorted hashes below, not by
+    // element order, so any stable dedup is equivalent.
     let mut distinct: Vec<&Vec<u8>> = items.iter().collect();
     distinct.sort_unstable();
     distinct.dedup();
 
     let n = distinct.len() as u64;
     let mut out = Vec::new();
-    // chia: WriteCompactSize(m_N) prefixes the encoded filter (src/blockfilter.cpp).
+    // The compact-size element count prefixes the encoded filter.
     write_compact_size(&mut out, n);
     if n == 0 {
-        // chia's empty filter: just the N=0 CompactSize byte, no GCS body. Yields [0].
+        // empty filter: just the N=0 compact-size byte, no GCS body — [0]
         return out;
     }
 
-    // chia: m_F = N * M. HashToRange maps each element uniformly into [0, F).
+    // F = N * M; each element hashes uniformly into [0, F).
     let f = n * GCS_M;
     let mut hashed: Vec<u64> = distinct
         .iter()
         .map(|e| map_into_range(siphash24(SIPHASH_K0, SIPHASH_K1, e.as_slice()), f))
         .collect();
-    // chia: BuildHashedSet sorts the hashed values ascending (duplicate hashes are kept => delta 0).
+    // sort the hashed values ascending (duplicate hashes are kept => delta 0)
     hashed.sort_unstable();
 
-    // chia: for each sorted value, GolombRiceEncode(P, value - last_value), MSB-first, then Flush().
+    // Golomb-Rice encode each delta, MSB-first, then flush.
     let mut writer = BitStreamWriter::new(out);
     let mut last_value = 0u64;
     for value in hashed {
@@ -87,11 +69,10 @@ pub fn chia_block_filter(items: &[Vec<u8>]) -> Vec<u8> {
     writer.finish()
 }
 
-/// Decode a chia BIP158 filter back into its sorted hashed-value set — the inverse of
-/// [`chia_block_filter`], mirroring `chiabip158`'s `GCSFilter(params, encoded_filter)` decode
-/// constructor (`src/blockfilter.cpp`): read the `CompactSize` element count, then N
-/// Golomb-Rice-coded deltas (P = 20), reconstructing the ascending hashed values. Returns `None`
-/// on malformed input (truncated bit stream, bad CompactSize) — never panics.
+/// Decode a filter back into its sorted hashed-value set — the inverse of
+/// [`chia_block_filter`]: read the compact-size element count, then N Golomb-Rice-coded
+/// deltas (P = 20), reconstructing the ascending hashed values. Returns `None` on
+/// malformed input (truncated bit stream, bad compact-size) — never panics.
 ///
 /// The decoded vec's LENGTH is the filter's `N`, which [`chia_block_filter_match`] needs to
 /// reproduce the `HashToRange` domain `[0, N*M)`.
@@ -127,8 +108,8 @@ pub fn decode_chia_block_filter(filter: &[u8]) -> Option<Vec<u64>> {
 }
 
 /// Whether `item` is (probabilistically) a member of a filter decoded by
-/// [`decode_chia_block_filter`] — `chiabip158` `GCSFilter::Match` semantics: hash the element
-/// into `[0, N*M)` with the same fixed-key siphash and binary-search the sorted value set.
+/// [`decode_chia_block_filter`]: hash the element into `[0, N*M)` with the same fixed-key
+/// siphash and binary-search the sorted value set.
 #[must_use]
 pub fn chia_block_filter_match(decoded: &[u64], item: &[u8]) -> bool {
     if decoded.is_empty() {
@@ -155,7 +136,7 @@ fn read_compact_size(bytes: &[u8]) -> Option<(u64, usize)> {
     }
 }
 
-// Bitcoin Core `BitStreamReader` (`chiabip158/src/streams.h`): consume bits MSB-first.
+// Bitcoin Core `BitStreamReader`: consume bits MSB-first.
 struct BitStreamReader<'a> {
     bytes: &'a [u8],
     // absolute bit cursor
@@ -180,8 +161,8 @@ impl<'a> BitStreamReader<'a> {
     }
 }
 
-/// Bitcoin Core `WriteCompactSize` (`chiabip158/src/serialize.h`): 1 byte `< 253`, else `0xfd`+u16 LE,
-/// `0xfe`+u32 LE, or `0xff`+u64 LE.
+/// Bitcoin Core `WriteCompactSize`: 1 byte `< 253`, else `0xfd`+u16 LE, `0xfe`+u32 LE, or
+/// `0xff`+u64 LE.
 fn write_compact_size(out: &mut Vec<u8>, n: u64) {
     if n < 253 {
         out.push(n as u8);
@@ -197,19 +178,19 @@ fn write_compact_size(out: &mut Vec<u8>, n: u64) {
     }
 }
 
-/// chia `MapIntoRange` (`chiabip158/src/blockfilter.cpp`): map `x` uniformly in `[0, 2^64)` to `[0, n)`
-/// via the upper 64 bits of the 128-bit product `x * n` (Lemire's multiply-shift).
+/// Map `x` uniformly in `[0, 2^64)` to `[0, n)` via the upper 64 bits of the 128-bit
+/// product `x * n` (Lemire's multiply-shift).
 #[inline]
 fn map_into_range(x: u64, n: u64) -> u64 {
     ((u128::from(x) * u128::from(n)) >> 64) as u64
 }
 
-/// chia `GolombRiceEncode` (`chiabip158/src/blockfilter.cpp`): write the quotient `x >> P` as unary
-/// (that many `1` bits, then a `0`), then the low `P` bits of `x` as the remainder.
+/// Golomb-Rice encode: write the quotient `x >> P` as unary (that many `1` bits, then a
+/// `0`), then the low `P` bits of `x` as the remainder.
 fn golomb_rice_encode(writer: &mut BitStreamWriter, p: u32, x: u64) {
     let mut q = x >> p;
     while q > 0 {
-        // chia writes at most 64 unary bits per Write() call.
+        // at most 64 unary bits per write call
         let nbits = if q <= 64 { q as u32 } else { 64 };
         writer.write(u64::MAX, nbits);
         q -= u64::from(nbits);
@@ -219,8 +200,8 @@ fn golomb_rice_encode(writer: &mut BitStreamWriter, p: u32, x: u64) {
     writer.write(x, p);
 }
 
-/// Bitcoin Core `BitStreamWriter` (`chiabip158/src/streams.h`): buffers bits MSB-first into whole octets,
-/// `Flush()` zero-pads the final partial byte.
+/// Bitcoin Core `BitStreamWriter`: buffers bits MSB-first into whole octets, flush
+/// zero-pads the final partial byte.
 struct BitStreamWriter {
     out: Vec<u8>,
     buffer: u8,
@@ -236,13 +217,12 @@ impl BitStreamWriter {
         }
     }
 
-    /// Write the `nbits` least-significant bits of `data` (`nbits <= 64`), MSB-first. Faithful port of
-    /// `BitStreamWriter::Write`: `m_buffer |= (data << (64 - nbits)) >> (64 - 8 + m_offset)`.
+    /// Write the `nbits` least-significant bits of `data` (`nbits <= 64`), MSB-first.
     fn write(&mut self, data: u64, mut nbits: u32) {
         while nbits > 0 {
             let bits = (8 - self.offset).min(nbits);
-            // (data << (64 - nbits)) aligns the nbits payload to the MSB, then >> (56 + offset) drops it
-            // into the current byte's next free bit. The u8 truncation mirrors C++'s uint8_t m_buffer.
+            // (data << (64 - nbits)) aligns the nbits payload to the MSB, then >> (56 + offset)
+            // drops it into the current byte's next free bit.
             let shifted = (data << (64 - nbits)) >> (56 + self.offset);
             self.buffer |= shifted as u8;
             self.offset += bits;
@@ -255,7 +235,7 @@ impl BitStreamWriter {
         }
     }
 
-    /// chia `BitStreamWriter::Flush()`: emit the final partial byte (zero-padded) if any bits are pending.
+    /// Emit the final partial byte (zero-padded) if any bits are pending.
     fn finish(mut self) -> Vec<u8> {
         if self.offset != 0 {
             self.out.push(self.buffer);
@@ -264,9 +244,8 @@ impl BitStreamWriter {
     }
 }
 
-/// SipHash-2-4 (Bitcoin Core `CSipHasher` / `crypto/siphash.cpp`) over `data` with 64-bit key halves
-/// `k0`/`k1`. chia's filter uses `k0 = k1 = 0`. Matches the reference: 2 compression + 4 finalization
-/// rounds, final block high byte carries `len & 0xff`.
+/// SipHash-2-4 over `data` with 64-bit key halves `k0`/`k1` (the filter uses `k0 = k1 = 0`):
+/// 2 compression + 4 finalization rounds, final block high byte carries `len & 0xff`.
 fn siphash24(k0: u64, k1: u64, data: &[u8]) -> u64 {
     let mut v0 = k0 ^ 0x736f_6d65_7073_6575;
     let mut v1 = k1 ^ 0x646f_7261_6e64_6f6d;
@@ -330,12 +309,9 @@ mod tests {
         hash_256(bytes).to_vec()
     }
 
-    // HARVESTED chiabip158 vector: chiabip158/rust-bindings/src/lib.rs `test_filter` asserts
-    //   Bip158Filter::new(&[sha256("abc"), sha256("xyz"), sha256("123")]).encode()
-    //     == [3, 174, 90, 204, 224, 219, 7, 253, 91]
-    // The leading 3 is WriteCompactSize(N=3); the remaining 8 bytes are the Golomb-Rice body. This is the
-    // #1 byte-parity gate: it pins P=20, M=1<<20, siphash k0=k1=0, MapIntoRange, and the MSB-first
-    // BitStreamWriter all at once against chia's own reference output.
+    // Reference vector: the filter over sha256("abc"), sha256("xyz"), sha256("123") encodes
+    // to [3, 174, 90, 204, 224, 219, 7, 253, 91]. The leading 3 is the compact-size N; this
+    // pins P, M, the zero siphash key, map-into-range and the MSB-first bit writer at once.
     #[test]
     fn chia_block_filter_matches_chiabip158_vector() {
         let items = vec![sha256(b"abc"), sha256(b"xyz"), sha256(b"123")];
@@ -346,17 +322,16 @@ mod tests {
         );
     }
 
-    // Genesis / no-tx-content: the empty element set encodes to [0] (WriteCompactSize(0), no body), so
-    // filter_hash == sha256([0]). This is the constant chia's fast path hardcodes
-    // (chia/full_node/full_block_utils.py:311) and the value producer.rs's genesis test asserts.
+    // Genesis / no-tx-content: the empty element set encodes to [0], so
+    // filter_hash == sha256([0]).
     #[test]
     fn empty_filter_is_single_zero_byte() {
         assert_eq!(chia_block_filter(&[]), vec![0u8]);
         assert_eq!(hash_256(chia_block_filter(&[])), hash_256(vec![0u8]));
     }
 
-    // Duplicate raw elements collapse (std::unordered_set semantics): the N prefix counts distinct
-    // elements, so a filter over [x, x] equals the filter over [x].
+    // Duplicate raw elements collapse: the N prefix counts distinct elements, so a filter
+    // over [x, x] equals the filter over [x].
     #[test]
     fn duplicate_elements_are_deduplicated() {
         let x = sha256(b"dup");
@@ -369,8 +344,8 @@ mod tests {
         assert_eq!(once[0], 1, "N == 1 distinct element");
     }
 
-    // Element order does not change the encoding: chia sorts the hashed values before Golomb-Rice
-    // encoding, so a permutation of the same set yields identical bytes.
+    // Element order does not change the encoding: the hashed values are sorted before
+    // Golomb-Rice encoding, so a permutation of the same set yields identical bytes.
     #[test]
     fn element_order_does_not_matter() {
         let a = sha256(b"abc");

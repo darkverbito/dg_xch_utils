@@ -388,25 +388,15 @@ impl ConditionWithArgs {
         }
     }
 
-    /// The BLS12-381 G1 identity (point at infinity) in its canonical
-    /// compressed encoding: the compression bit (`0x80`) and the infinity bit
-    /// (`0x40`) set in the leading byte, every remaining bit zero — i.e. `0xc0`
-    /// followed by 47 zero bytes.
+    /// BLS12-381 G1 identity in compressed form: `0xc0` followed by 47 zero bytes.
     const BLS_G1_INFINITY: [u8; 48] = {
         let mut bytes = [0u8; 48];
         bytes[0] = 0xc0;
         bytes
     };
 
-    /// If this condition belongs to the `AGG_SIG_*` family and its public-key
-    /// argument is the disallowed G1 infinity element, returns that key.
-    ///
-    /// chia rejects the infinity/identity public key for every `AGG_SIG_*`
-    /// opcode with `Err.INVALID_CONDITION` under the soft-fork-5 rule (activated
-    /// on mainnet, so it is enforced at every current height). Returns `None`
-    /// for any other condition and for any non-infinity `AGG_SIG_*` key, so
-    /// ordinary public keys are unaffected. See
-    /// `chia/_tests/core/full_node/test_conditions.py::TestConditions::test_agg_sig_infinity`.
+    /// Returns the public key if this is an `AGG_SIG_*` condition whose key is
+    /// the G1 infinity element, which consensus rejects as an invalid condition.
     pub fn agg_sig_infinity_pubkey(&self) -> Option<Bytes48> {
         let public_key = match self {
             ConditionWithArgs::AggSigParent(public_key, _)
@@ -840,11 +830,7 @@ fn from_opcode_with_args(
     Ok(match op_code {
         ConditionOpcode::Unknown => ConditionWithArgs::Unknown,
         ConditionOpcode::Remark => {
-            // chia's REMARK is `Ok(Condition::Skip)`: always true, all arguments
-            // ignored regardless of count (including zero). The stored message is
-            // never consumed downstream (`spend_from_conditions` has no REMARK
-            // arm), so we discard the arguments entirely rather than enforce a
-            // count or risk the 1024-byte Message bound on ignored data.
+            //REMARK is always true and ignores all of its arguments, so they are discarded
             ConditionWithArgs::Remark(Message::new(Vec::new())?)
         }
         ConditionOpcode::AggSigParent => {
@@ -1520,13 +1506,8 @@ pub fn op_code_with_args_from_sexp(sexp: &SExp) -> Result<(ConditionOpcode, Vec<
             }
         }
     }
-    // Three opcodes are valid with zero arguments, matching chia's condition
-    // parser (chia_rs `parse_args`): ASSERT_EPHEMERAL (76) takes no parameters;
-    // REMARK (1) is an always-true no-op that ignores ALL of its arguments
-    // (`REMARK => Ok(Condition::Skip)`); and an UNKNOWN opcode is likewise a
-    // no-op in consensus (non-strict) mode (`parse_opcode` -> None -> the
-    // condition is ignored). Every other condition requires at least its
-    // leading argument(s), which `from_opcode_with_args` enforces per-opcode.
+    //ASSERT_EPHEMERAL, REMARK and unknown opcodes are valid with zero arguments;
+    //every other condition requires at least its leading argument(s)
     if vars.is_empty()
         && !matches!(
             opcode,

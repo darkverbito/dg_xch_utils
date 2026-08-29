@@ -1,14 +1,12 @@
 //! # Order-independent (SwiftSync-class) validation core, layout v2
 //!
-//! DRAFT STATUS: this module is the de-risked **algebraic core** of the phase-2 approach — the
-//! v2 metadata-fold leaf, the commutative MSet-XOR aggregate, the bucket-C condition fold, and
-//! order-independent reconciliation to the phase-1 root. It is deliberately **corpus-free and
-//! driver-free**: it operates on already-reduced per-block observations
-//! ([`BlockObservation`]) rather than parsing generators, because the full backfill driver
-//! (block generator wiring, hint file format, sync integration) is out of scope here. The
-//! corpus parity proofs run this core against a real synced coin set; the unit proofs in
-//! `roots/tests/validate_v2.rs` prove the same order-independence and fail-closed properties
-//! on synthetic coins with no corpus.
+//! DRAFT STATUS: this module is the **algebraic core** only — the v2 metadata-fold leaf, the
+//! commutative MSet-XOR aggregate, the bucket-C condition fold, and order-independent
+//! reconciliation to the phase-1 root. It is deliberately **corpus-free and driver-free**: it
+//! operates on already-reduced per-block observations ([`BlockObservation`]) rather than
+//! parsing generators. The corpus parity proofs run this core against a real synced coin set;
+//! the unit proofs in `roots/tests/validate_v2.rs` prove the same order-independence and
+//! fail-closed properties on synthetic coins with no corpus.
 //!
 //! ## Why v2 drops the leaf index
 //!
@@ -97,8 +95,8 @@ impl TimeLockConditions {
     /// coin's ADD in the XOR aggregate, so a metadata value good enough to pass this check is
     /// provably the true creation metadata.
     ///
-    /// Semantics and saturating arithmetic mirror chia_rs `chia-consensus/src/gen/conditions.rs`
-    /// and `dg_xch_core::blockchain::condition_with_args` (`saturating_u32/u64_from_bigint`).
+    /// Semantics and saturating arithmetic mirror the consensus reference, as ported in
+    /// `dg_xch_core::blockchain::condition_with_args` (`saturating_u32/u64_from_bigint`).
     /// `now_height`/`now_timestamp` are the *previous transaction block* reference the spending
     /// block carries (bucket B), not wall-clock.
     ///

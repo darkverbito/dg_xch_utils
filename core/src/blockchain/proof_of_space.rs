@@ -126,9 +126,9 @@ impl From<&ProofBytes> for SExp<'static> {
 }
 
 // Serialization is hand written: the wire format packs the proof version into bit 1 of the
-// pool_contract_puzzle_hash Option prefix, which a per-field derive cannot express. A version 0
-// (v1) proof serializes byte for byte as it always has; a version 1 (v2 plot) proof writes prefix
-// 0b10/0b11 and carries plot_index, meta_group and strength where a v1 proof carries size.
+// pool_contract_puzzle_hash Option prefix, which a per-field derive cannot express. A v1 proof
+// writes prefix 0b00/0b01 and carries size; a v2 proof writes 0b10/0b11 and carries plot_index,
+// meta_group and strength in its place.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Debug)]
 pub struct ProofOfSpace {
     pub challenge: Bytes32,
@@ -345,8 +345,8 @@ impl From<ProofOfSpace> for SExp<'static> {
     }
 }
 
-/// chia `plot_group_id = sha256(strength || plot_pk || (pool_pk | contract_ph))`. Every plot in a
-/// group shares this; the per plot id folds the index and meta group on top.
+/// `plot_group_id = sha256(strength || plot_pk || (pool_pk | contract_ph))`. Every plot in a group
+/// shares this; the per plot id folds the index and meta group on top.
 #[must_use]
 pub fn calculate_plot_group_id_v2(
     strength: u8,
@@ -367,7 +367,7 @@ pub fn calculate_plot_group_id_v2(
     buf.into()
 }
 
-/// chia `plot_id = sha256(plot_group_id || plot_index || meta_group)`, the index big endian.
+/// `plot_id = sha256(plot_group_id || plot_index || meta_group)`, the index big endian.
 #[must_use]
 pub fn calculate_plot_id_v2(
     strength: u8,
@@ -420,21 +420,21 @@ pub fn calculate_plot_id_puzzle_hash(
 }
 
 /// The number of v1 phase-out epochs: always a power of two minus one, so it doubles as a bit mask
-/// over the phase-out hash. chia `num_phase_out_epochs`.
+/// over the phase-out hash.
 #[must_use]
 pub fn num_phase_out_epochs(constants: &ConsensusConstants) -> u32 {
     (1u32 << constants.plot_v1_phase_out_epoch_bits) - 1
 }
 
 /// The height at which v1 proofs stop being valid: a block whose previous transaction block is at
-/// or above this may not carry one. chia `v1_cut_off_height`.
+/// or above this may not carry one.
 #[must_use]
 pub fn v1_cut_off_height(constants: &ConsensusConstants) -> u64 {
     u64::from(constants.hard_fork2_height)
         + u64::from(num_phase_out_epochs(constants)) * u64::from(constants.epoch_blocks)
 }
 
-/// Whether a v1 proof has been phased out, ported from chia `is_v1_phased_out`.
+/// Whether a v1 proof has been phased out.
 ///
 /// Before hard fork 2 nothing is phased out. After it, each proof is retired at a randomly assigned
 /// epoch: the phase-out byte of `hash(proof || tag)` is compared against a counter that ticks down
@@ -602,7 +602,7 @@ pub fn generate_plot_public_key(
 mod tests {
     use super::*;
 
-    // The fixture keys chia_rs uses for its plot id vectors.
+    // The fixture keys behind the plot id vectors below.
     fn plot_pk() -> Bytes48 {
         Bytes48::try_from(
             "96b35c22adf93068c9536e016e88251ad715a591d8deabb60917d9c495f45a220ca56b906793c27778d5f7f71fb50b94",
@@ -649,8 +649,8 @@ mod tests {
 
     #[test]
     fn a_v1_proof_serializes_exactly_as_the_field_order_always_did() {
-        // The old derive wrote each field with its ordinary encoding. A v1 proof must keep those
-        // bytes, or every existing block and protocol message changes hash.
+        // A v1 proof carries the plain per-field encoding; those bytes are hashed into every block
+        // and protocol message.
         for (has_pool_pk, has_contract) in
             [(true, false), (false, true), (true, true), (false, false)]
         {
@@ -728,8 +728,7 @@ mod tests {
     #[test]
     fn a_v2_proof_needs_exactly_one_pool_binding() {
         let v = ChiaProtocolVersion::default();
-        // Both set and neither set must be rejected at parse; the v1 path stays lenient, matching
-        // what a plain Option pair always accepted.
+        // Both set and neither set are rejected at parse; the v1 path stays lenient.
         let both = make_pos(1, true, true, 0).to_bytes(v).expect("proof");
         assert!(ProofOfSpace::from_bytes_full(&both, v).is_err());
         let neither = make_pos(1, false, false, 0).to_bytes(v).expect("proof");
@@ -742,7 +741,6 @@ mod tests {
 
     #[test]
     fn v2_plot_group_ids_match_the_reference_vectors() {
-        // chia_rs test_compute_plot_group_id_v2.
         for (strength, pool, contract, expected) in [
             (
                 0u8,
@@ -779,7 +777,6 @@ mod tests {
 
     #[test]
     fn v2_plot_ids_match_the_reference_vectors() {
-        // chia_rs test_compute_plot_id_v2.
         for (strength, plot_index, meta_group, pool, contract, expected) in [
             (
                 0u8,

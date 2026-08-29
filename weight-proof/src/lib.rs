@@ -357,7 +357,7 @@ fn validate_sub_epoch_summaries(
 mod recent_blocks;
 
 /// The serving (construction) half: build a `WeightProof` from a node's `BlockStore` — the mirror image
-/// of the validator above, ported from the construction side of `chia/full_node/weight_proof.py`.
+/// of the validator above, ported from the reference node's construction side.
 pub mod serve;
 
 mod py_random {
@@ -1493,11 +1493,11 @@ fn validate_sub_epoch_segments(
         });
     }
 
-    // --- Parallel pass (the measured hotspot: thousands of independent class-group VDFs) ---
-    // Each task's sampled-segment verification is independent; rayon's global pool is core-count bounded, so
-    // this saturates the machine width (the 1/8-cores measurement is exactly this loop run serially). The
-    // shared `vdf_count` keeps the global DoS bound exact under interleaving; `try_for_each` short-circuits on
-    // the first failure with the identical error variant the serial version would return.
+    // --- Parallel pass (the hotspot: thousands of independent class-group VDFs) ---
+    // Each task's sampled-segment verification is independent; rayon's global pool is core-count
+    // bounded, so this saturates the machine width. The shared `vdf_count` keeps the global DoS
+    // bound exact under interleaving; `try_for_each` short-circuits on the first failure with the
+    // identical error variant the serial version would return.
     let vdf_count = AtomicUsize::new(0);
     tasks
         .par_iter()
@@ -1556,19 +1556,14 @@ fn validate_total_weight(
     _summaries: &[SubEpochSummary],
     _c: &ConsensusConstants,
 ) -> Result<(), WeightProofError> {
-    // No-op by faithful reference diff, not by omission. The reference's ONLY total-weight reconciliation
-    // is `_validate_summaries_weight` (chia `weight_proof.py:915`): it pins the summaries' accumulated
-    // `total_weight` to the concrete recent-chain block at the last sub-epoch boundary
-    // (`ses_end_height`). That check is already ported and enforced as phase 3
-    // (`validate_summaries_weight`), with the inflate-boundary-weight tamper covered by
-    // `phase3_tamper_inflate_boundary_weight_rejects`. In the reference, `recent_chain_data[-1]` (the
-    // claimed peak) is used only as `peak_height` to bound segment sampling — never as a separate weight
-    // check — and the recent chain's per-block weight/height continuity up to the peak is enforced by
-    // phase 5's header validation (checks 27/28). The only remaining reference step,
-    // `WeightProofHandler.get_fork_point`, compares the proof against a *local* blockchain
-    // (`self.blockchain.get_ses_heights()`) to locate the fork height; a standalone light-client trust
-    // anchor has no local chain and that step is out of scope for "is this proof valid". So there is no
-    // additional consensus check to port here: with phases 1-5 green, the proof is fully validated.
+    // No-op by faithful reference diff, not by omission. The reference's ONLY total-weight
+    // reconciliation pins the summaries' accumulated `total_weight` to the concrete recent-chain
+    // block at the last sub-epoch boundary — already ported and enforced as phase 3
+    // (`validate_summaries_weight`). The claimed peak is used only to bound segment sampling,
+    // and the recent chain's per-block weight/height continuity up to the peak is enforced by
+    // phase 5's header validation. The remaining reference step, fork-point location, compares
+    // the proof against a *local* blockchain — out of scope for a standalone light-client trust
+    // anchor. With phases 1-5 green, the proof is fully validated.
     Ok(())
 }
 

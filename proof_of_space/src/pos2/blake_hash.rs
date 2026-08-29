@@ -1,13 +1,12 @@
 use dg_xch_core::blockchain::sized_bytes::Bytes32;
 use dg_xch_core::traits::SizedBytes;
 
-/// The single block hash pos2 uses for challenge derivation, ported from `src/pos/BlakeHash.hpp`.
+/// The single block hash pos2 uses for challenge derivation.
 ///
-/// The reference inlines one BLAKE3 compression over a 64 byte block and emits
-/// `state[i] ^ state[i + 8]`. For a 64 byte input that is precisely BLAKE3's own root output, so
-/// this defers to the BLAKE3 implementation rather than carrying a second copy of the permutation.
-/// The vectors in this module's tests come from the reference's `blake_test_cases.hpp` and pin the
-/// part that could still go wrong: the little endian word packing.
+/// One BLAKE3 compression over a 64 byte block emitting `state[i] ^ state[i + 8]` is exactly
+/// BLAKE3's root output for a 64 byte input, so this defers to the BLAKE3 crate rather than
+/// carrying a second copy of the permutation. The vectors in the tests pin the little endian word
+/// packing.
 #[must_use]
 pub fn hash_block_256(block_words: &[u32; 16]) -> [u32; 8] {
     let mut bytes = [0u8; 64];
@@ -57,7 +56,7 @@ mod tests {
         result: [u32; 4],
     }
 
-    /// The first sixteen cases from the reference's generated `blake_test_cases.hpp`.
+    /// Sixteen frozen block-hash cases.
     const BLAKE_CASES: &[BlakeCase] = &[
         BlakeCase {
             plot_id: [

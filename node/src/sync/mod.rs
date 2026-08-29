@@ -49,18 +49,13 @@ pub use window::{Claim, Reservation, ReservationWindow};
 // provisioning starves the window.
 pub const TARGET_OUTBOUND: usize = 8;
 
-/// How far below the confirmed peak the short-sync backtrack searches for the fork point before giving
-/// up and demanding a long sync — chia's `short_sync_backtrack` cap: it fetches single blocks backward
-/// only `while curr_height > peak_height - 5` and returns `found_fork_point = False` past that
-/// (chia full_node.py:738), which `new_peak` answers with the batch/long-sync fallback ladder
-/// (chia full_node.py:845-873).
+/// How far below the confirmed peak the short-sync backtrack searches for the fork point before
+/// giving up and demanding a long sync.
 pub const BACKTRACK_MAX_DEPTH: u32 = 5;
 
-/// Warm-up slack below the epoch-depth backfill span: covers the couple of records
-/// `get_second_to_last_transaction_block_in_previous_epoch` reads BELOW the previous epoch
-/// surpass (its two-transaction-block walk) and warms the light-path `required_iters` state so
-/// the records the retarget actually reads near the surpass carry real values, never the zero
-/// seed (see [`Chaser::backfill_epoch_depth`]).
+/// Warm-up slack below the epoch-depth backfill span: covers the records the retarget walk reads
+/// below the previous epoch surpass and warms the light-path `required_iters` state so the records
+/// the retarget reads carry real values, never the zero seed (see [`Chaser::backfill_epoch_depth`]).
 pub const EPOCH_BACKFILL_SLACK: u32 = 128;
 
 /// The lowest block-record height the next possible epoch retarget can read, for a node whose
@@ -68,20 +63,13 @@ pub const EPOCH_BACKFILL_SLACK: u32 = 128;
 /// base). Anything at or above this height must be present as a record before the follow loop
 /// stages past the boundary, or the stage walk dies with "block record not found".
 ///
-/// The retarget fires when the first new-slot block of the FIRST SUB-EPOCH after an epoch
-/// boundary `B` is staged (chia `can_finish_sub_and_full_epoch`: `height + 1` must round down to
-/// an epoch-aligned sub-epoch, so the trigger lies in `[B, B + sub_epoch_blocks)`), and its
-/// `get_second_to_last_transaction_block_in_previous_epoch` walk reads records back past the
-/// PREVIOUS epoch surpass `B - epoch_blocks` (chia difficulty_adjustment.py: the descent breaks
-/// only once `curr.height < height_prev_epoch_surpass`).
-///
-/// The pending boundary is therefore the smallest epoch multiple `B` whose trigger window can
-/// still be AHEAD of `at` — `B + sub_epoch_blocks > at` — not the next boundary above `at`.
-/// Rounding `at` up to the next boundary (the pre-fix computation here and in the daemon's
-/// resume repair) skipped one full epoch of needed records exactly when `at` sat inside the
-/// first sub-epoch after a boundary whose retarget had not fired yet: the mainnet
-/// 4,575,744-boundary wall — peak frozen at 4,575,757, trigger block 4,575,758, retarget walk
-/// down to 4,571,135 against a record floor of 4,574,936.
+/// The retarget fires when the first new-slot block of the first sub-epoch after an epoch
+/// boundary `B` is staged (the trigger lies in `[B, B + sub_epoch_blocks)`), and its walk reads
+/// records back past the previous epoch surpass `B - epoch_blocks`. The pending boundary is
+/// therefore the smallest epoch multiple `B` whose trigger window can still be ahead of `at` —
+/// `B + sub_epoch_blocks > at` — not the next boundary above `at`; rounding `at` up to the next
+/// boundary skips one full epoch of needed records when `at` sits inside the first sub-epoch
+/// after a boundary whose retarget has not fired yet.
 #[must_use]
 pub fn epoch_backfill_low(at: u32, epoch_blocks: u32, sub_epoch_blocks: u32) -> u32 {
     let pending_boundary =
@@ -96,32 +84,29 @@ pub fn epoch_backfill_low(at: u32, epoch_blocks: u32, sub_epoch_blocks: u32) -> 
 pub const LONG_SYNC_REORG_MARGIN: u32 = 96;
 
 // How many locally-included sub-epoch summaries the fork-point walk collects at most: the
-// agreement plus chia's two-sub-epoch conservative back-off need 3, and a few extra tolerate
-// divergent summaries ABOVE the agreement (the reorg-across-the-gap case).
+// agreement plus the two-sub-epoch conservative back-off need 3, and a few extra tolerate
+// divergent summaries above the agreement.
 const WP_FORK_LOCAL_SES: usize = 8;
 
-/// The fork point of a validated weight proof's summary chain against OUR stored chain — chia
-/// `WeightProofHandler.get_fork_point` (chia/full_node/weight_proof.py:644-664) at the same
-/// sub-epoch granularity. chia walks its full in-memory summary map bottom-up from genesis; a
-/// checkpoint-anchored store does not have that map, so this walks TOP-DOWN from our peak —
-/// equivalent because sub-epoch summaries hash-chain (`prev_subepoch_summary_hash`), so one
-/// positional hash match proves the entire prefix below it agrees.
+/// The fork point of a validated weight proof's summary chain against our stored chain, at
+/// sub-epoch granularity. A checkpoint-anchored store has no genesis-up summary map, so this walks
+/// top-down from our peak — equivalent because sub-epoch summaries hash-chain
+/// (`prev_subepoch_summary_hash`), so one positional hash match proves the entire prefix below it
+/// agrees.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WpForkPoint {
     /// Every locally-visible summary agrees with the proof's at the same position: no fork is
-    /// DETECTED — but chia still backs the sync start off two sub-epochs ("Two summaries can
-    /// have different blocks and still be identical", weight_proof.py:659-661) unless the
-    /// `check_fork_next_block` peer probe lifts it to the local peak
-    /// (chia/full_node/check_fork_next_block.py).
+    /// detected — but the sync start is still backed off two sub-epochs, because identical
+    /// summaries can still cover different blocks.
     NoForkDetected {
-        /// chia's conservative start: the height of the local summary two below the last
-        /// agreement (0 when the agreement index is ≤ 2, weight_proof.py:659-663).
+        /// The conservative start: the height of the local summary two below the last agreement
+        /// (0 when the agreement index is ≤ 2).
         conservative: u32,
     },
     /// A local summary disagrees with the proof's at the same position: the chains diverged in
     /// or below that sub-epoch during the offline gap.
     Diverged {
-        /// chia's conservative start, as above — the long sync must REWIND to here through the
+        /// The conservative start, as above — the long sync must rewind to here through the
         /// engine's atomic reorg, never blindly extend the stale branch.
         fork_point: u32,
     },
@@ -132,14 +117,11 @@ pub enum WpForkPoint {
 }
 
 /// Compute the [`WpForkPoint`] of validated weight-proof `summaries` against the chain in
-/// `store` — the "where do the WP's chain and ours diverge" input to the long-sync band (chia
-/// `_sync` → `validate_weight_proof` → `get_fork_point`, full_node.py:1104-1113). The walk
-/// descends prev-hash-wise from the confirmed peak (store-fallback, so a cold restart works)
-/// collecting locally-included sub-epoch summaries, and matches them positionally against the
-/// proof's by hash. Mirrors chia exactly: the LAST received summary is never credited as an
-/// agreement (chia's loop breaks before comparing it, weight_proof.py:650-652), and the
-/// returned height backs off two sub-epochs below the agreement, clamped to 0 for the first
-/// three (weight_proof.py:659-663).
+/// `store` — the long-sync band's "where do the WP's chain and ours diverge" input. The walk
+/// descends prev-hash-wise from the confirmed peak collecting locally-included sub-epoch
+/// summaries and matches them positionally against the proof's by hash. The last received
+/// summary is never credited as an agreement, and the returned height backs off two sub-epochs
+/// below the agreement, clamped to 0 for the first three.
 ///
 /// # Errors
 /// Returns [`SyncError::Io`] on a store read failure or an unhashable summary.
@@ -154,7 +136,7 @@ pub async fn wp_fork_point<S: BlockStore + Sync>(
     let Some((peak_hash, _)) = store.get_peak().await? else {
         return Ok(WpForkPoint::Unknown);
     };
-    // hash → position over all but the LAST summary (chia never compares it).
+    // hash → position over all but the last summary (never credited as an agreement).
     let mut idx_of: HashMap<Bytes32, usize> = HashMap::with_capacity(summaries.len() - 1);
     for (i, s) in summaries[..summaries.len() - 1].iter().enumerate() {
         idx_of.entry(s.hash().map_err(SyncError::Io)?).or_insert(i);
@@ -211,9 +193,8 @@ pub async fn wp_fork_point<S: BlockStore + Sync>(
     let Some((agree_idx, pos)) = agree else {
         return Ok(WpForkPoint::Unknown);
     };
-    // chia weight_proof.py:659-663: `if fork_point_index <= 2: return 0` else two summaries
-    // below the agreement. A light store whose records end above the back-off height starts at
-    // its record floor — the sync cannot begin below the history it holds.
+    // An agreement index <= 2 clamps to 0; otherwise two summaries below the agreement. A light
+    // store whose records end above the back-off height starts at its record floor.
     let conservative = if agree_idx <= 2 {
         0
     } else {
@@ -261,10 +242,9 @@ impl Default for SyncConfig {
 }
 
 /// One confirmed block the reporting follow paths hand the daemon for the per-peak side effects
-/// (wallet coin-state push + mempool revalidation). `reorg` is `Some` exactly on the FIRST delta
+/// (wallet coin-state push + mempool revalidation). `reorg` is `Some` exactly on the first delta
 /// of a reorg's re-applied branch — the daemon pushes the rolled-back states (with the true fork
-/// height) before the branch's own coin deltas, mirroring chia's `WalletUpdate.coin_records =
-/// state_change_summary.rolled_back_records + new_states` (chia full_node.py:2101-2119).
+/// height) before the branch's own coin deltas.
 #[derive(Debug)]
 pub struct ConfirmedDelta {
     pub delta: BlockDelta,
@@ -278,9 +258,8 @@ impl ConfirmedDelta {
     }
 }
 
-/// The wallet-facing half of a landed reorg: the true fork height (chia
-/// `state_change_summary.fork_height`) and the abandoned span's post-rollback coin records (chia
-/// `rolled_back_records` — see [`ReorgReport::rolled_back`] for the exact state shapes).
+/// The wallet-facing half of a landed reorg: the true fork height and the abandoned span's
+/// post-rollback coin records (see [`ReorgReport::rolled_back`] for the exact state shapes).
 #[derive(Debug)]
 pub struct ReorgWalletDelta {
     pub fork_height: u32,
@@ -288,11 +267,9 @@ pub struct ReorgWalletDelta {
 }
 
 // Expand one window's engine outcomes into the reported confirm feed: plain extends report their
-// own delta; a `Reorg` outcome replaces the triggering delta with the ENTIRE re-applied branch
-// (fork+1..=tip, from the engine's [`ReorgReport`]) so subscribers hear every winning-branch
-// block — chia's `new_states` covers the whole branch above the fork, not just the tip — with
-// the rollback delta attached to the branch's first block. Orphans and `AlreadyHave` report
-// nothing (unchanged). Pure so the expansion is unit-testable without a live pipeline.
+// own delta; a `Reorg` outcome replaces the triggering delta with the entire re-applied branch
+// (fork+1..=tip) so subscribers hear every winning-branch block, with the rollback delta attached
+// to the branch's first block. Orphans and `AlreadyHave` report nothing.
 fn expand_confirmed(
     outcomes: Vec<AddBlockOutcome>,
     confirmed: Vec<BlockDelta>,
@@ -315,9 +292,8 @@ fn expand_confirmed(
                         });
                     }
                 }
-                // No report (drained by a non-reporting path — cannot happen from this loop, the
-                // reporting confirm clears before it batches) or an empty branch: fall back to
-                // the triggering delta so the peak advance is still reported.
+                // No report or an empty branch: fall back to the triggering delta so the peak
+                // advance is still reported.
                 _ => deltas.push(ConfirmedDelta::plain(delta)),
             },
             _ => deltas.push(ConfirmedDelta::plain(delta)),
@@ -325,10 +301,8 @@ fn expand_confirmed(
     }
 }
 
-/// Live pipeline instrumentation: the peak in-flight counts prove the `O(W·id + P·block)`
-/// bound directly — window identifiers and simultaneously-resident downloaded blocks both stay bounded as
-/// chain height grows. Feeds the `sync.batch` / `reservation` tracing spans; cheap atomics, zero-cost when
-/// nobody reads them.
+/// Live pipeline instrumentation. The peak in-flight counts witness that window identifiers and
+/// simultaneously-resident downloaded blocks stay bounded as chain height grows.
 #[derive(Default)]
 pub struct SyncMetrics {
     pub blocks_downloaded: AtomicU64,
@@ -336,52 +310,39 @@ pub struct SyncMetrics {
     pub reclaimed: AtomicU64,
     pub peak_window: AtomicUsize,
     pub peak_inflight_blocks: AtomicUsize,
-    // Last-window phase wall times in microseconds — the per-backend differentiators the
-    // Grafana per-node pages chart (VDF drain, parallel body precompute, batched confirm).
+    // Last-window phase wall times in microseconds.
     pub window_vdf_micros: AtomicU64,
-    // Header-signature all-core drain wall time (the third precompute phase; the header-sig batch).
     pub window_sig_micros: AtomicU64,
     pub window_body_micros: AtomicU64,
-    // Sequential staging-loop wall time (per-block prepare_delta store reads + record
-    // derivation; the staged archive rows commit inside the confirm transaction) — the phase
-    // between the parallel body precompute and the VDF drain that was previously UNMEASURED:
-    // live windows showed vdf+body+confirm ≈ 0.78 s against a ~2.7 s window wall, and this gauge
-    // is what attributes that residue.
+    // Sequential staging-loop wall time (the phase between the parallel body precompute and the
+    // VDF drain).
     pub window_stage_micros: AtomicU64,
     pub window_confirm_micros: AtomicU64,
-    // Last-window composition: total blocks and how many carried a transactions generator.
-    // window.body runs ONLY the generator blocks, so charting body time against these two
-    // series separates transaction cost from the non-transaction baseline.
+    // Last-window composition: total blocks and how many carried a transactions generator
+    // (window.body runs only the generator blocks).
     pub window_blocks: AtomicU64,
     pub window_tx_blocks: AtomicU64,
-    // Depth of the most recent reorg (peak height minus fork height; 0 = none yet) — the
-    // chia-exporter-style last_reorg_depth signal.
+    // Depth of the most recent reorg (peak height minus fork height; 0 = none yet).
     pub last_reorg_depth: AtomicU64,
-    // Engine collection sizes sampled each follow window (retention bisect): with jemalloc
-    // proving `allocated` itself climbs, whichever of these tracks the climb names the retainer.
+    // Engine collection sizes sampled each follow window.
     pub engine_cache_records: AtomicU64,
     pub engine_pending_orphans: AtomicU64,
     pub engine_staged_generators: AtomicU64,
-    // Difficulty-window record serving: how many records the daemon's
-    // consensus-walk maps took from the in-memory record window vs re-read from the store.
-    // store_reads collapsing to the per-peak head delta is the trough fix's live witness.
+    // How many records the daemon's consensus-walk maps took from the in-memory record window vs
+    // re-read from the store.
     pub difficulty_window_cache_hits: AtomicU64,
     pub difficulty_window_store_reads: AtomicU64,
-    // Follow-pipeline idle attribution: cumulative µs the follow driver waited on the
-    // network for its NEXT window (readahead take + direct-fetch fallback) and cumulative µs of
-    // whole follow steps (wait + stage + VDF drain + confirm). Validator idle fraction =
-    // rate(fetch_wait) / rate(step) — the live judge of the fetch-pipeline overlap.
+    // Cumulative µs the follow driver waited on the network for its next window, and cumulative
+    // µs of whole follow steps. Validator idle fraction = rate(fetch_wait) / rate(step).
     pub follow_fetch_wait_micros: AtomicU64,
     pub follow_step_micros: AtomicU64,
-    // Window readahead: current adaptive depth K, windows in flight, and the hit
-    // (window served from the pipeline) / miss (fallback direct fetch or replan) counters.
+    // Window readahead: current adaptive depth K, windows in flight, and hit/miss counters.
     pub readahead_depth: AtomicU64,
     pub readahead_inflight: AtomicU64,
     pub readahead_hits: AtomicU64,
     pub readahead_misses: AtomicU64,
-    // Bounded block queue (sync-decoupling phase 1): resident PRESENT bytes held in the reorder
-    // buffer (the byte-budget gauge) and the count of slots (InFlight + Present) held ahead of the
-    // consumer. The byte gauge is the producer/consumer backpressure witness the later phases chart.
+    // Block queue: resident PRESENT bytes in the reorder buffer and the count of slots
+    // (InFlight + Present) held ahead of the consumer.
     pub queue_resident_bytes: AtomicU64,
     pub queue_len: AtomicU64,
 }
@@ -398,27 +359,20 @@ pub enum SyncError {
         start: u32,
         end: u32,
     },
-    /// A peer answered `RespondBlocks` but the returned blocks do not cover the requested `start..=end`
-    /// (wrong count, or non-contiguous / off-by heights). With correlation now id-routed this should
-    /// not occur, but the check is defense-in-depth against a misbehaving peer echoing another range;
-    /// like [`SyncError::RangeRejected`] it is non-fatal — the reservation is reclaimed for another peer.
+    /// A peer answered `RespondBlocks` but the returned blocks do not cover the requested
+    /// `start..=end` (wrong count, or non-contiguous / off-by heights). Non-fatal like
+    /// [`SyncError::RangeRejected`]: the reservation is reclaimed for another peer.
     RangeMismatch {
         start: u32,
         end: u32,
         got: usize,
     },
-    /// A returned block did not match the headers-first candidate chain: its body hashes to no committed
-    /// weight-proof-attested header at the requested height (a re-stamped, forged, or wrong-anchor body —
-    /// hardening). The candidate records the header pass stored ARE the connect target (the tip/fork
-    /// for a normal window, the weight-proof-attested anchor header for the from-empty path), so a
-    /// body that binds to none — or to a candidate at a different height — is rejected BEFORE the
-    /// write-through, never accepted through the from-empty `prev = None` entry, and never allowed to hit
-    /// the store's `block_body → block_record` foreign key as a fatal error. Non-fatal like
-    /// [`SyncError::RangeMismatch`]: the batch is dropped, the reservation reclaimed for another peer, and
-    /// this peer retired by the worker's failure budget (chia bans the peer for
-    /// `CONSENSUS_ERROR_BAN_SECONDS`; the timed ban list is keyed on the peer HOST at the server accept
-    /// seam and is not reachable through the [`crate::sync::source::BlockRangeSource`] abstraction, so the
-    /// worker's drop-and-deprioritize is the posture here).
+    /// A returned block did not match the headers-first candidate chain: its body hashes to no
+    /// committed weight-proof-attested header at the requested height (a re-stamped, forged, or
+    /// wrong-anchor body). Rejected before the write-through so it can never hit the store's
+    /// `block_body → block_record` foreign key as a fatal error. Non-fatal like
+    /// [`SyncError::RangeMismatch`]: the batch is dropped, the reservation reclaimed for another
+    /// peer, and this peer retired by the worker's failure budget.
     BatchUnlinked {
         start: u32,
         end: u32,
@@ -426,16 +380,14 @@ pub enum SyncError {
     },
     /// No peer could serve a still-pending reservation — the window cannot drain.
     Exhausted(u32),
-    /// The short-sync backtrack walked [`BACKTRACK_MAX_DEPTH`] blocks below the peak without finding a
-    /// parent we have — the fork is deeper than the short-sync regime covers. The caller must fall back
-    /// to the long-sync/weight-proof path (chia: `short_sync_backtrack` returns `found_fork_point =
-    /// False` past its cap, full_node.py:736-774, and `new_peak` falls through to batch sync and then
-    /// `_sync()`, full_node.py:845-873) — never retry the same forward window.
+    /// The short-sync backtrack walked [`BACKTRACK_MAX_DEPTH`] blocks below the peak without
+    /// finding a parent we have — the fork is deeper than the short-sync regime covers. The caller
+    /// must fall back to the long-sync/weight-proof path, never retry the same forward window.
     DeepFork {
         /// The base of the forward window that orphaned (our peak + 1).
         base: u32,
-        /// The exclusive lower bound of the probe (chia's `peak_height - 5`): every height above it
-        /// was fetched and none connected.
+        /// The exclusive lower bound of the probe: every height above it was fetched and none
+        /// connected.
         floor: u32,
     },
 }
@@ -450,11 +402,10 @@ impl SyncError {
     }
 
     /// `true` when the failure is a `NotFound` from a consensus ancestry walk ("block record not
-    /// found") — the anchor-window-gap signal: a retarget/SES lookback on the stage path needed a
-    /// record below the store's record floor (or below the warmed cache edge). Retrying the
-    /// identical window can never succeed; the driver answers it by re-arming the resume repair
-    /// (floor re-measure + epoch-depth backfill + cache re-warm), the header-fetch analog of chia
-    /// re-requesting missing ancestry.
+    /// found"): a retarget/SES lookback on the stage path needed a record below the store's record
+    /// floor (or below the warmed cache edge). Retrying the identical window can never succeed;
+    /// the driver answers it by re-arming the resume repair (floor re-measure + epoch-depth
+    /// backfill + cache re-warm).
     #[must_use]
     pub fn is_missing_record(&self) -> bool {
         matches!(
@@ -564,12 +515,10 @@ where
         &self.config
     }
 
-    /// Headers-first candidate chain. Validate each header's proof of space against the running tip
-    /// cache and store its candidate record (no body); `get_unassociated` then reports these heights as
-    /// bodies-pending. Returns the count of candidate records stored. Full PoW/VDF validation fires off the
-    /// populated cache via [`Chaser::validate_stored_header`] — the sync-built ancestry is what triggers it,
-    /// closing the single-block validator's hand-seeded-ancestor caveat. `ssi`/`difficulty` anchor the checkpoint epoch (from the
-    /// weight proof in production).
+    /// Headers-first candidate chain. Validate each header's proof of space against the running
+    /// tip cache and store its candidate record (no body); `get_unassociated` then reports these
+    /// heights as bodies-pending. Returns the count of candidate records stored. Full PoW/VDF
+    /// validation fires off the populated cache via [`Chaser::validate_stored_header`].
     ///
     /// # Errors
     /// Returns [`SyncError::Node`] if any header's proof of space is invalid or the store rejects a record.
@@ -579,8 +528,7 @@ where
         schedule: &EpochSchedule,
         summaries: &[SubEpochSummary],
     ) -> Result<usize, SyncError> {
-        // Await-safe instrumentation: attach the span to the future (never an Entered guard across
-        // the `.await`) — the sharded-registry clone-after-close panic under work-stealing.
+        // Attach the span to the future — never hold an Entered guard across an `.await`.
         let span = tracing::info_span!("sync.headers", count = headers.len());
         headers::sync_header_chain(
             &self.engine,
@@ -614,19 +562,14 @@ where
         Ok(self.engine.warm_cache_from_store().await?)
     }
 
-    /// Epoch-depth header backfill below the checkpoint anchor. The live epoch retarget at the
-    /// PENDING boundary (`get_second_to_last_transaction_block_in_previous_epoch`) walks records
-    /// back past the PREVIOUS epoch surpass — up to a full epoch below the anchor, records a
-    /// checkpoint sync never fetched. Fetch those blocks, build their candidate records
-    /// headers-first with per-height epoch parameters (the summary schedule), and store the
-    /// RECORDS only (no bodies) — the walks stay inside known records once
-    /// [`Chaser::warm_engine_cache`] loads them. A slack of blocks before the span warms the
-    /// light-path walk state so the records the retarget actually reads (`sp_total_iters` near
-    /// the surpass) carry real `required_iters`, never a fabricated zero seed. The span floor comes
-    /// from [`epoch_backfill_low`] — the PENDING boundary's depth, not the next boundary above
-    /// the anchor (that rounding skipped a whole epoch of needed records whenever the anchor sat
-    /// inside the first sub-epoch after a boundary whose retarget had not fired yet: the mainnet
-    /// 4,575,744-boundary wall). Returns the number of backfilled records.
+    /// Epoch-depth header backfill below the checkpoint anchor. The epoch retarget at the pending
+    /// boundary walks records back past the previous epoch surpass — up to a full epoch below the
+    /// anchor, records a checkpoint sync never fetched. Fetch those blocks, build their candidate
+    /// records headers-first with per-height epoch parameters, and store the records only (no
+    /// bodies). A slack of blocks before the span warms the light-path walk state so the records
+    /// the retarget reads carry real `required_iters`, never a fabricated zero seed. The span
+    /// floor comes from [`epoch_backfill_low`] — the pending boundary's depth, not the next
+    /// boundary above the anchor. Returns the number of backfilled records.
     ///
     /// # Errors
     /// Returns [`SyncError`] if no source can serve the span or a header fails validation.
@@ -647,8 +590,7 @@ where
         if low >= anchor {
             return Ok(0);
         }
-        // Await-safe instrumentation: the fetch loop and header sync below both `.await`, so the
-        // span is attached to the whole async section rather than held as an Entered guard.
+        // Attach the span to the async section — never hold an Entered guard across an `.await`.
         let span = tracing::info_span!("sync.backfill", low, high = anchor - 1);
         async move {
             let schedule = self.epoch_schedule(summaries);
@@ -695,9 +637,9 @@ where
         .await
     }
 
-    /// Full single-block PoW/VDF validation of a header against the ancestry the headers-first pass populated
-    /// (headers-first). This is the closed-caveat proof: the ancestor map comes from [`Chaser::sync_headers`], not a
-    /// hand-built fixture. `ssi`/`difficulty` are the block's epoch parameters.
+    /// Full single-block PoW/VDF validation of a header against the ancestry the headers-first
+    /// pass populated ([`Chaser::sync_headers`]). `ssi`/`difficulty` are the block's epoch
+    /// parameters.
     ///
     /// # Errors
     /// Returns [`SyncError::Node`] if the PoW/VDF is invalid or an ancestor is missing from the cache.
@@ -797,9 +739,6 @@ where
     {
         let bodies = self.download_all(sources).await?;
         for (height, hh) in bodies {
-            // Await-safe instrumentation: the per-block `validate.parallel` span is attached to
-            // the future for this block (the store read + `add_block` both `.await`); the loop's
-            // `continue` becomes an early `return` from the instrumented block.
             let span = tracing::info_span!("validate.parallel", height);
             async {
                 let Some(block) = self.engine.store().get_block(&hh).await? else {
@@ -828,8 +767,7 @@ where
             .await?;
         }
         // This non-reporting path has no consumer for reorg reports; drop them so they can never
-        // mis-attach to a later reporting window (the sync-end transition covers the wallet side
-        // of a fast-sync landing).
+        // mis-attach to a later reporting window.
         self.engine.clear_reorg_reports();
         Ok(self.engine.store().get_peak().await?)
     }
@@ -862,13 +800,11 @@ where
         Ok((tip.header_hash()?, tip.height()))
     }
 
-    /// From-zero bulk sync via the weight proof — the driver composed from the sync
-    /// primitives (weight-proof validate → headers-first → download/confirm), reusing them, not
-    /// reinventing. Validate the proof, epoch-anchor the recent-chain header walk from the proof's summaries
-    /// (a naive genesis-constant anchor poisons the validator with `required_iters == 0`), populate the
-    /// candidate window, then download + confirm the recent bodies through the reservation pipeline across
-    /// `sources`. Returns the confirmed peak. Recent-chain only: this lands the node at the attested near-tip
-    /// so the cheap tip-follow driver takes over — it does not backfill deep history.
+    /// From-zero bulk sync via the weight proof: validate the proof, epoch-anchor the recent-chain
+    /// header walk from the proof's summaries (a naive genesis-constant anchor poisons the
+    /// validator with `required_iters == 0`), populate the candidate window, then download +
+    /// confirm the recent bodies through the reservation pipeline across `sources`. Returns the
+    /// confirmed peak. Recent-chain only — it does not backfill deep history.
     ///
     /// # Errors
     /// Returns [`SyncError::Io`] if the weight proof fails validation, or a download/validation/store error
@@ -893,11 +829,10 @@ where
         self.fast_sync_with_summaries(wp, &summaries, sources).await
     }
 
-    /// The header-anchor + body-fill half of [`Chaser::fast_sync`], split out so the caller can run the
-    /// multi-minute [`dg_xch_weight_proof::validate_weight_proof`] OFF the async runtime (a `spawn_blocking`
-    /// pool) and OFF the chaser lock, then re-enter here with the already-verified `summaries`. This is the
-    /// recovery path: a body-download failure retries ONLY this cheap leg — it must never re-run the
-    /// weight-proof verify (that is what wedged the from-zero node into an 18-min-per-tick loop).
+    /// The header-anchor + body-fill half of [`Chaser::fast_sync`], split out so the caller can
+    /// run the multi-minute [`dg_xch_weight_proof::validate_weight_proof`] off the async runtime
+    /// and off the chaser lock, then re-enter here with the already-verified `summaries`. A
+    /// body-download failure retries only this cheap leg — never the weight-proof verify.
     ///
     /// # Errors
     /// Returns [`SyncError`] on a header-validation, download, or store error from the recent-chain fill.
@@ -910,8 +845,6 @@ where
     where
         S: Clone + Send + Sync + 'static,
     {
-        // Await-safe instrumentation: attach the span to the header+body async section rather than
-        // holding an Entered guard across the two `.await`s.
         let span = tracing::info_span!("sync.fast_bulk", recent = wp.recent_chain_data.len());
         async move {
             let schedule = self.epoch_schedule(summaries);
@@ -936,9 +869,7 @@ where
         from_height: u32,
         to_height: u32,
     ) -> Result<Option<(Bytes32, u32)>, SyncError> {
-        // Await-safe instrumentation: the original code dropped the `sync.short` guard BEFORE
-        // `follow_blocks` (which emits its own `window.*` spans), so the span covers only the
-        // fetch+sort. Preserve that exact scope by instrumenting just the fetch future.
+        // The span covers only the fetch+sort; follow_blocks emits its own window.* spans.
         let span = tracing::info_span!("sync.short", from = from_height, to = to_height);
         let blocks = async {
             let mut blocks = source.fetch_range(from_height, to_height).await?;
@@ -960,8 +891,7 @@ where
         &mut self,
         blocks: &[dg_xch_core::blockchain::full_block::FullBlock],
     ) -> Result<Option<(Bytes32, u32)>, SyncError> {
-        // The cross-block window pipeline lives in follow_blocks_reporting; this caller
-        // just drops the reported deltas.
+        // The window pipeline lives in follow_blocks_reporting; this caller drops the deltas.
         Ok(self.follow_blocks_reporting(blocks).await?.0)
     }
 
@@ -977,8 +907,7 @@ where
         from_height: u32,
         to_height: u32,
     ) -> Result<(Option<(Bytes32, u32)>, Vec<ConfirmedDelta>), SyncError> {
-        // Await-safe instrumentation: as in `follow_to`, the `sync.short` span covers only the
-        // fetch+sort (the guard was dropped before `follow_blocks_reporting`). Preserve that scope.
+        // As in `follow_to`, the span covers only the fetch+sort.
         let span = tracing::info_span!("sync.short", from = from_height, to = to_height);
         let blocks = async {
             let mut blocks = source.fetch_range(from_height, to_height).await?;
@@ -990,19 +919,15 @@ where
         self.follow_blocks_reporting(&blocks).await
     }
 
-    /// The mirrored `short_sync_backtrack` (chia full_node.py:715-774) — the recovery arm for a follow
-    /// window that failed with the unknown-parent orphan ([`SyncError::is_orphan`]): the peer's chain
-    /// forked at/below our stored tip, so no forward re-fetch of `from_height..` can ever connect.
-    /// Fetch single blocks BACKWARD from below the failed window (chia fetches one at a time via
-    /// `request_block`, full_node.py:743-745; our range seam issues the equivalent one-height
-    /// `RequestBlocks`), collecting until a block whose parent we have (chia's `height_to_hash(h-1) ==
-    /// prev_header_hash` fork-point test, full_node.py:753-759) or the [`BACKTRACK_MAX_DEPTH`] cap
-    /// trips (chia's `while curr_height > peak_height - 5`, full_node.py:738). On a found fork point,
-    /// submit the collected chain lowest-first (chia full_node.py:761-768) together with the re-fetched
-    /// forward window through the ordinary follow pipeline — the engine's existing fork choice parks
-    /// the shared-height blocks as orphan candidates and reorgs the moment the branch outweighs the
-    /// peak, exactly as if the blocks had arrived in order. Returns the confirmed peak and the
-    /// confirmed deltas (the daemon's wallet/mempool feed).
+    /// Short-sync backtrack — the recovery arm for a follow window that failed with the
+    /// unknown-parent orphan ([`SyncError::is_orphan`]): the peer's chain forked at/below our
+    /// stored tip, so no forward re-fetch of `from_height..` can ever connect. Fetch single blocks
+    /// backward from below the failed window, collecting until a block whose parent we have or the
+    /// [`BACKTRACK_MAX_DEPTH`] cap trips. On a found fork point, submit the collected chain
+    /// lowest-first together with the re-fetched forward window through the ordinary follow
+    /// pipeline — the engine's fork choice parks the shared-height blocks as orphan candidates and
+    /// reorgs the moment the branch outweighs the peak. Returns the confirmed peak and the
+    /// confirmed deltas.
     ///
     /// # Errors
     /// [`SyncError::DeepFork`] when no fork point exists within the cap (the caller must long-sync,
@@ -1016,17 +941,13 @@ where
     ) -> Result<(Option<(Bytes32, u32)>, Vec<ConfirmedDelta>), SyncError> {
         let peak_height = from_height.saturating_sub(1);
         let floor = peak_height.saturating_sub(BACKTRACK_MAX_DEPTH);
-        // Await-safe instrumentation: the collection loop below `.await`s per backtracked height,
-        // and the original dropped the `sync.backtrack` guard before `follow_blocks_reporting`
-        // (which emits its own `window.*` spans). Instrument the collection future; keep the final
-        // confirm outside the span exactly as before.
+        // The span covers only the collection; follow_blocks_reporting emits its own window.* spans.
         let span = tracing::info_span!("sync.backtrack", peak = peak_height, floor, to = to_height);
         let collected = async {
             let mut collected: Vec<FullBlock> = Vec::new();
             let mut found_fork_point = false;
-            // chia full_node.py:738 — `while curr_height > peak_height - 5`: the probed heights are
-            // peak, peak-1, …, peak-4 (a signed bound in the reference, so genesis is reachable when
-            // the peak itself is shallower than the cap).
+            // Probe peak, peak-1, …, peak-4; genesis is reachable when the peak itself is
+            // shallower than the cap.
             for depth in 0..BACKTRACK_MAX_DEPTH {
                 let Some(curr_height) = peak_height.checked_sub(depth) else {
                     break;
@@ -1037,7 +958,7 @@ where
                 };
                 let prev_hash = block.prev_header_hash();
                 collected.push(block);
-                // chia full_node.py:753-759 — genesis reached, or the parent is a block we have.
+                // Genesis reached, or the parent is a block we have.
                 if curr_height == 0
                     || self
                         .engine
@@ -1061,9 +982,9 @@ where
                 fork_height = collected.last().map_or(0, |b| b.height().saturating_sub(1)),
                 "short-sync backtrack found the fork point"
             );
-            // chia full_node.py:761-768 adds the collected chain in reverse (lowest first); chia backtracked
-            // from the claimed peak itself, whereas we backtracked from below the already-failed forward
-            // window — so re-fetch that window and confirm the whole branch in one height-ordered pass.
+            // Submit the collected chain lowest-first; we backtracked from below the already-failed
+            // forward window, so re-fetch that window and confirm the whole branch in one
+            // height-ordered pass.
             if from_height <= to_height {
                 collected.extend(source.fetch_range(from_height, to_height).await?);
             }
@@ -1075,14 +996,12 @@ where
         self.follow_blocks_reporting(&collected).await
     }
 
-    /// One tip-follow step as chia's `new_peak` ladder (chia full_node.py new_peak): try the FORWARD
-    /// extend first — the overwhelmingly common tip case is a block whose parent IS our peak, which
-    /// `follow_to_reporting` confirms by fetching only `[from_height, to_height]`. Fall back to the
-    /// backward `short_sync_backtrack` arm ONLY when the forward window fails with the unknown-parent
-    /// orphan ([`SyncError::is_orphan`]) — a genuine reorg at/below our tip. Going straight to
-    /// `follow_backtrack_reporting` (its depth-0 probe is `from_height - 1`, our own peak) re-fetches
-    /// the peak block and re-confirms it `AlreadyHave` on EVERY step, adding a needless backward fetch
-    /// + peer round-trip per block; that overhead is what keeps a follower from pinning tip at lag 0-1.
+    /// One tip-follow step: try the forward extend first — the common tip case is a block whose
+    /// parent is our peak, which `follow_to_reporting` confirms by fetching only
+    /// `[from_height, to_height]`. Fall back to the backward backtrack arm only when the forward
+    /// window fails with the unknown-parent orphan ([`SyncError::is_orphan`]) — a genuine reorg
+    /// at/below our tip. Going straight to `follow_backtrack_reporting` would re-fetch and
+    /// re-confirm the peak block on every step.
     pub async fn follow_tip_step_reporting(
         &mut self,
         source: &Arc<dyn BlockRangeSource>,
@@ -1101,16 +1020,12 @@ where
         }
     }
 
-    /// The reorg-across-the-gap arm of the WP-anchored long sync (chia `_sync` →
-    /// `sync_from_fork_point` with a fork point BELOW the peak, full_node.py:1104-1113): re-follow
-    /// forward windows from `fork_point + 1`. Blocks identical to ours confirm as `AlreadyHave`; a
-    /// divergent branch stages as orphan candidates and reorgs ATOMICALLY through the engine's
-    /// single-transaction fork choice (T0-4) the moment it outweighs the stale peak — never a
-    /// blind extension of the dead branch. Returns as soon as the confirmed peak leaves the entry
-    /// peak (the follow pipeline then extends from the re-landed chain), and fails closed
-    /// [`LONG_SYNC_REORG_MARGIN`] heights past the stale tip without movement: the weight proof
-    /// said the chains diverged but the served branch never outweighed (a lying or stale peer —
-    /// the caller retries next tick with another).
+    /// The reorg-across-the-gap arm of the WP-anchored long sync: re-follow forward windows from
+    /// `fork_point + 1`. Blocks identical to ours confirm as `AlreadyHave`; a divergent branch
+    /// stages as orphan candidates and reorgs atomically through the engine's single-transaction
+    /// fork choice the moment it outweighs the stale peak. Returns as soon as the confirmed peak
+    /// leaves the entry peak, and fails closed [`LONG_SYNC_REORG_MARGIN`] heights past the stale
+    /// tip without movement (a lying or stale peer — the caller retries next tick with another).
     ///
     /// # Errors
     /// [`SyncError::Io`] when the margin is exhausted without the peak moving (or no peak exists —
@@ -1235,16 +1150,10 @@ where
                 .engine_staged_generators
                 .store(staged as u64, Ordering::Relaxed);
         }
-        // The daemon's follow path — same cross-block window pipeline as `follow_blocks`, plus
-        // the confirmed deltas for the wallet/mempool side effects.
-        //
-        // Window body precompute: the expensive PURE half of body validation (CLVM generator run
+        // Window body precompute: the expensive pure half of body validation (CLVM generator run
         // + BLS aggregate verify) for every transaction block of the window runs across all cores
-        // BEFORE the sequential stage loop — the same pattern as the window VDF batch. Inputs are
-        // resolved without validation state: generator refs from the window's own blocks (else the
-        // confirmed store) and the prev-transaction flag key from the window scan (else the
-        // store). The engine accepts a precompute only when its own stage-time flag key matches;
-        // otherwise it silently recomputes inline — behavior identical, cost saved on the match.
+        // before the sequential stage loop. The engine accepts a precompute only when its own
+        // stage-time flag key matches; otherwise it recomputes inline.
         let mut pre_bodies: std::collections::HashMap<u32, crate::engine::PrecomputedBody> = {
             let by_height: std::collections::HashMap<u32, &FullBlock> =
                 blocks.iter().map(|b| (b.height(), b)).collect();
@@ -1308,31 +1217,16 @@ where
                 self.metrics.window_body_micros.store(0, Ordering::Relaxed);
                 std::collections::HashMap::new()
             } else {
-                // Purely-synchronous section (a scoped-thread CPU batch, no `.await`): use
-                // `in_scope`, which exits the span when the closure returns — the invariant "no
-                // Entered guard may cross an `.await`" is then structurally enforced here.
+                // Synchronous section: `in_scope` so no Entered guard can cross an `.await`.
                 let span = tracing::info_span!("window.body", tx_blocks = jobs.len());
                 span.in_scope(|| {
                     let body_started = std::time::Instant::now();
                     let primitives = self.engine.primitives();
                     let constants = *self.engine.constants();
-                    // Core-bounded workers over job chunks — the same shape as the `vdf.batch`
-                    // drain (`header::verify_vdf_batch`), and for the same two reasons, the second
-                    // fatal on the Pi envelope: a thread PER transaction block oversubscribes the
-                    // CPUs with no throughput gain, and it multiplies peak memory by the WINDOW
-                    // size instead of the core count. Each generator run holds its own CLVM heap:
-                    // ~125 MB average at the first mainnet transaction blocks (~225.8k), but
-                    // 350-455 MiB MEASURED per dust-era compressed block (a dust-dense mainnet window —
-                    // the ROM bootstrap run retains every eval intermediate in the run arena, and
-                    // ref-list decompression through the CLVM deserializer dominates). 32
-                    // concurrent runs allocated ~4 GiB of anon heap in ~5 s and OOM-killed the
-                    // 4 GiB node on that window every restart; on an 8-core cgroup the bound
-                    // still admits ~3.6 GiB transient bursts on dust-era windows (the observed
-                    // resident-memory spikes). Bounded workers cap the resident runs at the core
-                    // count (4 on a Pi-4: ~1.8 GiB dust-era worst case), with per-run heaps freed
-                    // between the jobs a worker executes sequentially. The durable shrink is the
-                    // compact-arena CLVM representation (NodePtr-style, clvm_rs's footprint), not
-                    // a lower worker count.
+                    // Core-bounded workers over job chunks: a thread per transaction block would
+                    // oversubscribe the CPUs and multiply peak memory by the window size instead
+                    // of the core count — each generator run holds its own large CLVM heap
+                    // (hundreds of MiB on dense blocks).
                     let workers = std::thread::available_parallelism()
                         .map(std::num::NonZeroUsize::get)
                         .unwrap_or(4)
@@ -1387,18 +1281,15 @@ where
         // that block's deferred work, so the batch attributes the failing height precisely.
         let mut staged: Vec<(BlockDelta, usize, usize)> = Vec::new();
         let mut stage_err: Option<SyncError> = None;
-        // Phase-aware STAGING commit granularity, mirroring `confirm_staged_batch`'s model on the
-        // confirm side: near the tip each staged block commits its own archive transaction
-        // (per-block durability is correct AT tip); during bulk catch-up the whole window's archive
-        // rows accumulate into ONE transaction, committed once below — on the SQLite backend that
-        // collapses 32 sequential writer-fsync round-trips per window into one. The batch opens
-        // lazily at the first block that actually stages.
+        // Phase-aware staging commit granularity: near the tip each staged block commits its own
+        // archive transaction; during bulk catch-up the whole window's archive rows accumulate
+        // into one transaction, committed once below. The batch opens lazily at the first block
+        // that actually stages.
         let per_block_staging = self.engine.store().near_tip();
         let mut window_batch: Option<dg_xch_stores::BatchHandle> = None;
         let stage_started = std::time::Instant::now();
-        // Batch the loop's per-block store reads for the whole window (ONE candidate multi-get +
-        // one peak read — chia block_store.get_block_records_by_hash): the staging loop then
-        // awaits no per-block AlreadyHave/candidate point reads (the measured catch-up residue).
+        // Batch the loop's per-block store reads for the whole window (one candidate multi-get +
+        // one peak read) so the staging loop awaits no per-block point reads.
         self.engine.preload_stage_context(blocks).await?;
         for block in blocks {
             let pre = pre_bodies.remove(&block.height());
@@ -1422,27 +1313,23 @@ where
                 }
             }
         }
-        // The window staging transaction is NOT committed here: it is CARRIED (still open) into
-        // `confirm_staged_batch_in`, which folds coins + set_peak into the SAME transaction — one
-        // writer round-trip and one fsync for the whole window, with the archive-before-peak
-        // ordering satisfied inside the transaction. On any error path between here and the
-        // confirm (the drain failure below, a VDF-failed whole window) the batch is dropped and
-        // `begin()`'s rollback guard clears it — the window re-stages wholesale next tick. Note
-        // the writer connection stays held across the drains; the checkpointer is quiet in the
-        // catch-up band, so nothing contends.
+        // The window staging transaction is not committed here: it is carried (still open) into
+        // `confirm_staged_batch_in`, which folds coins + set_peak into the same transaction —
+        // one fsync per window, with archive-before-peak ordering satisfied inside it. On any
+        // error path before the confirm the batch is dropped and `begin()`'s rollback guard
+        // clears it; the window re-stages wholesale next tick.
         //
-        // The staging loop is the read context's ONLY consumer: drop it here so no later path
-        // (drain/confirm error, the next per-block follow) can consult this window's snapshot.
+        // The staging loop is the read context's only consumer: drop it here so no later path
+        // can consult this window's snapshot.
         self.engine.clear_stage_preload();
         self.metrics.window_stage_micros.store(
             stage_started.elapsed().as_micros() as u64,
             Ordering::Relaxed,
         );
 
-        // Silent-fallback ban: a poisoned sink (a panicked staging thread) must FAIL the window, never
-        // yield an empty queue -- the old `unwrap_or_default()` made `queue.is_empty()` true and every
-        // staged block confirmed with its VDF verification silently SKIPPED (a validation bypass on the
-        // panic path). Fail closed; the unconfirmed window re-stages next tick.
+        // A poisoned sink (a panicked staging thread) must fail the window, never yield an empty
+        // queue — that would confirm every staged block with its VDF verification silently
+        // skipped. Fail closed; the unconfirmed window re-stages next tick.
         let (queue, sig_queue) = match drain_header_sink(sink) {
             Ok(q) => q,
             Err(e) => {
@@ -1453,9 +1340,7 @@ where
         let mut confirm_upto = staged.len();
         let mut vdf_err: Option<SyncError> = None;
         if !queue.is_empty() {
-            // Purely-synchronous section (the scoped-thread VDF batch drain, no `.await`): use
-            // `in_scope` so the span exits when the closure returns — no Entered guard can leak
-            // across the `confirm_staged_batch().await` that follows.
+            // Synchronous section: `in_scope` so no Entered guard can cross an `.await`.
             let span =
                 tracing::info_span!("window.vdf", proofs = queue.len(), blocks = staged.len());
             span.in_scope(|| {
@@ -1492,24 +1377,13 @@ where
             });
         }
 
-        // Header-signature drain: the THIRD all-core precompute phase (the 26.7% on-CPU serial
-        // residue on a threadripper node). Same two-tier shape as the VDF drain — fast whole-window
-        // batch, then on a failure a per-block slice replay that attributes the exact failing height
-        // AND the exact chia rejection string (via the signature's tag). `confirm_upto` takes the
-        // MINIMUM of the VDF- and sig-determined boundaries so a block bad in EITHER gate is never
-        // confirmed; the reported error is whichever fails at the lower height (matching the
-        // sequential path's first-bad-block stop).
-        //
-        // BOUNDED SEMANTIC (not a bug — see node/tests/era_replay.rs::corrupt_header_sig_*): because
-        // the sig gates are DEFERRED, a block that is invalid in MULTIPLE gates can report a
-        // different first-fault STRING than the fully-inline path would. The accept/reject decision
-        // and the failing HEIGHT are always identical; only which rejection string surfaces first can
-        // move. Concretely: rc_sp/cc_sp signatures live inside the reward-chain block and pool_signature
-        // lives inside foliage_block_data, so corrupting one of those also breaks an INLINE gate that
-        // runs before this drain (the URSB hash, or the block-data sig message) — that inline gate
-        // rejects the block first. This is the identical property the VDF deferral already carries
-        // ("only the failure short-circuit order changes"); it costs extra work solely on
-        // already-invalid blocks and never confirms a bad one.
+        // Header-signature drain: same two-tier shape as the VDF drain — fast whole-window batch,
+        // then on a failure a per-block slice replay that attributes the exact failing height and
+        // rejection string. `confirm_upto` takes the minimum of the VDF- and sig-determined
+        // boundaries so a block bad in either gate is never confirmed; the reported error is
+        // whichever fails at the lower height. Because the sig gates are deferred, a block invalid
+        // in multiple gates can report a different first-fault string than the fully-inline path;
+        // the accept/reject decision and the failing height are always identical.
         let mut sig_err: Option<SyncError> = None;
         if !sig_queue.is_empty() {
             let span =
@@ -1544,8 +1418,8 @@ where
                             .into(),
                         );
                     }
-                    // A sig failure lowers the confirm boundary only if it is EARLIER than the
-                    // VDF-determined one; the earlier fault is the one the sequential path reports.
+                    // A sig failure lowers the confirm boundary only if it is earlier than the
+                    // VDF-determined one.
                     if sig_confirm_upto < confirm_upto {
                         confirm_upto = sig_confirm_upto;
                         vdf_err = sig_err.take();
@@ -1557,19 +1431,14 @@ where
             });
         }
 
-        // One store batch confirms the whole window; the
-        // engine falls back to per-block fork choice the moment a delta isn't a plain
-        // extension, so semantics match the sequential path exactly.
+        // One store batch confirms the whole window; the engine falls back to per-block fork
+        // choice the moment a delta isn't a plain extension.
         let to_confirm: Vec<BlockDelta> = staged.drain(..confirm_upto).map(|(d, _, _)| d).collect();
         let reported: Vec<BlockDelta> = to_confirm.clone();
         let mut deltas = Vec::new();
-        // A stale reorg report from a non-reporting confirm path (fast-sync's per-block adds)
-        // must never mis-attach to THIS window's outcomes: only reports pushed by the batch
-        // below are consumed by the expansion after it.
+        // A stale reorg report from a non-reporting confirm path must never mis-attach to this
+        // window's outcomes: only reports pushed by the batch below are consumed by the expansion.
         self.engine.clear_reorg_reports();
-        // Await-safe instrumentation: `confirm_staged_batch` is async, so attach the span to the
-        // future — the previous `{ let _e = span.enter(); ...await }` held an Entered guard across
-        // the `.await`, the exact sharded-registry clone-after-close hazard.
         let span = tracing::info_span!("window.confirm", blocks = to_confirm.len());
         let confirm_started = std::time::Instant::now();
         let outcomes = self
@@ -1613,13 +1482,11 @@ where
     }
 }
 
-/// Per-height epoch parameters derived from the weight proof's summary chain — the attested schedule
-/// of every `(sub_slot_iters, difficulty)` retarget. The summary for sub-epoch `k-1` is included at
-/// the first block of sub-epoch `k` (chia indexes `wp_summaries[height / SUB_EPOCH_BLOCKS - 1]`), and
-/// values it declares activate at that inclusion — so for a block at height `h`, the applicable values
-/// are the LAST ones declared among `summaries[..h / SUB_EPOCH_BLOCKS]`. A single-pair anchor is only
-/// correct for a window that provably crosses no epoch boundary; any span that can cross one (the
-/// epoch-depth backfill always does, and a recent chain may) must resolve per height.
+/// Per-height epoch parameters derived from the weight proof's summary chain. The summary for
+/// sub-epoch `k-1` is included at the first block of sub-epoch `k`, and values it declares
+/// activate at that inclusion — so for a block at height `h`, the applicable values are the last
+/// ones declared among `summaries[..h / SUB_EPOCH_BLOCKS]`. Any span that can cross an epoch
+/// boundary must resolve per height.
 pub struct EpochSchedule {
     // (activation sub-epoch index, ssi declared there) / (…, difficulty …), ascending.
     ssi_changes: Vec<(u32, u64)>,
@@ -1678,10 +1545,9 @@ impl EpochSchedule {
     }
 }
 
-// The tip epoch's `(sub_slot_iters, difficulty)`: the last summary that declares each (a sub-epoch boundary
-// carries the new value), falling back to the genesis constants when the proof declares none. Superseded in
-// production by [`EpochSchedule`] (per-height resolution); kept as the tests' independent oracle — the
-// schedule's value AT THE TIP must equal this anchor (the headers-first invariant the unit test pins).
+// The tip epoch's `(sub_slot_iters, difficulty)`: the last summary that declares each, falling
+// back to the genesis constants when the proof declares none. Kept as the tests' independent
+// oracle — the schedule's value at the tip must equal this anchor.
 #[cfg(test)]
 fn tip_epoch_from(
     summaries: &[SubEpochSummary],
@@ -1701,40 +1567,26 @@ fn tip_epoch_from(
     (ssi, difficulty)
 }
 
-// One download slot bound to one source (= one outbound peer). Pulls contiguous reservations from the shared
-// window, fetches the bodies, and writes them through to the store out of order. On a stall it reclaims its
-// reservation to the pool and drops out — a live peer picks the run up; eviction never revives a dead channel.
-// A worker tolerates this many consecutive fetch misses (timeout or reject) on its peer before it gives up
-// that peer — one transient reject/timeout must not permanently remove a peer for the whole sync (that
-// fragility turned any single body-download hiccup into a full `Exhausted` restart of the from-zero sync).
+// Consecutive fetch misses (timeout or reject) a worker tolerates on its peer before giving that
+// peer up — one transient hiccup must not permanently remove a peer for the whole sync.
 const MAX_PEER_FETCH_FAILURES: u32 = 5;
 // Short pause after a miss so a hard-rejecting peer cannot hot-loop reclaim→re-reserve→reject.
 const FETCH_FAILURE_BACKOFF: Duration = Duration::from_millis(250);
 
-/// Validate a downloaded block batch against the headers-first candidate chain BEFORE it is written
-/// through — hardening. A `RespondBlocks` is untrusted: a lying peer can re-stamp a body or answer
-/// with a different height range. chia validates the returned blocks are the requested heights,
-/// contiguous, and connect (`prev_header_hash` chains to the fork/anchor) and bans the peer on any
-/// mismatch (`full_node.py` short_sync_batch first-block connect :645-651 — `height_to_hash(start-1)` for
-/// start>0, `GENESIS_CHALLENGE` for the from-genesis batch :663-667 — and add_prevalidated_blocks →
-/// `peer.close(CONSENSUS_ERROR_BAN_SECONDS)` on any batch error :1436). We mirror the checks against our
-/// architecture: the headers-first pass ([`Chaser::sync_headers`] → [`headers::sync_header_chain`]) has
-/// already stored the WP-attested candidate record for every reserved height, and that candidate
-/// chain was validated to be contiguous and anchor-connected. So the batch is sound iff
-/// 1. it covers EXACTLY the reserved `start..=end`, ascending and contiguous, and
-/// 2. every body's `header_hash` binds to a committed candidate record AT its own height — the
-///    WP-attested header, never blind trust.
+/// Validate a downloaded block batch against the headers-first candidate chain before it is
+/// written through. A `RespondBlocks` is untrusted: a lying peer can re-stamp a body or answer
+/// with a different height range. The headers-first pass has already stored the WP-attested
+/// candidate record for every reserved height, so the batch is sound iff
+/// 1. it covers exactly the reserved `start..=end`, ascending and contiguous, and
+/// 2. every body's `header_hash` binds to a committed candidate record at its own height.
 ///
-/// A re-stamped / out-of-range / wrong-anchor body hashes to no candidate (or to one at a different
-/// height) and is rejected here, before it can reach `append_many` (where an orphan body would trip the
-/// store's `block_body → block_record` foreign key as a FATAL error that aborts the whole sync — a
-/// one-peer DoS), the confirm pipeline, or the from-empty `prev = None` entry. The connect check for the
-/// from-empty/anchor path reuses the anchor/WP linkage: the anchor's candidate record IS the
-/// WP-attested header, so matching a body against it inherits the proof's attestation without a prior
-/// in-store parent.
+/// A re-stamped / out-of-range / wrong-anchor body is rejected here, before it can reach
+/// `append_many` (where an orphan body would trip the store's `block_body → block_record` foreign
+/// key as a fatal error), the confirm pipeline, or the from-empty `prev = None` entry.
 ///
-/// Returns `Ok(Ok(()))` when the batch is sound, `Ok(Err(reason))` when it is rejected (non-fatal — the
-/// caller reclaims the reservation like any miss), and `Err(_)` only on a genuine store fault (propagated).
+/// Returns `Ok(Ok(()))` when the batch is sound, `Ok(Err(reason))` when it is rejected
+/// (non-fatal — the caller reclaims the reservation like any miss), and `Err(_)` only on a
+/// genuine store fault.
 async fn validate_downloaded_batch<S>(
     store: &S,
     blocks: &[FullBlock],
@@ -1744,9 +1596,8 @@ async fn validate_downloaded_batch<S>(
 where
     S: BlockStore + Sync,
 {
-    // (1) Exact coverage: count + ascending-contiguous heights over the reserved range. The
-    // OutboundPeerSource repeats this on the wire, but a batch reaches append_many only through the
-    // worker, so the gate must live here to cover EVERY source (in-memory tests, replay fixtures).
+    // (1) Exact coverage: count + ascending-contiguous heights over the reserved range. The gate
+    // lives here (not only in OutboundPeerSource) so it covers every source.
     let expected = usize::try_from(u64::from(end) - u64::from(start) + 1).unwrap_or(usize::MAX);
     let covers = blocks.len() == expected
         && blocks
@@ -1760,9 +1611,8 @@ where
             got: blocks.len(),
         }));
     }
-    // (2) Each body must bind to a committed candidate header AT its height — the connect check. A body
-    // that will not serialize its own foliage, hashes to no candidate, or matches a candidate at a
-    // different height is a re-stamp / forgery: reject the whole batch (non-fatal, treated as a miss).
+    // (2) Each body must bind to a committed candidate header at its height — the connect check.
+    // Any mismatch rejects the whole batch (non-fatal, treated as a miss).
     for b in blocks {
         let Ok(hh) = b.header_hash() else {
             return Ok(Err(SyncError::BatchUnlinked {
@@ -1798,8 +1648,8 @@ where
 {
     let mut failures: u32 = 0;
     loop {
-        // Discover pending heights before touching the lock (no await under the window mutex). Written bodies
-        // drop out of get_unassociated, so this is also the drain signal.
+        // Discover pending heights before touching the lock (no await under the window mutex).
+        // Written bodies drop out of get_unassociated, so this is also the drain signal.
         let pending = store.get_unassociated(cfg.window).await?;
         let (claim, live) = {
             let mut w = window.lock().await;
@@ -1824,27 +1674,19 @@ where
             start,
             end
         );
-        // Await-safe instrumentation: the fetch + write-through below all `.await`, so the
-        // `reservation` span is attached to that per-reservation future rather than held as an
-        // Entered guard across the awaits. The loop's control flow (`continue` on a good fetch,
-        // `return Ok(())` when the peer is given up) is carried out through a `ControlFlow` value
-        // so `?` still propagates store errors out of the block.
+        // The loop's control flow (`continue` on a good fetch, `return Ok(())` when the peer is
+        // given up) is carried through a `ControlFlow` value so `?` still propagates store errors.
         let flow = async {
             let outcome =
                 tokio::time::timeout(cfg.request_timeout, src.fetch_range(start, end)).await;
-            // Reason string so the live log names WHY a peer could not serve a recent range (timeout vs. reject
-            // vs. decode) — the measurement the "no peer can serve height" stall needs to be diagnosed, not
-            // guessed. `Ok(Ok(_))` is success; the two failure shapes are a hard timeout or a returned error.
+            // Reason string so the log names why a peer could not serve the range.
             let reason: std::borrow::Cow<'static, str> = match outcome {
                 Ok(Ok(blocks)) => {
                     metrics
                         .peak_inflight_blocks
                         .fetch_max(blocks.len(), Ordering::Relaxed);
-                    // HARDENING: the RespondBlocks body is untrusted until it matches the
-                    // headers-first candidate chain. Validate the batch BEFORE the write-through; a
-                    // re-stamped / out-of-range / wrong-anchor batch is reclaimed like any miss and never
-                    // reaches append_many (nor the store's block_body→block_record FK as a fatal error),
-                    // the confirm pipeline, or the from-empty prev=None entry.
+                    // The RespondBlocks body is untrusted until it matches the headers-first
+                    // candidate chain; validate before the write-through.
                     match validate_downloaded_batch(&store, &blocks, start, end).await? {
                         Ok(()) => {
                             let mut batch = store.begin().await?;
@@ -1863,17 +1705,15 @@ where
                             failures = 0; // a good fetch clears the peer's miss budget
                             return Ok::<_, SyncError>(std::ops::ControlFlow::Continue(()));
                         }
-                        // Rejected: fall through to the miss path (reclaim + count against the budget +
-                        // retire the peer). The named reason surfaces in the live warn log.
+                        // Rejected: fall through to the miss path.
                         Err(reject) => std::borrow::Cow::Owned(reject.to_string()),
                     }
                 }
                 Ok(Err(e)) => std::borrow::Cow::Owned(e.to_string()),
                 Err(_) => std::borrow::Cow::Borrowed("request timed out"),
             };
-            // A miss: reclaim the run for another peer and count it against this peer's budget. Only after
-            // MAX_PEER_FETCH_FAILURES consecutive misses (or a closed channel) do we give the peer up — a single
-            // hiccup no longer nukes it for the whole sync.
+            // A miss: reclaim the run for another peer and count it against this peer's budget.
+            // Only MAX_PEER_FETCH_FAILURES consecutive misses (or a closed channel) give the peer up.
             window.lock().await.reclaim(reservation.id);
             metrics.reclaimed.fetch_add(1, Ordering::Relaxed);
             failures += 1;
@@ -1900,11 +1740,10 @@ where
     }
 }
 
-/// Take the staged window's queued VDF proofs AND header signatures out of the sink, refusing a
+/// Take the staged window's queued VDF proofs and header signatures out of the sink, refusing a
 /// poisoned sink. Poison means a staging thread panicked mid-window; treating that as "nothing
-/// queued" would confirm the whole window unverified. No consensus input may silently degrade to a
-/// default (the difficulty-0 lesson). Both queues are drained atomically: a poison on EITHER fails
-/// the window closed.
+/// queued" would confirm the whole window unverified. A poison on either queue fails the window
+/// closed.
 ///
 /// # Errors
 /// [`SyncError`] (invalid) when either sink mutex is poisoned.
@@ -1930,9 +1769,6 @@ mod tests {
     use dg_xch_core::blockchain::sized_bytes::Bytes32;
     use dg_xch_core::blockchain::sub_epoch_summary::SubEpochSummary;
 
-    // Red-first: the epoch anchor must take the LAST declared
-    // (ssi, difficulty), not the first, and must fall back to the genesis constants when the proof
-    // declares none. A wrong anchor is the headers-first required_iters==0 poison.
     fn ses(new_difficulty: Option<u64>, new_sub_slot_iters: Option<u64>) -> SubEpochSummary {
         SubEpochSummary {
             prev_subepoch_summary_hash: Bytes32::default(),
@@ -1965,10 +1801,9 @@ mod tests {
         assert_eq!(tip_epoch_from(&s, 64, 3), (64, 3));
     }
 
-    // The pending-boundary depth math — pinned to the live mainnet wall (epoch_blocks = 4608,
-    // sub_epoch_blocks = 384, boundary 4,575,744 = 993 * 4608, previous surpass 4,571,136):
-    // every position that can still trigger the 4,575,744 retarget must demand records down to
-    // 4,571,136 - EPOCH_BACKFILL_SLACK = 4,571,008.
+    // Pending-boundary depth math, pinned to mainnet constants (epoch_blocks = 4608,
+    // sub_epoch_blocks = 384, boundary 4,575,744, previous surpass 4,571,136): every position that
+    // can still trigger the 4,575,744 retarget must demand records down to 4,571,008.
     #[test]
     fn epoch_backfill_low_covers_the_pending_boundary_retarget() {
         use super::epoch_backfill_low;
@@ -1976,10 +1811,8 @@ mod tests {
         // Mid-epoch anchor base (a sync leg's --sync-from=4575000 span base H-64): the next
         // boundary IS the pending boundary; old and new formulas agree.
         assert_eq!(epoch_backfill_low(4_574_936, e, s), 4_571_008);
-        // Peak just past the boundary, retarget trigger still ahead (the frozen pod: peak
-        // 4,575,757, trigger 4,575,758). The old `(at / e + 1) * e` rounding targeted 4,580,352
-        // and demanded only 4,575,616 — one full epoch short; the resume repair concluded
-        // "nothing to backfill" on every restart.
+        // Peak just past the boundary, retarget trigger still ahead: naive next-boundary rounding
+        // would demand only 4,575,616 — one full epoch short.
         assert_eq!(epoch_backfill_low(4_575_757, e, s), 4_571_008);
         // The boundary block itself and the last height inside the trigger window.
         assert_eq!(epoch_backfill_low(4_575_744, e, s), 4_571_008);
@@ -1992,8 +1825,6 @@ mod tests {
         assert_eq!(epoch_backfill_low(383, e, s), 0);
     }
 
-    // The recovery signal: a consensus-walk NotFound ("block record not found") inside the stage
-    // path classifies as a missing-record failure; validation rejections and peer failures do not.
     #[test]
     fn is_missing_record_matches_only_the_notfound_walk_error() {
         use super::SyncError;
@@ -2015,8 +1846,6 @@ mod tests {
         assert!(!io.is_missing_record());
     }
 
-    // The per-height schedule: summary i activates at sub-epoch i+1, values hold until the next
-    // declaration, and the schedule at the TIP equals the tip_epoch_from anchor (the headers-first invariant).
     #[test]
     fn epoch_schedule_resolves_per_height_and_matches_the_tip_anchor() {
         use super::EpochSchedule;

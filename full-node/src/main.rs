@@ -71,6 +71,12 @@ struct Cli {
     /// across peers as ceil(N / peers) per connection.
     #[arg(long)]
     prefetch_max_inflight: Option<usize>,
+    /// Outbound connections to keep open. Unset = the built-in default.
+    #[arg(long)]
+    target_outbound: Option<usize>,
+    /// Total peers (inbound + outbound) to accept. Unset = the built-in default.
+    #[arg(long)]
+    target_peer_count: Option<usize>,
     /// Cert-hash node id (64 hex chars) granted the TRUSTED tier, repeatable — chia's `trusted_peers`.
     /// A trusted peer gets the larger subscription (2,000,000) and response-item (500,000) caps and
     /// high-priority transaction-queue placement. Empty (default) = every peer untrusted.
@@ -112,6 +118,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cli.uncompact,
         cli.prefetch_memory_mb,
         cli.prefetch_max_inflight,
+        cli.target_outbound,
+        cli.target_peer_count,
         &cli.trusted_peer,
         &cli.trusted_cidr,
     )

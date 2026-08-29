@@ -17,12 +17,11 @@ use tokio::sync::{Semaphore, SemaphorePermit};
 // memory by registering unboundedly, and a slow wallet cannot stall the peak path (its channel is bounded and
 // updates are dropped, not blocked on).
 //
-// MAX_SUBSCRIBERS is ours (chia bounds subscribers implicitly by its connection cap; we cap the registry
-// itself). The per-peer combined puzzle-hash + coin-id cap now comes from the shared [`TrustPolicy`]
-// keyed on the peer's cert-hash node id — chia `max_subscriptions(peer)` (full_node_api.py:2215-2219):
-// the UNTRUSTED `max_subscribe_items` (200,000, initial-config.yaml:437) by default, the TRUSTED
-// `trusted_max_subscribe_items` (2,000,000, yaml:444) for a configured trusted peer. An empty
-// `trusted_peers` config leaves every peer untrusted — the pre-tier behaviour, unchanged.
+// MAX_SUBSCRIBERS caps the registry itself. The per-peer combined puzzle-hash + coin-id cap
+// comes from the shared [`TrustPolicy`] keyed on the peer's cert-hash node id: the untrusted
+// `max_subscribe_items` (200,000) by default, the trusted `trusted_max_subscribe_items`
+// (2,000,000) for a configured trusted peer. An empty `trusted_peers` config leaves every remote
+// peer untrusted.
 const MAX_SUBSCRIBERS: usize = 4096;
 const CHANNEL_CAPACITY: usize = 256;
 
@@ -104,9 +103,7 @@ fn drop_peer(reg: &mut Registry, peer: &Bytes32) {
 
 impl Registry {
     // The set of peers interested in a coin: by its puzzle hash, by its id, or by its HINT
-    // treated as a puzzle-hash subscription — chia `update_wallets` joins all three
-    // (full_node.py:1541-1546: `peers_for_coin_id` ∪ `peers_for_puzzle_hash(ph)` ∪
-    // `peers_for_puzzle_hash(hint)`), which is exactly how a wallet subscribed to a hint (the
+    // treated as a puzzle-hash subscription — which is how a wallet subscribed to a hint (the
     // outer puzzle hash of a CAT/DID/NFT) sees the inner-puzzle coin land.
     fn match_peers(
         &self,
@@ -152,8 +149,8 @@ impl Default for WalletNotifier {
 }
 
 impl WalletNotifier {
-    /// A registry at chia's stock caps with an empty trusted set — every peer untrusted (the additive
-    /// default). Production injects a config-derived policy via [`WalletNotifier::with_trust`].
+    /// A registry at the stock caps with an empty trusted set — every peer untrusted. Production
+    /// injects a config-derived policy via [`WalletNotifier::with_trust`].
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -166,7 +163,7 @@ impl WalletNotifier {
 
     /// A registry wired to a shared [`TrustPolicy`] — the production constructor. The policy decides
     /// each peer's subscription cap; the same `Arc` backs the api's response-item cap and the tx
-    /// queue's priority tier. Registry size stays the chia-parity [`MAX_SUBSCRIBERS`] bound.
+    /// queue's priority tier. Registry size stays under the [`MAX_SUBSCRIBERS`] bound.
     #[must_use]
     pub fn with_trust(trust: Arc<TrustPolicy>) -> Self {
         Self {
@@ -191,7 +188,7 @@ impl WalletNotifier {
 
     /// A registry with test-scale bounds (production uses [`WalletNotifier::with_trust`]). Both the
     /// untrusted and trusted per-peer caps are set to `max_items_per_subscriber` with an empty trusted
-    /// set, so every peer resolves to that single cap — the pre-tier `with_limits` semantics.
+    /// set, so every peer resolves to that single cap.
     #[must_use]
     pub fn with_limits(max_subscribers: usize, max_items_per_subscriber: usize) -> Self {
         let trust = TrustPolicy::with_caps(
@@ -204,10 +201,10 @@ impl WalletNotifier {
         Self::with_trust_and_subscribers(max_subscribers, Arc::new(trust))
     }
 
-    /// The per-peer combined subscription cap for `peer` — chia `max_subscriptions(peer)`
-    /// (full_node_api.py:2215-2219): trusted peers get `trusted_max_subscribe_items`, everyone else
-    /// `max_subscribe_items`. The register handlers slice / filter against it. `host` is the peer's
-    /// remote IP (localhost / trusted-CIDR peers resolve trusted; `None` = node-id trust only).
+    /// The per-peer combined subscription cap for `peer`: trusted peers get
+    /// `trusted_max_subscribe_items`, everyone else `max_subscribe_items`. The register handlers
+    /// slice / filter against it. `host` is the peer's remote IP (localhost / trusted-CIDR peers
+    /// resolve trusted; `None` = node-id trust only).
     #[must_use]
     pub fn max_subscriptions(&self, peer: &Bytes32, host: Option<IpAddr>) -> usize {
         self.trust.max_subscriptions(peer, host)
@@ -217,11 +214,9 @@ impl WalletNotifier {
         self.inner.read().await.subs.len()
     }
 
-    /// A peer's combined puzzle-hash + coin-id subscription count — chia
-    /// `PeerSubscriptions.peer_subscription_count` (subscriptions.py:82-85). The
+    /// A peer's combined puzzle-hash + coin-id subscription count. The
     /// RequestPuzzleState/RequestCoinState handlers check `request items + this` against
-    /// [`WalletNotifier::max_subscriptions`] before subscribing (full_node_api.py:2026-2040,
-    /// 2106-2121).
+    /// [`WalletNotifier::max_subscriptions`] before subscribing.
     pub async fn peer_subscription_count(&self, peer: &Bytes32) -> usize {
         self.inner
             .read()
@@ -231,12 +226,11 @@ impl WalletNotifier {
             .map_or(0, Subscriber::items)
     }
 
-    /// Drop a peer's puzzle-hash subscriptions — chia `request_remove_puzzle_subscriptions`
-    /// (full_node_api.py:1961-1975): `None` clears ALL (`clear_puzzle_subscriptions`, returning
-    /// the prior set), `Some` removes the listed subset (`remove_puzzle_subscriptions`, returning
-    /// only what was actually subscribed — in-request duplicates and never-subscribed hashes are
-    /// filtered out, subscriptions.py:155-168). The peer's delivery channel STAYS: chia keeps the
-    /// connection, and a later re-subscribe reuses it (one channel per peer).
+    /// Drop a peer's puzzle-hash subscriptions: `None` clears ALL (returning the prior set),
+    /// `Some` removes the listed subset (returning only what was actually subscribed —
+    /// in-request duplicates and never-subscribed hashes are filtered out). The peer's delivery
+    /// channel STAYS: the connection is kept, and a later re-subscribe reuses it (one channel
+    /// per peer).
     pub async fn remove_ph_subscriptions(
         &self,
         peer: &Bytes32,
@@ -269,8 +263,7 @@ impl WalletNotifier {
         removed
     }
 
-    /// Drop a peer's coin-id subscriptions — chia `request_remove_coin_subscriptions`
-    /// (full_node_api.py:1981-1995); see [`WalletNotifier::remove_ph_subscriptions`].
+    /// Drop a peer's coin-id subscriptions; see [`WalletNotifier::remove_ph_subscriptions`].
     pub async fn remove_coin_subscriptions(
         &self,
         peer: &Bytes32,
@@ -326,12 +319,11 @@ impl WalletNotifier {
         Ok(Some(rx))
     }
 
-    /// Register a peer's interest in `puzzle_hashes` (`RegisterForPhUpdates`). Returns the delivery receiver
-    /// on the peer's first registration (the daemon forwards it to the socket, `None` thereafter) AND the
-    /// puzzle hashes actually subscribed by THIS call — chia `PeerSubscriptions.add_puzzle_subscriptions`
-    /// returns the newly-added set with duplicates (in-request and already-subscribed) and the cap overflow
-    /// filtered out (subscriptions.py:87-119); `register_for_ph_updates` then feeds ONLY that set to the
-    /// initial-state query (full_node_api.py:1816-1830).
+    /// Register a peer's interest in `puzzle_hashes` (`RegisterForPhUpdates`). Returns the
+    /// delivery receiver on the peer's first registration (the daemon forwards it to the socket,
+    /// `None` thereafter) AND the puzzle hashes actually subscribed by THIS call — the
+    /// newly-added set with duplicates (in-request and already-subscribed) and the cap overflow
+    /// filtered out; only that set feeds the initial-state query.
     ///
     /// # Errors
     /// Returns [`WalletError::TooManySubscribers`] / [`WalletError::TooManyItems`] if a bound is exceeded.
@@ -346,8 +338,8 @@ impl WalletNotifier {
         // The per-peer cap resolves from trust: a trusted peer (node id, localhost, or trusted CIDR)
         // gets `trusted_max_subscribe_items`.
         let cap = self.trust.max_subscriptions(&peer, host);
-        // Truncate at the per-peer cap and dedup — chia `PeerSubscriptions.add_puzzle_subscriptions`
-        // (subscriptions.py:87): add until the limit is reached, drop the overflow, never error.
+        // Truncate at the per-peer cap and dedup: add until the limit is reached, drop the
+        // overflow, never error.
         let mut added = Vec::new();
         {
             let sub = reg.subs.get_mut(&peer).expect("just ensured");
@@ -366,9 +358,9 @@ impl WalletNotifier {
         Ok((rx, added))
     }
 
-    /// Register a peer's interest in `coin_ids` (`RegisterForCoinUpdates`). Returns the delivery receiver on
-    /// the peer's first registration (`None` thereafter) and the coin ids newly subscribed by this call —
-    /// chia `add_coin_subscriptions` (subscriptions.py:121).
+    /// Register a peer's interest in `coin_ids` (`RegisterForCoinUpdates`). Returns the delivery
+    /// receiver on the peer's first registration (`None` thereafter) and the coin ids newly
+    /// subscribed by this call.
     ///
     /// # Errors
     /// Returns [`WalletError::TooManySubscribers`] / [`WalletError::TooManyItems`] if a bound is exceeded.
@@ -383,7 +375,7 @@ impl WalletNotifier {
         // The per-peer cap resolves from trust: a trusted peer (node id, localhost, or trusted CIDR)
         // gets `trusted_max_subscribe_items`.
         let cap = self.trust.max_subscriptions(&peer, host);
-        // Truncate at the per-peer cap and dedup — chia `add_coin_subscriptions` (subscriptions.py:121).
+        // Truncate at the per-peer cap and dedup.
         let mut added = Vec::new();
         {
             let sub = reg.subs.get_mut(&peer).expect("just ensured");
@@ -427,15 +419,12 @@ impl WalletNotifier {
     }
 
     /// Push already-resolved coin states to every matching subscriber — the reorg ROLLBACK push.
-    /// chia's `update_wallets` delivers `WalletUpdate.coin_records = rolled_back_records +
-    /// new_states` (full_node.py:2101-2119, :1535-1571): the abandoned span's post-rollback
-    /// records reach subscribers so a coin created above the fork reads "not on chain"
-    /// (`created_height` None) and a coin spent above it reads unspent again (`spent_height`
-    /// None) — the CoinState mapping is chia `CoinRecord.coin_state` (0 index ⇒ None). Matching
-    /// is by coin id + puzzle hash; chia's hint join on this push uses only the NEW peak's hint
-    /// map (`ppp_result.hints`), which cannot name a rolled-back coin, so ph + id is the same
-    /// coverage. Delivery is the same bounded non-blocking channel as
-    /// [`WalletNotifier::on_new_peak`].
+    /// The abandoned span's post-rollback records reach subscribers so a coin created above the
+    /// fork reads "not on chain" (`created_height` None) and a coin spent above it reads unspent
+    /// again (`spent_height` None) — a 0 index maps to None. Matching is by coin id + puzzle
+    /// hash; the hint join on this push uses only the NEW peak's hint map, which cannot name a
+    /// rolled-back coin, so ph + id is the same coverage. Delivery is the same bounded
+    /// non-blocking channel as [`WalletNotifier::on_new_peak`].
     pub async fn notify_coin_states(
         &self,
         peak_hash: Bytes32,
@@ -469,13 +458,12 @@ impl WalletNotifier {
         }
     }
 
-    /// Emit a `CoinStateUpdate` to every subscriber whose interest matches a coin the new peak created or
-    /// spent — see [`WalletUpdate`] for the delta shape. A coin whose HINT equals a subscribed puzzle
-    /// hash matches too, exactly as chia joins `wallet_update.hints` on the push
-    /// (full_node.py:1544-1546, with the map built from THIS peak's `ppp_result.hints` at
-    /// full_node.py:2101-2103 — so, as in chia, the hint join covers coins hinted in this block, not
-    /// spends of older hinted coins). Delivery is non-blocking: a full/closed channel drops the update
-    /// (a slow wallet must not stall the peak path).
+    /// Emit a `CoinStateUpdate` to every subscriber whose interest matches a coin the new peak
+    /// created or spent — see [`WalletUpdate`] for the delta shape. A coin whose HINT equals a
+    /// subscribed puzzle hash matches too, with the map built from THIS peak's hints — the hint
+    /// join covers coins hinted in this block, not spends of older hinted coins. Delivery is
+    /// non-blocking: a full/closed channel drops the update (a slow wallet must not stall the
+    /// peak path).
     ///
     /// # Errors
     /// Returns [`WalletError::Store`] if resolving a spent coin fails.
@@ -491,8 +479,8 @@ impl WalletNotifier {
             store.get_coin_records(update.spent_ids).await?
         };
 
-        // chia's `coin_hints: dict[coin_id, hint]` (full_node.py:2101-2103). BlockDelta::hints pairs
-        // are (hint, created_coin_id); the engine already filters to exactly-32-byte hints.
+        // coin_id -> hint. BlockDelta::hints pairs are (hint, created_coin_id); the engine
+        // already filters to exactly-32-byte hints.
         let hint_by_coin: HashMap<Bytes32, Bytes32> = update
             .hints
             .iter()
@@ -531,8 +519,7 @@ impl WalletNotifier {
     }
 }
 
-/// One confirmed peak's wallet-visible delta — chia's `WalletUpdate` (full_node.py:117-121:
-/// `fork_height`, `peak`, `coin_records`, `hints`), borrowed from the engine's `BlockDelta`.
+/// One confirmed peak's wallet-visible delta, borrowed from the engine's `BlockDelta`.
 /// `created` are the block's addition records; `spent_ids` the removed coin ids (resolved to their
 /// now-spent records from the store inside [`WalletNotifier::on_new_peak`]); `hints` the block's
 /// create-coin `(hint, coin_id)` pairs (`BlockDelta::hints`, already filtered to 32-byte hints).
@@ -563,10 +550,9 @@ fn spent_state(cr: &CoinRecord) -> CoinState {
     }
 }
 
-/// The acquire failed because active + waiting slots were all taken — chia
-/// `LimitedSemaphoreFullError` (chia/util/limited_semaphore.py:13). The caller REJECTS the request
-/// (chia sends `RejectAdditionsRequest` / `RejectRemovalsRequest`, full_node_api.py:1450, 1530) —
-/// it never queues beyond the waiting bound.
+/// The acquire failed because active + waiting slots were all taken. The caller REJECTS the
+/// request (`RejectAdditionsRequest` / `RejectRemovalsRequest`) — it never queues beyond the
+/// waiting bound.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LimitedSemaphoreFull;
 
@@ -578,23 +564,22 @@ impl fmt::Display for LimitedSemaphoreFull {
 
 impl Error for LimitedSemaphoreFull {}
 
-/// chia `LimitedSemaphore` (chia/util/limited_semaphore.py): at most `active_limit` holders run
-/// concurrently, at most `waiting_limit` more may queue, and an acquire beyond active + waiting fails
-/// IMMEDIATELY with [`LimitedSemaphoreFull`] instead of queueing without bound. The full node guards
-/// its heavy wallet-serve DB work with one of these — `wallet_sync_api_sem =
-/// LimitedSemaphore.create(active_limit=2, waiting_limit=20)` on `request_additions` /
-/// `request_removals` (full_node_api.py:166, 1397, 1461) — so a public wallet peer cannot pile up
-/// unbounded concurrent block-delta scans behind the rate limiter's per-message budget.
+/// A bounded semaphore: at most `active_limit` holders run concurrently, at most `waiting_limit`
+/// more may queue, and an acquire beyond active + waiting fails IMMEDIATELY with
+/// [`LimitedSemaphoreFull`] instead of queueing without bound. The full node guards its heavy
+/// wallet-serve DB work with one of these (active_limit=2, waiting_limit=20 on
+/// `request_additions` / `request_removals`) so a public wallet peer cannot pile up unbounded
+/// concurrent block-delta scans behind the rate limiter's per-message budget.
 pub struct LimitedSemaphore {
-    // The active-holder bound (chia's inner `asyncio.Semaphore(active_limit)`).
+    // The active-holder bound.
     active: Semaphore,
-    // Remaining active + waiting slots (chia `_available_count`). Checked-and-decremented on acquire,
-    // restored when the permit drops; an acquire seeing no slot restores and fails without waiting.
+    // Remaining active + waiting slots. Checked-and-decremented on acquire, restored when the
+    // permit drops; an acquire seeing no slot restores and fails without waiting.
     available: AtomicI64,
 }
 
 /// An acquired [`LimitedSemaphore`] slot. Dropping it releases the active permit and frees the
-/// combined active/waiting slot (chia's `finally: self._available_count += 1`).
+/// combined active/waiting slot.
 pub struct LimitedPermit<'a> {
     _permit: SemaphorePermit<'a>,
     available: &'a AtomicI64,
@@ -607,7 +592,6 @@ impl Drop for LimitedPermit<'_> {
 }
 
 impl LimitedSemaphore {
-    /// chia `LimitedSemaphore.create(active_limit, waiting_limit)` (limited_semaphore.py:24).
     #[must_use]
     pub fn new(active_limit: usize, waiting_limit: usize) -> Self {
         Self {
@@ -619,7 +603,7 @@ impl LimitedSemaphore {
     }
 
     /// Take a slot: waits (bounded by `waiting_limit`) for an active permit, or fails immediately
-    /// when active + waiting are exhausted — chia `LimitedSemaphore.acquire` (limited_semaphore.py:31).
+    /// when active + waiting are exhausted.
     ///
     /// # Errors
     /// Returns [`LimitedSemaphoreFull`] when no active-or-waiting slot is free.

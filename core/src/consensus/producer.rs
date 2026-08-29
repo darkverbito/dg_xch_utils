@@ -28,20 +28,18 @@ use crate::traits::SizedBytes;
 use crate::utils::hash_256;
 use dg_xch_serialize::{ChiaProtocolVersion, ChiaSerialize};
 
-/// chia's `G2Element()` default: the BLS12-381 G2 point at infinity, serialized *compressed* as `0xc0`
-/// followed by 95 zero bytes. `chia/consensus/block_creation.py::create_foliage` puts exactly this in
-/// `TransactionsInfo.aggregated_signature` when a transaction block carries no spend bundle
-/// (`new_block_gen.signature if new_block_gen else G2Element()`).
+/// The BLS12-381 G2 point at infinity, serialized *compressed* as `0xc0` followed by 95
+/// zero bytes — the `TransactionsInfo.aggregated_signature` for a transaction block
+/// carrying no spend bundle.
 ///
 /// NOTE — parity trap: this is NOT `Bytes96::default()` (all zeros). An all-zero G2 is not a valid
-/// point encoding, and our own producer/validator boundary treats infinity as `0xc0..`: see
+/// point encoding, and the producer/validator boundary treats infinity as `0xc0..`: see
 /// `block_generator.rs::validate_block_aggregate_signature`, which accepts the empty-signature block
-/// only when `aggregated_signature == [0xc0, 0x00 * 95]`. (`spend_bundle.rs::aggregate` uses
-/// `Bytes96::default()` for its empty case — that is a dg_xch shortcut we deliberately do not copy.)
+/// only when `aggregated_signature == [0xc0, 0x00 * 95]`.
 ///
-/// This is also the correct PLACEHOLDER for the two foliage plot signatures at declare time — chia's
-/// `get_plot_sig` returns `G2Element()` (this value) for the foliage hashes before the farmer signs
-/// them; the real signatures arrive on `SignedValues`. See [`FarmerSignatures`].
+/// This is also the correct PLACEHOLDER for the two foliage plot signatures at declare time,
+/// before the farmer signs them; the real signatures arrive on `SignedValues`.
+/// See [`FarmerSignatures`].
 #[must_use]
 pub fn g2_infinity() -> Bytes96 {
     let mut buf = [0u8; 96];
@@ -49,36 +47,23 @@ pub fn g2_infinity() -> Bytes96 {
     Bytes96::new(buf)
 }
 
-/// DIVERGENCE (consensus-irrelevant): chia derives foliage `extension_data` as
-/// `bytes32(random.Random(seed).randint(0, 100_000_000).to_bytes(32, "big"))` — Python's
-/// Mersenne-Twister PRNG (`chia/consensus/block_creation.py::create_foliage`). We do NOT replicate
-/// MT19937 + Python's seeding/`_randbelow` rejection sampling here: it is a large, error-prone port
-/// for a value that no validator recomputes. `extension_data` is farmer-chosen entropy whose only
-/// consensus commitment is via the (increment-4) plot signature over `FoliageBlockData::hash`; any
-/// 32-byte value is valid. We derive it deterministically as `sha256(seed)`. A block we produce is
-/// fully consensus-legal; it simply will not be byte-identical to a chia block produced from the same
-/// seed. Revisit only if shared-seed bit-reproduction against upstream chia is ever required.
+/// `extension_data` is farmer-chosen entropy whose only consensus commitment is via the
+/// plot signature over `FoliageBlockData::hash`; any 32-byte value is valid. It is derived
+/// deterministically as `sha256(seed)`.
 #[must_use]
 fn extension_data_from_seed(seed: &[u8]) -> Bytes32 {
     Bytes32::new(hash_256(seed))
 }
 
-/// The four BLS plot signatures the FARMER supplies for a block it declared — chia's remote-signing
-/// seam. In the live node flow the producer never holds the plot secret key: the two signage-point
+/// The four BLS plot signatures the FARMER supplies for a block it declared. In the live
+/// node flow the producer never holds the plot secret key: the two signage-point
 /// signatures arrive on the `DeclareProofOfSpace` message
-/// (`challenge_chain_sp_signature`/`reward_chain_sp_signature`), and the two foliage signatures arrive
-/// later on the `SignedValues` reply, after the node sends the farmer the two foliage hashes to sign
-/// (`RequestSignedValues`). This mirrors chia `full_node_api.declare_proof_of_space`'s `get_plot_sig`
-/// closure — which returns `request.challenge_chain_sp_signature` for `cc_sp_hash`,
-/// `request.reward_chain_sp_signature` for `rc_sp_hash`, and `G2Element()` (the infinity placeholder,
-/// [`g2_infinity`], NOT zeros) for the two foliage hashes at declare time — and then the
-/// `signed_values` handler's `candidate.foliage.replace(foliage_block_data_signature=...,
-/// foliage_transaction_block_signature=...)` splice
-/// (chia/full_node/full_node_api.py::declare_proof_of_space + signed_values).
+/// (`challenge_chain_sp_signature`/`reward_chain_sp_signature`), and the two foliage
+/// signatures arrive later on the `SignedValues` reply, after the node sends the farmer
+/// the two foliage hashes to sign (`RequestSignedValues`).
 ///
 /// `foliage_transaction_block_signature` is meaningful only for a transaction block
-/// (`is_transaction_block == true`); it is ignored otherwise, exactly as chia only splices it
-/// `if candidate.is_transaction_block()`.
+/// (`is_transaction_block == true`); it is ignored otherwise.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub struct FarmerSignatures {
     pub challenge_chain_sp_signature: Bytes96,
@@ -87,17 +72,15 @@ pub struct FarmerSignatures {
     pub foliage_transaction_block_signature: Bytes96,
 }
 
-/// chia `block_creation.py::calculate_infusion_point_total_iters` (added in CHIA-4170/4168,
-/// commit 216331028): the candidate's total iters at its infusion point. When the signage point is in
-/// the overflow region of its sub-slot (`sp_iters > ip_iters`, i.e. the SP is past where the infusion
-/// lands so infusion spills into the NEXT sub-slot) chia adds one `sub_slot_iters`; otherwise the
-/// infusion is in the same sub-slot.
+/// The candidate's total iters at its infusion point. When the signage point is in the
+/// overflow region of its sub-slot (`sp_iters > ip_iters`, i.e. the SP is past where the
+/// infusion lands so infusion spills into the NEXT sub-slot) one `sub_slot_iters` is
+/// added; otherwise the infusion is in the same sub-slot.
 ///
-/// This is the value dg_xch's [`create_unfinished_block`] takes as `infusion_point_total_iters` and
-/// writes verbatim into `RewardChainBlockUnfinished.total_iters` — post-216331028 chia passes this in
-/// rather than recomputing `sub_slot_start_total_iters + ip_iters + (sub_slot_iters if overflow)`
-/// inside `create_unfinished_block`. The caller (the declare handler) must compute it here so the
-/// overflow case is handled at exactly one place. All sums are `u128` (chia `uint128`).
+/// This is the value [`create_unfinished_block`] takes as `infusion_point_total_iters` and
+/// writes verbatim into `RewardChainBlockUnfinished.total_iters`. The caller (the declare
+/// handler) must compute it here so the overflow case is handled at exactly one place.
+/// All sums are `u128`.
 #[must_use]
 pub fn calculate_infusion_point_total_iters(
     sub_slot_start_total_iters: u128,
@@ -115,17 +98,14 @@ pub fn calculate_infusion_point_total_iters(
         }
 }
 
-/// A single reward claim incorporated into a transaction block: the pool + farmer coins minted for one
-/// prior block. Mirrors the per-block inputs of chia's reward-claim walk in
-/// `chia/consensus/block_creation.py::create_foliage` (`create_pool_coin` / `create_farmer_coin` per
-/// `curr` block record).
+/// A single reward claim incorporated into a transaction block: the pool + farmer coins
+/// minted for one prior block.
 ///
-/// In chia these come from walking the block-record store backwards from the previous block to the
-/// most recent transaction block (and the non-transaction blocks between it and the one before). dg_xch
-/// has no block store yet (net-new, later increment), so the caller supplies the already-walked list.
-/// `fees` is the claimed block's own fee total: chia adds it to the farmer reward for the *previous
-/// transaction block only* (`calculate_base_farmer_reward(curr.height) + curr.fees`) and passes `0`
-/// (implicitly) for the skipped non-transaction blocks in the inner loop. Pass `fees == 0` for those.
+/// The claims come from walking the block records backwards from the previous block to the
+/// most recent transaction block (and the non-transaction blocks between it and the one
+/// before); the caller supplies the already-walked list. `fees` is the claimed block's own
+/// fee total, added to the farmer reward for the *previous transaction block only* — pass
+/// `fees == 0` for the skipped non-transaction blocks.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub struct RewardBlockClaim {
     pub height: u32,
@@ -134,9 +114,8 @@ pub struct RewardBlockClaim {
     pub fees: u64,
 }
 
-/// The transaction payload of a block being produced. Mirrors the fields of chia's `NewBlockGenerator`
-/// consumed by `create_foliage` (`.program`, `.block_refs`, `.additions`, `.removals`, `.signature`,
-/// `.cost`). `additions`/`removals` are the SPEND coins only — reward coins are added separately from
+/// The transaction payload of a block being produced.
+/// `additions`/`removals` are the SPEND coins only — reward coins are added separately from
 /// [`RewardBlockClaim`]s. When this is `None` (no spend bundle), `create_foliage` still emits a
 /// `TransactionsInfo` for a transaction block, with the generator-root / refs-root / signature / cost
 /// defaults documented in [`create_foliage`].
@@ -150,7 +129,7 @@ pub struct BlockTransactions {
     pub cost: u64,
 }
 
-/// The foliage-assembly output, mirroring chia `create_foliage`'s return tuple
+/// The foliage-assembly output:
 /// `(Foliage, FoliageTransactionBlock | None, TransactionsInfo | None)`. The two trailing members are
 /// `Some` iff `is_transaction_block`.
 #[derive(Clone, Debug)]
@@ -160,9 +139,9 @@ pub struct FoliageResult {
     pub transactions_info: Option<TransactionsInfo>,
 }
 
-/// chia `block_creation.py::compute_block_fee`: block fee = Σ(removal amounts) − Σ(addition amounts).
+/// Block fee = Σ(removal amounts) − Σ(addition amounts).
 /// Sums are taken in `u128` (a block holds ≤ `MAX_SPENDS_PER_BLOCK` coins, each a `u64`, so the sum
-/// cannot overflow `u128`). Errors — as chia raises `"... does not fit into uint64"` — when the
+/// cannot overflow `u128`). Errors when the
 /// additions exceed the removals (a would-be minting block) or the fee exceeds `u64`.
 ///
 /// # Errors
@@ -176,44 +155,41 @@ pub fn compute_block_fee(additions: &[Coin], removals: &[Coin]) -> Result<u64, C
     u64::try_from(fee).map_err(|_| ChiaError::InvalidBlockFeeAmount)
 }
 
-/// Assemble the foliage + reward coins for a block being produced — the reward-coin/foliage portion of
-/// Phase 4 (increment 2), mirroring `chia/consensus/block_creation.py::create_foliage`. Given the
+/// Assemble the foliage + reward coins for a block being produced. Given the
 /// unfinished reward block's hash, the reward claims, and (optionally) a transaction payload, this
 /// builds:
 ///   * the pool + farmer reward coins for every [`RewardBlockClaim`] (via
 ///     `coinbase::{create_pool_coin, create_farmer_coin}` + `block_rewards::calculate_*`),
 ///   * [`FoliageBlockData`],
-///   * [`Foliage`] with real BLS plot signatures (increment 4): `foliage_block_data_signature` over
+///   * [`Foliage`] with real BLS plot signatures: `foliage_block_data_signature` over
 ///     `foliage_data.get_hash()` and — for a transaction block — `foliage_transaction_block_signature`
-///     over `foliage_transaction_block.get_hash()`, both produced by `plot_signer` (chia's
-///     `get_plot_signature` callback),
+///     over `foliage_transaction_block.get_hash()`, both produced by `plot_signer`,
 ///   * for a transaction block, [`TransactionsInfo`] and [`FoliageTransactionBlock`].
 ///
-/// This STOPS before assembling the `RewardChainBlockUnfinished` / `UnfinishedBlock` (increment 3): it
-/// therefore takes `reward_block_unfinished_hash` (chia's `reward_block_unfinished.get_hash()`)
-/// directly rather than the whole object. Two more inputs are pre-resolved for the same reason — chia
-/// derives them from the block-record store, which dg_xch does not have yet:
-///   * `is_transaction_block` — chia's `get_prev_transaction_block(...)` result (always `true` for
+/// This STOPS before assembling the `RewardChainBlockUnfinished` / `UnfinishedBlock`: it
+/// therefore takes `reward_block_unfinished_hash`
+/// directly rather than the whole object. Two more inputs are pre-resolved for the same reason,
+/// being derived from the block records:
+///   * `is_transaction_block` — the previous-transaction-block result (always `true` for
 ///     genesis);
-///   * `prev_block_hash` / `prev_transaction_block_hash` — chia's `GENESIS_CHALLENGE` at height 0,
+///   * `prev_block_hash` / `prev_transaction_block_hash` — the genesis challenge at height 0,
 ///     else the respective ancestor's `header_hash`.
 ///
-/// Field order and hashing exactly mirror chia so the resulting `foliage_transaction_block_hash` /
+/// Field order and hashing are fixed so the resulting `foliage_transaction_block_hash` /
 /// `transactions_info_hash` match: reward coins → `tx_additions` → `additions_root`/`removals_root`
-/// (reusing the proven `block_generator::canonical_*` merkle helpers) → `TransactionsInfo` →
+/// (reusing the `block_generator::canonical_*` merkle helpers) → `TransactionsInfo` →
 /// `FoliageTransactionBlock` → its hash feeding `Foliage`.
 ///
-/// The BIP158 transaction filter is built internally via [`chia_block_filter`] (chia's `PyBIP158` with
-/// its fixed `{k0:0, k1:0, P:20, M:1<<20}` params), so `filter_hash = std_hash(chia_block_filter(...))`
-/// matches chia for both the empty (genesis / no-tx-content) case and non-empty transaction filters.
+/// The BIP158 transaction filter is built internally via [`chia_block_filter`], so
+/// `filter_hash = std_hash(chia_block_filter(...))` for both the empty (genesis /
+/// no-tx-content) case and non-empty transaction filters.
 ///
-/// `plot_public_key` is the proof-of-space's aggregate plot public key (chia's
-/// `reward_block_unfinished.proof_of_space.plot_public_key`), forwarded to `plot_signer` at each
-/// signing point exactly as chia forwards it to `get_plot_signature`.
+/// `plot_public_key` is the proof-of-space's aggregate plot public key
+/// (`reward_block_unfinished.proof_of_space.plot_public_key`), forwarded to `plot_signer` at each
+/// signing point.
 ///
-/// `plot_signer` is chia's injected `get_plot_signature: Callable[[bytes32, G1Element], G2Element]`:
-/// given a 32-byte message and the plot public key, it returns the BLS G2 element (AugScheme) plot signature.
-/// The producer never holds the plot secret key — the signer seam mirrors chia's callback so the
+/// `plot_signer`: given a 32-byte message and the plot public key, it returns the BLS G2
+/// element (AugScheme) plot signature. The producer never holds the plot secret key — the
 /// farmer/harvester owns the key material (see the module note on taproot/pool aggregation).
 ///
 /// # Errors
@@ -222,8 +198,8 @@ pub fn compute_block_fee(additions: &[Coin], removals: &[Coin]) -> Result<u64, C
 /// `FoliageBlockData` / `FoliageTransactionBlock` fail to serialize for hashing (the plot-signature
 /// message); and the propagated errors of
 /// [`compute_block_fee`]/`transactions_*_root`/[`transactions_info_hash`].
-/// How the two foliage plot signatures are produced. `Signer` is the increment-4 round-trip model
-/// (chia's `get_plot_signature` callback) used by tests and the local-signing path; `Precomputed`
+/// How the two foliage plot signatures are produced. `Signer` is the local-signing
+/// callback model used by tests and the local-signing path; `Precomputed`
 /// is the live-node farmer-supplied model — the node inserts signatures it received from the farmer
 /// (placeholders at declare time, real ones spliced in at `signed_values`), never holding the plot
 /// key. See [`FarmerSignatures`].
@@ -238,7 +214,7 @@ enum FoliageSigning<'a> {
     },
 }
 
-/// [`create_foliage`] with the increment-4 local `plot_signer` (chia `get_plot_signature`). See the
+/// [`create_foliage`] with a local `plot_signer`. See the
 /// module-level docs on the signer seam; forwards to [`create_foliage_inner`] with
 /// [`FoliageSigning::Signer`].
 ///
@@ -284,8 +260,8 @@ pub fn create_foliage(
 }
 
 /// [`create_foliage`] with FARMER-supplied foliage signatures instead of a local signer — the live
-/// node path (chia `full_node_api` builds the candidate foliage with `get_plot_sig` returning
-/// `G2Element()` placeholders, then `signed_values` splices the real signatures in). Pass
+/// node path (the candidate foliage is built with infinity placeholders, then
+/// `signed_values` splices the real signatures in). Pass
 /// [`g2_infinity`] placeholders at declare time; the real values are spliced later via
 /// [`splice_farmer_foliage_signatures`] (or passed here directly when both are already known).
 /// `foliage_transaction_block_signature` is used only when `is_transaction_block`.
@@ -351,12 +327,12 @@ fn create_foliage_inner(
     seed: &[u8],
     signing: &FoliageSigning,
 ) -> Result<FoliageResult, ChiaError> {
-    // chia: extension_data used to make blocks differ by header hash. See divergence note on the fn.
+    // extension_data makes blocks differ by header hash; see the note on the fn
     let extension_data = extension_data_from_seed(seed);
 
-    // chia: FoliageBlockData(reward_block_unfinished.get_hash(), pool_target, pool_target_signature,
-    // farmer_reward_puzzlehash, extension_data). The plot signature over foliage_data.get_hash() is
-    // increment 4; it is not a field of FoliageBlockData itself.
+    // FoliageBlockData(reward_block_unfinished.get_hash(), pool_target, pool_target_signature,
+    // farmer_reward_puzzlehash, extension_data). The plot signature over foliage_data.get_hash()
+    // is not a field of FoliageBlockData itself.
     let foliage_data = FoliageBlockData {
         unfinished_reward_block_hash: reward_block_unfinished_hash,
         pool_target,
@@ -365,10 +341,9 @@ fn create_foliage_inner(
         extension_data,
     };
 
-    // chia: foliage_block_data_signature = get_plot_signature(foliage_data.get_hash(),
-    // reward_block_unfinished.proof_of_space.plot_public_key). Always signed (tx block or not). In the
-    // Precomputed (farmer-supplied) path this is the signature the farmer returned — or its
-    // g2_infinity() placeholder while awaiting SignedValues.
+    // foliage_block_data_signature over foliage_data.get_hash() is always signed (tx block
+    // or not). In the Precomputed (farmer-supplied) path this is the signature the farmer
+    // returned — or its g2_infinity() placeholder while awaiting SignedValues.
     let foliage_block_data_hash = foliage_data
         .hash()
         .map_err(|_| ChiaError::InvalidFoliageBlockHash)?;
@@ -389,7 +364,7 @@ fn create_foliage_inner(
     let mut foliage_transaction_block_signature: Option<Bytes96> = None;
 
     if is_transaction_block {
-        // chia: reward_claims_incorporated += [pool_coin, farmer_coin] per walked block, only when
+        // reward_claims_incorporated += [pool_coin, farmer_coin] per walked block, only when
         // height > 0 (the genesis transaction block claims nothing). Preserve the [pool, farmer] order.
         let mut reward_claims_incorporated: Vec<Coin> = Vec::new();
         if height > 0 {
@@ -400,8 +375,7 @@ fn create_foliage_inner(
                     calculate_pool_reward(claim.height),
                     constants.genesis_challenge,
                 );
-                // chia: uint64(calculate_base_farmer_reward(curr.height) + curr.fees). uint64(...)
-                // would raise on overflow; we mirror that with a checked add.
+                // calculate_base_farmer_reward(curr.height) + curr.fees, overflow-checked.
                 let farmer_amount = calculate_base_farmer_reward(claim.height)
                     .checked_add(claim.fees)
                     .ok_or(ChiaError::BadFarmerCoinAmount)?;
@@ -416,8 +390,8 @@ fn create_foliage_inner(
             }
         }
 
-        // chia builds tx_additions (reward coins first, then spend additions) and byte_array_tx (each
-        // addition's puzzle_hash, then each removal's coin name) in this exact order.
+        // tx_additions (reward coins first, then spend additions) and byte_array_tx (each
+        // addition's puzzle_hash, then each removal's coin name) are built in this exact order.
         let mut tx_additions: Vec<Coin> = Vec::with_capacity(reward_claims_incorporated.len());
         let mut tx_removal_names: Vec<Bytes32> = Vec::new();
         let mut byte_array_tx: Vec<Vec<u8>> = Vec::new();
@@ -426,9 +400,9 @@ fn create_foliage_inner(
             byte_array_tx.push(coin.puzzle_hash.bytes().to_vec());
         }
 
-        // chia TransactionsInfo defaults when new_block_gen is None:
-        //   generator_hash = bytes32.zeros; generator_refs_hash = bytes32([1] * 32);
-        //   signature = G2Element() (infinity); cost = 0; spend_bundle_fees = 0.
+        // TransactionsInfo defaults when there is no generator:
+        //   generator_hash = zeros; generator_refs_hash = [1; 32];
+        //   signature = infinity; cost = 0; spend_bundle_fees = 0.
         let (generator_root, generator_refs_root, aggregated_signature, cost, spend_bundle_fees) =
             if let Some(tx) = transactions {
                 for coin in &tx.additions {
@@ -441,10 +415,9 @@ fn create_foliage_inner(
                     byte_array_tx.push(cname.bytes().to_vec());
                 }
                 let generator_root = transactions_generator_root(&tx.program);
-                // transactions_generator_refs_root returns bytes32([1]*32) for an empty list, matching
-                // chia's `generator_refs_hash = bytes32([1] * 32)` default.
+                // transactions_generator_refs_root returns [1; 32] for an empty list.
                 let generator_refs_root = transactions_generator_refs_root(&tx.block_refs)?;
-                // chia: spend_bundle_fees = compute_fees(new_block_gen.additions, new_block_gen.removals)
+                // spend_bundle_fees = compute_block_fee(additions, removals)
                 let fees = compute_block_fee(&tx.additions, &tx.removals)?;
                 (
                     generator_root,
@@ -463,13 +436,13 @@ fn create_foliage_inner(
                 )
             };
 
-        // chia: additions_root over merkle items (puzzle_hash, hash_coin_ids(coin_ids)); removals_root
-        // over the removal coin names. Both reuse block_generator's canonical_* helpers verbatim.
+        // additions_root over merkle items (puzzle_hash, hash_coin_ids(coin_ids)); removals_root
+        // over the removal coin names. Both reuse block_generator's canonical_* helpers.
         let additions_root =
             canonical_additions_root(&tx_additions).map_err(|_| ChiaError::BadAdditionRoot)?;
         let removals_root = canonical_removals_root(&tx_removal_names);
 
-        // chia: filter_hash = std_hash(PyBIP158(byte_array_tx).GetEncoded()).
+        // filter_hash = std_hash(chia_block_filter(byte_array_tx))
         let encoded = chia_block_filter(&byte_array_tx);
         let filter_hash = Bytes32::new(hash_256(encoded));
 
@@ -490,9 +463,7 @@ fn create_foliage_inner(
             removals_root,
             transactions_info_hash: transactions_info_hash(&info)?,
         };
-        // chia: foliage_transaction_block_hash = foliage_transaction_block.get_hash();
-        // foliage_transaction_block_signature = get_plot_signature(foliage_transaction_block_hash,
-        // proof_of_space.plot_public_key). The hash is computed once and reused as the signing message,
+        // foliage_transaction_block_hash is computed once and reused as the signing message,
         // so the (hash Some) == (signature Some) invariant is established atomically here.
         let ftb_hash = ftb.hash().map_err(|_| ChiaError::InvalidFoliageBlockHash)?;
         foliage_transaction_block_hash = Some(ftb_hash);
@@ -510,11 +481,10 @@ fn create_foliage_inner(
         transactions_info = Some(info);
     }
 
-    // chia: Foliage(prev_block_hash, reward_block_unfinished.get_hash(), foliage_data,
+    // Foliage(prev_block_hash, reward_block_unfinished.get_hash(), foliage_data,
     // foliage_block_data_signature, foliage_transaction_block_hash, foliage_transaction_block_signature).
-    // Both signatures are real farmer plot signatures (increment 4). chia's invariant
-    // `(ftb_hash is None) == (ftb_signature is None)` holds because both are set together inside the
-    // is_transaction_block branch above and both remain None otherwise.
+    // The invariant `(ftb_hash is None) == (ftb_signature is None)` holds because both are set
+    // together inside the is_transaction_block branch above and both remain None otherwise.
     debug_assert_eq!(
         foliage_transaction_block_hash.is_some(),
         foliage_transaction_block_signature.is_some(),
@@ -536,44 +506,34 @@ fn create_foliage_inner(
     })
 }
 
-/// Assemble a full [`UnfinishedBlock`] from the signage-point state plus the foliage payload — Phase 4
-/// (increment 3), mirroring `chia/consensus/block_creation.py::create_unfinished_block`. This builds the
+/// Assemble a full [`UnfinishedBlock`] from the signage-point state plus the foliage payload.
+/// This builds the
 /// [`RewardChainBlockUnfinished`] from the proof-of-space and the challenge-/reward-chain signage-point
 /// VDFs, calls [`create_foliage`] with that reward block's hash, and packs the result into an
 /// [`UnfinishedBlock`] (the infusion-point VDFs are filled later by `unfinished_block_to_full_block`).
 ///
-/// Parameters map onto chia's `create_unfinished_block` as follows:
-///   * `infusion_point_total_iters` — chia's `infusion_point_total_iters`, which becomes the reward
-///     block's `total_iters` (NOT `total_iters_sp = sub_slot_start_total_iters + sp_iters`, which chia
-///     only forwards into `create_foliage` and which our increment-2 `create_foliage` does not consume);
-///   * `pos_ss_cc_challenge_hash` — chia's `slot_cc_challenge`;
-///   * `challenge_chain_sp_vdf` / `reward_chain_sp_vdf` — chia's `signage_point.cc_vdf` / `.rc_vdf`
+///   * `infusion_point_total_iters` becomes the reward block's `total_iters`;
+///   * `pos_ss_cc_challenge_hash` is the slot's cc challenge;
+///   * `challenge_chain_sp_vdf` / `reward_chain_sp_vdf` are the signage point's cc/rc VDFs
 ///     (`Option`: `None` at a sub-slot's first signage point);
-///   * `challenge_chain_sp_proof` / `reward_chain_sp_proof` — chia's `signage_point.cc_proof` /
-///     `.rc_proof`, carried through unchanged into the `UnfinishedBlock`;
-///   * `finished_sub_slots` — chia's `finished_sub_slots_input` (already copied by the caller).
+///   * `challenge_chain_sp_proof` / `reward_chain_sp_proof` are carried through unchanged into
+///     the `UnfinishedBlock`;
+///   * `finished_sub_slots` is already copied by the caller.
 ///
 /// The remaining parameters (`height` .. `plot_signer`) are forwarded verbatim to [`create_foliage`];
-/// see its docs for the block-store-derived inputs dg_xch pre-resolves at the call site.
+/// see its docs for the block-store-derived inputs pre-resolved at the call site.
 ///
-/// Real farmer signing (increment 4): chia derives the two signage-point signatures via
-/// `get_plot_signature(cc_sp_hash / rc_sp_hash, proof_of_space.plot_public_key)` and asserts
-/// `AugSchemeMPL.verify(plot_public_key, cc_sp_hash, cc_sp_signature)`. Here `plot_signer` (chia's
-/// `get_plot_signature`) produces `challenge_chain_sp_signature` over `cc_sp_hash` and
+/// `plot_signer` produces `challenge_chain_sp_signature` over `cc_sp_hash` and
 /// `reward_chain_sp_signature` over `rc_sp_hash`, and the same signer is forwarded into
 /// [`create_foliage`] for the two foliage signatures. `proof_of_space.plot_public_key` is the G1 key
-/// handed to the signer at every point (matching chia).
+/// handed to the signer at every point.
 ///
-/// `cc_sp_hash` / `rc_sp_hash` are chia's signage-point message hashes, pre-resolved by the caller —
-/// consistent with how increments 2-3 pre-resolve block-store-derived inputs (chia's `SignagePoint`
-/// "testing mode" recompute branch, lines ~347-364, and the non-testing sub-slot/genesis/ancestor
-/// derivation both live in the caller, since dg_xch has no block store yet). In testing mode the caller
+/// `cc_sp_hash` / `rc_sp_hash` are the signage-point message hashes, pre-resolved by the caller.
+/// In testing mode the caller
 /// sets `cc_sp_hash = signage_point.cc_vdf.output.get_hash()` and
 /// `rc_sp_hash = signage_point.rc_vdf.output.get_hash()`; on the real path it derives `rc_sp_hash` from
 /// the last finished sub-slot's reward chain (or the genesis challenge / the ancestor's reward-slot
-/// hash) and `cc_sp_hash = slot_cc_challenge`. The VDFs still enter the reward block exactly as supplied
-/// (the chia `signage_point = SignagePoint(None, None, None, None)` null-out on the non-testing path is
-/// likewise a caller responsibility).
+/// hash) and `cc_sp_hash = slot_cc_challenge`. The VDFs enter the reward block exactly as supplied.
 ///
 /// # Errors
 /// [`ChiaError::InvalidRewardBlockHash`] if the assembled [`RewardChainBlockUnfinished`] fails to
@@ -605,16 +565,12 @@ pub fn create_unfinished_block(
     seed: &[u8],
     plot_signer: impl Fn(Bytes32, &Bytes48) -> Bytes96,
 ) -> Result<UnfinishedBlock, ChiaError> {
-    // chia: cc_sp_signature = get_plot_signature(cc_sp_hash, proof_of_space.plot_public_key);
-    //       rc_sp_signature = get_plot_signature(rc_sp_hash, proof_of_space.plot_public_key).
-    // plot_public_key is captured (Copy) before proof_of_space is moved into the reward block below, and
-    // is also forwarded to create_foliage for the two foliage plot signatures.
+    // plot_public_key is captured (Copy) before proof_of_space is moved into the reward block below,
+    // and is also forwarded to create_foliage for the two foliage plot signatures.
     let plot_public_key = proof_of_space.plot_public_key;
     let challenge_chain_sp_signature = plot_signer(cc_sp_hash, &plot_public_key);
     let reward_chain_sp_signature = plot_signer(rc_sp_hash, &plot_public_key);
 
-    // chia: RewardChainBlockUnfinished(infusion_point_total_iters, signage_point_index, slot_cc_challenge,
-    // proof_of_space, signage_point.cc_vdf, cc_sp_signature, signage_point.rc_vdf, rc_sp_signature).
     // Field order mirrors the model reward_chain_block_unfinished.rs exactly.
     let reward_chain_block = RewardChainBlockUnfinished {
         total_iters: infusion_point_total_iters,
@@ -627,8 +583,7 @@ pub fn create_unfinished_block(
         reward_chain_sp_signature,
     };
 
-    // chia calls create_foliage(constants, rc_block, ...), which internally uses rc_block.get_hash().
-    // Our increment-2 create_foliage takes the hash directly, so compute it once here and forward it
+    // create_foliage takes the reward block's hash directly, so compute it once here and forward it
     // (borrow before the reward block is moved into the UnfinishedBlock below).
     let reward_block_unfinished_hash = reward_chain_block
         .hash()
@@ -652,17 +607,13 @@ pub fn create_unfinished_block(
         plot_signer,
     )?;
 
-    // chia: transactions_generator = new_block_gen.program if new_block_gen else None;
-    //       transactions_generator_ref_list = new_block_gen.block_refs if new_block_gen else [].
-    // The UnfinishedBlock model types the ref list as a bare Vec<u32>, matching chia's plain
-    // List[uint32] (never None; `[]` when empty) — see blockchain/full_block.rs for the same shape.
+    // The UnfinishedBlock model types the ref list as a bare Vec<u32> (never None; empty when
+    // absent) — see blockchain/full_block.rs for the same shape.
     let (transactions_generator, transactions_generator_ref_list) = match transactions {
         Some(tx) => (Some(tx.program.clone()), tx.block_refs.clone()),
         None => (None, Vec::new()),
     };
 
-    // chia: UnfinishedBlock(finished_sub_slots, rc_block, signage_point.cc_proof, signage_point.rc_proof,
-    // foliage, foliage_transaction_block, transactions_info, transactions_generator, ref_list).
     Ok(UnfinishedBlock {
         finished_sub_slots,
         reward_chain_block,
@@ -677,11 +628,8 @@ pub fn create_unfinished_block(
 }
 
 /// [`create_unfinished_block`] with FARMER-supplied signatures instead of a local `plot_signer` — the
-/// live-node emit path (Phase 4 increment 5). Mirrors `chia/full_node/full_node_api.py`'s
-/// `declare_proof_of_space`, which builds the candidate via `create_unfinished_block` passing a
-/// `get_plot_sig` closure that returns the SP signatures FROM THE DECLARE MESSAGE
-/// (`request.challenge_chain_sp_signature` for `cc_sp_hash`, `request.reward_chain_sp_signature` for
-/// `rc_sp_hash`) and `G2Element()` placeholders for the two foliage hashes.
+/// live-node emit path: the SP signatures come FROM THE DECLARE MESSAGE and the two foliage
+/// signatures are infinity placeholders at declare time.
 ///
 /// The node never holds the plot key, so:
 ///   * `farmer_sigs.challenge_chain_sp_signature` / `.reward_chain_sp_signature` are taken verbatim
@@ -693,7 +641,7 @@ pub fn create_unfinished_block(
 ///
 /// After building the placeholder candidate, the caller reads the two hashes the farmer must sign from
 /// the returned block: `block.foliage.foliage_block_data.hash()` and
-/// `block.foliage.foliage_transaction_block_hash` (chia's `RequestSignedValues` payload).
+/// `block.foliage.foliage_transaction_block_hash` (the `RequestSignedValues` payload).
 ///
 /// # Errors
 /// [`ChiaError::InvalidRewardBlockHash`] if the reward block fails to hash, plus the propagated errors
@@ -723,10 +671,9 @@ pub fn create_unfinished_block_with_sigs(
     seed: &[u8],
     farmer_sigs: FarmerSignatures,
 ) -> Result<UnfinishedBlock, ChiaError> {
-    // chia get_plot_sig: cc_sp_hash -> request.challenge_chain_sp_signature; rc_sp_hash ->
-    // request.reward_chain_sp_signature. These come from the DeclareProofOfSpace message, NOT a signer.
-    // Unlike the signer path, cc_sp_hash / rc_sp_hash are not needed here — the SP signatures are already
-    // resolved — so this sibling drops those two params.
+    // The SP signatures come from the DeclareProofOfSpace message, NOT a signer.
+    // Unlike the signer path, cc_sp_hash / rc_sp_hash are not needed here — the SP signatures are
+    // already resolved — so this sibling drops those two params.
     let reward_chain_block = RewardChainBlockUnfinished {
         total_iters: infusion_point_total_iters,
         signage_point_index,
@@ -778,23 +725,15 @@ pub fn create_unfinished_block_with_sigs(
     })
 }
 
-/// Splice the farmer's real foliage signatures into a candidate built with placeholders — the node
-/// half of chia `full_node_api.signed_values`. Mirrors, field for field, chia's:
-/// ```text
-/// fsb2 = candidate.foliage.replace(foliage_block_data_signature=farmer_request.foliage_block_data_signature)
-/// if candidate.is_transaction_block():
-///     fsb2 = fsb2.replace(foliage_transaction_block_signature=farmer_request.foliage_transaction_block_signature)
-/// new_candidate = candidate.replace(foliage=fsb2)
-/// ```
-/// (chia/full_node/full_node_api.py::signed_values). The `foliage_block_data_signature` is always
-/// overwritten; the `foliage_transaction_block_signature` is overwritten ONLY for a transaction block
-/// (`candidate.foliage.foliage_transaction_block_hash.is_some()`), matching chia's
-/// `is_transaction_block()` guard — a non-transaction block has no `foliage_transaction_block_signature`
-/// slot (it stays `None`).
+/// Splice the farmer's real foliage signatures into a candidate built with placeholders —
+/// the node half of the `signed_values` flow. The `foliage_block_data_signature` is always
+/// overwritten; the `foliage_transaction_block_signature` is overwritten ONLY for a
+/// transaction block (`candidate.foliage.foliage_transaction_block_hash.is_some()`) — a
+/// non-transaction block has no `foliage_transaction_block_signature` slot (it stays `None`).
 ///
 /// The caller MUST first verify `foliage_block_data_signature` against the candidate's
 /// `reward_chain_block.proof_of_space.plot_public_key` over
-/// `candidate.foliage.foliage_block_data.hash()` (chia's `AugSchemeMPL.verify` guard) before calling
+/// `candidate.foliage.foliage_block_data.hash()` before calling
 /// this — this helper only performs the splice, it does not validate.
 pub fn splice_farmer_foliage_signatures(
     candidate: &mut UnfinishedBlock,
@@ -802,9 +741,9 @@ pub fn splice_farmer_foliage_signatures(
     foliage_transaction_block_signature: Bytes96,
 ) {
     candidate.foliage.foliage_block_data_signature = foliage_block_data_signature;
-    // chia: only a transaction block carries a foliage_transaction_block_signature. The
-    // (ftb_hash Some) == (ftb_signature Some) invariant from create_foliage means we key the splice on
-    // the hash slot being present.
+    // Only a transaction block carries a foliage_transaction_block_signature. The
+    // (ftb_hash Some) == (ftb_signature Some) invariant from create_foliage means we key the splice
+    // on the hash slot being present.
     if candidate.foliage.foliage_transaction_block_hash.is_some() {
         candidate.foliage.foliage_transaction_block_signature =
             Some(foliage_transaction_block_signature);
@@ -812,10 +751,9 @@ pub fn splice_farmer_foliage_signatures(
 }
 
 /// Verify a farmer plot signature (`Bytes96`) over `msg` against a plot public key (`Bytes48`) under
-/// AugScheme — the wire-typed form of chia `signed_values`'s
-/// `AugSchemeMPL.verify(plot_public_key, foliage_block_data.get_hash(), foliage_block_data_signature)`
-/// guard. Kept here so callers (the full node's `signed_values` handler) never touch `blst` directly.
-/// Returns `false` on any decode failure (fail-closed — a malformed signature is a verify miss).
+/// AugScheme. Kept here so callers (the full node's `signed_values` handler) never touch `blst`
+/// directly. Returns `false` on any decode failure (fail-closed — a malformed signature is a
+/// verify miss).
 #[must_use]
 pub fn verify_plot_signature(plot_public_key: &Bytes48, msg: Bytes32, signature: &Bytes96) -> bool {
     use blst::min_pk::{PublicKey, Signature};
@@ -826,22 +764,19 @@ pub fn verify_plot_signature(plot_public_key: &Bytes48, msg: Bytes32, signature:
     crate::clvm::bls_bindings::verify_signature(&pk, msg.as_ref(), &sig)
 }
 
-/// chia `block_creation.py::unfinished_block_to_full_block` (chia/consensus/block_creation.py:410):
-/// finish an [`UnfinishedBlock`] into a [`FullBlock`] by infusing the timelord's infusion-point VDFs
+/// Finish an [`UnfinishedBlock`] into a [`FullBlock`] by infusing the timelord's infusion-point VDFs
 /// and tweaking the height / weight / foliage links the foliage could not know at signage time.
 ///
 /// The reward-chain block's signage-point-and-earlier fields are copied verbatim from the unfinished
 /// reward block; the three infusion-point VDFs (`cc_ip`, `rc_ip`, optional `icc_ip`) and their proofs
-/// come from the timelord's `NewInfusionPointVDF`. `is_transaction_block` mirrors chia's
-/// `get_prev_transaction_block(prev_block, blocks, total_iters_sp)` first return — the daemon computes
-/// it against the block store and passes it in (core holds no store); it is forced `true` at genesis
-/// (`prev_block is None`), exactly as chia does.
+/// come from the timelord's `NewInfusionPointVDF`. `is_transaction_block` is computed by the daemon
+/// against the block store and passed in (core holds no store); it is forced `true` at genesis.
 ///
 /// The foliage `reward_block_hash` is re-derived from the finished reward-chain block. On a non-genesis
 /// block the foliage's `prev_block_hash` is set to the previous block's header hash, and a
-/// non-transaction block additionally nulls the `foliage_transaction_block_hash` + its signature (chia's
-/// `new_fbh/new_fbs = None`) and drops the transaction foliage/info/generator. The genesis block keeps
-/// its foliage untouched save for `reward_block_hash` (chia's `prev_block is None` branch).
+/// non-transaction block additionally nulls the `foliage_transaction_block_hash` + its signature
+/// and drops the transaction foliage/info/generator. The genesis block keeps
+/// its foliage untouched save for `reward_block_hash`.
 ///
 /// # Errors
 /// [`ChiaError::InvalidRewardBlockHash`] if the finished reward-chain block fails to hash.
@@ -860,8 +795,8 @@ pub fn unfinished_block_to_full_block(
     difficulty: u64,
 ) -> Result<FullBlock, ChiaError> {
     let rcb_u = &unfinished_block.reward_chain_block;
-    // chia block_creation.py:444-465 — prev None ⇒ genesis transaction block at height 0, weight =
-    // difficulty; else extend the prev block, carrying is_transaction_block from get_prev_transaction_block.
+    // prev None ⇒ genesis transaction block at height 0, weight = difficulty; else extend the
+    // prev block with the caller-supplied is_transaction_block.
     let (is_transaction_block, new_weight, new_height) = match prev_block {
         None => (true, u128::from(difficulty), 0u32),
         Some(prev) => (
@@ -870,7 +805,7 @@ pub fn unfinished_block_to_full_block(
             prev.height + 1,
         ),
     };
-    // chia: only a genesis or a transaction block keeps the transaction foliage/info/generator.
+    // only a genesis or a transaction block keeps the transaction foliage/info/generator
     let keep_tx = prev_block.is_none() || is_transaction_block;
     let (new_foliage_transaction_block, new_tx_info, new_generator, new_generator_ref_list) =
         if keep_tx {
@@ -883,7 +818,7 @@ pub fn unfinished_block_to_full_block(
         } else {
             (None, None, None, Vec::new())
         };
-    // chia block_creation.py:466-482 — RewardChainBlock: SP-and-earlier fields verbatim from the
+    // RewardChainBlock: SP-and-earlier fields verbatim from the
     // unfinished reward block, the three infusion-point VDFs spliced in, new height/weight/is_tx.
     let reward_chain_block = RewardChainBlock {
         weight: new_weight,
@@ -901,7 +836,7 @@ pub fn unfinished_block_to_full_block(
         infused_challenge_chain_ip_vdf: icc_ip_vdf,
         is_transaction_block,
     };
-    // chia block_creation.py:483-498 — foliage.replace(reward_block_hash=..., [prev_block_hash,
+    // foliage.replace(reward_block_hash=..., [prev_block_hash,
     // foliage_transaction_block_hash/signature nulled for a non-tx block]).
     let reward_block_hash = reward_chain_block
         .hash()
@@ -931,13 +866,12 @@ pub fn unfinished_block_to_full_block(
     })
 }
 
-/// chia `full_node.py::has_valid_pool_sig` (chia/full_node/full_node.py:1855): a non-genesis block whose
+/// A non-genesis block whose
 /// pool target is the `(GENESIS_PRE_FARM_POOL_PUZZLE_HASH, 0)` pre-farm target AND whose proof-of-space
 /// carries a pool PUBLIC KEY (the plot-NFT-less pooling scheme) must carry a valid pool signature over
 /// `bytes(pool_target)`. A plot-NFT plot (`pool_public_key is None`, a pool contract puzzle hash instead)
-/// needs no signature at this gate, and a genesis block (`prev_block_hash == GENESIS_CHALLENGE`) is exempt
-/// — chia's exact guard is `pool_target == pre_farm_target AND prev_block_hash != GENESIS AND
-/// pool_public_key is not None`. Fail-closed on a missing/malformed signature (a verify miss); `true`
+/// needs no signature at this gate, and a genesis block (`prev_block_hash == GENESIS_CHALLENGE`) is
+/// exempt. Fail-closed on a missing/malformed signature (a verify miss); `true`
 /// whenever the guard does not apply.
 #[must_use]
 pub fn has_valid_pool_sig(constants: &ConsensusConstants, block: &FullBlock) -> bool {
@@ -951,8 +885,8 @@ pub fn has_valid_pool_sig(constants: &ConsensusConstants, block: &FullBlock) -> 
         == constants.genesis_pre_farm_pool_puzzle_hash
         && fbd.pool_target.max_height == 0;
     if !is_pre_farm_target || block.foliage.prev_block_hash == constants.genesis_challenge {
-        // chia only checks the signature for a pre-farm-target block that is NOT genesis; otherwise the
-        // pool signature is validated elsewhere (block body) — this early gate passes.
+        // The signature is only checked for a pre-farm-target block that is NOT genesis; otherwise
+        // the pool signature is validated elsewhere (block body) — this early gate passes.
         return true;
     }
     let (Ok(pool_target_bytes), Some(pool_sig)) = (
@@ -989,7 +923,7 @@ mod producer_foliage_tests {
         Bytes32::new([byte; 32])
     }
 
-    /// A deterministic plot secret key for tests (chia `AugSchemeMPL.key_gen`-equivalent). The plot
+    /// A deterministic plot secret key for tests. The plot
     /// public key `sk.sk_to_pk()` is the G1 handed to the signer and verified against — the single-key
     /// straightforward AugScheme case (taproot/pool aggregation is a farmer/harvester concern; see the
     /// module note).
@@ -997,12 +931,12 @@ mod producer_foliage_tests {
         SecretKey::key_gen_v3(&[seed; 32], &[]).expect("deterministic plot sk")
     }
 
-    /// The plot public key as the wire `Bytes48` (chia's G1Element `ProofOfSpace.plot_public_key`).
+    /// The plot public key as the wire `Bytes48` (`ProofOfSpace.plot_public_key`).
     fn plot_pk_bytes(sk: &SecretKey) -> Bytes48 {
         sk.sk_to_pk().into()
     }
 
-    /// A real AugScheme plot signer closure mirroring chia's `get_plot_signature` callback: sign the
+    /// A real AugScheme plot signer closure: sign the
     /// 32-byte message with `sk`, prepending `sk`'s own public key (AugScheme), returning the G2
     /// signature as `Bytes96`. `sign` (bls_bindings) uses `sk_to_pk()` as the prepend, so the result
     /// verifies against `plot_pk_bytes(sk)` under [`verify_signature`].
@@ -1019,8 +953,7 @@ mod producer_foliage_tests {
         verify_signature(&pk, msg.as_ref(), &sig)
     }
 
-    // HARVESTED from chia/_tests/core/consensus/test_block_creation.py::test_compute_block_fee.
-    // fee = sum(removals) - sum(additions); negative (minting) is an error ("does not fit into uint64").
+    // fee = sum(removals) - sum(additions); negative (minting) is an error.
     #[test]
     fn compute_block_fee_matches_chia_vectors() {
         let mk = |amts: &[u64]| -> Vec<Coin> {
@@ -1056,7 +989,7 @@ mod producer_foliage_tests {
         }
     }
 
-    // INVARIANT: chia coinbase.py parent ids = genesis_challenge half ++ 16-byte big-endian height.
+    // INVARIANT: parent ids = genesis_challenge half ++ 16-byte big-endian height.
     // Since block_height is uint32, the 16-byte height is 12 zero bytes then the 4-byte height, so the
     // parent id is 16 challenge bytes ++ 12 zero bytes ++ height.to_be_bytes(). pool uses [:16],
     // farmer uses [16:]; the two must differ, and rebuilding must be deterministic.
@@ -1095,7 +1028,7 @@ mod producer_foliage_tests {
         assert_eq!(create_pool_coin(height, ph(0x11), 1, gc), pool);
     }
 
-    // A non-transaction block: chia returns (Foliage, None, None) and no foliage_transaction fields.
+    // A non-transaction block returns (Foliage, None, None) and no foliage_transaction fields.
     #[test]
     fn non_transaction_block_has_no_foliage_transaction_block() {
         let pool_target = PoolTarget {
@@ -1144,11 +1077,10 @@ mod producer_foliage_tests {
         );
     }
 
-    // The genesis transaction block: height 0, no reward claims, no spends. chia builds a
-    // TransactionsInfo with generator_hash = zeros, generator_refs_hash = [1;32], signature =
-    // G2Element() (infinity 0xc0..), fees = 0, cost = 0, empty reward_claims_incorporated. The empty
-    // addition/removal merkle sets are bytes32.zeros (chia _tests/core/test_merkle_set.py: empty root ==
-    // bytes32.zeros), and the empty BIP158 filter is [0] so filter_hash = sha256([0]).
+    // The genesis transaction block: height 0, no reward claims, no spends. TransactionsInfo has
+    // generator_hash = zeros, generator_refs_hash = [1;32], signature = infinity (0xc0..),
+    // fees = 0, cost = 0, empty reward_claims_incorporated. The empty addition/removal merkle
+    // sets are all-zeros, and the empty BIP158 filter is [0] so filter_hash = sha256([0]).
     #[test]
     fn genesis_transaction_block_defaults_match_chia() {
         let pool_target = PoolTarget {
@@ -1374,12 +1306,10 @@ mod producer_foliage_tests {
         );
     }
 
-    // THE ROUND TRIP (increment 4). chia's create_foliage / create_unfinished_block sign FOUR hashes via
-    // get_plot_signature and assert AugSchemeMPL.verify(plot_public_key, hash, sig). Prove the dg_xch BLS
-    // layer (bls_bindings::sign / verify_signature, AugScheme DST) closes that loop: sign each of the four
-    // message hashes with a fixed-seed plot key and assert every signature VERIFIES against the plot public
-    // key; then assert a signature made with the WRONG key FAILS. Anchor: chia/consensus/block_creation.py
-    // lines 124-127 (foliage_block_data), 263-265 (foliage_transaction_block), 366-370 (cc_sp / rc_sp).
+    // THE ROUND TRIP. Four hashes are plot-signed per block. Prove the BLS layer
+    // (bls_bindings::sign / verify_signature, AugScheme DST) closes that loop: sign each of the
+    // four message hashes with a fixed-seed plot key and assert every signature VERIFIES against
+    // the plot public key; then assert a signature made with the WRONG key FAILS.
     #[test]
     fn plot_signatures_round_trip_and_wrong_key_fails() {
         let sk = plot_sk(0x5A);
@@ -1434,12 +1364,10 @@ mod producer_foliage_tests {
 
 #[cfg(test)]
 mod producer_unfinished_block_tests {
-    // INVARIANT-ASSERT harness for `create_unfinished_block`. chia has no direct unit vector (only
-    // end-to-end via BlockTools/wallet_block_tools), so we assemble an UnfinishedBlock from hand-built
-    // signage-point inputs and a genesis foliage and assert the structural invariants chia's
-    // `create_unfinished_block` establishes: field propagation into RewardChainBlockUnfinished, the
+    // INVARIANT-ASSERT harness for `create_unfinished_block`: assemble an UnfinishedBlock from
+    // hand-built signage-point inputs and a genesis foliage and assert the structural
+    // invariants: field propagation into RewardChainBlockUnfinished, the
     // foliage↔reward-block-hash tie, the is_transaction_block consistency, and hash stability.
-    // Anchor: chia/consensus/block_creation.py::create_unfinished_block.
     use super::{BlockTransactions, create_unfinished_block, g2_infinity};
     use crate::blockchain::class_group_element::ClassgroupElement;
     use crate::blockchain::coin::Coin;
@@ -1467,7 +1395,7 @@ mod producer_unfinished_block_tests {
         sk.sk_to_pk().into()
     }
 
-    /// Real AugScheme plot signer (chia's `get_plot_signature`); the produced signature verifies against
+    /// Real AugScheme plot signer; the produced signature verifies against
     /// `plot_pk_bytes(sk)` under [`verify_signature`].
     fn real_signer(sk: &SecretKey) -> impl Fn(Bytes32, &Bytes48) -> Bytes96 + '_ {
         move |msg: Bytes32, _plot_pk: &Bytes48| -> Bytes96 { sign(sk, msg.as_ref()).into() }
@@ -1490,8 +1418,7 @@ mod producer_unfinished_block_tests {
         verify_signature(&pk, msg.as_ref(), &sig)
     }
 
-    /// Proof of space carrying an explicit plot public key (chia's `ProofOfSpace.plot_public_key`, the
-    /// G1 handed to `get_plot_signature`).
+    /// Proof of space carrying an explicit plot public key (the G1 handed to the plot signer).
     fn mk_pos_with_key(plot_public_key: Bytes48) -> ProofOfSpace {
         ProofOfSpace {
             version: 0,
@@ -1537,7 +1464,7 @@ mod producer_unfinished_block_tests {
     // The genesis unfinished block: height 0, transaction block, no claims / no spends. Assert every
     // signage-point field propagates into the reward block, the sp VDF proofs carry into the
     // UnfinishedBlock, the foliage commits the reward block's hash, is_transaction_block is consistent,
-    // and the reward block's hash (chia's UnfinishedBlock.partial_hash) is stable across rebuilds.
+    // and the reward block's hash is stable across rebuilds.
     #[test]
     fn genesis_unfinished_block_invariants_match_chia() {
         let cc_sp_vdf = mk_vdf(0x10, 1_000);
@@ -1545,7 +1472,7 @@ mod producer_unfinished_block_tests {
         let total_iters: u128 = 123_456;
         let sp_index: u8 = 7;
         let cc_challenge = ph(0x20);
-        // Pre-resolved signage-point message hashes (chia's cc_sp_hash / rc_sp_hash). Distinct so the
+        // Pre-resolved signage-point message hashes (cc_sp_hash / rc_sp_hash). Distinct so the
         // marker signer can prove each landed in the correct reward-block slot.
         let cc_sp_hash = ph(0x30);
         let rc_sp_hash = ph(0x31);
@@ -1589,7 +1516,7 @@ mod producer_unfinished_block_tests {
         // signage-point VDFs propagate into the reward block.
         assert_eq!(rc.challenge_chain_sp_vdf, Some(cc_sp_vdf));
         assert_eq!(rc.reward_chain_sp_vdf, Some(rc_sp_vdf));
-        // increment-4 real signing: the marker signer proves cc_sp_hash was signed into the cc slot and
+        // real signing: the marker signer proves cc_sp_hash was signed into the cc slot and
         // rc_sp_hash into the rc slot (not the zero placeholder, and not swapped).
         assert_eq!(
             rc.challenge_chain_sp_signature,
@@ -1629,7 +1556,7 @@ mod producer_unfinished_block_tests {
             ub.foliage_transaction_block.is_some()
         );
 
-        // no spend generator => transactions_generator None; chia's `[]` is a bare empty Vec.
+        // no spend generator => transactions_generator None; the ref list is a bare empty Vec.
         assert!(ub.transactions_generator.is_none());
         assert_eq!(ub.transactions_generator_ref_list, Vec::<u32>::new());
 
@@ -1695,7 +1622,7 @@ mod producer_unfinished_block_tests {
     }
 
     // A transaction block carrying a spend generator: transactions_generator and the ref list propagate
-    // from the BlockTransactions payload, mirroring chia's `new_block_gen.program` / `.block_refs`.
+    // from the BlockTransactions payload.
     #[test]
     fn transaction_generator_and_ref_list_propagate() {
         let removed = Coin {
@@ -1758,11 +1685,9 @@ mod producer_unfinished_block_tests {
         );
     }
 
-    // END-TO-END REAL SIGNING: build a genesis UnfinishedBlock with a real plot key and the AugScheme
-    // signer, then assert ALL FOUR plot signatures verify against the proof-of-space's plot public key —
-    // mirroring chia's `assert AugSchemeMPL.verify(plot_public_key, cc_sp_hash, cc_sp_signature)` (and the
-    // implicit correctness of the other three). Anchor: chia/consensus/block_creation.py:366-370 (sp) +
-    // 124-127 / 263-265 (foliage).
+    // END-TO-END REAL SIGNING: build a genesis UnfinishedBlock with a real plot key and the
+    // AugScheme signer, then assert ALL FOUR plot signatures verify against the proof-of-space's
+    // plot public key.
     #[test]
     fn all_four_plot_signatures_verify_end_to_end() {
         let sk = plot_sk(0x7E);
@@ -1858,12 +1783,11 @@ mod producer_unfinished_block_tests {
     }
 }
 
-// Phase 4 increment 5 — the farmer-supplied-signature emit path. These prove the producer half of
-// chia's declare→RequestSignedValues→signed_values flow: the SP signatures come from the declare
-// message (not a signer), the foliage signatures are placeholders at declare time and are spliced in
-// from SignedValues, and the resulting block is byte-identical to the increment-4 signer path fed the
-// same four signatures. Anchor: chia/full_node/full_node_api.py::declare_proof_of_space + signed_values,
-// chia/consensus/block_creation.py::create_unfinished_block / calculate_infusion_point_total_iters.
+// The farmer-supplied-signature emit path. These prove the producer half of the
+// declare→RequestSignedValues→signed_values flow: the SP signatures come from the declare
+// message (not a signer), the foliage signatures are placeholders at declare time and are
+// spliced in from SignedValues, and the resulting block is byte-identical to the signer path
+// fed the same four signatures.
 #[cfg(test)]
 mod producer_emit_path_tests {
     use super::{
@@ -1935,7 +1859,7 @@ mod producer_emit_path_tests {
         }
     }
 
-    // chia calculate_infusion_point_total_iters: overflow (sp_iters > ip_iters) adds one sub_slot_iters.
+    // overflow (sp_iters > ip_iters) adds one sub_slot_iters
     #[test]
     fn infusion_point_total_iters_overflow_math_matches_chia() {
         // Non-overflow: sp_iters <= ip_iters => start + ip_iters.
@@ -2073,7 +1997,7 @@ mod producer_emit_path_tests {
         )
         .expect("candidate builds");
 
-        // The two hashes the farmer signs (chia RequestSignedValues payload).
+        // The two hashes the farmer signs (the RequestSignedValues payload).
         let fbd_hash = candidate
             .foliage
             .foliage_block_data
@@ -2083,7 +2007,7 @@ mod producer_emit_path_tests {
             .foliage
             .foliage_transaction_block_hash
             .expect("tx block => ftb hash");
-        // The farmer's real signatures over those hashes (chia SignedValues).
+        // The farmer's real signatures over those hashes (SignedValues).
         let real_fbd: Bytes96 = sign(&sk, fbd_hash.as_ref()).into();
         let real_ftb: Bytes96 = sign(&sk, ftb_hash.as_ref()).into();
 
@@ -2158,9 +2082,9 @@ mod producer_emit_path_tests {
         );
     }
 
-    // EQUIVALENCE: the farmer-supplied path produces the SAME UnfinishedBlock the increment-4 signer
-    // path would, when the signer is fed exactly the four signatures. This proves the with_sigs sibling
-    // is a faithful refactor, not a divergent code path — the same bytes go on the wire either way.
+    // EQUIVALENCE: the farmer-supplied path produces the SAME UnfinishedBlock the signer
+    // path would, when the signer is fed exactly the four signatures — the same bytes go on
+    // the wire either way.
     #[test]
     fn with_sigs_equals_signer_path_for_the_same_four_signatures() {
         let sk = plot_sk(0x9C);

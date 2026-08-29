@@ -9,8 +9,7 @@ use std::arch::x86_64::{
     __m128i, _mm_aesenc_si128, _mm_cvtsi128_si32, _mm_loadu_si128, _mm_set_epi32, _mm_storeu_si128,
 };
 
-/// Round counts, ported from `src/pos/aes/AesHash.hpp`. Sixteen is the reference's tuning point:
-/// fast enough for a Pi class solver, heavy enough to keep a GPU compute bound.
+/// Round counts for each use of the plot hash.
 pub const AES_G_ROUNDS: u32 = 16;
 pub const AES_PAIRING_ROUNDS: u32 = 16;
 pub const AES_MATCHING_TARGET_ROUNDS: u32 = 16;
@@ -152,11 +151,9 @@ impl AesHash {
 
     /// `g` over many x values at once, writing `match_info` for each into `out`.
     ///
-    /// Plotting calls `g` once per x across the whole `2^k` space, and each call is independent.
-    /// Hashing a block of them inside one call lets the processor keep several `aesenc` chains in
-    /// flight, which turns a latency bound loop into a throughput bound one. A single `g_x` cannot
-    /// do this: the instruction path lives behind a `target_feature` boundary the optimiser will
-    /// not inline through, so every scalar call serialises on its own dependency chain.
+    /// Each call is independent, so hashing a block of them in one call keeps several `aesenc`
+    /// chains in flight. A scalar `g_x` cannot: the instruction path sits behind a `target_feature`
+    /// boundary the optimiser will not inline through.
     ///
     /// # Panics
     /// If `out` is shorter than `xs`.
@@ -266,7 +263,7 @@ impl AesHash {
 mod tests {
     use super::*;
 
-    /// The reference's regression plot id: `plot_id[i] = i * 11 + 5`, used at k28.
+    /// The regression plot id: `plot_id[i] = i * 11 + 5`, used at k28.
     fn regression_plot_id() -> Bytes32 {
         let mut bytes = [0u8; 32];
         for (i, b) in bytes.iter_mut().enumerate() {
@@ -275,7 +272,7 @@ mod tests {
         Bytes32::from(bytes)
     }
 
-    /// Reproduces `aes_regression_results` from the reference's `tests/test_aes.cpp`, in order.
+    /// The regression inputs, in the order the vector below records them.
     fn regression_results(hasher: &AesHash) -> Vec<u32> {
         let mut out = Vec::with_capacity(41);
         for x in [0u32, 1, 0x1234_5678, 0xFFFF_FFFF, 0xABCD_EF12] {
@@ -299,7 +296,7 @@ mod tests {
         out
     }
 
-    /// Frozen from the reference implementation's `kAesRegression` in `tests/aes_test_cases.hpp`.
+    /// The frozen regression vector.
     const AES_REGRESSION: [u32; 41] = [
         127_783_594,
         124_767_263,
@@ -346,8 +343,6 @@ mod tests {
 
     #[test]
     fn the_hash_matches_the_reference_regression_vector() {
-        // Bit for bit conformance with the reference implementation. Every later stage of pos2
-        // rests on these bytes, so this is the test that decides whether the port is real.
         let hasher = AesHash::new(&regression_plot_id(), 28);
         let got = regression_results(&hasher);
         assert_eq!(got.len(), AES_REGRESSION.len());
@@ -358,8 +353,6 @@ mod tests {
 
     #[test]
     fn the_native_and_portable_paths_agree() {
-        // The instruction path is only safe to use because it produces the same bytes as the
-        // portable one, so assert that rather than trusting it.
         let hasher = AesHash::new(&regression_plot_id(), 28);
         for x in [0u32, 1, 0x1234_5678, 0xFFFF_FFFF] {
             let state = AesHash::state(x, 0, 0, 0);

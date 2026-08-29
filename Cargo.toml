@@ -19,6 +19,7 @@ members = [
     "servers",
     "simulator",
     "stores",
+    "tools/dev-tools",
     "tests",
     "vdf",
     "weight-proof"

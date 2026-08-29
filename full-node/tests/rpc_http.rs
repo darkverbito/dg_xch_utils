@@ -1,15 +1,15 @@
-// RPC parity — the chia HTTP envelope and the 8555 TLS posture.
+// The HTTP RPC envelope and the 8555 TLS posture.
 //
 // Envelope: every response is `{"<named_key>": ..., "success": true}` and every application
-// error is an HTTP-200 `{"success": false, "error": ...}` (chia/rpc/util.py:74-97). The
+// error is an HTTP-200 `{"success": false, "error": ...}`. The
 // envelope tests drive `NodeRpcHandler` directly; the shape assertions deserialize through
-// dg_xch_clients' REAL chia response wrappers (the exact structs a chia-shaped Rust client
+// dg_xch_clients' REAL response wrappers (the exact structs a Rust RPC client
 // parses).
 //
-// TLS: `build_rpc_tls_context` serves the chia 8555 posture (chia server.py:54-71) — server
+// TLS: `build_rpc_tls_context` serves the 8555 posture — server
 // cert generated from the CA chain, client certificate REQUIRED and verified against that CA.
 // The end-to-end tests run the real `RpcServer` accept loop and connect with the real
-// `FullnodeClient` (chia-tooling shape: client certs + https + envelope parse); the negative
+// `FullnodeClient` (client certs + https + envelope parse); the negative
 // tests prove a no-cert client and a wrong-CA client are refused at the handshake.
 
 mod common;
@@ -93,7 +93,7 @@ async fn call_raw(
 
 // ---- envelope shape ---------------------------------------------------------------------------
 
-// Success envelope: `{"blockchain_state": {...}, "success": true}` with chia's full state shape
+// Success envelope: `{"blockchain_state": {...}, "success": true}` with the full state shape
 // (peak as a full block record, sync sub-object, mempool gauges, average_block_time).
 #[tokio::test]
 async fn envelope_blockchain_state_named_key_and_success() {
@@ -115,27 +115,27 @@ async fn envelope_blockchain_state_named_key_and_success() {
             .as_object()
             .expect("obj")
             .contains_key("average_block_time"),
-        "chia's average_block_time key is present"
+        "the average_block_time key is present"
     );
     assert!(state.as_object().expect("obj").contains_key("node_id"));
 }
 
 // Error envelope: an application error is HTTP-200 `{"success": false, "error": ...}` with the
-// traceback/structuredError keys chia emits (chia/rpc/util.py:86-97) — never an HTTP 4xx/5xx.
+// traceback/structuredError keys — never an HTTP 4xx/5xx.
 #[tokio::test]
 async fn envelope_errors_are_http_200_success_false() {
     let (rpc, _mp) = seeded_rpc().await;
     let handler = NodeRpcHandler::new(rpc);
     let bogus = Bytes32::from([0x42u8; 32]);
     let (status, v) = call(&handler, "/get_block", json!({"header_hash": bogus})).await;
-    assert_eq!(status, StatusCode::OK, "app errors are HTTP 200 in chia");
+    assert_eq!(status, StatusCode::OK, "app errors are HTTP 200");
     assert_eq!(v["success"], Value::from(false));
     assert!(
         v["error"]
             .as_str()
             .expect("error string")
             .contains("not found"),
-        "the chia error message survives: {v}"
+        "the error message survives: {v}"
     );
     let obj = v.as_object().expect("obj");
     assert!(obj.contains_key("traceback"));
@@ -147,7 +147,7 @@ async fn envelope_errors_are_http_200_success_false() {
     assert_eq!(v["success"], Value::from(false));
 }
 
-// Unknown endpoints are HTTP 404 (chia's aiohttp router behavior).
+// Unknown endpoints are HTTP 404.
 #[tokio::test]
 async fn unknown_endpoint_is_404() {
     let (rpc, _mp) = seeded_rpc().await;
@@ -157,7 +157,7 @@ async fn unknown_endpoint_is_404() {
     assert_eq!(v["success"], Value::from(false));
 }
 
-// An oversize body is refused with 413 (chia's aiohttp client_max_size = 1 MiB).
+// An oversize body is refused with 413 (the 1 MiB body cap).
 #[tokio::test]
 async fn oversize_body_is_413() {
     let (rpc, _mp) = seeded_rpc().await;
@@ -167,7 +167,7 @@ async fn oversize_body_is_413() {
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
 }
 
-// The chia-client-shaped assertion: the coin_records envelope parses through dg_xch_clients'
+// The client-shaped assertion: the coin_records envelope parses through dg_xch_clients'
 // real response wrapper (`response["coin_records"]` + `response["success"]`).
 #[tokio::test]
 async fn envelope_coin_records_parse_as_chia_client_shape() {
@@ -181,13 +181,13 @@ async fn envelope_coin_records_parse_as_chia_client_shape() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let parsed: CoinRecordAryResp = serde_json::from_value(v).expect("chia client shape");
+    let parsed: CoinRecordAryResp = serde_json::from_value(v).expect("client shape");
     assert!(parsed.success);
     assert_eq!(parsed.coin_records.len(), 1);
     assert_eq!(parsed.coin_records[0].coin.name(), name);
 }
 
-// get_block / get_block_record envelopes parse through the chia client wrappers.
+// get_block / get_block_record envelopes parse through the client wrappers.
 #[tokio::test]
 async fn envelope_block_and_record_parse_as_chia_client_shape() {
     let (rpc, _mp) = seeded_rpc().await;
@@ -209,8 +209,8 @@ async fn envelope_block_and_record_parse_as_chia_client_shape() {
     assert_eq!(parsed.block_record.header_hash, hh);
 }
 
-// push_tx answers chia's `{"status": "SUCCESS"}`, idempotent on a duplicate; the status parses
-// through the chia client's TXResp.
+// push_tx answers `{"status": "SUCCESS"}`, idempotent on a duplicate; the status parses
+// through the client's TXResp.
 #[tokio::test]
 async fn envelope_push_tx_status_success_and_idempotent() {
     let (rpc, mempool) = seeded_rpc().await;
@@ -224,7 +224,7 @@ async fn envelope_push_tx_status_success_and_idempotent() {
     let parsed: TXResp = serde_json::from_value(v).expect("tx shape");
     assert!(parsed.success);
     assert_eq!(parsed.status, TXStatus::SUCCESS);
-    // Duplicate: SUCCESS again (chia full_node_rpc_api.py:846-855), still one resident item.
+    // Duplicate: SUCCESS again, still one resident item.
     let (_s, v) = call(&handler, "/push_tx", body).await;
     let parsed: TXResp = serde_json::from_value(v).expect("tx shape");
     assert_eq!(parsed.status, TXStatus::SUCCESS);
@@ -232,7 +232,7 @@ async fn envelope_push_tx_status_success_and_idempotent() {
 }
 
 // The utility endpoints: healthz, get_routes, get_version, get_network_info,
-// get_aggsig_additional_data (plain hex, chia's `.hex()`), get_connections (empty sans live).
+// get_aggsig_additional_data (plain hex, `.hex()`), get_connections (empty sans live).
 #[tokio::test]
 async fn envelope_utility_endpoints() {
     let (rpc, _mp) = seeded_rpc().await;
@@ -255,11 +255,11 @@ async fn envelope_utility_endpoints() {
     assert_eq!(v["network_name"].as_str(), Some("mainnet"));
     assert_eq!(v["network_prefix"].as_str(), Some("xch"));
     let genesis = v["genesis_challenge"].as_str().expect("genesis");
-    assert!(!genesis.starts_with("0x"), "chia serves plain hex here");
+    assert!(!genesis.starts_with("0x"), "plain hex is served here");
 
     let (_s, v) = call(&handler, "/get_aggsig_additional_data", json!({})).await;
     let data = v["additional_data"].as_str().expect("additional data");
-    assert!(!data.starts_with("0x"), "chia's .hex() has no 0x prefix");
+    assert!(!data.starts_with("0x"), "no 0x prefix on this field");
     assert_eq!(
         format!("0x{data}"),
         MAINNET.agg_sig_me_additional_data.to_string()
@@ -339,7 +339,7 @@ async fn spawn_tls_server() -> (
     (port, run, mempool, rpc)
 }
 
-// End-to-end with the REAL chia-shaped Rust RPC client: client cert signed by our CA is
+// End-to-end with the REAL Rust RPC client: client cert signed by our CA is
 // accepted, https + envelope parse round-trips four representative endpoints.
 #[tokio::test]
 async fn tls_e2e_chia_client_four_endpoints() {
@@ -393,8 +393,8 @@ async fn tls_e2e_chia_client_four_endpoints() {
     run.store(false, Ordering::Relaxed);
 }
 
-// chia posture negative: a client with NO certificate is refused at the handshake
-// (chia server.py:70 `verify_mode = ssl.CERT_REQUIRED`).
+// TLS-posture negative: a client with NO certificate is refused at the handshake
+// (`verify_mode = ssl.CERT_REQUIRED`).
 #[tokio::test]
 async fn tls_no_client_cert_is_refused() {
     let (port, run, _mp, _rpc) = spawn_tls_server().await;
@@ -411,7 +411,7 @@ async fn tls_no_client_cert_is_refused() {
     run.store(false, Ordering::Relaxed);
 }
 
-// chia posture negative: a client certificate from the WRONG CA (here: signed by a mere leaf,
+// TLS-posture negative: a client certificate from the WRONG CA (here: signed by a mere leaf,
 // so it cannot chain to the server's root) is refused at the handshake.
 #[tokio::test]
 async fn tls_wrong_ca_client_cert_is_refused() {

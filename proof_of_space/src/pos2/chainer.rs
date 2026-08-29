@@ -51,7 +51,7 @@ fn last_link_extra_threshold() -> u64 {
     (max_upper / bonus) as u64
 }
 
-/// Validates a quality chain, ported from `src/pos/Chainer.hpp`.
+/// Validates a quality chain.
 ///
 /// A chain is a walk over proof fragments where each link's hash must land on enough zero bits.
 /// The fragments are not free to come from anywhere: link `i` must be drawn from the challenge set
@@ -140,7 +140,6 @@ mod tests {
 
     #[test]
     fn the_last_link_threshold_matches_the_reference() {
-        // Emitted from the reference `compute_last_link_extra_threshold`.
         assert_eq!(*LAST_LINK_EXTRA_THRESHOLD, 3_127_297_797_138_110);
     }
 

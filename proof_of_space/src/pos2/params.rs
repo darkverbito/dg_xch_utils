@@ -16,7 +16,7 @@ impl Range {
     }
 }
 
-/// The parameters a plot is proved and verified under, ported from `src/pos/ProofParams.hpp`.
+/// The parameters a plot is proved and verified under.
 ///
 /// `match_info` is `k` bits laid out as `[section | match_key | match_target]`, and the widths of
 /// the first two fields are what `strength` tunes: a stronger plot spends more match key bits,

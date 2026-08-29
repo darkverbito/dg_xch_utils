@@ -19,11 +19,15 @@ const MAX_REQUEST_BYTES: usize = 2048;
 const ACCEPT_TICK: Duration = Duration::from_millis(500);
 // Sampling-profiler window for a /debug/flamegraph request, and the hard cap on the whole profile (sample +
 // symbolize + SVG render) so a wedged profiler can never hold the connection forever.
+#[cfg(feature = "profiling")]
 const FLAMEGRAPH_SECONDS: u64 = 20;
+#[cfg(feature = "profiling")]
 const FLAMEGRAPH_HZ: i32 = 97; // prime-ish sample rate; avoids lockstep with periodic node work
+#[cfg(feature = "profiling")]
 const FLAMEGRAPH_TIMEOUT: Duration = Duration::from_secs(FLAMEGRAPH_SECONDS + 20);
 // Hard cap on a /debug/heap dump (jemalloc prof.dump writes the file synchronously; a wedged disk
 // must not hold the connection forever).
+#[cfg(feature = "profiling")]
 const HEAP_DUMP_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// RED-style block-producer pipeline counters. The linear
@@ -154,9 +158,9 @@ pub struct MetricsSources<S> {
     pub inbound_peers: PeerMap,
     // Peer-link traffic counters (shared with every handler map + the broadcast paths).
     pub net: Arc<NetCounters>,
-    // The mempool, for the chia-exporter-style size/cost gauges.
+    // The mempool, for the size/cost gauges.
     pub mempool: Arc<tokio::sync::Mutex<Mempool>>,
-    // Signage-point telemetry (latest accepted index / running total), chia-exporter aligned.
+    // Signage-point telemetry (latest accepted index / running total).
     pub sp_current_index: Arc<AtomicU32>,
     pub signage_points_total: Arc<std::sync::atomic::AtomicU64>,
     // Sync-liveness witnesses for the `/health` liveness probe. Progress is recorded on every
@@ -173,11 +177,11 @@ pub struct MetricsSources<S> {
 
 // Sync-liveness thresholds for the `/health` liveness probe.
 //
-// STALL_SECS: mainnet infuses a block roughly every 18.75s, so a healthy synced node's confirmed peak
-// advances far inside this window; a node BELOW tip, WITH peers, whose confirmed peak has not moved for
-// this long is the silent-stall signature (the worker-thread panic that left the process alive but sync
-// dead). 300s = ~16 expected blocks of no progress — comfortably past transient peer churn / one slow
-// reorg, well short of the hour a real stall sat frozen.
+// STALL_SECS: mainnet infuses a block roughly every 18.75s, so a healthy synced node's confirmed
+// peak advances far inside this window; a node BELOW tip, WITH peers, whose confirmed peak has
+// not moved for this long is the silent-stall signature (e.g. a worker-thread panic that leaves
+// the process alive but sync dead). 300s = ~16 expected blocks of no progress — comfortably past
+// transient peer churn / one slow reorg.
 const STALL_SECS: u64 = 300;
 // Boot grace: a fresh node must dial peers, fetch a ~14 MB weight proof, and run the multi-minute proof
 // verify before its first fast-sync peak lands. The probe cannot fail inside this window regardless of
@@ -200,7 +204,7 @@ pub struct HealthState {
     // Wall-clock second the process started — anchors the boot grace window.
     boot_unix: u64,
     // Highest confirmed peak height observed so far, and the second it last increased. The peak is the
-    // primary sync-progress signal (chia infuses ~every 18.75s, so it moves on any healthy node).
+    // primary sync-progress signal (mainnet infuses ~every 18.75s, so it moves on any healthy node).
     last_peak: AtomicU64,
     last_progress_unix: AtomicU64,
     // Highest `blocks_downloaded` counter observed — a SECONDARY witness so the multi-minute fast-sync
@@ -361,7 +365,7 @@ pub struct MetricsSnapshot {
     pub window_vdf_micros: u64,
     pub window_body_micros: u64,
     // The sequential staging-loop wall (per-block store reads + record derivation) — the
-    // previously unmeasured phase between body precompute and VDF drain.
+    // phase between body precompute and VDF drain.
     pub window_stage_micros: u64,
     pub window_confirm_micros: u64,
     pub window_blocks: u64,
@@ -1258,6 +1262,7 @@ async fn serve<S: BlockStore + Send + Sync + 'static>(
             }
             continue;
         }
+        #[cfg(feature = "profiling")]
         if path.starts_with("/debug/flamegraph") {
             // One profile at a time — a second request while one runs is refused, not queued.
             if profiling.swap(true, Ordering::SeqCst) {
@@ -1272,11 +1277,12 @@ async fn serve<S: BlockStore + Send + Sync + 'static>(
             info!("flamegraph profiling started (~{FLAMEGRAPH_SECONDS}s)");
             let done = profiling.clone();
             tokio::spawn(async move {
-                handle_flamegraph(stream).await;
+                profiling::handle_flamegraph(stream).await;
                 done.store(false, Ordering::SeqCst);
             });
             continue;
         }
+        #[cfg(feature = "profiling")]
         if path.starts_with("/debug/heap") {
             // Same one-at-a-time guard as the flamegraph: a second profile request is refused, not queued.
             if profiling.swap(true, Ordering::SeqCst) {
@@ -1291,7 +1297,7 @@ async fn serve<S: BlockStore + Send + Sync + 'static>(
             info!("heap-profile dump requested");
             let done = profiling.clone();
             tokio::spawn(async move {
-                handle_heap(stream).await;
+                profiling::handle_heap(stream).await;
                 done.store(false, Ordering::SeqCst);
             });
             continue;
@@ -1339,148 +1345,153 @@ async fn write_simple(stream: &mut TcpStream, status: &str, body: &str) -> Resul
     Ok(())
 }
 
-// Sample the process for FLAMEGRAPH_SECONDS and stream back the flamegraph SVG. Runs on its own spawned task
-// (bounded to one concurrent via `profiling`) so /metrics keeps answering during the profile.
-async fn handle_flamegraph(mut stream: TcpStream) {
-    match tokio::time::timeout(FLAMEGRAPH_TIMEOUT, sample_flamegraph(FLAMEGRAPH_SECONDS)).await {
-        Ok(Ok(svg)) => {
-            let header = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: image/svg+xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                svg.len()
-            );
-            let _ = stream.write_all(header.as_bytes()).await;
-            let _ = stream.write_all(&svg).await;
-            let _ = stream.flush().await;
-        }
-        Ok(Err(e)) => {
-            warn!(error = %e, "flamegraph profiling failed");
-            let _ = write_simple(&mut stream, "500 Internal Server Error", &e).await;
-        }
-        Err(_) => {
-            warn!("flamegraph profiling timed out");
-            let _ = write_simple(&mut stream, "504 Gateway Timeout", "flamegraph timed out").await;
+#[cfg(feature = "profiling")]
+mod profiling {
+    use super::*;
+
+    // Sample the process for FLAMEGRAPH_SECONDS and stream back the flamegraph SVG. Runs on its own spawned task
+    // (bounded to one concurrent via `profiling`) so /metrics keeps answering during the profile.
+    pub(super) async fn handle_flamegraph(mut stream: TcpStream) {
+        match tokio::time::timeout(FLAMEGRAPH_TIMEOUT, sample_flamegraph(FLAMEGRAPH_SECONDS)).await {
+            Ok(Ok(svg)) => {
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: image/svg+xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    svg.len()
+                );
+                let _ = stream.write_all(header.as_bytes()).await;
+                let _ = stream.write_all(&svg).await;
+                let _ = stream.flush().await;
+            }
+            Ok(Err(e)) => {
+                warn!(error = %e, "flamegraph profiling failed");
+                let _ = write_simple(&mut stream, "500 Internal Server Error", &e).await;
+            }
+            Err(_) => {
+                warn!("flamegraph profiling timed out");
+                let _ = write_simple(&mut stream, "504 Gateway Timeout", "flamegraph timed out").await;
+            }
         }
     }
-}
 
-// The whole profile — start guard, sample, symbolize, render — runs inside one `spawn_blocking` closure so the
-// `pprof::ProfilerGuard` is created and dropped on a single blocking thread (it never crosses an `.await`, so
-// the spawned future stays `Send`) and the CPU work never steals a runtime worker.
-async fn sample_flamegraph(seconds: u64) -> Result<Vec<u8>, String> {
-    tokio::task::spawn_blocking(move || {
-        let guard = pprof::ProfilerGuardBuilder::default()
-            .frequency(FLAMEGRAPH_HZ)
-            .blocklist(&["libc", "libgcc", "pthread", "vdso"])
-            .build()
-            .map_err(|e| format!("profiler start: {e}"))?;
-        std::thread::sleep(Duration::from_secs(seconds));
-        let report = guard
-            .report()
-            .build()
-            .map_err(|e| format!("report build: {e}"))?;
-        let mut svg = Vec::new();
-        report
-            .flamegraph(&mut svg)
-            .map_err(|e| format!("flamegraph render: {e}"))?;
-        Ok(svg)
-    })
-    .await
-    .map_err(|e| format!("profiler task join: {e}"))?
-}
-
-// The decisive leak instrument: dump jemalloc's sampled heap profile (allocation-site stacks for the
-// LIVE bytes the process holds) and stream it back. Symbolize offline against the container binary:
-// `jeprof --show_bytes full-node heap.prof --pdf` or `pprof -http=: full-node heap.prof`.
-//
-// Requires jemalloc built with prof (`profiling` feature on tikv-jemallocator — the Linux target dep)
-// AND activated at PROCESS START via jemalloc's env var. tikv-jemalloc-sys builds with
-// --with-jemalloc-prefix=_rjem_, so the variable the linked jemalloc reads is `_RJEM_MALLOC_CONF`
-// (NOT plain `MALLOC_CONF`):
-//   _RJEM_MALLOC_CONF=prof:true,prof_active:true,lg_prof_sample:19
-// `opt.prof` cannot be flipped at runtime — a deploy without the env var (or a prof-less build, e.g.
-// macOS dev) must fail LOUD here, never stream back an empty profile.
-async fn handle_heap(mut stream: TcpStream) {
-    match tokio::time::timeout(HEAP_DUMP_TIMEOUT, dump_heap_profile()).await {
-        Ok(Ok(prof)) => {
-            info!(bytes = prof.len(), "heap profile dumped");
-            let header = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=\"heap.prof\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                prof.len()
-            );
-            let _ = stream.write_all(header.as_bytes()).await;
-            let _ = stream.write_all(&prof).await;
-            let _ = stream.flush().await;
-        }
-        Ok(Err(e)) => {
-            warn!(error = %e, "heap profile dump failed");
-            let _ = write_simple(&mut stream, "500 Internal Server Error", &e).await;
-        }
-        Err(_) => {
-            warn!("heap profile dump timed out");
-            let _ = write_simple(&mut stream, "504 Gateway Timeout", "heap dump timed out").await;
-        }
-    }
-}
-
-// The mallctl work runs on the blocking pool: `prof.dump` writes the profile file synchronously
-// (file I/O inside jemalloc) and must not stall a runtime worker.
-async fn dump_heap_profile() -> Result<Vec<u8>, String> {
-    tokio::task::spawn_blocking(jemalloc_prof_dump)
+    // The whole profile — start guard, sample, symbolize, render — runs inside one `spawn_blocking` closure so the
+    // `pprof::ProfilerGuard` is created and dropped on a single blocking thread (it never crosses an `.await`, so
+    // the spawned future stays `Send`) and the CPU work never steals a runtime worker.
+    async fn sample_flamegraph(seconds: u64) -> Result<Vec<u8>, String> {
+        tokio::task::spawn_blocking(move || {
+            let guard = pprof::ProfilerGuardBuilder::default()
+                .frequency(FLAMEGRAPH_HZ)
+                .blocklist(&["libc", "libgcc", "pthread", "vdso"])
+                .build()
+                .map_err(|e| format!("profiler start: {e}"))?;
+            std::thread::sleep(Duration::from_secs(seconds));
+            let report = guard
+                .report()
+                .build()
+                .map_err(|e| format!("report build: {e}"))?;
+            let mut svg = Vec::new();
+            report
+                .flamegraph(&mut svg)
+                .map_err(|e| format!("flamegraph render: {e}"))?;
+            Ok(svg)
+        })
         .await
-        .map_err(|e| format!("heap dump task join: {e}"))?
-}
-
-// The activation contract, checked loud-first (see `handle_heap`): `opt.prof` reads Err on a build
-// without jemalloc prof compiled in, `false` when compiled in but not enabled at start, and
-// `prof.active` is the runtime sampling switch. Only then is `prof.dump` worth issuing.
-const HEAP_PROF_HOWTO: &str =
-    "start the process with _RJEM_MALLOC_CONF=prof:true,prof_active:true,lg_prof_sample:19";
-
-fn jemalloc_prof_dump() -> Result<Vec<u8>, String> {
-    // SAFETY (all three mallctl calls): `opt.prof` and `prof.active` are bool-typed mallctl keys read
-    // as Rust `bool` (1 byte, matching jemalloc's C bool — the same shape tikv_jemalloc_ctl's own
-    // `profiling::prof` wrapper uses); `prof.dump`'s new-value is a `*const c_char` pointing at a
-    // NUL-terminated path that outlives the call (jemalloc uses it synchronously during the mallctl).
-    let compiled =
-        unsafe { tikv_jemalloc_ctl::raw::read::<bool>(b"opt.prof\0") }.map_err(|e| {
-            format!(
-                "jemalloc heap profiling is not compiled into this build ({e}); \
-                 build the Linux target with the tikv-jemallocator `profiling` feature and {HEAP_PROF_HOWTO}"
-            )
-        })?;
-    if !compiled {
-        return Err(format!(
-            "jemalloc heap profiling is compiled in but was not enabled at process start; {HEAP_PROF_HOWTO}"
-        ));
+        .map_err(|e| format!("profiler task join: {e}"))?
     }
-    let active = unsafe { tikv_jemalloc_ctl::raw::read::<bool>(b"prof.active\0") }
-        .map_err(|e| format!("failed to read prof.active ({e}); {HEAP_PROF_HOWTO}"))?;
-    if !active {
-        return Err(format!(
-            "jemalloc heap profiling is enabled but sampling is inactive (prof_active:false); {HEAP_PROF_HOWTO}"
-        ));
+
+    // The decisive leak instrument: dump jemalloc's sampled heap profile (allocation-site stacks for the
+    // LIVE bytes the process holds) and stream it back. Symbolize offline against the container binary:
+    // `jeprof --show_bytes full-node heap.prof --pdf` or `pprof -http=: full-node heap.prof`.
+    //
+    // Requires jemalloc built with prof (`profiling` feature on tikv-jemallocator — the Linux target dep)
+    // AND activated at PROCESS START via jemalloc's env var. tikv-jemalloc-sys builds with
+    // --with-jemalloc-prefix=_rjem_, so the variable the linked jemalloc reads is `_RJEM_MALLOC_CONF`
+    // (NOT plain `MALLOC_CONF`):
+    //   _RJEM_MALLOC_CONF=prof:true,prof_active:true,lg_prof_sample:19
+    // `opt.prof` cannot be flipped at runtime — a deploy without the env var (or a prof-less build, e.g.
+    // macOS dev) must fail LOUD here, never stream back an empty profile.
+    pub(super) async fn handle_heap(mut stream: TcpStream) {
+        match tokio::time::timeout(HEAP_DUMP_TIMEOUT, dump_heap_profile()).await {
+            Ok(Ok(prof)) => {
+                info!(bytes = prof.len(), "heap profile dumped");
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=\"heap.prof\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    prof.len()
+                );
+                let _ = stream.write_all(header.as_bytes()).await;
+                let _ = stream.write_all(&prof).await;
+                let _ = stream.flush().await;
+            }
+            Ok(Err(e)) => {
+                warn!(error = %e, "heap profile dump failed");
+                let _ = write_simple(&mut stream, "500 Internal Server Error", &e).await;
+            }
+            Err(_) => {
+                warn!("heap profile dump timed out");
+                let _ = write_simple(&mut stream, "504 Gateway Timeout", "heap dump timed out").await;
+            }
+        }
     }
-    let path = std::env::temp_dir().join(format!(
-        "full-node-heap-{}-{}.prof",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos())
-    ));
-    let c_path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes())
-        .map_err(|e| format!("dump path contains NUL: {e}"))?;
-    let dump = unsafe { tikv_jemalloc_ctl::raw::write(b"prof.dump\0", c_path.as_ptr()) };
-    dump.map_err(|e| format!("prof.dump failed: {e}"))?;
-    let prof = std::fs::read(&path).map_err(|e| format!("read dumped profile: {e}"));
-    let _ = std::fs::remove_file(&path); // best-effort temp hygiene, success or not
-    prof
+
+    // The mallctl work runs on the blocking pool: `prof.dump` writes the profile file synchronously
+    // (file I/O inside jemalloc) and must not stall a runtime worker.
+    async fn dump_heap_profile() -> Result<Vec<u8>, String> {
+        tokio::task::spawn_blocking(jemalloc_prof_dump)
+            .await
+            .map_err(|e| format!("heap dump task join: {e}"))?
+    }
+
+    // The activation contract, checked loud-first (see `handle_heap`): `opt.prof` reads Err on a build
+    // without jemalloc prof compiled in, `false` when compiled in but not enabled at start, and
+    // `prof.active` is the runtime sampling switch. Only then is `prof.dump` worth issuing.
+    const HEAP_PROF_HOWTO: &str =
+        "start the process with _RJEM_MALLOC_CONF=prof:true,prof_active:true,lg_prof_sample:19";
+
+    pub(super) fn jemalloc_prof_dump() -> Result<Vec<u8>, String> {
+        // SAFETY (all three mallctl calls): `opt.prof` and `prof.active` are bool-typed mallctl keys read
+        // as Rust `bool` (1 byte, matching jemalloc's C bool — the same shape tikv_jemalloc_ctl's own
+        // `profiling::prof` wrapper uses); `prof.dump`'s new-value is a `*const c_char` pointing at a
+        // NUL-terminated path that outlives the call (jemalloc uses it synchronously during the mallctl).
+        let compiled =
+            unsafe { tikv_jemalloc_ctl::raw::read::<bool>(b"opt.prof\0") }.map_err(|e| {
+                format!(
+                    "jemalloc heap profiling is not compiled into this build ({e}); \
+                     build the Linux target with the tikv-jemallocator `profiling` feature and {HEAP_PROF_HOWTO}"
+                )
+            })?;
+        if !compiled {
+            return Err(format!(
+                "jemalloc heap profiling is compiled in but was not enabled at process start; {HEAP_PROF_HOWTO}"
+            ));
+        }
+        let active = unsafe { tikv_jemalloc_ctl::raw::read::<bool>(b"prof.active\0") }
+            .map_err(|e| format!("failed to read prof.active ({e}); {HEAP_PROF_HOWTO}"))?;
+        if !active {
+            return Err(format!(
+                "jemalloc heap profiling is enabled but sampling is inactive (prof_active:false); {HEAP_PROF_HOWTO}"
+            ));
+        }
+        let path = std::env::temp_dir().join(format!(
+            "full-node-heap-{}-{}.prof",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        let c_path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes())
+            .map_err(|e| format!("dump path contains NUL: {e}"))?;
+        let dump = unsafe { tikv_jemalloc_ctl::raw::write(b"prof.dump\0", c_path.as_ptr()) };
+        dump.map_err(|e| format!("prof.dump failed: {e}"))?;
+        let prof = std::fs::read(&path).map_err(|e| format!("read dumped profile: {e}"));
+        let _ = std::fs::remove_file(&path); // best-effort temp hygiene, success or not
+        prof
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         BOOT_GRACE_SECS, HealthState, MetricsSnapshot, STALL_SECS, StoreSnapshot,
-        jemalloc_prof_dump, render_metrics,
+        render_metrics,
     };
     use dg_xch_stores::HistogramSnapshot;
 
@@ -1575,23 +1586,24 @@ mod tests {
         assert!(v.body.contains("advancing"), "body: {}", v.body);
     }
 
-    // Red-first: a /debug/heap request against a process without ACTIVE jemalloc profiling
+    // A /debug/heap request against a process without ACTIVE jemalloc profiling
     // must fail loud with the exact activation env var — never resolve to an empty profile. This
     // holds in BOTH unprofiled environments: a prof-less build (macOS dev / non-`profiling`
     // feature: opt.prof itself is absent) and a prof-compiled build started without
     // `_RJEM_MALLOC_CONF` (opt.prof reads false). The only environment where it may succeed is a
     // live deploy that set the env var — which no test runner does.
     #[test]
+    #[cfg(feature = "profiling")]
     fn heap_dump_without_active_profiling_fails_naming_the_env_var() {
-        let err =
-            jemalloc_prof_dump().expect_err("dump must not succeed without _RJEM_MALLOC_CONF");
+        let err = super::profiling::jemalloc_prof_dump()
+            .expect_err("dump must not succeed without _RJEM_MALLOC_CONF");
         assert!(
             err.contains("_RJEM_MALLOC_CONF=prof:true,prof_active:true,lg_prof_sample:19"),
             "error must carry the exact activation string, got: {err}"
         );
     }
 
-    // Unverified — runs in a live deployment. Red-first: the render must expose every counter/gauge as a Prometheus
+    // The render must expose every counter/gauge as a Prometheus
     // series with its value, including the peak and claimed heights the dashboard graphs.
     #[test]
     fn render_exposes_all_series_with_values() {

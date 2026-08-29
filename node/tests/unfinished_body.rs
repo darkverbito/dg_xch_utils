@@ -1,9 +1,8 @@
-// The unfinished-block transactions gate, pure-fn species proofs. chia's
-// add_unfinished_block RUNS the transactions generator (full_node.py:2497-2536,
-// `_run_block` with budget `min(MAX_BLOCK_COST_CLVM, transactions_info.cost)`) and raises
-// ConsensusError on any failure — GENERATOR_RUNTIME_ERROR (117) for a generator that will not
+// The unfinished-block transactions gate, pure-fn species proofs. Unfinished-block validation
+// RUNS the transactions generator with budget `min(MAX_BLOCK_COST_CLVM, transactions_info.cost)`
+// and rejects on any failure — GENERATOR_RUNTIME_ERROR for a generator that will not
 // deserialize or raises mid-run, BLOCK_COST_EXCEEDS_MAX for a run over the claimed budget,
-// INVALID_BLOCK_COST for an inexact claim — BEFORE the block enters full_node_store or the
+// INVALID_BLOCK_COST for an inexact claim — BEFORE the block enters the unfinished cache or the
 // relay broadcast. These species need a root-CONSISTENT bogus generator (transactions_info
 // forged to commit to it), which the plot-key foliage signature makes unforgeable through the
 // daemon's full header validation — so the daemon-level red tests
@@ -30,7 +29,7 @@ const HEIGHT: u32 = 5_000_004;
 const PREV_TX: u32 = 5_000_000;
 
 // The UnfinishedBlock a peer would have relayed for real mainnet block 5,000,004: strip the
-// infusion-point VDFs, keep everything the farmer signed (chia `UnfinishedBlock` projection).
+// infusion-point VDFs, keep everything the farmer signed.
 fn unfinished_5000004() -> UnfinishedBlock {
     let fb: FullBlock = load_full_block(HEIGHT);
     UnfinishedBlock {
@@ -82,9 +81,8 @@ fn validate(
     validate_unfinished_block_body(&NativePrimitives, &MAINNET, ub, &[], HEIGHT, PREV_TX)
 }
 
-// GENERATOR_RUNTIME_ERROR species 1 — bytes that are not deserializable CLVM (chia_rs fails the
-// deserialize; chia error 117). The forged root MATCHES the bytes, so the gate must reach the
-// RUN to reject — not the structural root check.
+// GENERATOR_RUNTIME_ERROR species 1 — bytes that are not deserializable CLVM. The forged root
+// MATCHES the bytes, so the gate must reach the RUN to reject — not the structural root check.
 #[test]
 fn undeserializable_generator_is_rejected_at_the_run() {
     let ub = with_forged_generator(
@@ -113,7 +111,7 @@ fn raising_generator_is_rejected_at_the_run() {
 }
 
 // INVALID_BLOCK_COST — the claim overstates the true cost: the run finishes under budget and
-// the exact-equality rule rejects (chia validate_block_body rule 9).
+// the exact-equality rule (body rule 9) rejects.
 #[test]
 fn overstated_cost_claim_is_rejected() {
     let mut ub = unfinished_5000004();
@@ -127,9 +125,9 @@ fn overstated_cost_claim_is_rejected() {
     );
 }
 
-// BLOCK_COST_EXCEEDS_MAX — the claim understates the true cost: the run budget is chia's
+// BLOCK_COST_EXCEEDS_MAX — the claim understates the true cost: the run budget is
 // `min(MAX_BLOCK_COST_CLVM, claimed)`, so execution blows the claimed budget DURING the run,
-// burning at most the claimed cost of our CPU (the DoS bound chia's clamp exists for).
+// burning at most the claimed cost of our CPU (the DoS bound the clamp exists for).
 #[test]
 fn understated_cost_claim_fails_during_the_run() {
     let mut ub = unfinished_5000004();
@@ -160,7 +158,7 @@ fn honest_mainnet_5000004_validates_with_exact_cost() {
 }
 
 // The empty-generator fast path (the own-farmed non-transaction shape): nothing to run,
-// nothing to reject — conds stays None, exactly chia's.
+// nothing to reject — conds stays None.
 #[test]
 fn non_tx_unfinished_block_passes_untouched() {
     let mut ub = unfinished_5000004();
@@ -172,8 +170,8 @@ fn non_tx_unfinished_block_passes_untouched() {
     assert!(out.is_none(), "no conditions for a non-transaction block");
 }
 
-// chia blockchain.py:729-734 — a non-transaction block carrying a generator is structurally
-// invalid (the daemon-level red test drives this same species through the full relay path).
+// A non-transaction block carrying a generator is structurally invalid (the daemon-level red
+// test drives this same species through the full relay path).
 #[test]
 fn non_tx_unfinished_block_with_generator_is_rejected() {
     let mut ub = unfinished_5000004();

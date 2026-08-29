@@ -1,4 +1,4 @@
-// On-connect greetings, node side (chia full_node.py on_connect :967-1010): the PRODUCTION node
+// On-connect greetings, node side (`on_connect` :967-1010): the PRODUCTION node
 // (Node::boot + spawn_peer_server, StoreApi over the real store/mempool) must greet a freshly
 // handshaken FULL_NODE peer with
 //   - NewPeak of the current peak (:991-998, fork_point_with_previous_peak = the peak height), and
@@ -42,6 +42,8 @@ fn config(listen: SocketAddr, rpc: SocketAddr) -> Config {
         std::process::id()
     ));
     Config {
+        target_outbound: None,
+        target_peer_count: None,
         listen,
         rpc,
         introducer: None,
@@ -156,7 +158,7 @@ async fn recv_within(rx: &mut mpsc::Receiver<Arc<ChiaMessage>>, what: &str) -> A
         .expect("capture channel open")
 }
 
-// chia full_node.py:991-998 — the NewPeak greeting carries the store's confirmed peak, fork
+// The NewPeak greeting carries the store's confirmed peak, fork
 // point = the peak height (the on-connect convention, same as the wallet greeting).
 #[tokio::test]
 async fn full_node_peer_is_greeted_with_the_confirmed_peak() {
@@ -176,10 +178,10 @@ async fn full_node_peer_is_greeted_with_the_confirmed_peak() {
     assert_eq!(
         got.fork_point_with_previous_peak,
         common::PEAK_HEIGHT,
-        "on-connect fork point is the peak height (chia :995)"
+        "on-connect fork point is the peak height"
     );
-    // The unfinished reward-block hash commits to the peak's reward chain block — chia sends
-    // `peak_full.reward_chain_block.get_unfinished().get_hash()`.
+    // The unfinished reward-block hash commits to the peak's reward chain block
+    // (`reward_chain_block.get_unfinished().get_hash()`).
     let unfinished = common::full_block().reward_chain_block.get_unfinished();
     let bytes = unfinished
         .to_bytes(ChiaProtocolVersion::default())
@@ -191,15 +193,14 @@ async fn full_node_peer_is_greeted_with_the_confirmed_peak() {
     );
 }
 
-// chia full_node.py:967-982 — synced ⇒ RequestMempoolTransactions with our BIP158 filter (an
+// Synced ⇒ RequestMempoolTransactions with our BIP158 filter (an
 // empty mempool encodes the EMPTY PyBIP158 filter, which must still decode).
 #[tokio::test]
 async fn synced_node_requests_mempool_sync_from_a_new_full_node_peer() {
     let (_node, _client, mut rx) = rig(true).await;
 
-    // First push is the NewPeak greeting, second the mempool-sync request (chia sends the
-    // mempool request first, :976-981, then NewPeak — order is not part of the contract; accept
-    // either by collecting both).
+    // One push is the NewPeak greeting, the other the mempool-sync request — order is not
+    // part of the contract; accept either by collecting both.
     let a = recv_within(&mut rx, "the first on-connect push").await;
     let b = recv_within(&mut rx, "the second on-connect push").await;
     let req = [a, b]
@@ -219,8 +220,8 @@ async fn synced_node_requests_mempool_sync_from_a_new_full_node_peer() {
 
 // ---- the OUTBOUND half: WE dial a full-node peer and must greet it too ----------------------
 //
-// chia's on_connect fires for connections in BOTH directions (chia/server/server.py
-// start_client → `await on_connect(connection)` after the outgoing handshake) — a node that only
+// on_connect fires for connections in BOTH directions (after the outgoing handshake too) —
+// a node that only
 // greets inbound peers never mempool-syncs from the peers IT dials, which on a fresh node is all
 // of them. The daemon's supervisor on-connect hook runs `outbound_on_connect` against every
 // outbound dial; this proves the sends against a recording mock peer.
@@ -368,7 +369,7 @@ async fn outbound_dial_greets_the_peer_and_requests_its_mempool() {
 }
 
 // An UNSYNCED node dialing out still greets with NewPeak but must not request the peer's
-// mempool (chia's synced gate applies in both directions).
+// mempool (the synced gate applies in both directions).
 #[tokio::test]
 async fn unsynced_outbound_dial_sends_no_mempool_request() {
     let (peer_port, peer_run, new_peaks, mempool_filters) = spawn_recording_peer().await;
@@ -414,7 +415,7 @@ async fn unsynced_outbound_dial_sends_no_mempool_request() {
     peer_run.store(false, Ordering::Relaxed);
 }
 
-// The unsynced posture: chia's `if synced and peak_height is not None` gate — NewPeak still
+// The unsynced posture: `if synced and peak_height is not None` gate — NewPeak still
 // greets (it has no synced gate), but no mempool request.
 #[tokio::test]
 async fn unsynced_node_does_not_request_mempool_sync() {

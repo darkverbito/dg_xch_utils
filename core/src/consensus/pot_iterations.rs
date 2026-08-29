@@ -107,9 +107,8 @@ pub fn calculate_iterations_quality(
     max(1, bigint.to_u64().unwrap_or(0))
 }
 
-/// The quality lottery routed through the size model the proof's version uses, which is the shape
-/// chia gives this function: a v1 proof carries its own k, a v2 proof plays at the network's fixed
-/// v2 plot size.
+/// The quality lottery routed through the size model the proof's version uses: a v1 proof carries
+/// its own k, a v2 proof plays at the network's fixed v2 plot size.
 #[must_use]
 pub fn calculate_iterations_quality_for_proof(
     constants: &ConsensusConstants,
@@ -137,9 +136,8 @@ pub fn calculate_iterations_quality_for_proof(
     }
 }
 
-/// chia `_expected_plot_size` for a v2 plot: `(2^k) * (k + 1.46) / 8`, computed in f64 and
-/// truncated exactly as the reference does. All v2 plots share one k, the network's
-/// `plot_size_v2`.
+/// The expected size of a v2 plot: `(2^k) * (k + 1.46) / 8`, computed in f64 and truncated. All v2
+/// plots share one k, the network's `plot_size_v2`.
 #[allow(clippy::cast_possible_truncation)]
 #[allow(clippy::cast_sign_loss)]
 #[must_use]
@@ -176,26 +174,22 @@ pub fn calculate_iterations_quality_v2(
 
 #[cfg(test)]
 mod tests {
-    //! Harvested from `chia/_tests/core/consensus/test_pot_iterations.py` (the "harvest Chia's tests,
-    //! not libs" discipline). chia's `test_constants` overrides `NUM_SPS_SUB_SLOT=32`
-    //! (`SUB_SLOT_TIME_TARGET=300` and `HARD_FORK2_HEIGHT` are irrelevant to these functions), so the
-    //! overflow boundary is `32 - NUM_SP_INTERVALS_EXTRA(3) = 29`. Every vector below is chia's, verbatim.
+    //! Test constants override `NUM_SPS_SUB_SLOT=32`, so the overflow boundary is
+    //! `32 - NUM_SP_INTERVALS_EXTRA(3) = 29`.
     //!
-    //! DIVERGENCES (flagged, not bugs):
-    //!   * chia's `calculate_iterations_quality` takes a `PlotParam` (v1 or v2); dg_xch keeps the
-    //!     v1 `size: u8` signature and routes versions through
-    //!     `calculate_iterations_quality_for_proof`. The v2 vectors port against
-    //!     `expected_plot_size_v2` / `calculate_iterations_quality_v2`.
-    //!   * on an astronomically-large quotient chia's `uint64(...)` would raise; dg_xch CLAMPS to
-    //!     `u64::MAX` (see `clamps_to_u64_max_on_overflow`). Both reject the impossible proof downstream
-    //!     (`calculate_ip_iters` then errors on `required_iters >= sp_interval_iters`) — a defensive
-    //!     clamp vs a raise, not a consensus difference.
+    //! `calculate_iterations_quality` keeps the v1 `size: u8` signature; versions are routed
+    //! through `calculate_iterations_quality_for_proof`, and the v2 vectors run against
+    //! `expected_plot_size_v2` / `calculate_iterations_quality_v2`.
+    //!
+    //! An astronomically-large quotient clamps to `u64::MAX` (see
+    //! `clamps_to_u64_max_on_overflow`); the impossible proof is still rejected downstream, where
+    //! `calculate_ip_iters` errors on `required_iters >= sp_interval_iters`.
 
     use super::*;
     use crate::consensus::constants::MAINNET;
     use crate::traits::SizedBytes; // Bytes32::new (quality-hash construction in the harvested vectors)
 
-    // chia: DEFAULT_CONSTANTS.replace(NUM_SPS_SUB_SLOT=32, ...). ConsensusConstants is Copy.
+    // ConsensusConstants is Copy.
     fn test_constants() -> ConsensusConstants {
         ConsensusConstants {
             num_sps_sub_slot: 32,
@@ -203,7 +197,6 @@ mod tests {
         }
     }
 
-    // chia test_pot_iterations.py::TestPotIterations::test_is_overflow_block
     #[test]
     fn test_is_overflow_block() {
         let c = test_constants();
@@ -212,24 +205,21 @@ mod tests {
         assert!(is_overflow_block(&c, 29).unwrap());
         assert!(is_overflow_block(&c, 30).unwrap());
         assert!(is_overflow_block(&c, 31).unwrap());
-        // chia: raises ValueError("SP index too high").
         let err = is_overflow_block(&c, 32).unwrap_err();
         assert!(err.to_string().contains("SP index too high"));
     }
 
-    // chia test_pot_iterations.py::TestPotIterations::test_calculate_sp_iters
     #[test]
     fn test_calculate_sp_iters() {
         let c = test_constants();
         let ssi: u64 = 100_001 * 64 * 4;
-        // chia: raises ValueError("SP index too high") for index == NUM_SPS_SUB_SLOT.
+        // index == NUM_SPS_SUB_SLOT errors
         let err = calculate_sp_iters(&c, ssi, 32).unwrap_err();
         assert!(err.to_string().contains("SP index too high"));
         // The last valid index (31) does not error.
         assert!(calculate_sp_iters(&c, ssi, 31).is_ok());
     }
 
-    // chia test_pot_iterations.py::TestPotIterations::test_calculate_ip_iters
     #[test]
     fn test_calculate_ip_iters() {
         let c = test_constants();
@@ -237,19 +227,19 @@ mod tests {
         let sp_interval_iters = ssi / u64::from(c.num_sps_sub_slot);
         let extra = c.num_sp_intervals_extra;
 
-        // chia: invalid signage point index -> "SP index too high".
+        // invalid signage point index -> "SP index too high"
         let err = calculate_ip_iters(&c, ssi, 123, 100_000).unwrap_err();
         assert!(err.to_string().contains("SP index too high"));
 
         let sp_iters = sp_interval_iters * 13;
 
-        // chia: required_iters too high (== and > sp_interval_iters) -> "Required iters ...".
+        // required_iters too high (== and > sp_interval_iters) errors
         let err = calculate_ip_iters(&c, ssi, 0, sp_interval_iters).unwrap_err();
         assert!(err.to_string().contains("Required iters"));
         let err = calculate_ip_iters(&c, ssi, 0, sp_interval_iters * 12).unwrap_err();
         assert!(err.to_string().contains("Required iters"));
 
-        // chia: required_iters too low (0) -> same message ("... or not > 0.").
+        // required_iters too low (0) -> same error
         let err = calculate_ip_iters(&c, ssi, 0, 0).unwrap_err();
         assert!(err.to_string().contains("Required iters"));
 
@@ -268,7 +258,7 @@ mod tests {
             sp_iters + extra * sp_interval_iters + required_iters
         );
 
-        // chia: required_iters = uint64(ssi * 4 / 300) (Python float-div then truncate == integer div).
+        // required_iters = ssi * 4 / 300 (integer division)
         let required_iters = (ssi * 4) / 300;
         let ip_iters = calculate_ip_iters(&c, ssi, 13, required_iters).unwrap();
         assert_eq!(
@@ -277,7 +267,7 @@ mod tests {
         );
         assert!(sp_iters < ip_iters);
 
-        // Overflow (the candidate's make-or-break vector): index NUM_SPS_SUB_SLOT-1, sp_iters > ip_iters,
+        // Overflow: index NUM_SPS_SUB_SLOT-1, sp_iters > ip_iters,
         // ip_iters == (sp_iters + extra*sp_interval + required) % ssi.
         let sp_iters = sp_interval_iters * u64::from(c.num_sps_sub_slot - 1);
         let ip_iters =
@@ -289,17 +279,14 @@ mod tests {
         assert!(sp_iters > ip_iters);
     }
 
-    // The quality -> required_iters path the candidate's `resolve_candidate_iters` stands on. chia has no
-    // standalone unit vector for `calculate_iterations_quality` (it is exercised inside test_win_percentage,
-    // which needs the v2 plot model — see the ignored port below). These deterministic invariants lock the
-    // v1 path without a hand-computed sha256+bigint: floored at 1, linear in difficulty, inverse in plot
-    // size. Anchor: chia/consensus/pot_iterations.py::calculate_iterations_quality.
+    // Deterministic invariants for the v1 quality -> required_iters path: floored at 1,
+    // linear in difficulty, inverse in plot size.
     #[test]
     fn calculate_iterations_quality_v1_invariants() {
         let dcf = MAINNET.difficulty_constant_factor;
         let q = Bytes32::from([7u8; 32]);
         let sp = Bytes32::from([9u8; 32]);
-        // Always >= 1 (chia max(iters, 1)).
+        // Always >= 1.
         assert!(calculate_iterations_quality(dcf, q, 32, 1, sp) >= 1);
         // Linear in difficulty => monotonic non-decreasing.
         let low = calculate_iterations_quality(dcf, q, 32, 1, sp);
@@ -314,8 +301,7 @@ mod tests {
         );
     }
 
-    // DIVERGENCE lock: dg_xch clamps to u64::MAX where chia's uint64() would raise. Anchor:
-    // chia/consensus/pot_iterations.py::calculate_iterations_quality (the uint64(...) cast).
+    // DIVERGENCE lock: dg_xch clamps to u64::MAX instead of erroring on an oversized quotient.
     #[test]
     fn clamps_to_u64_max_on_overflow() {
         let got = calculate_iterations_quality(
@@ -328,7 +314,6 @@ mod tests {
         assert_eq!(got, u64::MAX);
     }
 
-    // chia test_pot_iterations.py::test_expected_plot_size_v1
     #[test]
     fn test_expected_plot_size_v1() {
         let mut last_size = 2_400_000u64;
@@ -339,16 +324,9 @@ mod tests {
         }
     }
 
-    // chia test_pot_iterations.py::TestPotIterations::test_win_percentage — PORTED v1-only, #[ignore]d.
-    // REASON (not faked): chia's fixture mixes v1 and v2 farmers; dg_xch has no v2 plot model
-    // (`PlotParam::make_v2`, `PLOT_SIZE_V2`, `_expected_plot_size` v2), so the v2 farmers are omitted and
-    // this is a v1-only reduction of chia's vector — the proportionality property still holds among v1
-    // farmers. It is also a ~400k-iteration probabilistic vector (1% tolerance) that was NOT run locally
-    // (no-cargo constraint), so it is ignored until confirmed on the cluster rather than shipped green.
-    // chia test_pot_iterations.py::TestPotIterations::test_win_percentage — the full mixed fixture:
-    // five v1 farmer classes and three v2 classes. The three v2 classes share the network's fixed
-    // v2 plot size, so chia's fixture gives them identical space and identical win counts; strength
-    // deliberately plays no part in the lottery.
+    // Five v1 farmer classes and three v2 classes. The v2 classes share the network's fixed v2
+    // plot size, so they hold identical space and win identically; strength plays no part in the
+    // lottery. A ~400k-iteration probabilistic vector with a 1% tolerance.
     #[test]
     fn test_win_percentage() {
         struct FarmerClass {
@@ -396,7 +374,7 @@ mod tests {
                 let sp_hash = Bytes32::new(hash_256(sp_in));
                 for class in &mut classes {
                     for farmer_index in 0..class.count {
-                        // chia: std_hash(slot_be4 + k_1byte + bytes(farmer_index)) — bytes(n) is n zeros.
+                        // std_hash(slot_be4 + k_1byte + farmer_index zero bytes).
                         let mut q_in = Vec::new();
                         q_in.extend_from_slice(&slot_index.to_be_bytes());
                         q_in.push(class.k);
@@ -445,8 +423,7 @@ mod tests {
         assert_eq!(classes[6].wins, classes[7].wins);
     }
 
-    // chia test_pot_iterations.py::test_expected_plot_size_v2: the v2 size is one constant, blind
-    // to strength, plot index and group.
+    // The v2 size is one constant, blind to strength, plot index and group.
     #[test]
     fn test_expected_plot_size_v2() {
         let c = ConsensusConstants {
@@ -458,7 +435,7 @@ mod tests {
 
     #[test]
     fn v2_expected_plot_size_matches_the_reference_float_math() {
-        // int((2**k) * (k + 1.46) / 8) in the reference, IEEE754 f64 both sides.
+        // int((2**k) * (k + 1.46) / 8), in IEEE754 f64.
         assert_eq!(super::expected_plot_size_v2(28), 988_513_566);
         assert_eq!(super::expected_plot_size_v2(18), 637_665);
         assert_eq!(super::expected_plot_size_v2(30), 4_222_489_722);

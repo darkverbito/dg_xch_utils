@@ -269,9 +269,8 @@ async fn mid_range_kill_resumes_with_exactly_the_missing_heights() {
 // ---------------------------------------------------------------------------------------------
 // Kill-point classes D-F: the restart-resume REPAIR holes (the observed fleet stall). A restart
 // leaves the walk cache colder than the store, and the store itself can carry an anchored span or
-// a mid-span record hole; the stage-path consensus walks must resolve from the store (chia
-// parity: blockchain.py falls back to get_block_record_from_db on every cache miss) instead of
-// livelocking the MissingRecord recovery on the identical window.
+// a mid-span record hole; the stage-path consensus walks must resolve from the store (cache
+// miss → store read) instead of livelocking the MissingRecord recovery on the identical window.
 // ---------------------------------------------------------------------------------------------
 
 const WEIGHT_BASE: u128 = 1_000_000; // common::RESTAMP_BASE_WEIGHT — records chain with restamped blocks
@@ -344,7 +343,7 @@ fn plain_hash(n: u32) -> Bytes32 {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn restart_warm_covers_the_deepest_retarget_walk() {
     const B: u32 = 2_000 * 4_608; // epoch boundary
-    // The deepest first-sub-epoch trigger offset the walk itself admits: chia's
+    // The deepest first-sub-epoch trigger offset the walk itself admits: the
     // `height_in_next_epoch` guard caps triggers at offset 362 (o + 2*MAX_SUB_SLOT_BLOCKS +
     // MIN_BLOCKS_PER_CHALLENGE_BLOCK + 5 < 5*MAX_SUB_SLOT_BLOCKS past the surpass).
     const ANCHOR: u32 = B + 362;
@@ -444,9 +443,9 @@ async fn stage_fixture() -> (Arc<SqliteStore>, Chaser<Arc<SqliteStore>, NativePr
 }
 
 // Kill-point class E: records the driver's repair backfilled into the STORE must be readable by
-// the stage walk WITHOUT a lockstep re-warm — the store is the fallback (chia parity). Pre-fix,
-// the stage walk read only the cache, so the identical window re-staged into the identical
-// "block record not found" forever: the MissingRecord livelock this class pins.
+// the stage walk WITHOUT a lockstep re-warm — the store is the fallback. A cache-only stage walk
+// re-stages the identical window into the identical "block record not found" forever: the
+// MissingRecord livelock this class pins.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stage_walk_falls_back_to_store_after_missing_record_backfill() {
     let (store, mut chaser) = stage_fixture().await;

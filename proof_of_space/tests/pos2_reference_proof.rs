@@ -4,10 +4,7 @@ use dg_xch_pos::pos2::constants::TOTAL_XS_IN_PROOF;
 use dg_xch_pos::pos2::params::ProofParams;
 use dg_xch_pos::pos2::validator::ProofValidator;
 
-/// A genuine k18 strength2 proof, produced by the reference plotter, prover and solver for the
-/// plot id and challenge below. This is the positive case: the negative tests only show that
-/// nonsense is rejected, whereas this shows a real proof is accepted and yields the same quality
-/// chain the reference computed.
+/// A k18 strength2 proof for the plot id and challenge below, with the quality chain it yields.
 const PROOF_HEX: &str = concat!(
     "e1f2a972453be5d7b941ab6af512678cfd2eb98fd6203ce22e194e593b6fa2a1",
     "2d712e6f4c4ef358ec91fd86e5a735525e999ab8bd9114cfa8c9f1092e904f57",

@@ -1,23 +1,14 @@
 //! Store-backed fork view (no reorg-depth horizon): `Engine::fork_view` and
-//! `Engine::candidate_branch` rebuild a fork's coin context / reorg branch from the DURABLE STORE
-//! (persisted body + record) when the in-memory `staged_deltas`/`pending` caches miss — chia's
-//! `find_fork_point.lookup_fork_chain` + `advance_fork_info`, not a bounded/volatile cache.
+//! `Engine::candidate_branch` rebuild a fork's coin context / reorg branch from the DURABLE
+//! STORE (persisted body + record) when the in-memory `staged_deltas`/`pending` caches miss —
+//! not a bounded/volatile cache. Fork choice is weight-only and the reorg rolls the coin store
+//! back to the fork height at ANY depth, so a heavier valid chain must always win, regardless of
+//! fork depth or a process restart.
 //!
-//! Before the fix, `fork_view` walked `prev_hash` back through the in-memory caches only and, on
-//! reaching a stored-but-non-confirmed ancestor absent from them, returned
-//! "cannot establish the fork coin context: ancestor … is not on the confirmed chain and its
-//! delta is outside the reorg horizon". Those caches are bounded and lost on restart — that bound
-//! was a fabricated reorg horizon. chia has none: fork choice is weight-only
-//! (chia/consensus/blockchain.py:495-510) and the reorg rolls the coin store back to the fork
-//! height at ANY depth (chia/full_node/coin_store.py:705-727, no floor), re-applying a branch
-//! rebuilt from the STORE (find_fork_point.py::lookup_fork_chain). A heavier valid chain must
-//! always win, regardless of fork depth or a process restart.
-//!
-//! The failing case: a 1-block EQUAL-WEIGHT tie-break strands the node after a restart because the
-//! next block's prev (the orphan branch) is stored-but-non-confirmed and absent from the empty
-//! `pending` cache. These tests reproduce that minimized, and the
-//! over-reorg guard proves the store-backed walk does NOT reorg to a branch that is not heavier
-//! than the peak (chia blockchain.py:497-500).
+//! The failing case: a 1-block EQUAL-WEIGHT tie-break strands the node after a restart because
+//! the next block's prev (the orphan branch) is stored-but-non-confirmed and absent from the
+//! empty `pending` cache. These tests reproduce that minimized, and the over-reorg guard proves
+//! the store-backed walk does NOT reorg to a branch that is not heavier than the peak.
 
 mod common;
 
@@ -88,7 +79,7 @@ fn tx_record(
     r
 }
 
-/// The exact reward claims chia expects a child transaction block to incorporate for `record`
+/// The exact reward claims a child transaction block must incorporate for `record`
 /// (a transaction block directly on top of another transaction block).
 fn claims_for(record: &BlockRecord) -> Vec<Coin> {
     vec![
@@ -286,8 +277,7 @@ async fn seed_base_with_coin(
 // B spends coin_z (below the fork) and creates coin_w; C spends coin_w (a coin that exists ONLY on
 // the branch). After the restart the fresh engine's pending/staged_deltas are empty, so C's body
 // validation must rebuild B's coin delta — including coin_w and the coin_z spend — from B's
-// persisted STORE BODY (chia advance_fork_info), fork at P (H-1), and reorg. Pre-fix this failed
-// with the fabricated reorg-horizon error.
+// persisted STORE BODY, fork at P (H-1), and reorg.
 // ---------------------------------------------------------------------------------------------
 #[tokio::test]
 async fn reorg_to_heavier_branch_when_fork_ancestor_only_in_store() {
@@ -330,7 +320,7 @@ async fn reorg_to_heavier_branch_when_fork_ancestor_only_in_store() {
     let b = synth_tx_block(
         &p,
         H,
-        tie_weight, // == A ⇒ orphan (chia: equal weight keeps the peak)
+        tie_weight, // == A ⇒ orphan (equal weight keeps the peak)
         vec![spend_output(
             coin_z.parent_coin_info,
             coin_z.amount,
@@ -446,7 +436,7 @@ async fn reorg_to_heavier_branch_when_fork_ancestor_only_in_store() {
 
 // ---------------------------------------------------------------------------------------------
 // Over-reorg guard: the store-backed fork walk must NOT reorg to a branch that is not heavier than
-// the peak (chia blockchain.py:497-500 — an equal/lighter-weight competitor keeps the peak). Same
+// the peak (an equal/lighter-weight competitor keeps the peak). Same
 // store reconstruction as the main test (C's fork ancestor B is only in the store after a
 // restart), but the main chain is extended one block beyond the fork so the peak outweighs C. C
 // must validate (fork_view rebuilds B from the store — no horizon error) yet park as an ORPHAN,
@@ -612,10 +602,9 @@ async fn add_branch_orphan(
 // Depth-unbounded guard: a 3-block orphan branch (B1@H, B2@H+1, B3@H+2), each spending a distinct
 // coin seeded below the fork, is parked with only records + bodies in the store. After a RESTART
 // (pending empty), a heavier tip B4@H+3 on B3 must reorg — its fork context and reorg branch are
-// rebuilt for ALL THREE stored ancestors from the durable store, forking at P (H-1). This is the
-// chia property the fabricated horizon violated: a reorg of ANY depth wins
-// (coin_store.rollback_to_block has no floor; the fork point is walked from the store). There is
-// no reorg-depth cap in the fix — the walk streams ancestor-by-ancestor to the confirmed chain.
+// rebuilt for ALL THREE stored ancestors from the durable store, forking at P (H-1). A reorg of
+// ANY depth wins; there is no reorg-depth cap — the walk streams ancestor-by-ancestor to the
+// confirmed chain.
 // ---------------------------------------------------------------------------------------------
 #[tokio::test]
 async fn deep_reorg_reconstructs_a_multi_block_branch_from_the_store_across_a_restart() {

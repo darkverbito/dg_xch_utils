@@ -4,12 +4,9 @@
 //   transactions_generator_root(gen)               == transactions_info.generator_root
 //   transactions_generator_refs_root(ref_list)     == transactions_info.generator_refs_root
 //
-// The execution test (`respond_blocks_generator_execution.rs`) proved execution→cost but NEVER
-// computed either root, so the generator-root path was untested against real mainnet blocks. That gap let
-// a defect reach the live node: for `height >= hard_fork_height`, `transactions_generator_root` wrongly
-// returned `generator.to_program_backrefs().tree_hash()` instead of chia's `std_hash(bytes(generator))`, so
-// every post-hard-fork transaction block was rejected with `InvalidTransactionsGeneratorHash`. Reference:
-// `chia/consensus/block_body_validation.py` (`std_hash(bytes(block.transactions_generator))`).
+// The execution test (`respond_blocks_generator_execution.rs`) proves execution→cost but never
+// computes either root; these lock the identity roots against real mainnet blocks: the
+// generator root is `std_hash(bytes(generator))` — never the decompressed tree hash.
 
 use dg_xch_core::blockchain::foliage_transaction_block::FoliageTransactionBlock;
 use dg_xch_core::blockchain::sized_bytes::Bytes32;
@@ -35,7 +32,6 @@ fn decode() -> RespondBlocks {
 }
 
 /// Every transaction block's declared `generator_root` / `generator_refs_root` must be reproduced exactly.
-/// This is the coverage the execution-only test lacked; it is red on the pre-fix tree-hash implementation.
 #[test]
 fn real_mainnet_generator_roots_match_declared() {
     let resp = decode();
@@ -108,13 +104,12 @@ fn real_mainnet_generator_roots_match_declared() {
 /// blocks **with the real `FoliageTransactionBlock` attached** (`Some`). This drives, together, the whole
 /// path the live node runs — execution, gen_root, refs_root, aggregate-signature verify, cost, fees,
 /// `transactions_info_hash`, AND the foliage `additions_root`/`removals_root` merkle-set comparisons — and
-/// must accept every block, returning the declared roots. This is the sync-ready oracle: when it is green
-/// with real foliage on the fixture's real blocks, the node runs exactly these checks to sync.
+/// must accept every block, returning the declared roots.
 ///
 /// The `additions_root`/`removals_root` comparisons are the merkle-set surface: the additions root is a
 /// `merkle_set` root over `(puzzle_hash, hash_coin_ids(coin_ids))` leaves and the removals root a merkle set
 /// over spent-coin ids. Both are only reached once agg-sig, cost, and fees pass, so a green result here
-/// proves the merkle-set node scheme matches chia byte-for-byte on real blocks.
+/// proves the merkle-set node scheme is byte-exact on real blocks.
 #[test]
 fn real_mainnet_transaction_block_validates_end_to_end() {
     let resp = decode();
@@ -331,7 +326,7 @@ fn tampered_foliage_roots_are_rejected() {
 
 /// Guard: a genuinely wrong generator must STILL be rejected. Tamper one byte of a real generator; its
 /// sha256 root necessarily changes, so `validate_transaction_block` must reject with
-/// `InvalidTransactionsGeneratorHash` (the check is not loosened by the fix).
+/// `InvalidTransactionsGeneratorHash`.
 #[test]
 fn tampered_generator_is_still_rejected() {
     let resp = decode();

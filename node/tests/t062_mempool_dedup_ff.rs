@@ -1,13 +1,10 @@
 // Mempool dedup + singleton fast-forward. Real CLVM fixtures: a
 // `singleton_top_layer_v1_1` singleton (inner puzzle `1`) run through the ACTUAL conditions
-// runner, so eligibility flows exactly as in production — chia_rs MempoolVisitor flags at the
-// spend-bundle conditions run, `supports_fast_forward` + the store's unspent-lineage lookup at
-// admission, FF-aware conflict/double-spend classification, FF rebase at new-peak and at block
-// assembly, and identical-spend deduplication with cost savings.
-//
-// CNI anchors: chia_rs 0.42.1 conditions.rs (ELIGIBLE_FOR_DEDUP/ELIGIBLE_FOR_FF),
-// mempool_manager.py check_removals :227-290 / validate_spend_bundle :667-710 / can_replace
-// :1096-1189 / new_peak :873-987, eligible_coin_spends.py, coin_store.py :795-818.
+// runner, so eligibility flows exactly as in production — the ELIGIBLE_FOR_DEDUP /
+// ELIGIBLE_FOR_FF flags at the spend-bundle conditions run, `supports_fast_forward` + the
+// store's unspent-lineage lookup at admission, FF-aware conflict/double-spend classification,
+// FF rebase at new-peak and at block assembly, and identical-spend deduplication with cost
+// savings.
 
 use dg_xch_core::blockchain::coin::Coin;
 use dg_xch_core::blockchain::coin_record::CoinRecord;
@@ -632,7 +629,7 @@ async fn new_peak_touches_only_spent_coin_owners_and_reorg_uses_slow_path() {
     let name = mp.admit(&store, b, conds).await.expect("admits");
 
     // The store learns X was spent, but the peak's spent list does NOT mention it (out-of-band
-    // change). chia's fast path touches only items indexed by the block's spent coins — the
+    // change). The fast path touches only items indexed by the block's spent coins — the
     // resident item MUST survive: no O(pool) store re-scan per peak.
     store
         .apply_block(102, PEAK_TIME + 10, &[], &[x_coin.name()])

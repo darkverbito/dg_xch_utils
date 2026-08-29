@@ -47,12 +47,12 @@ impl XorShift {
 }
 
 // 1 — The committed corpus round-trips byte-identical: RecentChainData (96 real headers) and the
-// full 14 MB mainnet weight proof decode with exact-fit framing (from_bytes_full: every byte
+// full 14 MB mainnet weight proof decode with exact-fit framing (from_bytes_exact: every byte
 // consumed) and re-encode to the exact source bytes. JSON-sourced fixtures (no original network
 // bytes) pin encode->decode->encode fixed-point plus structural equality instead.
 #[test]
 fn real_corpus_round_trips_byte_identical() {
-    let chain = RecentChainData::from_bytes_full(RECENT_CHAIN_96, version())
+    let chain = RecentChainData::from_bytes_exact(RECENT_CHAIN_96, version())
         .expect("recent-chain blob decodes with exact-fit framing");
     assert!(chain.recent_chain_data.len() > 80, "real slice present");
     assert_eq!(
@@ -61,7 +61,7 @@ fn real_corpus_round_trips_byte_identical() {
         "RecentChainData re-encodes to the exact source bytes"
     );
 
-    let wp = WeightProof::from_bytes_full(WEIGHT_PROOF, version())
+    let wp = WeightProof::from_bytes_exact(WEIGHT_PROOF, version())
         .expect("weight proof decodes with exact-fit framing");
     assert_eq!(
         wp.to_bytes(version()).expect("re-encode"),
@@ -72,7 +72,7 @@ fn real_corpus_round_trips_byte_identical() {
     for height in [5_000_000u32, 5_000_004] {
         let block = common::load_full_block(height);
         let e1 = block.to_bytes(version()).expect("encode");
-        let back = FullBlock::from_bytes_full(&e1, version()).expect("decode");
+        let back = FullBlock::from_bytes_exact(&e1, version()).expect("decode");
         assert_eq!(back, block, "FullBlock {height} structural round-trip");
         let e2 = back.to_bytes(version()).expect("re-encode");
         assert_eq!(e1, e2, "FullBlock {height} byte fixed-point");
@@ -80,7 +80,7 @@ fn real_corpus_round_trips_byte_identical() {
 
     for (i, record) in common::load_records().iter().enumerate() {
         let e1 = record.to_bytes(version()).expect("encode");
-        let back = BlockRecord::from_bytes_full(&e1, version()).expect("decode");
+        let back = BlockRecord::from_bytes_exact(&e1, version()).expect("decode");
         assert_eq!(&back, record, "BlockRecord[{i}] structural round-trip");
         assert_eq!(
             back.to_bytes(version()).expect("re-encode"),
@@ -94,7 +94,7 @@ fn real_corpus_round_trips_byte_identical() {
     let blocks = common::sweep::chain(4_575_000, 4_575_800, u32::MAX);
     for record in blocks.values() {
         let e1 = record.to_bytes(version()).expect("encode");
-        let back = BlockRecord::from_bytes_full(&e1, version()).expect("decode");
+        let back = BlockRecord::from_bytes_exact(&e1, version()).expect("decode");
         assert_eq!(
             &back, record,
             "synthetic record round-trip @{}",
@@ -114,7 +114,7 @@ fn truncated_corpus_always_errors_never_panics() {
     for cut in cuts {
         let prefix = &RECENT_CHAIN_96[..cut];
         let out = catch_unwind(AssertUnwindSafe(|| {
-            RecentChainData::from_bytes_full(prefix, version())
+            RecentChainData::from_bytes_exact(prefix, version())
         }))
         .unwrap_or_else(|_| panic!("decoder PANICKED on truncation at {cut}/{len}"));
         assert!(out.is_err(), "truncation at {cut}/{len} must error, got Ok");
@@ -135,7 +135,7 @@ fn mutated_corpus_never_panics() {
     for pos in positions {
         buf[pos] ^= 0xff;
         let out = catch_unwind(AssertUnwindSafe(|| {
-            FullBlock::from_bytes_full(&buf, version())
+            FullBlock::from_bytes_exact(&buf, version())
         }));
         assert!(
             out.is_ok(),
@@ -157,7 +157,7 @@ fn random_garbage_always_errors_never_panics() {
         macro_rules! must_err {
             ($ty:ty) => {
                 let out =
-                    catch_unwind(AssertUnwindSafe(|| <$ty>::from_bytes_full(&buf, version())))
+                    catch_unwind(AssertUnwindSafe(|| <$ty>::from_bytes_exact(&buf, version())))
                         .unwrap_or_else(|_| {
                             panic!(
                                 "{} PANICKED on garbage case {case} (len {len})",
@@ -181,7 +181,7 @@ fn random_garbage_always_errors_never_panics() {
 // 5 — Hostile framing values fail closed: an over-claimed String length errors (Err, not panic —
 // the claimed 64 MiB is bounded here because the String path pre-allocates the claim before
 // reading; the Vec path is fail-fast by element and errors on the first missing element), and the
-// chia-parity strict tags (Option in {0,1}, bool in {0,1}) reject everything else.
+// strict tags (Option in {0,1}, bool in {0,1}) reject everything else.
 #[test]
 fn hostile_lengths_and_tags_error_fast() {
     // String claiming 64 MiB with no payload.
@@ -199,12 +199,12 @@ fn hostile_lengths_and_tags_error_fast() {
         "over-claimed Vec length must fail on the first missing element"
     );
 
-    // chia parse_optional: the presence tag must be exactly 0 or 1.
+    // The Option presence tag must be exactly 0 or 1.
     for tag in [2u8, 0x80, 0xff] {
         let buf = [tag, 0, 0, 0];
         assert!(
             Option::<u8>::from_bytes(&mut Cursor::new(&buf[..]), version()).is_err(),
-            "Option tag {tag:#x} must be rejected (chia parse_optional parity)"
+            "Option tag {tag:#x} must be rejected"
         );
         assert!(
             bool::from_bytes(&mut Cursor::new(&buf[..]), version()).is_err(),
