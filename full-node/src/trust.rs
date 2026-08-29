@@ -1,29 +1,20 @@
-// The trusted-peer tier — chia `ChiaServer.is_trusted_peer` / `full_node_api.is_trusted`
-// (chia/util/network.py::is_trusted_peer, chia/server/server.py:788-795,
-// chia/full_node/full_node_api.py:2227).
+// The trusted-peer tier. Trust keys on three inputs:
+//   `is_localhost(host) || node_id in trusted_peers || host in trusted_cidrs`.
+// Trust is evaluated fresh at each gate (never cached on the connection), so this policy is a
+// pure function of the peer's cert-hash node id, its remote HOST (IP), and the config.
 //
-// Chia keys trust on THREE inputs (chia `is_trusted_peer`, chia/util/network.py):
-//   `is_localhost(host) || node_id.hex() in trusted_peers || is_trusted_cidr(host, trusted_cidrs)`.
-// Trust is evaluated FRESH at each gate (chia calls `self.is_trusted(peer)` inside
-// `max_subscriptions`, `max_subscribe_response_items`, and the tx-queue priority decision — it is
-// NOT cached on the connection), so this policy is a pure function of the peer's cert-hash node id,
-// its remote HOST (IP), and the config.
+// The host is carried on `SocketPeer.host` and threaded into each gate. A peer with no resolved
+// host (an outbound dial to a name we never resolved to an `IpAddr`) can still be trusted by
+// node id — never by host.
 //
-// The host is carried on `SocketPeer.host` (the ban-list work put the peer's remote IP there) and
-// threaded into each gate. A peer with no resolved host (an outbound dial to a name we never
-// resolved to an `IpAddr`) can still be trusted by node id — never by host.
-//
-// What trust gates, all three hardwired to chia's UNTRUSTED numbers before this tier existed:
+// What trust gates:
 //   1. `max_subscriptions(peer)`             — 200,000 untrusted → 2,000,000 trusted.
 //   2. `max_subscribe_response_items(peer)`  — 100,000 untrusted →   500,000 trusted.
 //   3. tx-queue admission                    — trusted peers' bundles get high-priority queue
 //      placement; see `tx_queue::TxQueue`.
 //
-// Parity note (host-rules delta CLOSED): with NO config, localhost is
-// now AUTO-TRUSTED, matching chia (`is_localhost(host)` short-circuits before the node-id map). A
-// loopback wallet therefore gets the trusted caps + tx priority out of the box, exactly as under
-// chia — this is a behaviour change from the node-id-only bd1a503 tier, and it is the chia-correct
-// behaviour.
+// With NO config, localhost is auto-trusted (`is_localhost(host)` short-circuits before the
+// node-id map): a loopback wallet gets the trusted caps + tx priority out of the box.
 
 use dg_xch_core::blockchain::sized_bytes::Bytes32;
 use ipnet::IpNet;
@@ -32,7 +23,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
 use tracing::warn;
 
-// chia `initial-config.yaml` full_node caps (initial-config.yaml:437/441/444/448).
+// Stock full-node subscription caps.
 const MAX_SUBSCRIBE_ITEMS: usize = 200_000;
 const TRUSTED_MAX_SUBSCRIBE_ITEMS: usize = 2_000_000;
 const MAX_SUBSCRIBE_RESPONSE_ITEMS: usize = 100_000;
@@ -41,8 +32,8 @@ const TRUSTED_MAX_SUBSCRIBE_RESPONSE_ITEMS: usize = 500_000;
 /// The trusted-peer policy: the set of trusted peer node ids (cert hashes), the list of trusted
 /// CIDR networks, and the untrusted/trusted cap pairs. Shared as an `Arc` between the
 /// [`crate::wallet::WalletNotifier`] (subscription caps), the full-node api (response-item cap), and
-/// the gossip transaction queue (priority tier). The default (empty node-id set, empty CIDR list) is
-/// chia's default: every REMOTE peer untrusted, but a LOCALHOST peer auto-trusted.
+/// the gossip transaction queue (priority tier). The default (empty node-id set, empty CIDR
+/// list): every REMOTE peer untrusted, but a LOCALHOST peer auto-trusted.
 #[derive(Debug, Clone)]
 pub struct TrustPolicy {
     trusted: HashSet<Bytes32>,
@@ -54,9 +45,8 @@ pub struct TrustPolicy {
 }
 
 impl Default for TrustPolicy {
-    /// The chia-default policy: an empty trusted node-id set and empty CIDR list at chia's stock
-    /// caps. Every remote peer resolves untrusted; a localhost peer resolves trusted (chia
-    /// `is_localhost`).
+    /// The default policy: an empty trusted node-id set and empty CIDR list at the stock caps.
+    /// Every remote peer resolves untrusted; a localhost peer resolves trusted.
     fn default() -> Self {
         Self {
             trusted: HashSet::new(),
@@ -70,7 +60,7 @@ impl Default for TrustPolicy {
 }
 
 impl TrustPolicy {
-    /// Build a policy from a set of trusted node ids at chia's stock caps (no trusted CIDRs).
+    /// Build a policy from a set of trusted node ids at the stock caps (no trusted CIDRs).
     #[must_use]
     pub fn new(trusted: HashSet<Bytes32>) -> Self {
         Self {
@@ -80,8 +70,8 @@ impl TrustPolicy {
     }
 
     /// Build a policy from the runtime config's `trusted_peers` list of hex node-id (cert-hash)
-    /// strings — chia's `trusted_peers` map keyed on `node_id.hex()`. A malformed hex entry is
-    /// skipped (logged by the caller); an empty list yields the chia default (localhost-only trust).
+    /// strings. A malformed hex entry is skipped (logged by the caller); an empty list yields the
+    /// default (localhost-only trust).
     #[must_use]
     pub fn from_hex_ids(ids: &[String]) -> Self {
         let trusted = ids
@@ -91,9 +81,9 @@ impl TrustPolicy {
         Self::new(trusted)
     }
 
-    /// The production constructor — chia `is_trusted_peer`'s two config inputs: `trusted_peers` (hex
-    /// node-id / cert-hash strings) AND `trusted_cidrs` (CIDR strings). A malformed node-id is
-    /// skipped silently; a malformed CIDR is logged and skipped. Empty lists yield the chia default
+    /// The production constructor — the two config inputs: `trusted_peers` (hex node-id /
+    /// cert-hash strings) AND `trusted_cidrs` (CIDR strings). A malformed node-id is skipped
+    /// silently; a malformed CIDR is logged and skipped. Empty lists yield the default
     /// (localhost auto-trusted, every other peer untrusted).
     #[must_use]
     pub fn from_config(trusted_peers: &[String], trusted_cidrs: &[String]) -> Self {
@@ -102,10 +92,9 @@ impl TrustPolicy {
         policy
     }
 
-    /// Parse `--trusted-cidr` strings into IPv4/IPv6 CIDR matchers. A malformed entry is logged and
-    /// skipped — chia's `ip_network(cidr)` would RAISE (crash the node); we prefer robustness: one
-    /// bad config line does not sink the node. Both IPv4 (`10.0.0.0/8`) and IPv6 (`2001:db8::/32`)
-    /// forms parse.
+    /// Parse `--trusted-cidr` strings into IPv4/IPv6 CIDR matchers. A malformed entry is logged
+    /// and skipped — one bad config line does not sink the node. Both IPv4 (`10.0.0.0/8`) and
+    /// IPv6 (`2001:db8::/32`) forms parse.
     fn parse_cidrs(cidrs: &[String]) -> Vec<IpNet> {
         cidrs
             .iter()
@@ -119,8 +108,8 @@ impl TrustPolicy {
             .collect()
     }
 
-    /// A policy with explicit caps — the test seam for driving the trusted/untrusted split at small
-    /// scale (production uses [`TrustPolicy::from_config`] / [`TrustPolicy::default`] with chia caps).
+    /// A policy with explicit caps — the test seam for driving the trusted/untrusted split at
+    /// small scale (production uses [`TrustPolicy::from_config`] / [`TrustPolicy::default`]).
     #[must_use]
     pub fn with_caps(
         trusted: HashSet<Bytes32>,
@@ -139,29 +128,28 @@ impl TrustPolicy {
         }
     }
 
-    /// chia `is_localhost` (chia/util/network.py): the loopback identities. Our `SocketPeer.host` is
-    /// an already-resolved `IpAddr`, so the hostname form (`"localhost"`) never reaches this layer —
-    /// only the two literal loopback IPs chia's set contains, 127.0.0.1 and ::1. Matched EXACTLY
-    /// (not the whole 127.0.0.0/8 block) to mirror chia's literal string set — 127.0.0.2 is loopback
-    /// but chia does not trust it.
+    /// The loopback identities. `SocketPeer.host` is an already-resolved `IpAddr`, so the
+    /// hostname form (`"localhost"`) never reaches this layer — only the two literal loopback
+    /// IPs, 127.0.0.1 and ::1. Matched EXACTLY (not the whole 127.0.0.0/8 block): 127.0.0.2 is
+    /// loopback but is not trusted.
     #[must_use]
     fn is_localhost(host: IpAddr) -> bool {
         host == IpAddr::V4(Ipv4Addr::LOCALHOST) || host == IpAddr::V6(Ipv6Addr::LOCALHOST)
     }
 
-    /// Whether `host` falls inside any configured trusted CIDR — chia `is_trusted_cidr`
-    /// (chia/util/network.py). `IpNet::contains` masks host bits by the network prefix, so an IPv4
-    /// host is only ever tested against IPv4 networks and likewise for IPv6.
+    /// Whether `host` falls inside any configured trusted CIDR. `IpNet::contains` masks host
+    /// bits by the network prefix, so an IPv4 host is only ever tested against IPv4 networks and
+    /// likewise for IPv6.
     #[must_use]
     fn host_in_trusted_cidrs(&self, host: IpAddr) -> bool {
         self.trusted_cidrs.iter().any(|net| net.contains(&host))
     }
 
-    /// Whether `peer` is trusted — chia `is_trusted_peer` (chia/util/network.py):
-    /// `is_localhost(host) || node_id.hex() in trusted_peers || is_trusted_cidr(host, trusted_cidrs)`.
-    /// `host` is the peer's remote IP (`SocketPeer.host`); `None` (an outbound dial to an unresolved
-    /// name) means only the node-id path can grant trust. With empty config only localhost is
-    /// trusted — the chia default.
+    /// Whether `peer` is trusted:
+    /// `is_localhost(host) || node_id in trusted_peers || host in trusted_cidrs`.
+    /// `host` is the peer's remote IP (`SocketPeer.host`); `None` (an outbound dial to an
+    /// unresolved name) means only the node-id path can grant trust. With empty config only
+    /// localhost is trusted.
     #[must_use]
     pub fn is_trusted(&self, peer: &Bytes32, host: Option<IpAddr>) -> bool {
         if let Some(ip) = host
@@ -172,9 +160,8 @@ impl TrustPolicy {
         self.trusted.contains(peer)
     }
 
-    /// The per-peer combined subscription cap — chia `max_subscriptions(peer)`
-    /// (full_node_api.py:2215-2219): the trusted `trusted_max_subscribe_items` (2,000,000) for a
-    /// trusted peer, else the untrusted `max_subscribe_items` (200,000).
+    /// The per-peer combined subscription cap: the trusted `trusted_max_subscribe_items`
+    /// (2,000,000) for a trusted peer, else the untrusted `max_subscribe_items` (200,000).
     #[must_use]
     pub fn max_subscriptions(&self, peer: &Bytes32, host: Option<IpAddr>) -> usize {
         if self.is_trusted(peer, host) {
@@ -184,9 +171,8 @@ impl TrustPolicy {
         }
     }
 
-    /// The initial-state response-item budget — chia `max_subscribe_response_items(peer)`
-    /// (full_node_api.py:2221-2225): the trusted `trusted_max_subscribe_response_items` (500,000)
-    /// for a trusted peer, else the untrusted `max_subscribe_response_items` (100,000).
+    /// The initial-state response-item budget: the trusted `trusted_max_subscribe_response_items`
+    /// (500,000) for a trusted peer, else the untrusted `max_subscribe_response_items` (100,000).
     #[must_use]
     pub fn max_subscribe_response_items(&self, peer: &Bytes32, host: Option<IpAddr>) -> usize {
         if self.is_trusted(peer, host) {
@@ -241,7 +227,7 @@ mod tests {
         let policy = TrustPolicy::default();
         assert!(!policy.is_trusted(&id(0xaa), None));
         assert!(!policy.is_trusted(&id(0x00), Some(ip("10.0.0.1"))));
-        // 127.0.0.2 is is_loopback() but NOT in chia's literal localhost set — stays untrusted.
+        // 127.0.0.2 is is_loopback() but NOT in the literal localhost set — stays untrusted.
         assert!(!policy.is_trusted(&id(0x00), Some(ip("127.0.0.2"))));
         assert_eq!(
             policy.max_subscriptions(&id(0xaa), Some(ip("10.0.0.1"))),
@@ -254,7 +240,7 @@ mod tests {
     }
 
     // Case 1: a localhost peer (127.0.0.1 / ::1) is trusted even with empty trusted_peers/cidrs, and
-    // that lifts BOTH caps to the trusted tier — chia is_localhost short-circuits before the node-id
+    // that lifts BOTH caps to the trusted tier — is_localhost short-circuits before the node-id
     // map.
     #[test]
     fn localhost_is_trusted_with_empty_config() {
@@ -304,7 +290,7 @@ mod tests {
     }
 
     // Gate 1+2 cap selection: a trusted (node-id) peer gets the trusted caps, an untrusted peer the
-    // untrusted caps — chia max_subscriptions / max_subscribe_response_items.
+    // untrusted caps — max_subscriptions / max_subscribe_response_items.
     #[test]
     fn trusted_peer_gets_trusted_caps_untrusted_gets_untrusted() {
         let policy = TrustPolicy::new(HashSet::from([id(0xaa)]));

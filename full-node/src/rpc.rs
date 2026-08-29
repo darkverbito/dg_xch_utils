@@ -1,17 +1,15 @@
-// The node's chia-compatible HTTP RPC (RPC parity).
+// The node's Chia-compatible HTTP RPC.
 //
 // Two layers:
 //   - `NodeRpc` — the typed query surface. Every endpoint reads through the store/mempool traits,
 //     never a backend. Errors are typed (`RpcError`); the HTTP layer decides representation.
-//   - `NodeRpcHandler` — the chia envelope adapter over `dg_xch_servers::RpcServer`. Every
-//     response is `{"<named_key>": ..., "success": true}` and every application error is an
-//     HTTP-200 `{"success": false, "error": "..."}` — chia `wrap_http_handler`
-//     (chia/rpc/util.py:74-97). Endpoint semantics and named keys mirror
-//     chia/full_node/full_node_rpc_api.py (see each method's citation).
+//   - `NodeRpcHandler` — the envelope adapter over `dg_xch_servers::RpcServer`. Every response is
+//     `{"<named_key>": ..., "success": true}` and every application error is an HTTP-200
+//     `{"success": false, "error": "..."}`.
 //
-// Transport is TLS with chia's posture (chia server.py `ssl_context_for_server`: server cert from
-// the private CA, client certificate REQUIRED and verified against that CA) — see
-// [`build_rpc_tls_context`]. Plain-HTTP liveness/metrics stay on the separate `--metrics` port.
+// Transport is TLS (server cert from the private CA, client certificate REQUIRED and verified
+// against that CA) — see [`build_rpc_tls_context`]. Plain-HTTP liveness/metrics stay on the
+// separate `--metrics` port.
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -64,27 +62,24 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, OnceLock};
 use tokio::sync::Mutex;
 
-// ---- bounds (chia leaves ranges unbounded on its trusted-local RPC; we bound LOUDLY — an
-// over-cap request errors, it is never silently truncated) --------------------------------------
+// ---- bounds (every range is bounded LOUDLY — an over-cap request errors, it is never silently
+// truncated) ------------------------------------------------------------------------------------
 
 /// Most block records one `get_block_records` call may return — one full mainnet day (4608
-/// blocks), the window chia's own `get_blockchain_state` netspace math reads.
+/// blocks), the window the `get_blockchain_state` netspace math reads.
 pub const MAX_BLOCK_RECORDS_PER_REQUEST: u32 = 4608;
 /// Most FULL blocks (bodies included) one `get_blocks` call may return.
 pub const MAX_BLOCKS_PER_REQUEST: u32 = 128;
-/// Most ids (names / parent ids / puzzle hashes / hints) one coin query may carry — chia's own
-/// SQLite variable ceiling (`MAX_PUZZLE_HASH_BATCH_SIZE`, coin_store.py:588).
+/// Most ids (names / parent ids / puzzle hashes / hints) one coin query may carry.
 pub const MAX_IDS_PER_REQUEST: usize = 32_690;
-/// Request-body cap — chia's aiohttp `client_max_size` default (1 MiB, chia/util/network.py:49;
-/// the full node service never overrides it). An oversize body is refused with HTTP 413.
+/// Request-body cap (1 MiB). An oversize body is refused with HTTP 413.
 pub const MAX_RPC_BODY_BYTES: usize = 1024 * 1024;
-// The netspace / average-block-time lookback chia uses in get_blockchain_state (one day).
+// The netspace / average-block-time lookback for get_blockchain_state (one day).
 const BLOCKCHAIN_STATE_LOOKBACK: u32 = 4608;
 // Longest walk down from a height to find the nearest transaction block (tx blocks land every
 // ~2 blocks; 128 is generous and keeps the walk bounded).
 const MAX_TX_BLOCK_WALK: u32 = 128;
-// chia UI_ACTUAL_SPACE_CONSTANT_FACTOR (chia/consensus/pos_quality.py) — the netspace estimate's
-// plot-efficiency constant.
+// UI_ACTUAL_SPACE_CONSTANT_FACTOR — the netspace estimate's plot-efficiency constant.
 const UI_ACTUAL_SPACE_CONSTANT_FACTOR: f64 = 0.762;
 
 #[derive(Debug)]
@@ -136,17 +131,17 @@ impl From<MempoolError> for RpcError {
 /// `get_network_info`. Attached once by `spawn_rpc_server`; a `NodeRpc` without it (unit tests)
 /// serves the store-backed endpoints and answers the live ones empty / not-in-cache.
 pub struct NodeRpcLive {
-    /// sha256 of our RPC leaf certificate — chia's cert-hash node identity.
+    /// sha256 of our RPC leaf certificate — the cert-hash node identity.
     pub node_id: Bytes32,
-    /// The `--network` id (chia `selected_network`).
+    /// The `--network` id (`selected_network`).
     pub network_id: String,
     /// The P2P listen port (`get_connections.local_port`).
     pub local_port: u16,
-    /// The heaviest claimed peer peak (chia `sync_store.target_peak` analog) — sync_tip_height.
+    /// The heaviest claimed peer peak — sync_tip_height.
     pub claimed_peak: Arc<AtomicU32>,
     /// Phase-2 slot state: recent signage points + finished sub-slots.
     pub slot_state: Arc<Mutex<SlotState>>,
-    /// The unfinished-block cache (chia `full_node_store._unfinished_blocks`).
+    /// The unfinished-block cache.
     pub unfinished: Arc<Mutex<UnfinishedCache>>,
     /// The inbound peer sessions map.
     pub inbound_peers: PeerMap,
@@ -154,10 +149,9 @@ pub struct NodeRpcLive {
 
 // ---- shared coin-query window ------------------------------------------------------------------
 
-/// The chia coin-query window every `get_coin_records_by_*` endpoint takes
-/// (full_node_rpc_api.py:708-840): `include_spent_coins` defaults FALSE, `start_height` /
-/// `end_height` filter on the confirmed height (end EXCLUSIVE — chia's SQL
-/// `confirmed_index>=? AND confirmed_index<?`).
+/// The coin-query window every `get_coin_records_by_*` endpoint takes:
+/// `include_spent_coins` defaults FALSE, `start_height` / `end_height` filter on the confirmed
+/// height (end EXCLUSIVE: `confirmed_index >= start AND confirmed_index < end`).
 #[derive(Deserialize, Clone, Copy, Debug, Default)]
 pub struct CoinQueryWindow {
     #[serde(default)]
@@ -191,7 +185,7 @@ impl CoinQueryWindow {
     }
 }
 
-/// `get_blockchain_state`'s full answer: the typed chia `blockchain_state` object plus the two
+/// `get_blockchain_state`'s full answer: the typed `blockchain_state` object plus the two
 /// fields core's struct does not carry (`average_block_time`, `mempool_fees`) — the HTTP layer
 /// merges them into the JSON object.
 #[derive(Clone, Debug)]
@@ -253,7 +247,7 @@ where
         &self.mempool
     }
 
-    /// Chia's full `blockchain_state` object (full_node_rpc_api.py:190-310): peak as a full
+    /// The full `blockchain_state` object: peak as a full
     /// [`BlockRecord`], the `sync` sub-object, the netspace estimate over the last 4608 blocks,
     /// average block time, the mempool gauges, `block_max_cost`, and the cert-hash `node_id`.
     ///
@@ -290,7 +284,7 @@ where
                 self.constants.sub_slot_iters_starting,
             ),
         };
-        // Netspace + average block time over the last day of blocks (chia :249-259). A node
+        // Netspace + average block time over the last day of blocks. A node
         // without deep history (mid-chain anchored) reports 0/None rather than erroring.
         let (space, average_block_time) = match &peak {
             Some(rec) if rec.height > 1 => {
@@ -312,8 +306,8 @@ where
                 mp.total_cost(),
                 fees,
                 mp.max_total_cost(),
-                // chia get_min_fee_rate(5_000_000) (mempool.py:301-327, served by the node's
-                // Mempool); chia emits null when nothing could fit — flattened to 0 here
+                // get_min_fee_rate(5_000_000), served by the node's Mempool; null when nothing
+                // could fit — flattened to 0 here
                 // (MinMempoolFees carries a plain f64).
                 mp.get_min_fee_rate(5_000_000).unwrap_or(0.0),
             )
@@ -327,7 +321,7 @@ where
         let sync = SyncStatus {
             sync_mode,
             synced,
-            // chia: while syncing toward an unknown tip, display peak/peak (:241-244).
+            // While syncing toward an unknown tip, display peak/peak.
             sync_tip_height: if sync_mode && sync_tip_height == 0 {
                 peak_height
             } else if sync_mode {
@@ -359,10 +353,10 @@ where
         })
     }
 
-    /// chia `get_fee_estimate` (full_node_rpc_api.py:1374): fee-per-cost estimates for a spend of
+    /// `get_fee_estimate`: fee-per-cost estimates for a spend of
     /// the given `cost` (or `spend_bundle`) to be confirmed within each `target_times` offset, plus
     /// the mempool gauges and last-block telemetry. Estimates are made monotonically DECREASING in
-    /// target time (sooner ⇒ pricier) exactly as chia does. Insufficient tracker history yields the
+    /// target time (sooner ⇒ pricier). Insufficient tracker history yields the
     /// floor (0) — never a fabricated constant.
     ///
     /// # Errors
@@ -374,8 +368,7 @@ where
         cost: Option<u64>,
         mut target_times: Vec<u64>,
     ) -> Result<FeeEstimateResponse, RpcError> {
-        // chia _validate_fee_estimate_cost: exactly one of {spend_bundle, cost} (spend_type is
-        // chia's third option — not served here).
+        // Exactly one of {spend_bundle, cost} (a spend_type option is not served here).
         let spend_cost = match (spend_bundle, cost) {
             (Some(_), Some(_)) | (None, None) => {
                 return Err(RpcError::BadRequest(
@@ -384,7 +377,7 @@ where
             }
             (None, Some(c)) => c,
             (Some(bundle), None) => {
-                // chia pre_validate_spendbundle → conds.cost. Height = next block (peak + 1).
+                // Cost from the conditions run. Height = next block (peak + 1).
                 let height = match self.store.get_peak().await? {
                     Some((hh, _)) => {
                         self.store
@@ -400,7 +393,7 @@ where
                     .cost
             }
         };
-        // chia sorts target_times ascending, then makes the products monotonically decreasing.
+        // Sort target_times ascending, then make the products monotonically decreasing.
         target_times.sort_unstable();
 
         #[allow(
@@ -419,7 +412,7 @@ where
                 .into_iter()
                 .map(|e| e as u64)
                 .collect();
-            // chia: current_fee_rate = estimate_fee_rate(time_offset_seconds=1).mojos_per_clvm_cost
+            // current_fee_rate = estimate_fee_rate(time_offset_seconds=1)
             let current_fee_rate = est.estimate_fee_rate(1);
             (
                 estimates,
@@ -436,7 +429,7 @@ where
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
 
-        // Peak + last-transaction-block telemetry (chia walks back to the last tx block).
+        // Peak + last-transaction-block telemetry (walk back to the last tx block).
         let peak = match self.store.get_peak().await? {
             Some((hh, _)) => self.store.get_block_record(&hh).await?,
             None => None,
@@ -452,7 +445,7 @@ where
             None => (0u32, 0u64, 0u64, 0u64, 0.0f64, 0u32),
             Some(rec) => {
                 // Walk to the most recent transaction block at/below the peak (a tx block carries a
-                // timestamp; chia's peak loop, full_node_rpc_api.py:1409-1416).
+                // timestamp).
                 let mut cur = Some(rec.clone());
                 let mut last_tx = None;
                 while let Some(c) = cur {
@@ -507,7 +500,7 @@ where
         })
     }
 
-    // chia get_average_block_time (full_node_rpc_api.py:65): seconds between the nearest
+    // get_average_block_time: seconds between the nearest
     // transaction blocks at/below the peak and at/below the lookback height.
     async fn average_block_time(
         &self,
@@ -550,7 +543,7 @@ where
         }
     }
 
-    /// The full block for a header hash — chia `get_block` (full_node_rpc_api.py:414): an
+    /// The full block for a header hash` — `get_block`: an
     /// unknown hash is an ERROR (`Block ... not found`), never null.
     ///
     /// # Errors
@@ -562,10 +555,9 @@ where
         })
     }
 
-    /// Full blocks for the height range `start..end` (END-EXCLUSIVE) — chia `get_blocks`
-    /// (full_node_rpc_api.py:430). Heights with no confirmed block are skipped (chia's
-    /// `get_full_blocks_at` returns what exists). Returns each block with its header hash so the
-    /// HTTP layer can mirror chia's injected `header_hash` field. `exclude_reorged` is accepted
+    /// Full blocks for the height range `start..end` (END-EXCLUSIVE) — `get_blocks`.
+    /// Heights with no confirmed block are skipped. Returns each block with its header hash so
+    /// the HTTP layer can mirror the injected `header_hash` field. `exclude_reorged` is accepted
     /// for compatibility but a no-op: this store serves only canonical-chain blocks by height
     /// (orphans are not addressable by height here), so reorged blocks are never returned.
     ///
@@ -597,8 +589,8 @@ where
         Ok(out)
     }
 
-    /// The block record for a header hash — chia `get_block_record`
-    /// (full_node_rpc_api.py:614): unknown hash is an error.
+    /// The block record for a header hash` — `get_block_record`
+    ///: unknown hash is an error.
     ///
     /// # Errors
     /// Returns [`RpcError::BadRequest`] if the record is unknown, [`RpcError::Store`] on a query
@@ -612,8 +604,8 @@ where
             })
     }
 
-    /// The canonical block record at a height — chia `get_block_record_by_height`
-    /// (full_node_rpc_api.py:580): a height above the peak (or an empty chain) is an error.
+    /// The canonical block record at a height` — `get_block_record_by_height`
+    ///: a height above the peak (or an empty chain) is an error.
     ///
     /// # Errors
     /// Returns [`RpcError::BadRequest`] if the height is above the peak or has no confirmed
@@ -631,9 +623,9 @@ where
             .ok_or_else(|| RpcError::BadRequest(format!("Block hash {height} not found in chain")))
     }
 
-    /// Block records for the height range `start..end` (END-EXCLUSIVE) — chia
-    /// `get_block_records` (full_node_rpc_api.py:480): heights above the peak end the walk
-    /// (partial list, chia's `break`); a height at/below the peak with no confirmed record is an
+    /// Block records for the height range `start..end` (END-EXCLUSIVE) —
+    /// `get_block_records`: heights above the peak end the walk
+    /// (partial list, `break`); a height at/below the peak with no confirmed record is an
     /// ERROR (`Height not in blockchain`), never silently skipped.
     ///
     /// # Errors
@@ -671,8 +663,8 @@ where
         Ok(out)
     }
 
-    /// Every coin spend a block's generator produces — chia `get_block_spends`
-    /// (full_node_rpc_api.py:520, chia_rs `get_spends_for_trusted_block`). A non-transaction
+    /// Every coin spend a block's generator produces` — `get_block_spends`
+    /// (chia_rs `get_spends_for_trusted_block`). A non-transaction
     /// block answers an empty list.
     ///
     /// # Errors
@@ -692,9 +684,8 @@ where
             .map_err(|e| RpcError::BadRequest(format!("Failed to get spends for block: {e:?}")))
     }
 
-    /// [`NodeRpc::get_block_spends`] plus each spend's parsed conditions — chia
-    /// `get_block_spends_with_conditions` (full_node_rpc_api.py:551, chia_rs
-    /// `get_spends_for_trusted_block_with_conditions`).
+    /// [`NodeRpc::get_block_spends`] plus each spend's parsed conditions —
+    /// `get_block_spends_with_conditions`.
     ///
     /// # Errors
     /// As [`NodeRpc::get_block_spends`].
@@ -711,8 +702,8 @@ where
             .map_err(|e| RpcError::BadRequest(format!("Failed to get spends for block: {e:?}")))
     }
 
-    /// The netspace estimate between two block records — chia `get_network_space`
-    /// (full_node_rpc_api.py:652): `UI_ACTUAL_SPACE_CONSTANT_FACTOR * (Δweight / Δiters) *
+    /// The netspace estimate between two block records` — `get_network_space`
+    ///: `UI_ACTUAL_SPACE_CONSTANT_FACTOR * (Δweight / Δiters) *
     /// DIFFICULTY_CONSTANT_FACTOR * 2^plot_filter_prefix_bits`.
     ///
     /// # Errors
@@ -752,7 +743,7 @@ where
             .ok_or_else(|| RpcError::BadRequest("blocks carry no iteration delta".to_string()))
     }
 
-    // The chia netspace formula (full_node_rpc_api.py:691-706); float math mirrors chia's.
+    // The netspace formula; float math matches the wire convention.
     #[allow(
         clippy::cast_precision_loss,
         clippy::cast_possible_truncation,
@@ -773,8 +764,8 @@ where
         Some(estimate as u128)
     }
 
-    /// The cached unfinished blocks at the peak height, as header blocks — chia
-    /// `get_unfinished_block_headers` (full_node_rpc_api.py:633, full_node_store.py:342).
+    /// The cached unfinished blocks at the peak height, as header blocks —
+    /// `get_unfinished_block_headers`.
     /// Answers empty without attached live state.
     ///
     /// # Errors
@@ -805,14 +796,14 @@ where
     }
 
     /// A recently-received signage point (by `sp_hash`) or end-of-sub-slot (by
-    /// `challenge_hash`) — chia `get_recent_signage_point_or_eos` (full_node_rpc_api.py:313),
+    /// `challenge_hash`)` — `get_recent_signage_point_or_eos`,
     /// served from the live slot state. `time_received` is not tracked by this cache and is
     /// reported as `0.0`; a point still resident in the slot state is `reverted: false`
-    /// (chia's own still-in-store fast path).
+    /// (the still-in-store fast path).
     ///
     /// # Errors
     /// Returns [`RpcError::BadRequest`] if neither parameter is given or the point is not in
-    /// the cache (chia's `SP_NOT_IN_CACHE` / `EOS_NOT_IN_CACHE`).
+    /// the cache (`SP_NOT_IN_CACHE` / `EOS_NOT_IN_CACHE`).
     pub async fn get_recent_signage_point_or_eos(
         &self,
         sp_hash: Option<&Bytes32>,
@@ -853,8 +844,8 @@ where
         Ok(m)
     }
 
-    /// Coin records by coin id — chia `get_coin_records_by_names`
-    /// (full_node_rpc_api.py:768): unknown names are simply absent; `include_spent_coins`
+    /// Coin records by coin id` — `get_coin_records_by_names`
+    ///: unknown names are simply absent; `include_spent_coins`
     /// defaults FALSE; the height window filters on the confirmed height.
     ///
     /// # Errors
@@ -869,8 +860,8 @@ where
         Ok(window.apply(self.store.get_coin_records(names).await?))
     }
 
-    /// A single coin record by id — chia `get_coin_record_by_name`
-    /// (full_node_rpc_api.py:749): unknown is an ERROR.
+    /// A single coin record by id` — `get_coin_record_by_name`
+    ///: unknown is an ERROR.
     ///
     /// # Errors
     /// Returns [`RpcError::BadRequest`] if the coin is unknown; [`RpcError::Store`] on a query
@@ -882,8 +873,8 @@ where
             .ok_or_else(|| RpcError::BadRequest(format!("Coin record {name} not found")))
     }
 
-    /// Coin records by parent coin id — chia `get_coin_records_by_parent_ids`
-    /// (full_node_rpc_api.py:790). Service tier (`coin-index`).
+    /// Coin records by parent coin id` — `get_coin_records_by_parent_ids`
+    ///. Service tier (`coin-index`).
     ///
     /// # Errors
     /// Returns [`RpcError::BadRequest`] beyond [`MAX_IDS_PER_REQUEST`] parents;
@@ -902,8 +893,8 @@ where
         Ok(window.apply(out))
     }
 
-    /// Coin records for one puzzle hash — chia `get_coin_records_by_puzzle_hash`
-    /// (full_node_rpc_api.py:708). Service tier (`coin-index`).
+    /// Coin records for one puzzle hash` — `get_coin_records_by_puzzle_hash`
+    ///. Service tier (`coin-index`).
     ///
     /// # Errors
     /// Returns [`RpcError::Store`] on a query failure.
@@ -917,8 +908,8 @@ where
             .await
     }
 
-    /// Coin records for a puzzle-hash list — chia `get_coin_records_by_puzzle_hashes`
-    /// (full_node_rpc_api.py:727). Unspent queries read the unspent secondary index directly;
+    /// Coin records for a puzzle-hash list` — `get_coin_records_by_puzzle_hashes`
+    ///. Unspent queries read the unspent secondary index directly;
     /// spent-inclusive queries resolve ids through the coin-state index first (bounded by the
     /// store's `MAX_COIN_STATES` budget). Service tier (`coin-index`).
     ///
@@ -957,15 +948,15 @@ where
 
     /// Admit a spend bundle to the mempool, returning its name. The bundle→conditions CLVM run
     /// (mempool mode, next-block height) and the aggregate-signature check both happen here,
-    /// server-side — the caller supplies only the bundle, matching chia's `push_tx`
-    /// (full_node_rpc_api.py:841). Idempotent: a bundle already resident answers SUCCESS via the
-    /// shared admission seam (chia :846-855).
+    /// server-side — the caller supplies only the bundle, matching `push_tx`
+    ///. Idempotent: a bundle already resident answers SUCCESS via the
+    /// shared admission seam.
     ///
     /// # Errors
     /// Returns [`RpcError::BadRequest`] if the bundle fails CLVM or signature validation,
     /// [`RpcError::Mempool`] with the rejection reason, or [`RpcError::Store`] on a store failure.
     pub async fn push_tx(&self, bundle: SpendBundle) -> Result<Bytes32, RpcError> {
-        // The shared admission seam (tx_admission.rs, chia full_node.add_transaction): the same
+        // The shared admission seam (tx_admission.rs): the same
         // validate → admit → announce path the gossip worker and the wallet's p2p SendTransaction
         // run — one mempool admission seam, three ingress surfaces.
         crate::tx_admission::admit_spend_bundle(
@@ -986,8 +977,8 @@ where
         })
     }
 
-    /// Coin records a 32-byte hint points at — chia `get_coin_records_by_hint`
-    /// (full_node_rpc_api.py:812): unspent-only by default, height-windowed. Resolves through
+    /// Coin records a 32-byte hint points at` — `get_coin_records_by_hint`
+    ///: unspent-only by default, height-windowed. Resolves through
     /// the `coin_hint` index populated on block apply. Requires the `hint` service tier.
     ///
     /// # Errors
@@ -1005,9 +996,9 @@ where
         Ok(window.apply(records))
     }
 
-    /// Additions (coins created) and removals (coins spent) at a block — chia
-    /// `get_additions_and_removals` (`chia/full_node/full_node_rpc_api.py:913`). Rejects a header
-    /// hash that is not the confirmed block at its height (chia's `height_to_hash(height) ==
+    /// Additions (coins created) and removals (coins spent) at a block —
+    /// `get_additions_and_removals`. Rejects a header
+    /// hash that is not the confirmed block at its height (`height_to_hash(height) ==
     /// header_hash` fork check). Requires the `coin-index` service tier (reads the
     /// `confirmed_index` / `spent_index` secondary indexes).
     ///
@@ -1045,8 +1036,8 @@ where
         })
     }
 
-    /// The [`CoinSpend`] (coin + puzzle reveal + solution) of a spent coin — chia
-    /// `get_puzzle_and_solution` (`chia/full_node/full_node_rpc_api.py:871`). The coin must be
+    /// The [`CoinSpend`] (coin + puzzle reveal + solution) of a spent coin —
+    /// `get_puzzle_and_solution`. The coin must be
     /// spent at exactly `height`; the block's generator is then re-run through the existing CLVM
     /// runner ([`coin_spend_from_generator`]) to recover the reveal and solution — no second VM.
     ///
@@ -1062,15 +1053,15 @@ where
         puzzle_and_solution_coin_spend(self.store.as_ref(), &self.constants, coin_id, height).await
     }
 
-    /// Every mempool transaction id — chia `get_all_mempool_tx_ids`
-    /// (full_node_rpc_api.py:1208).
+    /// Every mempool transaction id` — `get_all_mempool_tx_ids`
+    ///.
     pub async fn get_all_mempool_tx_ids(&self) -> Vec<Bytes32> {
         let mp = self.mempool.lock().await;
         mp.items_by_fee().iter().map(|i| i.name).collect()
     }
 
-    /// Every mempool item, keyed by transaction id — chia `get_all_mempool_items`
-    /// (full_node_rpc_api.py:1212).
+    /// Every mempool item, keyed by transaction id` — `get_all_mempool_items`
+    ///.
     pub async fn get_all_mempool_items(&self) -> Vec<MempoolItemJson> {
         let mp = self.mempool.lock().await;
         mp.items_by_fee()
@@ -1079,8 +1070,8 @@ where
             .collect()
     }
 
-    /// One mempool item by transaction id — chia `get_mempool_item_by_tx_id`
-    /// (full_node_rpc_api.py:1218): unknown is an ERROR. `include_pending` is accepted but a
+    /// One mempool item by transaction id` — `get_mempool_item_by_tx_id`
+    ///: unknown is an ERROR. `include_pending` is accepted but a
     /// no-op — this mempool holds no pending set (a PENDING-classed bundle is not retained).
     ///
     /// # Errors
@@ -1095,8 +1086,8 @@ where
             .ok_or_else(|| RpcError::BadRequest(format!("Tx id {tx_id} not in the mempool")))
     }
 
-    /// Every mempool item spending a coin — chia `get_mempool_items_by_coin_name`
-    /// (full_node_rpc_api.py:1235). An unknown coin answers an empty list.
+    /// Every mempool item spending a coin` — `get_mempool_items_by_coin_name`
+    ///. An unknown coin answers an empty list.
     pub async fn get_mempool_items_by_coin_name(
         &self,
         coin_name: &Bytes32,
@@ -1109,15 +1100,15 @@ where
             .collect()
     }
 
-    /// The network's AGG_SIG_ME additional data — chia `get_aggsig_additional_data`
-    /// (full_node_rpc_api.py:1205).
+    /// The network's AGG_SIG_ME additional data` — `get_aggsig_additional_data`
+    ///.
     #[must_use]
     pub fn get_aggsig_additional_data(&self) -> Bytes32 {
         self.constants.agg_sig_me_additional_data
     }
 
-    /// Network name / address prefix / genesis challenge — chia `get_network_info`
-    /// (rpc_server.py:273). Without attached live state the name is inferred from the
+    /// Network name / address prefix / genesis challenge` — `get_network_info`
+    ///. Without attached live state the name is inferred from the
     /// consensus constants.
     #[must_use]
     pub fn get_network_info(&self) -> (String, String, Bytes32) {
@@ -1143,10 +1134,9 @@ where
         )
     }
 
-    /// The live peer connections — chia `get_connections` (rpc_server.py:283 /
-    /// `default_get_connections`). Serves the INBOUND session map; per-connection byte/time
-    /// counters are not tracked per peer and report 0. Answers empty without
-    /// attached live state.
+    /// The live peer connections — `get_connections`. Serves the INBOUND session map;
+    /// per-connection byte/time counters are not tracked per peer and report 0. Answers empty
+    /// without attached live state.
     pub async fn get_connections(&self, node_type: Option<u8>) -> Vec<Map<String, Value>> {
         let Some(live) = self.live.get() else {
             return Vec::new();
@@ -1195,8 +1185,7 @@ fn eos_not_in_cache(challenge_hash: &Bytes32) -> RpcError {
     ))
 }
 
-// chia calculate_prefix_bits for v1 plots (chia/types/blockchain_format/proof_of_space.py:221):
-// the plot-filter halvings ladder, keyed on the newer block's height.
+// The v1 plot-filter halvings ladder, keyed on the newer block's height.
 fn plot_filter_prefix_bits(constants: &ConsensusConstants, height: u32) -> u8 {
     let mut bits = constants.number_zero_bits_plot_filter;
     if height >= constants.plot_filter_32_height {
@@ -1211,7 +1200,7 @@ fn plot_filter_prefix_bits(constants: &ConsensusConstants, height: u32) -> u8 {
     bits
 }
 
-// The chia MempoolItem JSON shape (spend_bundle / fee / cost / npc_result / spend_bundle_name /
+// The MempoolItem JSON shape (spend_bundle / fee / cost / npc_result / spend_bundle_name /
 // additions / removals), built from the node's internal item.
 fn mempool_item_json(item: &dg_xch_node::MempoolItem) -> MempoolItemJson {
     MempoolItemJson {
@@ -1265,9 +1254,8 @@ async fn generator_input_for_block<S: CoinStore + BlockStore>(
 }
 
 /// Recover the [`CoinSpend`] (coin + puzzle reveal + solution) of a coin spent at exactly `height` by
-/// re-running that block's generator through the existing CLVM runner — chia
-/// `get_puzzle_and_solution` (`chia/full_node/full_node_api.py:1571`, RPC sibling
-/// `full_node_rpc_api.py:871`). Shared by the HTTP RPC and the light-wallet p2p handler
+/// re-running that block's generator through the existing CLVM runner —
+/// `get_puzzle_and_solution`. Shared by the HTTP RPC and the light-wallet p2p handler
 /// (`RequestPuzzleSolution`) so both paths run the one tested extraction, never a second VM.
 ///
 /// # Errors
@@ -1313,8 +1301,8 @@ pub(crate) async fn puzzle_and_solution_coin_spend<S: CoinStore + BlockStore>(
         })
 }
 
-/// The `get_additions_and_removals` response — coins created and coins spent at a block (chia's
-/// `{additions, removals}` JSON).
+/// The `get_additions_and_removals` response — coins created and coins spent at a block
+/// (the `{additions, removals}` JSON).
 #[cfg(feature = "coin-index")]
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct AdditionsAndRemovals {
@@ -1324,18 +1312,17 @@ pub struct AdditionsAndRemovals {
 
 // ---- TLS ---------------------------------------------------------------------------------------
 
-/// The RPC listener's TLS material: a chia-posture rustls server config plus the cert-hash node
+/// The RPC listener's TLS material: the rustls server config plus the cert-hash node
 /// id derived from the served leaf certificate.
 pub struct RpcTlsContext {
     pub server_config: Arc<ServerConfig>,
     pub node_id: Bytes32,
 }
 
-/// Build the RPC listener's TLS config with chia's 8555 posture (chia server.py
-/// `ssl_context_for_server`, :54-71): the server cert is generated from the private CA
-/// (`PRIVATE_CA_CRT`/`PRIVATE_CA_KEY` env override, else the embedded public chia CA — the same
-/// fallback chain the P2P listener uses), and the client must present a certificate that chains
-/// to that CA (`verify_mode = CERT_REQUIRED`). Setting `DG_XCH_RPC_ALLOW_ANY_CLIENT_CERT=1`
+/// Build the RPC listener's TLS config with the standard 8555 posture: the server cert is
+/// generated from the private CA (`PRIVATE_CA_CRT`/`PRIVATE_CA_KEY` env override, else the
+/// embedded public mainnet CA — the same fallback chain the P2P listener uses), and the client
+/// must present a certificate that chains to that CA. Setting `DG_XCH_RPC_ALLOW_ANY_CLIENT_CERT=1`
 /// relaxes client verification to the legacy accept-anything posture for bare local
 /// tooling (curl without certs).
 ///
@@ -1497,7 +1484,7 @@ struct ConnectionsReq {
     node_type: Option<u8>,
 }
 
-// chia get_fee_estimate request: exactly one of spend_bundle|cost, plus target_times (seconds).
+// get_fee_estimate request: exactly one of spend_bundle|cost, plus target_times (seconds).
 #[derive(Deserialize, Default)]
 struct FeeEstimateReq {
     #[serde(default)]
@@ -1508,19 +1495,19 @@ struct FeeEstimateReq {
     target_times: Vec<u64>,
 }
 
-/// chia `get_fee_estimate` response (full_node_rpc_api.py:1436-1452). Field names + JSON types are
+/// `get_fee_estimate` response. Field names + JSON types are
 /// chia-exact so real wallets/tooling (e.g. `chia_rs`/Sage fee clients) parse it unchanged.
 #[derive(Serialize)]
 pub struct FeeEstimateResponse {
     /// Estimated total fee (mojos) per target time, monotonically decreasing in target time.
     pub estimates: Vec<u64>,
-    /// The requested target times (seconds), sorted ascending — echoed back like chia.
+    /// The requested target times (seconds), sorted ascending — echoed back.
     pub target_times: Vec<u64>,
     /// Fee-rate (mojos per clvm cost) for near-term inclusion (`estimate_fee_rate(1)`).
     pub current_fee_rate: f64,
-    /// Current mempool cost (chia `total_mempool_cost`).
+    /// Current mempool cost (`total_mempool_cost`).
     pub mempool_size: u64,
-    /// Current mempool fees (chia `total_mempool_fees`).
+    /// Current mempool fees (`total_mempool_fees`).
     pub mempool_fees: u64,
     /// Number of spends resident in the mempool.
     pub num_spends: u64,
@@ -1588,8 +1575,8 @@ pub fn route_names() -> Vec<&'static str> {
     routes
 }
 
-// Routes `RpcServer` HTTP requests to `NodeRpc` and speaks chia's response envelope. One
-// dispatcher keyed on the URI path; the body is a JSON params object (chia RPC convention).
+// Routes `RpcServer` HTTP requests to `NodeRpc` and speaks the response envelope. One
+// dispatcher keyed on the URI path; the body is a JSON params object.
 pub struct NodeRpcHandler<S> {
     rpc: Arc<NodeRpc<S>>,
 }
@@ -1604,7 +1591,7 @@ where
     }
 
     // Dispatch one request. `Ok(None)` = unknown endpoint (HTTP 404); `Ok(Some(map))` = the
-    // response object BEFORE the success flag is stamped; `Err` = the chia error envelope.
+    // response object BEFORE the success flag is stamped; `Err` = the error envelope.
     #[allow(clippy::too_many_lines)]
     async fn route(&self, path: &str, body: &[u8]) -> Result<Option<Map<String, Value>>, RpcError> {
         let out = match path {
@@ -1642,7 +1629,7 @@ where
                     if !req.exclude_header_hash
                         && let Value::Object(obj) = &mut v
                     {
-                        // chia injects PLAIN hex here (`json["header_hash"] = hh.hex()`).
+                        // The wire convention injects PLAIN hex here.
                         obj.insert(
                             "header_hash".to_string(),
                             Value::from(plain_hex(&header_hash)),
@@ -1777,8 +1764,8 @@ where
                 let req: PushTxReq = parse(body)?;
                 match self.rpc.push_tx(req.spend_bundle).await {
                     Ok(_name) => obj_with("status", Value::from("SUCCESS")),
-                    // chia push_tx: a PENDING-classed rejection answers {"status": "PENDING"}
-                    // (full_node_rpc_api.py:857-869 raises only on FAILED).
+                    // A PENDING-classed rejection answers {"status": "PENDING"}; only FAILED
+                    // errors.
                     Err(RpcError::Mempool(m)) => {
                         let (status, err_name) = m.ack();
                         if status == TXStatus::PENDING {
@@ -1829,7 +1816,7 @@ where
                 envelope("tx_ids", &self.rpc.get_all_mempool_tx_ids().await)?
             }
             "/get_all_mempool_items" => {
-                // chia keys the map by PLAIN-hex tx id (item.name.hex()).
+                // The map is keyed by PLAIN-hex tx id.
                 let items = self.rpc.get_all_mempool_items().await;
                 let mut m = Map::new();
                 for item in items {
@@ -1860,7 +1847,7 @@ where
                     .rpc
                     .get_fee_estimate(req.spend_bundle, req.cost, req.target_times)
                     .await?;
-                // chia returns the flat object (no named-key wrapper), then `success` is stamped.
+                // A flat object (no named-key wrapper), then `success` is stamped.
                 match to_value(&resp)? {
                     Value::Object(m) => m,
                     _ => Map::new(),
@@ -1911,9 +1898,8 @@ where
     }
 }
 
-// chia util/math.py make_monotonically_decreasing: clamp each element to the running minimum so
-// the sequence never increases (the fee estimator can quote a HIGHER rate for a LONGER wait — an
-// artifact users do not expect, smoothed here exactly as chia does).
+// Clamp each element to the running minimum so the sequence never increases (the fee estimator
+// can quote a HIGHER rate for a LONGER wait — an artifact users do not expect).
 fn make_monotonically_decreasing(seq: &[f64]) -> Vec<f64> {
     let mut out = Vec::with_capacity(seq.len());
     let mut min = f64::INFINITY;
@@ -1955,21 +1941,21 @@ fn obj_with(key: &str, value: Value) -> Map<String, Value> {
 }
 
 // A u128 as JSON: an exact integer while it fits u64, else an f64 (serde_json cannot carry
-// arbitrary-precision integers; chia emits a Python bigint). Mainnet netspace exceeds u64 —
+// arbitrary-precision integers). Mainnet netspace exceeds u64 —
 // the f64 form keeps 53 bits of mantissa, far inside the estimate's own error bar.
 #[allow(clippy::cast_precision_loss)]
 fn json_u128(value: u128) -> Value {
     u64::try_from(value).map_or_else(|_| Value::from(value as f64), Value::from)
 }
 
-// PLAIN hex (no 0x) — the convention chia uses for injected header hashes, mempool map keys, and
+// PLAIN hex (no 0x) — the wire convention for injected header hashes, mempool map keys, and
 // `additional_data`.
 fn plain_hex(bytes: &Bytes32) -> String {
     let s = bytes.to_string();
     s.strip_prefix("0x").map_or(s.clone(), ToString::to_string)
 }
 
-// chia's condition JSON (CoinSpendWithConditions.from_json_dict, chia/types/coin_spend.py:44):
+// The condition JSON shape:
 // opcode as 0x-prefixed hex, vars as plain hex.
 fn condition_json(cond: &RawCondition) -> Value {
     let mut m = Map::new();
@@ -2039,7 +2025,7 @@ where
             CONTENT_TYPE,
             http::HeaderValue::from_static("application/json"),
         );
-        // chia's aiohttp client_max_size posture: an oversize body is refused at the transport.
+        // An oversize body is refused at the transport.
         if body.len() > MAX_RPC_BODY_BYTES {
             *response.status_mut() = StatusCode::PAYLOAD_TOO_LARGE;
             *response.body_mut() = Full::new(Bytes::from(
@@ -2052,13 +2038,13 @@ where
             return Ok(response);
         }
         let payload = match self.route(&path, &body).await {
-            // chia wrap_http_handler: stamp success unless the handler already set it.
+            // Stamp success unless the handler already set it.
             Ok(Some(mut map)) => {
                 map.entry("success".to_string())
                     .or_insert(Value::from(true));
                 Value::Object(map)
             }
-            // Unknown endpoint: chia's aiohttp answers 404.
+            // Unknown endpoint: 404.
             Ok(None) => {
                 *response.status_mut() = StatusCode::NOT_FOUND;
                 serde_json::json!({
@@ -2066,8 +2052,7 @@ where
                     "error": format!("unknown endpoint {path}"),
                 })
             }
-            // Application errors are HTTP-200 with chia's error envelope
-            // (chia/rpc/util.py:86-97).
+            // Application errors are HTTP-200 with the error envelope.
             Err(e) => serde_json::json!({
                 "success": false,
                 "error": e.to_string(),

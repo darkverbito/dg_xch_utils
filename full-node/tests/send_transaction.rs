@@ -1,7 +1,6 @@
-// `SendTransaction` (wallet protocol, code 48) served with chia's `TransactionAck`
-// semantics (chia/full_node/full_node_api.py::send_transaction + full_node.py::add_transaction +
-// mempool_manager.py::add_spend_bundle): every submit is ACKED — never silently dropped — with
-// SUCCESS(1)/PENDING(2)/FAILED(3) and chia's `Err.name` string in the error field. Duplicates are
+// `SendTransaction` (wallet protocol, code 48) served with `TransactionAck` semantics: every
+// submit is ACKED — never silently dropped — with SUCCESS(1)/PENDING(2)/FAILED(3) and the
+// error-name string in the error field. Duplicates are
 // idempotent SUCCESS; a height-parked bundle acks PENDING; a not-synced node acks FAILED
 // NO_TRANSACTIONS_WHILE_SYNCING before any CLVM runs. Admission shares the push_tx seam
 // (validate → mempool.admit → NewTransaction announce queue), so a p2p-admitted spend is
@@ -45,6 +44,8 @@ fn config(listen: SocketAddr, rpc: SocketAddr) -> Config {
         std::process::id()
     ));
     Config {
+        target_outbound: None,
+        target_peer_count: None,
         listen,
         rpc,
         introducer: None,
@@ -114,9 +115,9 @@ async fn rig(synced: bool) -> (Arc<Node>, dg_xch_core::blockchain::coin::Coin, W
     (node, coin, client)
 }
 
-// Submit `bundle` as a wire `SendTransaction` and await the correlated reply — the ack the chia
-// reference wallet and Sage both block on. Errors when no reply arrives inside `timeout_ms`
-// (the exact silent-drop this suite was written RED against).
+// Submit `bundle` as a wire `SendTransaction` and await the correlated reply — the ack
+// wallets block on. Errors when no reply arrives inside `timeout_ms` (the silent-drop failure
+// mode this suite guards).
 async fn submit(
     connection: &Arc<RwLock<WebsocketConnection>>,
     bundle: &SpendBundle,
@@ -144,7 +145,7 @@ async fn submit(
 // ── 1. The headline gap (was RED: no dispatch arm — every wallet submit timed out) ───────────────
 // A valid spend bundle is acked SUCCESS with the txid and no error; the item is mempool-resident;
 // and the NewTransaction re-broadcast is queued exactly as the HTTP push_tx path queues it
-// (chia broadcast_added_tx fires for both ingress paths — one admission seam).
+// (the announce fires for both ingress paths — one admission seam).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn send_transaction_acks_success_and_admits() {
     let (node, coin, client) = rig(true).await;
@@ -153,11 +154,11 @@ async fn send_transaction_acks_success_and_admits() {
 
     let ack = submit(&client.connection, &bundle, 10_000)
         .await
-        .expect("a TransactionAck reply (chia never silently drops send_transaction)");
+        .expect("a TransactionAck reply (send_transaction is never silently dropped)");
 
     assert_eq!(ack.txid, name, "ack carries the spend bundle name");
     assert_eq!(ack.status, TXStatus::SUCCESS, "error: {:?}", ack.error);
-    assert_eq!(ack.error, None, "chia acks SUCCESS with error=None");
+    assert_eq!(ack.error, None, "SUCCESS acks with error=None");
     assert!(
         node.mempool.lock().await.get(&name).is_some(),
         "acked-SUCCESS bundle must be mempool-resident"
@@ -176,9 +177,9 @@ async fn send_transaction_acks_success_and_admits() {
     );
 }
 
-// ── 2. Idempotent duplicate (chia full_node_api.py send_transaction fast path) ────────────────────
+// ── 2. Idempotent duplicate (`send_transaction` fast path) ────────────────────
 // Resubmitting a bundle already in the mempool acks SUCCESS — and does NOT queue a second
-// announce (chia returns before broadcast_added_tx on the duplicate path).
+// announce (the duplicate path returns before the broadcast).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn duplicate_send_transaction_is_idempotent_success() {
     let (node, coin, client) = rig(true).await;
@@ -195,7 +196,7 @@ async fn duplicate_send_transaction_is_idempotent_success() {
     assert_eq!(
         second.status,
         TXStatus::SUCCESS,
-        "duplicate submit is idempotent SUCCESS (chia), got error: {:?}",
+        "duplicate submit is idempotent SUCCESS, got error: {:?}",
         second.error
     );
     assert_eq!(second.txid, name);
@@ -207,9 +208,9 @@ async fn duplicate_send_transaction_is_idempotent_success() {
     );
 }
 
-// ── 3. Invalid bundles ack FAILED with chia's Err-name strings ────────────────────────────────────
-// chia's ack error field is `Err(...).name` (full_node_api.py:1560 error.name): the wallet
-// string-matches these, so the names must be chia's exactly.
+// ── 3. Invalid bundles ack FAILED with the exact error-name strings ────────────────────────────────────
+// The ack error field is the error-name string: the wallet string-matches these, so the names
+// must be exact.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn invalid_bundles_ack_failed_with_chia_err_names() {
     let (node, coin, client) = rig(true).await;
@@ -235,8 +236,7 @@ async fn invalid_bundles_ack_failed_with_chia_err_names() {
     assert_eq!(ack.status, TXStatus::FAILED);
     assert_eq!(ack.error.as_deref(), Some("DOUBLE_SPEND"));
 
-    // Unmet SECONDS timelock: chia fails seconds-based locks outright (only height locks pend) —
-    // mempool_manager.py add_spend_bundle: tl_error not in {ASSERT_HEIGHT_*} → FAILED.
+    // Unmet SECONDS timelock: seconds-based locks fail outright (only height locks pend).
     let locked = common::conditioned_bundle(
         &coin,
         &[
@@ -255,9 +255,9 @@ async fn invalid_bundles_ack_failed_with_chia_err_names() {
     );
 }
 
-// ── 4. Height-parked bundle acks PENDING (chia PendingTxCache path) ──────────────────────────────
+// ── 4. Height-parked bundle acks PENDING ──────────────────────────────
 // An unmet ASSERT_HEIGHT_ABSOLUTE parks the bundle for retry and acks PENDING with the failing
-// assert's Err name (mempool_manager.py:826-827 → status PENDING, error ASSERT_HEIGHT_ABSOLUTE_FAILED).
+// assert's Err name (→ status PENDING, error ASSERT_HEIGHT_ABSOLUTE_FAILED).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn height_locked_bundle_acks_pending() {
     let (node, coin, client) = rig(true).await;
@@ -287,11 +287,11 @@ async fn height_locked_bundle_acks_pending() {
     );
     assert!(
         node.tx_announce.lock().await.is_empty(),
-        "chia only broadcasts successful admissions, never pending ones (DoS vector)"
+        "only successful admissions broadcast, never pending ones (DoS vector)"
     );
 }
 
-// ── 5. Not-synced node rejects before validating (chia full_node.py:2882-2885) ───────────────────
+// ── 5. Not-synced node rejects before validating ───────────────────
 // add_transaction gates on synced BEFORE any CLVM: FAILED, Err.NO_TRANSACTIONS_WHILE_SYNCING.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn not_synced_node_acks_failed_no_transactions_while_syncing() {
@@ -335,9 +335,9 @@ async fn admitted_transaction_flows_to_block_generator() {
 }
 
 // ── Seen-cache: a known-invalid bundle is not revalidated (mempool) ─────────────────────
-// chia full_node.py:2887-2891: a spend id already in the seen cache (kept there for
-// ValidationError rejects — "Keep known-invalid bundles in seen-cache to prevent re-validation")
-// acks FAILED ALREADY_INCLUDING_TRANSACTION without a second CLVM/signature run.
+// A spend id already in the seen cache (kept there for validation rejects, so known-invalid
+// bundles are not re-validated) acks FAILED ALREADY_INCLUDING_TRANSACTION without a second
+// CLVM/signature run.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn known_invalid_bundle_is_not_revalidated() {
     let (_node, coin, client) = rig(true).await;
