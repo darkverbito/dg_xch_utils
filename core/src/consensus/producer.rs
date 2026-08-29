@@ -1421,6 +1421,10 @@ mod producer_unfinished_block_tests {
     /// Proof of space carrying an explicit plot public key (the G1 handed to the plot signer).
     fn mk_pos_with_key(plot_public_key: Bytes48) -> ProofOfSpace {
         ProofOfSpace {
+            version: 0,
+            plot_index: 0,
+            meta_group: 0,
+            strength: 0,
             challenge: ph(0x01),
             pool_public_key: None,
             pool_contract_puzzle_hash: Some(ph(0x02)),
@@ -1822,6 +1826,10 @@ mod producer_emit_path_tests {
     }
     fn mk_pos(plot_public_key: Bytes48) -> ProofOfSpace {
         ProofOfSpace {
+            version: 0,
+            plot_index: 0,
+            meta_group: 0,
+            strength: 0,
             challenge: ph(0x01),
             pool_public_key: None,
             pool_contract_puzzle_hash: Some(ph(0x02)),

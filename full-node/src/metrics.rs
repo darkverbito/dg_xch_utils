@@ -1261,6 +1261,7 @@ async fn serve<S: BlockStore + Send + Sync + 'static>(
     sources: MetricsSources<S>,
     run: Arc<AtomicBool>,
 ) {
+    #[cfg(feature = "profiling")]
     let profiling = Arc::new(AtomicBool::new(false));
     while run.load(Ordering::Relaxed) {
         let accept = tokio::time::timeout(ACCEPT_TICK, listener.accept()).await;
@@ -1400,7 +1401,8 @@ mod profiling {
     // Sample the process for FLAMEGRAPH_SECONDS and stream back the flamegraph SVG. Runs on its own spawned task
     // (bounded to one concurrent via `profiling`) so /metrics keeps answering during the profile.
     pub(super) async fn handle_flamegraph(mut stream: TcpStream) {
-        match tokio::time::timeout(FLAMEGRAPH_TIMEOUT, sample_flamegraph(FLAMEGRAPH_SECONDS)).await {
+        match tokio::time::timeout(FLAMEGRAPH_TIMEOUT, sample_flamegraph(FLAMEGRAPH_SECONDS)).await
+        {
             Ok(Ok(svg)) => {
                 let header = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: image/svg+xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -1416,7 +1418,8 @@ mod profiling {
             }
             Err(_) => {
                 warn!("flamegraph profiling timed out");
-                let _ = write_simple(&mut stream, "504 Gateway Timeout", "flamegraph timed out").await;
+                let _ =
+                    write_simple(&mut stream, "504 Gateway Timeout", "flamegraph timed out").await;
             }
         }
     }
@@ -1475,7 +1478,8 @@ mod profiling {
             }
             Err(_) => {
                 warn!("heap profile dump timed out");
-                let _ = write_simple(&mut stream, "504 Gateway Timeout", "heap dump timed out").await;
+                let _ =
+                    write_simple(&mut stream, "504 Gateway Timeout", "heap dump timed out").await;
             }
         }
     }

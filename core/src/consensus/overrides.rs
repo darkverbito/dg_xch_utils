@@ -45,9 +45,18 @@ pub struct ConsensusOverrides {
     pub soft_fork3_height: Option<u32>,
     pub hard_fork_height: Option<u32>,
     pub hard_fork_fix_height: Option<u32>,
+    pub hard_fork2_height: Option<u32>,
     pub plot_filter_128_height: Option<u32>,
     pub plot_filter_64_height: Option<u32>,
     pub plot_filter_32_height: Option<u32>,
+    pub number_zero_bits_plot_filter_v2: Option<u8>,
+    pub plot_size_v2: Option<u8>,
+    pub min_plot_strength: Option<u8>,
+    pub max_plot_strength: Option<u8>,
+    pub plot_v1_phase_out_epoch_bits: Option<u8>,
+    pub plot_filter_v2_first_adjustment_height: Option<u32>,
+    pub plot_filter_v2_second_adjustment_height: Option<u32>,
+    pub plot_filter_v2_third_adjustment_height: Option<u32>,
     pub bech32_prefix: Option<String>,
     pub is_testnet: Option<bool>,
 }
@@ -177,6 +186,9 @@ pub fn apply_overrides(mut c: ConsensusConstants, o: &ConsensusOverrides) -> Con
     if let Some(v) = o.hard_fork_fix_height {
         c.hard_fork_fix_height = v;
     }
+    if let Some(v) = o.hard_fork2_height {
+        c.hard_fork2_height = v;
+    }
     if let Some(v) = o.plot_filter_128_height {
         c.plot_filter_128_height = v;
     }
@@ -185,6 +197,30 @@ pub fn apply_overrides(mut c: ConsensusConstants, o: &ConsensusOverrides) -> Con
     }
     if let Some(v) = o.plot_filter_32_height {
         c.plot_filter_32_height = v;
+    }
+    if let Some(v) = o.number_zero_bits_plot_filter_v2 {
+        c.number_zero_bits_plot_filter_v2 = v;
+    }
+    if let Some(v) = o.plot_size_v2 {
+        c.plot_size_v2 = v;
+    }
+    if let Some(v) = o.min_plot_strength {
+        c.min_plot_strength = v;
+    }
+    if let Some(v) = o.max_plot_strength {
+        c.max_plot_strength = v;
+    }
+    if let Some(v) = o.plot_v1_phase_out_epoch_bits {
+        c.plot_v1_phase_out_epoch_bits = v;
+    }
+    if let Some(v) = o.plot_filter_v2_first_adjustment_height {
+        c.plot_filter_v2_first_adjustment_height = v;
+    }
+    if let Some(v) = o.plot_filter_v2_second_adjustment_height {
+        c.plot_filter_v2_second_adjustment_height = v;
+    }
+    if let Some(v) = o.plot_filter_v2_third_adjustment_height {
+        c.plot_filter_v2_third_adjustment_height = v;
     }
     if let Some(v) = o.is_testnet {
         c.is_testnet = v;

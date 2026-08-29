@@ -10,6 +10,7 @@ repository.workspace = true
 
 [dependencies]
 async-trait = "0.1.89"
+aes = { version = "0.8.4", features = ["hazmat"] }
 blake3 = "1.8.3"
 dg_xch_core = {path = "../core", version="3.0.0", default-features = false }
 futures-util = "0.3.32"
