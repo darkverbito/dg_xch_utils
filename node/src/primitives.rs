@@ -10,14 +10,8 @@ use dg_xch_core::consensus::block_generator::{
 use dg_xch_core::consensus::constants::ConsensusConstants;
 use dg_xch_core::errors::ChiaError;
 
-// The four consensus primitives the block-validation engine invokes, behind one
-// swap seam. The engine binds to this trait, never to a concrete
-// implementation, so a primitive that misses a measured throughput bar is
-// replaced here without touching the engine above it. Measurement
-// shows the native CLVM and BLS paths clear the validate-at-tip bar
-// comfortably, so `NativePrimitives` is the only implementation today; the live
-// swap candidates the seam exists for are the CLVM runtime and the blst
-// `portable`-feature BLS build.
+// The consensus primitives the block-validation engine invokes, behind one swap seam. The engine
+// binds to this trait, never to a concrete implementation.
 pub trait ConsensusPrimitives {
     /// Run a block's transactions generator, returning its conditions and cost.
     ///
@@ -50,12 +44,9 @@ pub trait ConsensusPrimitives {
         target: Option<&VdfInfo>,
     ) -> bool;
 
-    /// [`Self::verify_vdf`] with any INTERNAL parallelism disabled — same result, verified on
-    /// the calling thread only. The window drain calls this when its worker pool already
-    /// saturates every core (one proof per worker): the native verifier's per-segment two-thread
-    /// split doubles the thread count there for no wall gain (measured +17% process CPU on the
-    /// a tx-dense window drain). Implementations without an internal-parallelism distinction keep the
-    /// default, which is `verify_vdf` itself.
+    /// [`Self::verify_vdf`] with any internal parallelism disabled — same result, verified on the
+    /// calling thread only. The window drain calls this when its worker pool already saturates
+    /// every core. The default is `verify_vdf` itself.
     fn verify_vdf_serial(
         &self,
         constants: &ConsensusConstants,
@@ -137,8 +128,7 @@ impl ConsensusPrimitives for NativePrimitives {
     }
 }
 
-/// Engine stand-in: the generator step binds to the seam, not the concrete type.
-/// Phase 2 grows the engine around calls shaped like this.
+/// Generator step bound to the seam rather than a concrete type.
 ///
 /// # Errors
 /// Propagates whatever `ConsensusPrimitives::run_block_generator` returns.
@@ -170,9 +160,6 @@ mod tests {
         }
     }
 
-    // A generic engine step proves the caller binds to `P: ConsensusPrimitives`
-    // rather than a concrete type; running it through NativePrimitives proves the
-    // delegation reaches core's real consensus reject path.
     fn verify_sig<P: ConsensusPrimitives>(
         primitives: &P,
         conditions: &SpendBundleConditions,
@@ -185,8 +172,7 @@ mod tests {
     #[test]
     fn engine_binds_to_seam_not_concrete() {
         let native = NativePrimitives;
-        // Empty spend set with a non-infinity aggregate must be rejected: proves
-        // the trait method delegates to validate_block_aggregate_signature.
+        // An empty spend set with a non-infinity aggregate must be rejected.
         let non_infinity = Bytes96::parse(&[0xab_u8; 96]).unwrap();
         let result = verify_sig(&native, &empty_conditions(), &non_infinity, &MAINNET);
         assert!(matches!(result, Err(ChiaError::BadAggregateSignature)));

@@ -1,13 +1,10 @@
 //! Storage-side coverage: block-level generator back-reference resolution.
 //!
-//! Port intent of `chia/_tests/blockchain/test_get_block_generator.py` at the node/store seam.
-//! chia resolves each `transactions_generator_ref_list` height to a prior block's generator via
-//! `lookup_block_generators` (`BlockStore.get_generators_at`, the `in_main_chain` query), preserving
-//! ref-list order, and treats a missing referenced generator as `Err.GENERATOR_REF_HAS_NO_GENERATOR`.
-//!
-//! dg_xch wires this in `BlockStore::get_generator_at_height` + `Engine::resolve_generator_refs`. These
-//! tests confirm two generator-bearing mainnet bodies onto the confirmed chain and exercise resolution
-//! directly — no Chia crate, fixtures are the vendored mainnet blocks.
+//! Each `transactions_generator_ref_list` height resolves to a prior block's generator in
+//! ref-list order, and a missing referenced generator is `GENERATOR_REF_HAS_NO_GENERATOR`.
+//! Wired in `BlockStore::get_generator_at_height` + `Engine::resolve_generator_refs`. These
+//! tests confirm two generator-bearing mainnet bodies onto the confirmed chain and exercise
+//! resolution directly; fixtures are the vendored mainnet blocks.
 
 mod common;
 
@@ -48,7 +45,7 @@ fn engine(store: SqliteStore) -> Engine<SqliteStore, NativePrimitives> {
     Engine::new(store, NativePrimitives, MAINNET)
 }
 
-// The store lookup resolves a confirmed prior generator by height (mirror of chia get_generators_at).
+// The store lookup resolves a confirmed prior generator by height.
 #[tokio::test]
 async fn get_generator_at_height_returns_the_confirmed_generator() {
     let store = store_with_two_confirmed_generators().await;
@@ -149,7 +146,7 @@ async fn resolve_generator_refs_preserves_ref_list_order() {
 }
 
 // (b) A referenced height with no confirmed generator is a validation failure
-// (chia Err.GENERATOR_REF_HAS_NO_GENERATOR), never a silent pass — including a partial resolution.
+// (GENERATOR_REF_HAS_NO_GENERATOR), never a silent pass — including a partial resolution.
 #[tokio::test]
 async fn resolve_generator_refs_missing_height_is_validation_failure() {
     let eng = engine(store_with_two_confirmed_generators().await);

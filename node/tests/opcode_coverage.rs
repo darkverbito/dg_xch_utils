@@ -3,10 +3,10 @@
 //   (1) PARSE:   ConditionWithArgs recognizes an opcode and round-trips it.
 //   (2) ENFORCE: block_generator::spend_from_conditions collects it into SpendBundleConditions, and
 //                validate_block_conditions checks it.
-// A prior fix closed the enforcement gap: the five opcodes that spend_from_conditions once dropped at `_ => {}`
-// (ASSERT_CONCURRENT_SPEND 64, ASSERT_CONCURRENT_PUZZLE 65, SEND_MESSAGE 66, RECEIVE_MESSAGE 67,
-// ASSERT_EPHEMERAL 76) now carry fields on `Spend` and are checked in validate_block_conditions. This
-// test pins that every opcode in the current Chia set is Enforced or a recognized NoOp — no silent drops.
+// ASSERT_CONCURRENT_SPEND 64, ASSERT_CONCURRENT_PUZZLE 65, SEND_MESSAGE 66, RECEIVE_MESSAGE 67,
+// and ASSERT_EPHEMERAL 76 carry fields on `Spend` and are checked in validate_block_conditions.
+// This test pins that every opcode in the current Chia set is Enforced or a recognized NoOp — no
+// silent drops.
 
 use dg_xch_core::blockchain::condition_opcode::ConditionOpcode;
 use dg_xch_core::blockchain::condition_with_args::{ConditionWithArgs, Message, MessageArgs};
@@ -103,7 +103,7 @@ fn unknown_opcode_decodes_to_unknown_not_panic() {
 enum Enforcement {
     // Collected into SpendBundleConditions/Spend and checked (spend_from_conditions + validate_block_conditions).
     Enforced,
-    // A recognized no-op in Chia too (Remark, SoftFork cost only) — safe to ignore.
+    // A recognized no-op (Remark, SoftFork cost only) — safe to ignore.
     NoOp,
 }
 
@@ -111,13 +111,9 @@ fn classification(op: ConditionOpcode) -> Enforcement {
     use ConditionOpcode as O;
     use Enforcement::{Enforced, NoOp};
     match op {
-        // The five formerly-dropped opcodes are now collected onto `Spend` in
-        // spend_from_conditions and enforced in validate_block_conditions. chia error
-        // codes on violation: ASSERT_CONCURRENT_SPEND_FAILED=132,
-        // ASSERT_CONCURRENT_PUZZLE_FAILED=133, ASSERT_EPHEMERAL_FAILED=140,
-        // MESSAGE_NOT_SENT_OR_RECEIVED=147 (chia-consensus 0.37.0 validation_error.rs).
-        // chia-consensus 0.37.0 enforces all five at every height — the 2.0 hard fork
-        // (5_496_000) only selects the generator ROM, not this condition set.
+        // These opcodes are collected onto `Spend` in spend_from_conditions and enforced in
+        // validate_block_conditions, at every height — the 2.0 hard fork (5_496_000) only
+        // selects the generator ROM, not this condition set.
         O::AssertConcurrentSpend
         | O::AssertConcurrentPuzzle
         | O::SendMessage
@@ -156,8 +152,8 @@ fn classification(op: ConditionOpcode) -> Enforcement {
     }
 }
 
-// The enforcement gap is now closed. Every opcode in the current Chia set is either
-// Enforced or a recognized NoOp — there is no dropped-but-parsed opcode left.
+// Every opcode in the current Chia set is either Enforced or a recognized NoOp — there is no
+// dropped-but-parsed opcode.
 #[test]
 fn every_opcode_is_enforced_or_noop() {
     for op in every_condition().iter().map(ConditionWithArgs::op_code) {
@@ -169,7 +165,7 @@ fn every_opcode_is_enforced_or_noop() {
     }
 }
 
-// The five formerly-dropped opcodes are now enforced (previously dropped by the `_ => {}` arm).
+// The five opcodes above must classify as Enforced.
 #[test]
 fn the_five_ported_opcodes_are_now_enforced() {
     for op in [
@@ -187,10 +183,10 @@ fn the_five_ported_opcodes_are_now_enforced() {
     }
 }
 
-// chia-consensus 0.37.0 enforces all five conditions at every height: the 2.0 hard fork only
-// switches the generator ROM (run_block_generator2 vs run_block_generator), both of which share
-// the same conditions parser/validator. dg_xch matches this — validate_block_conditions enforces
-// them unconditionally. This test pins the hard-fork constant that selects the ROM.
+// All five conditions are enforced at every height: the 2.0 hard fork only switches the
+// generator ROM (run_block_generator2 vs run_block_generator), both of which share the same
+// conditions parser/validator — validate_block_conditions enforces them unconditionally. This
+// test pins the hard-fork constant that selects the ROM.
 #[test]
 fn hard_fork_height_selects_the_rom_not_the_condition_set() {
     assert_eq!(MAINNET.hard_fork_height, 5_496_000);

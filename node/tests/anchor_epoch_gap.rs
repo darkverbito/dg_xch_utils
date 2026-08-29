@@ -86,7 +86,7 @@ fn chain(low: u32, high: u32) -> HashMap<Bytes32, BlockRecord> {
     blocks
 }
 
-// Anchor-span coverage only (the pre-fix store contents): the retarget walk at the trigger block
+// Anchor-span coverage only: the retarget walk at the trigger block
 // must fail with the exact "block record not found" NotFound on the floor record's prev hash —
 // the log line the pod repeated forever.
 #[test]

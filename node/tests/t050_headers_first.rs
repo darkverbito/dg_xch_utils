@@ -85,8 +85,8 @@ async fn headers_first_candidate_chain_validates_and_stores_without_bodies() {
 
 // The sub-epoch-summary attachment (the ses machinery): a boundary header declares its
 // included summary's hash (authenticated by the challenge-chain VDF chain); headers-first must attach the
-// weight-proof-attested summary OBJECT to that record — chia's wp_summaries substitution
-// (pre_validate_blocks_multiprocessing) — because the epoch machinery (can_finish_sub_and_full_epoch, the
+// weight-proof-attested summary OBJECT to that record —
+// because the epoch machinery (can_finish_sub_and_full_epoch, the
 // get_next_* pass-throughs, make_sub_epoch_summary's prev-ses walk) reads records, not headers. A boundary
 // record stored WITHOUT its summary makes every later new-slot block in the sub-epoch spuriously
 // "finishable" (INVALID_SUB_EPOCH_SUMMARY rejections). This slice starts ON the mainnet sub-epoch boundary

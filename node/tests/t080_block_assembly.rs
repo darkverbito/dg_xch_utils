@@ -1,27 +1,18 @@
-// The mempool→block-generator path on the produce side.
+// The mempool→block-generator path on the produce side: the mempool assembles a block generator
+// that is spliced into the candidate via `create_unfinished_block`.
 //
-// chia 2.7.1 farms transactions: `full_node_api.declare_proof_of_space` (block_creation config
-// default 1, full_node_api.py:952-963) calls `mempool_manager.create_block_generator2` →
-// `mempool.create_block_generator2` (chia/full_node/mempool.py:708-868) and splices the resulting
-// `NewBlockGenerator` into the candidate via `create_unfinished_block`. Before this suite's
-// implementation, dg_xch's produce path built only EMPTY blocks — a real farm win with a fee-paying
-// mempool resident emitted a valid but fee-less block (the red-first run of
-// `winning_candidate_includes_fee_paying_mempool_item` proved it: the produce
-// path built an empty block).
-//
-// The green suite pins the assembly's chia semantics:
-//   * fee-priority selection (`ORDER BY priority DESC, seq ASC` — items_by_fee) and the FIFO seq
-//     tiebreak;
-//   * the SF9 6,000-spend cap enforced AT BUILD (chia MAX_SPENDS_PER_BLOCK);
+// The suite pins the assembly semantics:
+//   * fee-priority selection (`priority DESC, seq ASC` — items_by_fee) and the FIFO seq tiebreak;
+//   * the SF9 6,000-spend cap enforced AT BUILD (MAX_SPENDS_PER_BLOCK);
 //   * the skip/stop heuristics (MAX_SKIPPED_ITEMS=10 — break ON the tenth skip;
 //     MIN_COST_THRESHOLD=6_000_000);
 //   * cost accounting: BlockTransactions.cost == the re-run cost == item admission cost +
-//     BLOCK_OVERHEAD (chia mempool_manager BLOCK_OVERHEAD = QUOTE_BYTES*COST_PER_BYTE +
-//     QUOTE_EXECUTION_COST = 24_020 on mainnet constants);
+//     BLOCK_OVERHEAD (BLOCK_OVERHEAD = QUOTE_BYTES*COST_PER_BYTE + QUOTE_EXECUTION_COST =
+//     24_020 on mainnet constants);
 //   * the aggregate signature of the included bundles verifies against the re-run conditions;
 //   * the post-SF9 emitted-generator form: quoted spend list (`ff01` prefix), canonical
-//     serialization, empty ref list — chia_rs SIMPLE_GENERATOR-legal (byte format:
-//     chia_rs `solution_generator`, pinned by core's chia_rs_solution_generator_byte_parity);
+//     serialization, empty ref list (pinned byte-for-byte by core's
+//     chia_rs_solution_generator_byte_parity);
 //   * empty mempool ⇒ byte-identical empty-block path (the producer_differential corpus is the
 //     hard gate; this is the explicit unit);
 //   * the assembled block passes OUR OWN transaction-body validation (validate_transaction_block —
@@ -65,13 +56,13 @@ async fn store() -> SqliteStore {
 }
 
 // The candidate is built for a POST-SF9 mainnet height so the emitted generator must satisfy the
-// SF9 form (chia_rs SIMPLE_GENERATOR | CANONICAL_INTS | LIMIT_SPENDS at soft_fork9_height =
-// 8,655,000 mainnet).
+// SF9 form (SIMPLE_GENERATOR | CANONICAL_INTS | LIMIT_SPENDS at soft_fork9_height = 8,655,000
+// mainnet).
 const PEAK_HEIGHT: u32 = MAINNET.soft_fork9_height + 100;
 const PEAK_TIMESTAMP: u64 = 1_760_000_000;
 // The height of the block being built (the CLVM flag-ladder key).
 const BUILD_HEIGHT: u32 = PEAK_HEIGHT + 1;
-// chia mempool_manager BLOCK_OVERHEAD = QUOTE_BYTES * COST_PER_BYTE + QUOTE_EXECUTION_COST.
+// BLOCK_OVERHEAD = QUOTE_BYTES * COST_PER_BYTE + QUOTE_EXECUTION_COST.
 const BLOCK_OVERHEAD: u64 = 2 * MAINNET.cost_per_byte + 20;
 const TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -358,7 +349,7 @@ async fn winning_candidate_includes_fee_paying_mempool_item() {
 }
 
 // Resident ⇒ includable: an item admitted with an effective ASSERT_HEIGHT exactly at the pool's
-// peak (the strictest resident lock — chia `assert_height <= peak`, t060 assert_pool_valid_at_peak)
+// peak (the strictest resident lock — `assert_height <= peak`, t060 assert_pool_valid_at_peak)
 // assembles into a block that validates under the SAME previous-transaction-block frame.
 #[tokio::test]
 async fn resident_timelocked_item_is_includable_at_the_peak_frame() {
@@ -418,8 +409,8 @@ async fn resident_timelocked_item_is_includable_at_the_peak_frame() {
 }
 
 // ── Test 2: fee-priority ordering + the seq (FIFO) tiebreak ───────────────────────────────────────
-// chia mempool.py:722 `SELECT name, fee FROM tx ORDER BY priority DESC, seq ASC` — the highest fee
-// per virtual cost assembles first; equal-priority items assemble in admission order.
+// `priority DESC, seq ASC` — the highest fee per virtual cost assembles first; equal-priority
+// items assemble in admission order.
 #[tokio::test]
 async fn fee_priority_orders_selection_with_seq_tiebreak() {
     let store = store().await;
@@ -450,8 +441,8 @@ async fn fee_priority_orders_selection_with_seq_tiebreak() {
 }
 
 // ── Test 3a: the 6,000-spend cap enforced at build ────────────────────────────────────────────────
-// chia mempool.py:761-769 — an item that would push the block past MAX_SPENDS_PER_BLOCK is skipped;
-// a later, smaller item that still fits is taken; selection stops at the cap.
+// An item that would push the block past MAX_SPENDS_PER_BLOCK is skipped; a later, smaller item
+// that still fits is taken; selection stops at the cap.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn spend_cap_6000_enforced_at_build() {
     let store = store().await;
@@ -491,8 +482,7 @@ async fn spend_cap_6000_enforced_at_build() {
 }
 
 // ── Test 3b: MAX_SKIPPED_ITEMS — the loop breaks ON the tenth cost-full skip ─────────────────────
-// chia mempool.py:656-667 `skipped_items += 1; if skipped_items < MAX_SKIPPED_ITEMS: continue;
-// break` — after ten items that don't fit, selection gives up even on items that WOULD fit.
+// After ten items that don't fit, selection gives up even on items that WOULD fit.
 #[tokio::test]
 async fn skip_heuristic_breaks_after_max_skipped_items() {
     let budget = MAINNET.max_block_cost_clvm - BLOCK_OVERHEAD;
@@ -568,8 +558,8 @@ async fn skip_heuristic_breaks_after_max_skipped_items() {
 }
 
 // ── Test 3c: MIN_COST_THRESHOLD — stop once the remaining budget is below a typical spend ────────
-// chia mempool.py:676-684 — after adding an item that leaves < 6M cost, selection stops without
-// considering further items, even ones that would fit.
+// After adding an item that leaves < 6M cost, selection stops without considering further items,
+// even ones that would fit.
 #[tokio::test]
 async fn min_cost_threshold_stops_selection() {
     let budget = MAINNET.max_block_cost_clvm - BLOCK_OVERHEAD;
@@ -618,7 +608,7 @@ async fn min_cost_threshold_stops_selection() {
 }
 
 // ── Test 4: cost accounting — re-run cost, item cost, BLOCK_OVERHEAD ─────────────────────────────
-// chia's accounting: a mempool item's admission cost is its conditions + execution + byte cost as
+// Cost accounting: a mempool item's admission cost is its conditions + execution + byte cost as
 // if solution_generator-wrapped MINUS the quote wrapper (mempool_manager BLOCK_OVERHEAD); the
 // assembled single-item block's true cost is therefore EXACTLY item.cost + BLOCK_OVERHEAD, and the
 // builder's declared cost must equal an independent re-run of the emitted generator.
@@ -781,7 +771,7 @@ async fn backref_compression_packs_extra_spend_over_plain_limit() {
 }
 
 // ── Test 5: the aggregate signature of the included bundles verifies ──────────────────────────────
-// chia AugSchemeMPL.aggregate(sigs) over the included items' aggregated signatures; the block's
+// The aggregate over the included items' aggregated signatures; the block's
 // signature must verify against the re-run conditions' AGG_SIG pairs (validate_block_aggregate_
 // signature — the same gate the body validator runs).
 #[tokio::test]
@@ -839,11 +829,9 @@ async fn aggregate_signature_of_included_bundles_verifies() {
 }
 
 // ── Test 6: the post-SF9 emitted-generator form ──────────────────────────────────────────────────
-// chia_rs SF9 (spendbundle_validation.rs get_flags_for_height_and_constants): SIMPLE_GENERATOR —
-// the generator must be a quoted list (`ff01` prefix, check_generator_quote), the ref list must be
-// empty (TooManyGeneratorRefs), and our body rule 2 requires canonical CLVM serialization. The
-// byte format itself is chia_rs `solution_generator` (pinned byte-for-byte by core's
-// chia_rs_solution_generator_byte_parity against the chia_rs 0.42.1 test vector).
+// SF9 SIMPLE_GENERATOR: the generator must be a quoted list (`ff01` prefix), the ref list must
+// be empty (TooManyGeneratorRefs), and body rule 2 requires canonical CLVM serialization. The
+// byte format is pinned byte-for-byte by core's chia_rs_solution_generator_byte_parity.
 #[tokio::test]
 async fn post_sf9_generator_form() {
     let store = store().await;
@@ -865,9 +853,9 @@ async fn post_sf9_generator_form() {
 }
 
 // ── Test 7: empty mempool ⇒ the empty-block path, untouched ──────────────────────────────────────
-// chia mempool.py:848-849 `if removals == []: return None`. The candidate then assembles exactly as
-// before this change (transactions=None): no generator, zero fees/cost, the empty-TransactionsInfo
-// defaults — the path producer_differential pins byte-for-byte against 7,953 real mainnet blocks.
+// No removals ⇒ no generator. The candidate assembles with transactions=None: no generator,
+// zero fees/cost, the empty-TransactionsInfo defaults — the path producer_differential pins
+// byte-for-byte against 7,953 real mainnet blocks.
 #[tokio::test]
 async fn empty_mempool_yields_the_unchanged_empty_block() {
     let mp = mempool_at_peak();
@@ -886,12 +874,12 @@ async fn empty_mempool_yields_the_unchanged_empty_block() {
     assert_eq!(
         ti.generator_root,
         Bytes32::default(),
-        "no generator => zeros root (chia bytes32.zeros)"
+        "no generator => zeros root"
     );
     assert_eq!(
         ti.generator_refs_root,
         Bytes32::from([1u8; 32]),
-        "no refs => bytes32([1]*32) (chia default)"
+        "no refs => bytes32([1]*32) (the empty-list sentinel)"
     );
 }
 

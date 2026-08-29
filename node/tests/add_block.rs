@@ -108,8 +108,7 @@ async fn add_real_mainnet_block_matches_reference_and_advances_peak() {
 }
 
 // ---------------------------------------------------------------------------
-// Data-level block-validation rules, harvested from chia-blockchain
-// `chia/_tests/blockchain/test_blockchain.py` (TestBlockHeaderValidation). These are the pure
+// Data-level block-validation rules. These are the pure
 // prev-linkage / height / weight checks the engine performs in `derive_delta` + `prev_record_by`,
 // which run BEFORE any VDF/PoSpace/plot infrastructure the native node lacks — so they port directly.
 // A validated mainnet parent (height 5_000_000) is the confirmed peak; each child violates exactly one

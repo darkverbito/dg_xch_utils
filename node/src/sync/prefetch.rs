@@ -1,28 +1,14 @@
-//! Fetch-pipeline readahead: keep K follow windows of block bodies fetched-or-in-flight
-//! AHEAD of the validator, striped across DISTINCT peers, so the follow loop never idles on the
-//! network between windows. The measured problem this closes: every leg's sustained rate sat at
-//! 40-60% of its phase-sum ceiling because the fetch of window N+1 effectively started only as
-//! the validation of window N finished — one window deep, one peer at a time (worst case observed:
-//! 18s wall per window, ~14s of it fetch wait for tx-dense bodies from public peers).
+//! Fetch-pipeline readahead: keep K follow windows of block bodies fetched-or-in-flight ahead of
+//! the validator, striped across distinct peers, so the follow loop never idles on the network
+//! between windows. Up to `depth` adjacent windows are dispatched to different peers, the validator
+//! [`WindowReadahead::take`]s them back in height order, and the depth adapts — grow while the
+//! validator measurably waits on the network, shrink when the pipe runs ahead — capped by a
+//! resident-bytes budget and a per-peer window cap.
 //!
-//! The reference shape is libbitcoin-node's check chaser (`src/chasers/chaser_check.cpp`):
-//! `set_unassociated()` keeps a download window of `position() + maximum_concurrency_` block
-//! hashes populated ahead of the validate chaser and portions it across the live channels
-//! (`ceilinged_divide(inventory, connections_)`); `get_hashes`/`put_hashes` hand batch maps to
-//! peer channels concurrently instead of fetching on demand. Here the work unit is the follow
-//! window (`FOLLOW_BATCH` heights) and the channel is a [`BlockRangeSource`]: up to `depth`
-//! adjacent windows are dispatched to DIFFERENT peers, the validator [`WindowReadahead::take`]s
-//! them back in height order, and the depth ADAPTS — grow while the validator measurably waits
-//! on the network, shrink when the pipe runs ahead — capped by a resident-bytes budget and by
-//! one in-flight window per peer slot (the W == P contract).
-//!
-//! The readahead holds fetched bodies in RAM ONLY — it never touches the store, and confirm
-//! order is untouched (the caller stages and confirms exactly the window it asked for, in
-//! height order). Crash/resume semantics are therefore byte-identical to the direct-fetch path:
-//! a kill mid-readahead loses nothing but not-yet-validated downloads, and the restart
-//! re-fetches from the confirmed peak. Every dispatch is bounded: at most
-//! [`READAHEAD_MAX_DEPTH`] spawned tasks, each wrapped in the request timeout, all aborted on
-//! drop.
+//! The readahead holds fetched bodies in RAM only — it never touches the store, and confirm order
+//! is untouched, so crash/resume semantics match the direct-fetch path. Every dispatch is bounded:
+//! at most [`READAHEAD_MAX_DEPTH`] spawned tasks, each wrapped in the request timeout, all aborted
+//! on drop.
 
 use crate::sync::{BlockRangeSource, SyncError, SyncMetrics, TARGET_OUTBOUND};
 use dg_xch_core::blockchain::full_block::FullBlock;
@@ -36,52 +22,35 @@ use tracing::Instrument;
 /// Initial readahead depth K: windows fetched-or-in-flight ahead of the validator.
 pub const READAHEAD_START_DEPTH: usize = 4;
 
-/// DEFAULT depth ceiling (the shipped default behavior) — one in-flight window per outbound peer slot
-/// (`W == P`): at the default one-window-per-peer fan-out, striping past the peer count
-/// would put two concurrent ranges on one connection, where two `RequestBlocks` from distinct source
-/// instances could collide on a message id. The aggressive `--prefetch-memory-mb` /
-/// `--prefetch-max-inflight` knobs ([`PrefetchConfig::aggressive`]) raise this ceiling — up to
-/// [`READAHEAD_ABS_MAX_DEPTH`] — and lift the per-peer fan-out to [`READAHEAD_MAX_PER_PEER`], which
-/// stays id-safe because a peer's extra windows share ONE source instance's `next_msg_id`.
+/// Default depth ceiling — one in-flight window per outbound peer slot. Striping past the peer
+/// count would put two concurrent ranges on one connection, where two `RequestBlocks` from distinct
+/// source instances could collide on a message id. [`PrefetchConfig::aggressive`] raises this
+/// ceiling up to [`READAHEAD_ABS_MAX_DEPTH`].
 pub const READAHEAD_MAX_DEPTH: usize = TARGET_OUTBOUND;
 
 /// Adaptive floor: never below the classic one-window overlap the follow driver always had.
 pub const READAHEAD_MIN_DEPTH: usize = 1;
 
 /// Resident-bytes budget for fetched-but-not-yet-taken bodies (wire-size approximation, EWMA of
-/// resolved windows). 256 MiB admits the full 8-window depth even at ~1 MiB/block dust-era wire
-/// sizes (8 × 32 × 1 MiB = 256 MiB) while staying far inside a 4 GiB node envelope — the
-/// validation arena (37-57 MiB/block transient), not the wire bytes, remains the memory ceiling.
+/// resolved windows). 256 MiB admits the full 8-window depth even at ~1 MiB/block wire sizes.
 pub const READAHEAD_BYTE_BUDGET: u64 = 256 * 1024 * 1024;
 
-/// Absolute hard ceiling on readahead depth K — the most windows fetched-or-in-flight, hence the
-/// most spawned fetch tasks, REGARDLESS of the operator's RAM budget. The byte budget does the real,
-/// measured-size-adaptive clamp ([`depth_within_budget`]); this is the "bound everything" backstop so
-/// a huge `--prefetch-memory-mb` can never spawn an unbounded task fan-out. 256 windows × 32 heights
-/// = 8192 heights in flight — a Threadripper-scale ceiling, still O(1) in chain height.
+/// Absolute hard ceiling on readahead depth K — the most spawned fetch tasks regardless of the
+/// operator's RAM budget, so a huge `--prefetch-memory-mb` can never spawn an unbounded fan-out.
 pub const READAHEAD_ABS_MAX_DEPTH: usize = 256;
 
-/// Ceiling on concurrent in-flight windows dispatched onto a SINGLE peer connection. The shipped
-/// default is 1 (the `W == P` one-window-per-peer contract); the aggressive knob
-/// raises AGGREGATE concurrency by allowing a bounded fan-out per peer — extra requests spread
-/// ACROSS peers, never flooding one. Distinct windows on one connection are message-id-safe because
-/// they share ONE [`crate::sync::source::OutboundPeerSource`] instance, whose `next_msg_id` hands out
-/// distinct ids per request; this cap bounds only how hard a single peer is leaned on.
+/// Ceiling on concurrent in-flight windows dispatched onto a single peer connection. Distinct
+/// windows on one connection are message-id-safe because they share one
+/// [`crate::sync::source::OutboundPeerSource`] instance; this cap bounds only how hard a single
+/// peer is leaned on.
 pub const READAHEAD_MAX_PER_PEER: usize = 16;
 
-/// The RAM budget and concurrency bounds a [`WindowReadahead`] runs under. [`PrefetchConfig::default`]
-/// reproduces the shipped default behavior EXACTLY (256 MiB budget, depth/aggregate-in-flight ≤ 8, one
-/// window per peer); [`PrefetchConfig::aggressive`] derives the operator's `--prefetch-memory-mb` /
-/// `--prefetch-max-inflight` knobs.
-///
-/// Two distinct bounds, hence (optionally) two knobs — they clamp in DIFFERENT units and a large-RAM
-/// fetch-starved node needs both:
-/// * `byte_budget` (bytes, from `--prefetch-memory-mb`) is the HARD OOM ceiling on resident bodies —
-///   it drives DEPTH via the measured-size clamp, collapsing to one window when blocks are huge.
-/// * `max_inflight` / `per_peer` (a COUNT, from `--prefetch-max-inflight`) cap the outstanding fetch
-///   fan-out — the concurrency that keeps the buffer refilling as fast as the validator drains it.
-///   A byte budget alone can't express this: at small (dust-era ~1 MiB) blocks a big budget admits a
-///   very high window COUNT, so the count cap is what bounds spawned tasks and per-peer load.
+/// The RAM budget and concurrency bounds a [`WindowReadahead`] runs under.
+/// [`PrefetchConfig::default`] is the shipped default (256 MiB budget, depth/aggregate-in-flight
+/// ≤ 8, one window per peer); [`PrefetchConfig::aggressive`] derives the `--prefetch-memory-mb` /
+/// `--prefetch-max-inflight` knobs. The two bounds clamp in different units: `byte_budget` is the
+/// OOM ceiling on resident bodies, while `max_inflight` / `per_peer` cap the outstanding fetch
+/// fan-out (at small blocks a byte budget alone would admit a very high window count).
 #[derive(Clone, Copy, Debug)]
 pub struct PrefetchConfig {
     /// HARD ceiling on resident (fetched-but-not-yet-taken) window bytes — the OOM bound.
@@ -108,16 +77,10 @@ impl Default for PrefetchConfig {
 
 impl PrefetchConfig {
     /// Derive the aggressive config from the operator knobs. `memory_mb` sets the resident-bytes
-    /// budget (the OOM ceiling that drives depth); `max_inflight` optionally caps the aggregate
-    /// outstanding-fetch fan-out (defaulting to the anti-flood ceiling `peers × READAHEAD_MAX_PER_PEER`,
-    /// itself bounded by [`READAHEAD_ABS_MAX_DEPTH`]); `peers` is the planning peer count (the
-    /// `W == P` target) the aggregate is spread across as `per_peer = ceil(max_inflight / peers)`.
-    ///
-    /// The depth ceiling is raised to the aggregate so K may exceed the shipped 8; the actual K still
-    /// ADAPTS up from [`READAHEAD_START_DEPTH`] under measured validator wait and is clamped every
-    /// dispatch by the measured-size byte budget — so a huge `memory_mb` at dust-era block sizes still
-    /// collapses depth and can never OOM (floored at [`READAHEAD_MIN_DEPTH`], the irreducible one
-    /// window the direct-fetch path also holds).
+    /// budget; `max_inflight` optionally caps the aggregate fetch fan-out (defaulting to
+    /// `peers × READAHEAD_MAX_PER_PEER`, bounded by [`READAHEAD_ABS_MAX_DEPTH`]); the aggregate is
+    /// spread as `per_peer = ceil(max_inflight / peers)`. The actual K still adapts up from
+    /// [`READAHEAD_START_DEPTH`] and is clamped every dispatch by the measured-size byte budget.
     #[must_use]
     pub fn aggressive(memory_mb: u64, max_inflight: Option<usize>, peers: usize) -> Self {
         let byte_budget = memory_mb.saturating_mul(1024 * 1024);
@@ -130,9 +93,8 @@ impl PrefetchConfig {
         let per_peer = max_inflight
             .div_ceil(peers)
             .clamp(1, READAHEAD_MAX_PER_PEER);
-        // Resident-depth ceiling coincides with the aggregate in-flight cap (a resolved-but-not-taken
-        // window still occupies a deque slot counted against `max_inflight`), and is never below the
-        // shipped default so aggressive can only ever raise, never lower, the ceiling.
+        // The resident-depth ceiling tracks the aggregate in-flight cap and is never below the
+        // default, so aggressive can only raise the ceiling.
         let max_depth = max_inflight.max(READAHEAD_MAX_DEPTH);
         Self {
             byte_budget,
@@ -158,7 +120,7 @@ struct Inflight {
     handle: JoinHandle<Result<Vec<FullBlock>, SyncError>>,
 }
 
-/// The K-deep multi-peer window readahead the follow driver owns (see the module docs).
+/// The K-deep multi-peer window readahead owned by the follow driver.
 pub struct WindowReadahead {
     // Ascending, contiguous in-flight windows; head is the next window the validator will ask
     // for.
@@ -205,10 +167,8 @@ impl WindowReadahead {
         Self::with_config(metrics, request_timeout, PrefetchConfig::default())
     }
 
-    /// The readahead under an explicit [`PrefetchConfig`] — the aggressive `--prefetch-memory-mb` /
-    /// `--prefetch-max-inflight` path. The adaptive depth K still STARTS at [`READAHEAD_START_DEPTH`]
-    /// and ramps under measured wait; the config only raises the ceilings (budget, depth, aggregate
-    /// in-flight, per-peer fan-out) K may climb to.
+    /// The readahead under an explicit [`PrefetchConfig`]. The adaptive depth K still starts at
+    /// [`READAHEAD_START_DEPTH`]; the config only raises the ceilings K may climb to.
     #[must_use]
     pub fn with_config(
         metrics: Arc<SyncMetrics>,
@@ -252,10 +212,8 @@ impl WindowReadahead {
         self.inflight.len()
     }
 
-    /// `true` when `peer_id` is at its per-peer window cap ([`PrefetchConfig::per_peer`]) — the
-    /// striping exclusion. At the shipped default (`per_peer == 1`) this is exactly "already carries
-    /// an in-flight window"; the aggressive knob raises the cap so a peer may carry a bounded fan-out.
-    /// The caller uses it to pick a direct-fetch source that is not already saturated by the readahead.
+    /// `true` when `peer_id` is at its per-peer window cap ([`PrefetchConfig::per_peer`]). The
+    /// caller uses it to pick a direct-fetch source not already saturated by the readahead.
     #[must_use]
     pub fn busy_peer(&self, peer_id: u64) -> bool {
         self.peer_window_count(peer_id) >= self.cfg.per_peer
@@ -270,13 +228,10 @@ impl WindowReadahead {
     }
 
     /// Top the pipeline up: dispatch adjacent windows of `batch` heights (the last one capped at
-    /// `claimed`) across the live peers — the fewest-in-flight peer first, at most
-    /// [`PrefetchConfig::per_peer`] windows each (one per peer at the shipped default) — until the
-    /// admissible depth is reached, starting at `next_from` or after the last in-flight window,
-    /// whichever is higher. Windows entirely
-    /// below `next_from` are stale (the base moved past them) and are aborted first. Call this
-    /// right after [`WindowReadahead::take`], BEFORE validating — the whole point is that these
-    /// fetches run during validation.
+    /// `claimed`) across the live peers — fewest-in-flight peer first, at most
+    /// [`PrefetchConfig::per_peer`] windows each — until the admissible depth is reached. Windows
+    /// entirely below `next_from` are stale and aborted first. Call this right after
+    /// [`WindowReadahead::take`], before validating, so these fetches run during validation.
     pub fn fill(
         &mut self,
         sources: &[Arc<dyn BlockRangeSource>],
@@ -289,9 +244,8 @@ impl WindowReadahead {
                 w.handle.abort();
             }
         }
-        // Admissible depth: the adaptive K, clamped by the config ceiling AND — the OOM bound — by
-        // the measured-size resident-bytes budget. `max_inflight` additionally caps the AGGREGATE
-        // windows in flight, the concurrency ceiling the aggressive knob raises past the shipped 8.
+        // Admissible depth: the adaptive K, clamped by the config ceiling, the measured-size
+        // resident-bytes budget, and the aggregate in-flight cap.
         let admissible =
             depth_within_budget(self.depth, self.window_bytes_ewma, self.cfg.byte_budget)
                 .min(self.cfg.max_depth)
@@ -304,9 +258,8 @@ impl WindowReadahead {
         while self.inflight.len() < admissible && from <= claimed && !sources.is_empty() {
             let to = claimed.min(from.saturating_add(batch.saturating_sub(1)));
             let mut chosen = None;
-            // Prefer the peer with the FEWEST in-flight windows (still under its per-peer cap), so the
-            // aggregate fan-out spreads evenly across peers instead of piling onto the rotation head —
-            // this is what raises aggregate concurrency WITHOUT flooding one connection.
+            // Prefer the peer with the fewest in-flight windows (still under its per-peer cap) so
+            // the fan-out spreads evenly across peers.
             let mut best_count = self.cfg.per_peer;
             for i in 0..sources.len() {
                 let idx = (self.rotation + i) % sources.len();
@@ -324,8 +277,7 @@ impl WindowReadahead {
                     }
                 }
             }
-            // Every live peer is at its per-peer cap: dispatching more would flood a connection (and,
-            // at `per_peer == 1`, risk a message-id collision between source instances) — stop here.
+            // Every live peer is at its per-peer cap — stop here.
             let Some((idx, src)) = chosen else { break };
             self.rotation = (idx + 1) % sources.len();
             let peer_id = src.peer_id();
@@ -351,14 +303,11 @@ impl WindowReadahead {
         self.publish_gauges();
     }
 
-    /// Hand the validator the window `[from, to]` if it is the readahead's head window: await
-    /// just that head (bounded by the dispatch-time request timeout), leaving every deeper
-    /// window in flight — a slow peer serving window N+3 can never stall the take (and hence
-    /// the confirm) of window N. Returns `None` when the head fetch failed (the caller
-    /// direct-fetches this window; the tail stays valid) or when the plan no longer matches the
-    /// request (a claimed-cap drift or a base jump — everything is aborted and the next
-    /// [`WindowReadahead::fill`] replans). The wait, hit, and miss are recorded into
-    /// [`SyncMetrics`]; the measured wait drives the adaptive depth.
+    /// Hand the validator the window `[from, to]` if it is the readahead's head window: await just
+    /// that head (bounded by the dispatch-time request timeout), leaving every deeper window in
+    /// flight. Returns `None` when the head fetch failed (the caller direct-fetches this window; the
+    /// tail stays valid) or when the plan no longer matches the request (everything is aborted and
+    /// the next [`WindowReadahead::fill`] replans). The measured wait drives the adaptive depth.
     pub async fn take(&mut self, from: u32, to: u32) -> Option<Vec<FullBlock>> {
         while self.inflight.front().is_some_and(|w| w.to < from) {
             if let Some(w) = self.inflight.pop_front() {
@@ -420,10 +369,8 @@ impl WindowReadahead {
         self.publish_gauges();
     }
 
-    // The adaptive-K policy: a take that measurably waited grows the depth (validator idle =
-    // pipeline too shallow); a long streak of instant takes shrinks it back (network running
-    // ahead = budget to give back). Bounds: [READAHEAD_MIN_DEPTH, READAHEAD_MAX_DEPTH]; the
-    // resident-bytes budget is applied at dispatch time (`depth_within_budget`).
+    // Adaptive-K policy: a take that measurably waited grows the depth; a long streak of instant
+    // takes shrinks it back. The resident-bytes budget is applied at dispatch time.
     fn adapt_depth(&mut self, wait: Duration) {
         if wait > GROW_WAIT_THRESHOLD {
             self.zero_wait_streak = 0;
@@ -450,8 +397,7 @@ impl WindowReadahead {
         self.metrics
             .readahead_inflight
             .store(self.inflight.len() as u64, Ordering::Relaxed);
-        // The O(W·id) witness the reservation gauge already charts: height identifiers
-        // fetched-or-in-flight ahead of the validator.
+        // Height identifiers fetched-or-in-flight ahead of the validator.
         let ids: usize = self
             .inflight
             .iter()
@@ -476,8 +422,6 @@ mod tests {
         READAHEAD_MAX_PER_PEER, READAHEAD_MIN_DEPTH, depth_within_budget,
     };
 
-    // The resident-budget clamp: admissible depth is depth × ewma ≤ budget, floored at the
-    // minimum overlap, and a zero EWMA (nothing resolved yet) admits the requested depth.
     #[test]
     fn budget_clamps_depth_but_never_below_the_floor() {
         // 4 windows at 10 MiB each fit a 64 MiB budget.
@@ -490,7 +434,6 @@ mod tests {
         assert_eq!(depth_within_budget(5, 0, 64 << 20), 5);
     }
 
-    // Unset == the shipped default behavior, field for field (the byte-identical contract).
     #[test]
     fn default_config_reproduces_the_shipped_bounds() {
         let d = PrefetchConfig::default();
@@ -501,8 +444,6 @@ mod tests {
         assert_eq!(d.per_peer, 1);
     }
 
-    // `--prefetch-memory-mb` alone: the budget grows, depth/aggregate-in-flight climb far past the
-    // shipped 8 (bounded by the anti-flood ceiling), and the fan-out spreads across peers.
     #[test]
     fn aggressive_scales_budget_depth_and_concurrency() {
         // 8 GiB, no explicit in-flight cap, planning for the 8-peer W==P target.
@@ -523,8 +464,6 @@ mod tests {
         assert!(a.per_peer <= READAHEAD_MAX_PER_PEER);
     }
 
-    // The explicit `--prefetch-max-inflight` count knob caps the fan-out independently of the byte
-    // budget, and the per-peer spread follows from it.
     #[test]
     fn explicit_max_inflight_sets_the_fanout() {
         let a = PrefetchConfig::aggressive(16384, Some(24), 8);
@@ -538,8 +477,6 @@ mod tests {
         assert_eq!(small.max_depth, READAHEAD_MAX_DEPTH);
     }
 
-    // Every bound is hard: an absurd budget and in-flight request can never spawn an unbounded
-    // task fan-out or flood a peer.
     #[test]
     fn bounds_are_hard_regardless_of_the_knob() {
         let a = PrefetchConfig::aggressive(u64::MAX, Some(1_000_000), 8);
@@ -549,10 +486,8 @@ mod tests {
         assert!(a.max_depth <= READAHEAD_ABS_MAX_DEPTH);
     }
 
-    // OOM-safety: the budget bound is in BYTES (measured window size), so however huge the budget,
-    // the admissible depth collapses far below the window-count ceiling at dust-era block sizes and
-    // the resident bodies never exceed the budget — bar the one irreducible floor window the
-    // direct-fetch path also holds.
+    // The budget bound is in bytes, so at huge block sizes the admissible depth collapses and the
+    // resident bodies never exceed the budget (bar the one floor window).
     #[test]
     fn huge_budget_collapses_depth_at_dust_era_block_sizes() {
         // A dust-era window measured at ~455 MiB/block × 32 heights ≈ 14.2 GiB.

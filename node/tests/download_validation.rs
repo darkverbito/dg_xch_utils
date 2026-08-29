@@ -3,11 +3,8 @@
 // untrusted: a lying/hostile peer can (a) answer with a different height range, (b) return a
 // non-contiguous / short batch, (c) re-stamp a body (serve a real neighbouring block relabelled to a
 // requested height), or (d) on the from-empty / anchor path, serve a first block that does not connect
-// to the weight-proof-attested anchor header. chia validates the returned blocks are the requested
-// heights, contiguous, and connect (`full_node.py` short_sync_batch first-block connect :645-651;
-// add_prevalidated_blocks → `peer.close(CONSENSUS_ERROR_BAN_SECONDS)` on any batch error :1436), seeding
-// the fork anchor at `height_to_hash(start-1)` for start>0 and `GENESIS_CHALLENGE` for the from-genesis
-// batch (:663-667) — NOT "trust because empty".
+// to the weight-proof-attested anchor header. The returned blocks must be the requested heights,
+// contiguous, and connect — never "trust because empty".
 //
 // Our architecture makes the candidate chain the connect target: the headers-first pass has already
 // stored the WP-attested candidate record for every reserved height (`sync_header_chain`), and
@@ -54,8 +51,8 @@ fn foreign_body(base: &FullBlock, h: u32) -> FullBlock {
 // The ways a hostile peer can answer a `fetch_range(start, end)` with a batch that must be rejected.
 #[derive(Clone, Copy, Debug)]
 enum Deceit {
-    // Serve blocks for `start+shift ..= end+shift` — the requested-vs-returned height RANGE is wrong
-    // (chia: returned heights must equal the request). Fails the coverage check.
+    // Serve blocks for `start+shift ..= end+shift` — the requested-vs-returned height RANGE is
+    // wrong. Fails the coverage check.
     ShiftRange(u32),
     // Serve the range minus its middle height — a short, non-contiguous batch. Fails the coverage check.
     DropMiddle,
@@ -124,9 +121,9 @@ fn chaser_with(store: SqliteStore) -> Chaser<Arc<SqliteStore>, NativePrimitives>
 // CASE 1 — a peer that answers with a DIFFERENT height range (heights shifted by +1000) is rejected: the
 // batch never drains a reserved height, so with only that peer the window cannot fill and the sync
 // surfaces `Exhausted` FAST (bounded by the failure budget), never wedging on an endlessly re-accepted
-// wrong-range batch. RED (pre-fix): no coverage check → the off-range bodies are appended and the
-// reservation is marked complete, but the reserved candidates stay unfilled → the worker re-reserves and
-// re-accepts forever → the bounded wall is exceeded (a wedge).
+// wrong-range batch. Without the coverage check the off-range bodies are appended and the
+// reservation is marked complete, but the reserved candidates stay unfilled → the worker
+// re-reserves and re-accepts forever (a wedge).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn wrong_range_batch_is_rejected_fast() {
     let base = common::load_full_block(5_000_000);
@@ -168,7 +165,7 @@ async fn wrong_range_batch_is_rejected_fast() {
 }
 
 // CASE 2 — a non-contiguous / short batch (the reserved range minus its middle height) is rejected on the
-// coverage check: same fast-Exhausted posture. RED (pre-fix): the short batch is appended and the
+// coverage check: same fast-Exhausted posture. Without the check: the short batch is appended and the
 // reservation completed while the dropped height stays unfilled → re-reserve/re-accept wedge.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn non_contiguous_batch_is_rejected_fast() {
@@ -195,7 +192,7 @@ async fn non_contiguous_batch_is_rejected_fast() {
 
 // CASE 3 — a re-stamped / forged body (right height, hashes to no candidate) is NEVER written to the
 // store. A good peer runs alongside so the sync terminates by draining the real candidates; the forged
-// bodies the hostile peer served must be absent, and the real bodies present. RED (pre-fix): the forged
+// bodies the hostile peer served must be absent, and the real bodies present. Without the check: the forged
 // bodies are appended (get_block returns them) — the soundness gap that would then feed re-stamped bodies
 // into validation / the from-empty entry.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -244,7 +241,7 @@ async fn restamped_foreign_body_is_never_written() {
 
 // CASE 2b — a re-stamped REAL neighbour (block h+1000 relabelled to height h) passes the naive height
 // check but binds to a candidate at the WRONG height, and is rejected: its (out-of-window) hash is never
-// written. RED (pre-fix): the relabelled body is appended.
+// written. Without the check: the relabelled body is appended.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn relabelled_neighbour_body_is_rejected() {
     let base = common::load_full_block(5_000_000);

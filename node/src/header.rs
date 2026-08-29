@@ -54,8 +54,8 @@ pub struct QueuedVdf {
 }
 
 // One header BLS signature captured during the sequential header walk, replayed in the parallel
-// drain. `tag` carries which of the five finished-header gates this is so the drain reproduces the
-// EXACT chia rejection string on the failing block.
+// drain. `tag` carries which of the five finished-header gates this is so the drain reproduces
+// the exact rejection string on the failing block.
 #[derive(Clone)]
 pub struct QueuedSig {
     pk: Bytes48,
@@ -65,15 +65,11 @@ pub struct QueuedSig {
 }
 
 /// Window-level header-validation sink: the cross-block pipeline stages every block of a sync
-/// window through the sequential header walk with the expensive pure gates deferred HERE, then
-/// drains the whole window across all cores in one batch — per-block batches leave most cores idle
-/// (a block carries ~5 VDF proofs and ~5 BLS sigs; a many-core box has far more than that in cores).
-/// Two queues, drained by two all-core batches ([`verify_vdf_batch`], [`verify_sig_batch`]). `vdf`
-/// holds Wesolowski VDF proofs (the genesis-era dominant cost). `sig` holds finished-header BLS
-/// signatures (the recent-era single largest on-CPU serial cost — 26.7% of on-CPU samples on a
-/// threadripper SqliteStore node before this batch existed).
-/// (A `std::sync::Mutex` per queue, not a `RefCell`: the staging loop holds the sink across `.await`
-/// points, and the daemon runs it inside spawned tasks whose futures must be `Send`.)
+/// window through the sequential header walk with the expensive pure gates deferred here, then
+/// drains the whole window across all cores in one batch — per-block batches leave most cores
+/// idle. Two queues, drained by [`verify_vdf_batch`] and [`verify_sig_batch`].
+/// A `std::sync::Mutex` per queue, not a `RefCell`: the staging loop holds the sink across
+/// `.await` points, and the daemon runs it inside spawned tasks whose futures must be `Send`.
 #[derive(Default)]
 pub struct HeaderSink {
     pub vdf: std::sync::Mutex<Vec<QueuedVdf>>,
@@ -105,11 +101,10 @@ impl HeaderSink {
 }
 
 // Deferred-VDF wrapper: the header validator's `validate_vdf` calls are pure boolean gates — no
-// verification RESULT ever feeds a later input computation — so the sequential walk queues every
-// proof and answers true, and the queue is verified afterwards fanned across all cores. The
-// block's accept/reject decision is identical (all gates ANDed); only the failure short-circuit
-// order changes, costing extra work solely on invalid blocks. Proof-of-space stays inline: its
-// quality string is a VALUE consumed by required_iters.
+// verification result ever feeds a later input computation — so the sequential walk queues every
+// proof and answers true, and the queue is verified afterwards across all cores. The accept/reject
+// decision is identical (all gates ANDed); only the failure short-circuit order changes.
+// Proof-of-space stays inline: its quality string is a value consumed by required_iters.
 struct DeferredVdfVerifier<'a, P> {
     inner: PrimitiveVerifier<'a, P>,
     queue: std::cell::RefCell<Vec<QueuedVdf>>,
@@ -147,10 +142,7 @@ impl<P: ConsensusPrimitives> HeaderValidationVerifier for DeferredVdfVerifier<'_
     }
 
     // Deferred header-signature gate: queue (pk, msg, sig, tag) and answer true, exactly as
-    // `validate_vdf` defers a VDF proof. The gate is a pure boolean — no verification RESULT feeds a
-    // later input computation — so the block's accept/reject decision is unchanged; only the
-    // failure short-circuit order moves (extra work solely on invalid blocks). The whole window's
-    // sigs are drained across all cores by `verify_sig_batch`.
+    // `validate_vdf` defers a VDF proof; drained by `verify_sig_batch`.
     fn verify_bls_sig(&self, pk: &Bytes48, msg: &[u8], sig: &Bytes96, tag: HeaderSigTag) -> bool {
         self.sig_queue.borrow_mut().push(QueuedSig {
             pk: *pk,
@@ -203,13 +195,10 @@ pub(crate) fn verify_vdf_batch<P: ConsensusPrimitives + Sync>(
         let q = &queue[0];
         return primitives.verify_vdf(constants, &q.input, &q.info, &q.proof, q.target.as_ref());
     }
-    // Dedup before dispatch: ~8% of a window's queued proofs are byte-identical repeats — blocks
-    // sharing a signage point carry the same sp VDF proofs (MEASURED on a tx-dense window drain). One
-    // representative per identical (input, info, proof, target) suffices: verification is a
+    // Dedup before dispatch: blocks sharing a signage point carry the same sp VDF proofs. One
+    // representative per identical (input, info, proof, target) suffices — verification is a
     // deterministic pure function, so the batch AND over duplicates equals the AND over uniques.
-    // The vdf-crate memo alone cannot catch these here — a parallel drain runs identical proofs
-    // CONCURRENTLY on different workers, and both miss. The key is the exact field bytes (no
-    // hash shortcut on a consensus gate).
+    // The key is the exact field bytes (no hash shortcut on a consensus gate).
     let mut seen: std::collections::HashSet<Vec<u8>> =
         std::collections::HashSet::with_capacity(queue.len());
     let mut order: Vec<usize> = Vec::with_capacity(queue.len());
@@ -219,13 +208,10 @@ pub(crate) fn verify_vdf_batch<P: ConsensusPrimitives + Sync>(
         }
     }
     drop(seen);
-    // Longest-processing-time dispatch over a shared cursor, replacing contiguous pre-chunking.
-    // Per-proof cost is heterogeneous — it scales with the segment count (witness_type + 1), a
-    // MEASURED 8.9–216 ms spread inside one tx-dense window queue — so fixed chunks pinned the wall
-    // at the heaviest chunk's sum (probe: chunk_max = 1.60× chunk_mean = exactly the measured
-    // 1.60× drain stretch over the work floor). The cursor bounds the tail at one proof, and
-    // handing out the heaviest proofs first bounds that tail by the LIGHTEST stragglers instead
-    // of a late 200 ms end-of-slot proof.
+    // Longest-processing-time dispatch over a shared cursor: per-proof cost scales with the
+    // segment count (witness_type + 1), so fixed chunks pin the wall at the heaviest chunk's sum.
+    // The cursor bounds the tail at one proof, and handing out the heaviest proofs first bounds
+    // that tail by the lightest stragglers.
     order.sort_by_key(|&i| std::cmp::Reverse(queue[i].proof.witness_type));
     let workers = std::thread::available_parallelism()
         .map(std::num::NonZeroUsize::get)
@@ -240,8 +226,7 @@ pub(crate) fn verify_vdf_batch<P: ConsensusPrimitives + Sync>(
         queue.len().div_ceil(workers),
     );
     // With at least one proof per worker the pool already saturates every core: verify on the
-    // worker thread only (no per-segment two-thread split — measured +17% process CPU for no
-    // wall). Small batches keep the internal split to fill idle cores.
+    // worker thread only. Small batches keep the internal split to fill idle cores.
     let saturated = order.len() >= workers;
     let next = std::sync::atomic::AtomicUsize::new(0);
     let failed = std::sync::atomic::AtomicBool::new(false);
@@ -251,8 +236,7 @@ pub(crate) fn verify_vdf_batch<P: ConsensusPrimitives + Sync>(
                 s.spawn(|| {
                     loop {
                         // A failed proof anywhere makes the batch's AND false; the remaining
-                        // workers stop dispatching (the window bisect re-verifies subranges to
-                        // attribute the height, exactly as before).
+                        // workers stop dispatching (the window bisect attributes the height).
                         if failed.load(std::sync::atomic::Ordering::Relaxed) {
                             return false;
                         }
@@ -298,16 +282,10 @@ fn verify_one_sig(q: &QueuedSig) -> bool {
     bls_verify(&q.pk, &q.msg, &q.sig)
 }
 
-/// Verify a queued batch of header BLS signatures across every available core, ANDed. Mirrors
-/// `verify_vdf_batch`'s shared-cursor work-stealing (an `AtomicUsize` cursor + a `failed` early-out),
-/// but WITHOUT the LPT sort or the dedup pass: each header sig is one AugScheme pairing of uniform
-/// cost (unlike the 8.9–216 ms VDF spread that motivates LPT), so a plain cursor already bounds the
-/// tail at one signature, and there is no heterogeneity to sort by. Each signature is verified
-/// through the same `bls_verify` the inline path calls, so the outcome is byte-identical;
-/// parallelism (not random-coefficient batching) is what turns the serial 26.7% into all-core work —
-/// random-coefficient multi-sig was rejected: for ~5 sigs/block it saves little over N parallel
-/// pairings while risking the exact fail-closed semantics on malformed points, and a batch-level
-/// "some sig failed" still forces a per-signature fallback to attribute the failing block.
+/// Verify a queued batch of header BLS signatures across every available core, ANDed. Same
+/// shared-cursor work-stealing as `verify_vdf_batch`, but without the LPT sort or dedup pass:
+/// each header sig is one AugScheme pairing of uniform cost. Each signature is verified through
+/// the same `bls_verify` the inline path calls, so the outcome is identical.
 #[must_use]
 pub(crate) fn verify_sig_batch(queue: &[QueuedSig]) -> bool {
     if queue.is_empty() {
@@ -329,9 +307,8 @@ pub(crate) fn verify_sig_batch(queue: &[QueuedSig]) -> bool {
             .map(|_| {
                 s.spawn(|| {
                     loop {
-                        // A failed sig anywhere makes the batch's AND false; remaining workers stop
-                        // dispatching (the window bisect re-verifies the failing block's slice to
-                        // attribute the height AND the exact rejection string via `first_failing_sig`).
+                        // A failed sig anywhere makes the batch's AND false; remaining workers
+                        // stop dispatching (`first_failing_sig` attributes the failure).
                         if failed.load(std::sync::atomic::Ordering::Relaxed) {
                             return false;
                         }
@@ -393,8 +370,8 @@ pub fn validate_finished_header<P: ConsensusPrimitives + Sync>(
             block.height()
         )));
     }
-    // Header sigs drained the same way: single-block path attributes the exact chia rejection
-    // string via the failing signature's tag, byte-identical to the inline gate.
+    // Header sigs drained the same way: the single-block path attributes the exact rejection
+    // string via the failing signature's tag.
     let sig_queue = sink.sig.into_inner().unwrap_or_default();
     if let Some(tag) = first_failing_sig(&sig_queue) {
         return Err(NodeError::Invalid(format!(
@@ -452,18 +429,12 @@ pub fn validate_finished_header_deferred<P: ConsensusPrimitives + Sync>(
     Ok(required_iters)
 }
 
-// ---------------------------------------------------------------------------------------------
-// Window-drain measurement probe (feature `drain-probe`; measurement builds only, never fleet).
-//   DGXCH_DRAIN_PROBE=wall   — per-batch wall / process-CPU / worker count: negligible overhead,
-//                              the honest A/B wall.
-//   DGXCH_DRAIN_PROBE=serial — additionally verifies every queued proof serially FIRST, naming
-//                              the per-proof cost split and the contiguous-chunk imbalance the
-//                              parallel drain then sees (doubles VDF work — cost-split runs only;
-//                              the serial pre-pass also warms the discriminant memo, so the wall
-//                              printed in this mode flatters the parallel drain).
-// Both modes count proof recurrence — a queued (input, info, proof) triple seen earlier in the
-// run — because the open "port chia's verify_vdf lru_cache(1000)?" question needs a measured
-// recurrence rate on the sync path, not a guess.
+// Window-drain measurement probe (feature `drain-probe`; measurement builds only).
+//   DGXCH_DRAIN_PROBE=wall   — per-batch wall / process-CPU / worker count.
+//   DGXCH_DRAIN_PROBE=serial — additionally verifies every queued proof serially first to name
+//                              the per-proof cost split (doubles VDF work; the pre-pass warms the
+//                              discriminant memo, flattering the parallel wall).
+// Both modes count proof recurrence within the run.
 #[cfg(feature = "drain-probe")]
 mod drain_probe {
     use super::QueuedVdf;
@@ -671,8 +642,8 @@ mod tests {
     use dg_xch_core::blockchain::sized_bytes::{Bytes48, Bytes96};
     use dg_xch_core::consensus::block_header_validation::HeaderSigTag;
 
-    // Lock the tag -> chia rejection string mapping for all five gates. A rename here is a
-    // consensus-visible error-string change and must be a deliberate edit, not a silent drift.
+    // Lock the tag -> rejection-string mapping for all five gates. A rename here is a
+    // consensus-visible error-string change and must be a deliberate edit.
     #[test]
     fn tag_rejection_strings_are_exact() {
         assert_eq!(
@@ -714,9 +685,8 @@ mod tests {
 
     #[test]
     fn first_failing_sig_returns_the_first_bad_in_push_order() {
-        // Two failing sigs; `first_failing_sig` must return the FIRST in slice order (the queue
-        // preserves the sequential walk's rc -> cc -> block-data -> ftb -> pool push order, so the
-        // reported rejection matches the inline first-failure).
+        // Two failing sigs; `first_failing_sig` must return the first in slice order so the
+        // reported rejection matches the inline first-failure.
         let q = [
             garbage(HeaderSigTag::RewardChainSp),
             garbage(HeaderSigTag::Pool),

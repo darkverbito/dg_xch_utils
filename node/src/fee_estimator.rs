@@ -1,9 +1,7 @@
-// Fee estimation — a faithful native port of chia's bitcoin-core-derived fee estimator
-// (chia/full_node/fee_tracker.py, fee_estimator.py `SmartFeeEstimator`,
-// bitcoin_fee_estimator.py `BitcoinFeeEstimator`, fee_estimator_constants.py). Provides the
-// `get_fee_estimate` RPC + `RequestFeeEstimates` wallet handler.
+// Fee estimation — a bitcoin-core-derived bucketed estimator. Provides the `get_fee_estimate`
+// RPC + `RequestFeeEstimates` wallet handler.
 //
-// Model (chia = bitcoin core policy/fees, gist morcos/d3637f01):
+// Model:
 //   - Transactions are bucketed by fee-per-cost (× 1000), buckets growing geometrically by
 //     STEP_SIZE from INITIAL_STEP to INFINITE_FEE_RATE (`init_buckets`).
 //   - Three horizons (short/medium/long) each keep exponentially-decayed moving averages, over
@@ -13,16 +11,13 @@
 //   - `new_block` (process_block) decays the averages then records, for every mempool item the
 //     block confirmed, how many blocks it waited — the positive signal.
 //   - `add_mempool_item`/`remove_mempool_item` track the still-in-mempool population per bucket.
-//   - A query walks buckets from the top, accumulating until a bucket band clears SUCCESS_PCT with
-//     enough data, and reports that band's median fee-rate (`estimate_median_val`,
-//     bitcoin `TxConfirmStats::EstimateMedianVal`).
+//   - A query walks buckets from the top, accumulating until a bucket band clears SUCCESS_PCT
+//     with enough data, and reports that band's median fee-rate (`estimate_median_val`).
 //
-// The wire/response contract is chia-exact; the numeric conversion follows chia's
-// `SmartFeeEstimator` verbatim (median → mojos_per_clvm_cost via two /1000 steps — see
+// The numeric conversion is median → mojos_per_clvm_cost via two /1000 steps (see
 // `estimate_rate`). Empty/insufficient history yields rate 0.0 (the floor); a mempool under
 // sustained pressure converges on the prevailing fee-per-cost.
 
-// fee_estimator_constants.py — bitcoin policy/fees.h, tuned for chia's block cadence.
 const INITIAL_STEP: f64 = 5.0; // first bucket above zero
 const MAX_FEE_RATE: f64 = 40_000_000.0; // mojo per 1000 cost unit
 const INFINITE_FEE_RATE: f64 = 1_000_000_000.0;
@@ -44,8 +39,8 @@ const LONG_DECAY: f64 = 0.999_31;
 const SUCCESS_PCT: f64 = 0.85; // require 85% within-target confirmations
 const SUFFICIENT_FEE_TXS: f64 = 0.01; // avg txs/block per bucket needed for significance
 
-/// One bucket band's accumulated stats during a median query (chia `BucketResult`). The full set
-/// is kept to mirror chia's struct faithfully; only `start` reaches the parse fallback.
+/// One bucket band's accumulated stats during a median query; only `start` reaches the parse
+/// fallback.
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Default)]
 struct BucketResult {
@@ -57,22 +52,21 @@ struct BucketResult {
     left_mempool: f64,
 }
 
-/// The outcome of a median query (chia `EstimateResult`).
+/// The outcome of a median query.
 #[derive(Clone, Copy, Debug)]
 struct EstimateResult {
-    #[allow(dead_code)] // requested_time is chia-shaped bookkeeping; the wire path re-derives it.
+    #[allow(dead_code)] // the wire path re-derives it
     requested_time: u64,
     fail_bucket: BucketResult,
     median: f64,
 }
 
-// chia `clamp` (fee_tracker.py).
 fn clamp(n: i64, smallest: i64, largest: i64) -> i64 {
     smallest.max(n.min(largest))
 }
 
-/// The bucket a fee-rate falls into — the bucket to the LEFT unless the rate matches exactly
-/// (chia `get_bucket_index`: `bisect_left(buckets, fee_rate) - 1`, clamped).
+/// The bucket a fee-rate falls into — the bucket to the left unless the rate matches exactly
+/// (`bisect_left(buckets, fee_rate) - 1`, clamped).
 #[must_use]
 fn get_bucket_index(buckets: &[f64], fee_rate: f64) -> usize {
     debug_assert!(!buckets.is_empty(), "buckets must be non-empty");
@@ -82,8 +76,8 @@ fn get_bucket_index(buckets: &[f64], fee_rate: f64) -> usize {
     idx as usize
 }
 
-/// The geometric bucket ladder (chia `init_buckets`): INITIAL_STEP, ×STEP_SIZE up to
-/// MAX_FEE_RATE, capped by INFINITE_FEE_RATE.
+/// The geometric bucket ladder: INITIAL_STEP, ×STEP_SIZE up to MAX_FEE_RATE, capped by
+/// INFINITE_FEE_RATE.
 #[must_use]
 fn init_buckets() -> Vec<f64> {
     let mut buckets = Vec::new();
@@ -96,8 +90,8 @@ fn init_buckets() -> Vec<f64> {
     buckets
 }
 
-// The per-item info the tracker ingests (chia `MempoolItemInfo`): cost, fee, and the height the
-// item entered the mempool (the reference for "blocks waited").
+// The per-item info the tracker ingests: cost, fee, and the height the item entered the mempool
+// (the reference for "blocks waited").
 #[derive(Clone, Copy, Debug)]
 struct ItemInfo {
     cost: u64,
@@ -116,8 +110,7 @@ impl ItemInfo {
     }
 }
 
-// Bitcoin `TxConfirmStats` — the decayed bucketed confirmation history for one horizon
-// (chia `FeeStat`).
+// The decayed bucketed confirmation history for one horizon.
 struct FeeStat {
     buckets: Vec<f64>,
     tx_ct_avg: Vec<f64>,
@@ -149,7 +142,7 @@ impl FeeStat {
         }
     }
 
-    // chia FeeStat.tx_confirmed: record a tx that confirmed `blocks_to_confirm` blocks after entry.
+    // Record a tx that confirmed `blocks_to_confirm` blocks after entry.
     fn tx_confirmed(&mut self, blocks_to_confirm: usize, item: ItemInfo) {
         debug_assert!(blocks_to_confirm >= 1);
         let periods_to_confirm = blocks_to_confirm.div_ceil(self.scale);
@@ -162,7 +155,7 @@ impl FeeStat {
         self.m_fee_rate_avg[bucket_index] += fee_rate;
     }
 
-    // chia FeeStat.update_moving_averages: decay every average toward zero.
+    // Decay every average toward zero.
     fn update_moving_averages(&mut self) {
         for j in 0..self.buckets.len() {
             for i in 0..self.confirmed_average.len() {
@@ -174,8 +167,8 @@ impl FeeStat {
         }
     }
 
-    // chia FeeStat.clear_current: retire the block-index row that's about to be reused, folding its
-    // outstanding unconfirmed counts into old_unconfirmed_txs.
+    // Retire the block-index row that's about to be reused, folding its outstanding unconfirmed
+    // counts into old_unconfirmed_txs.
     fn clear_current(&mut self, block_height: u32) {
         let row = block_height as usize % self.unconfirmed_txs.len();
         for i in 0..self.buckets.len() {
@@ -184,7 +177,7 @@ impl FeeStat {
         }
     }
 
-    // chia FeeStat.new_mempool_tx: a new mempool tx joins the unconfirmed population at its bucket.
+    // A new mempool tx joins the unconfirmed population at its bucket.
     fn new_mempool_tx(&mut self, block_height: u32, fee_rate: f64) -> usize {
         let bucket_index = get_bucket_index(&self.buckets, fee_rate);
         let row = block_height as usize % self.unconfirmed_txs.len();
@@ -200,8 +193,8 @@ impl FeeStat {
         cur + old
     }
 
-    // chia FeeStat.remove_tx: a tx left the mempool WITHOUT confirming (evicted/expired/replaced) —
-    // decrement its unconfirmed slot and, if it waited past a period, credit failed_average.
+    // A tx left the mempool without confirming (evicted/expired/replaced) — decrement its
+    // unconfirmed slot and, if it waited past a period, credit failed_average.
     #[allow(clippy::cast_precision_loss)]
     fn remove_tx(&mut self, latest_seen_height: u32, item: ItemInfo, bucket_index: usize) {
         let block_ago = if latest_seen_height == 0 {
@@ -234,9 +227,8 @@ impl FeeStat {
         }
     }
 
-    // bitcoin TxConfirmStats::EstimateMedianVal (chia FeeStat.estimate_median_val): walk buckets
-    // from the top, accumulating until a band clears `success_break_point` with enough data, then
-    // report that band's median fee-rate. `median == -1.0` means no passing band.
+    // Walk buckets from the top, accumulating until a band clears `success_break_point` with
+    // enough data, then report that band's median fee-rate. `median == -1.0` means no passing band.
     #[allow(clippy::too_many_lines)]
     #[allow(clippy::cast_precision_loss)]
     fn estimate_median_val(
@@ -266,8 +258,8 @@ impl FeeStat {
         let bins = self.unconfirmed_txs.len() as i64;
         let mut new_bucket_range = true;
         let mut passing = true;
-        // chia tracks a `pass_bucket` struct too, but only `median` + `fail_bucket` reach the wire
-        // (via `SmartFeeEstimator.parse`); the passing band is captured by best_near/far + found.
+        // Only `median` + `fail_bucket` reach the wire; the passing band is captured by
+        // best_near/far + found.
         let mut fail_bucket = BucketResult::default();
 
         // period_target-1 must index confirmed_average; out of range → no estimate.
@@ -378,7 +370,7 @@ impl FeeStat {
     }
 }
 
-/// The three-horizon confirmation tracker (chia `FeeTracker`).
+/// The three-horizon confirmation tracker.
 pub struct FeeTracker {
     short_horizon: FeeStat,
     med_horizon: FeeStat,
@@ -413,10 +405,10 @@ impl FeeTracker {
         }
     }
 
-    // chia FeeTracker.process_block: a new transaction block confirmed `items` — decay, then record.
+    // A new transaction block confirmed `items` — decay, then record.
     fn process_block(&mut self, block_height: u32, items: &[ItemInfo]) {
         if block_height <= self.latest_seen_height {
-            return; // ignore reorgs / non-advancing heights (chia)
+            return; // ignore reorgs / non-advancing heights
         }
         self.latest_seen_height = block_height;
         self.short_horizon.clear_current(block_height);
@@ -443,8 +435,8 @@ impl FeeTracker {
         self.long_horizon.tx_confirmed(blocks_to_confirm, item);
     }
 
-    // chia FeeTracker.add_tx: a new mempool item joins the unconfirmed population. Each horizon
-    // buckets the fee-rate itself (chia `new_mempool_tx` re-derives the bucket from its argument).
+    // A new mempool item joins the unconfirmed population. Each horizon buckets the fee-rate
+    // itself.
     fn add_tx(&mut self, item: ItemInfo) {
         let fee_rate = item.fee_per_cost() * 1000.0;
         self.short_horizon
@@ -455,7 +447,7 @@ impl FeeTracker {
             .new_mempool_tx(self.latest_seen_height, fee_rate);
     }
 
-    // chia FeeTracker.remove_tx: a mempool item left without confirming.
+    // A mempool item left without confirming.
     fn remove_tx(&mut self, item: ItemInfo) {
         let fee_rate = item.fee_per_cost() * 1000.0;
         let bucket_index = get_bucket_index(&self.buckets, fee_rate);
@@ -501,12 +493,12 @@ impl FeeTracker {
     }
 }
 
-/// The node-facing fee estimator — chia `BitcoinFeeEstimator` + `SmartFeeEstimator`. Wraps the
-/// tracker with the mempool-size bookkeeping and the median→fee-rate parse that the RPC and the
-/// wallet handler consume. One lives inside each [`crate::mempool::Mempool`].
+/// The node-facing fee estimator. Wraps the tracker with the mempool-size bookkeeping and the
+/// median→fee-rate parse that the RPC and the wallet handler consume. One lives inside each
+/// [`crate::mempool::Mempool`].
 pub struct FeeEstimator {
     tracker: FeeTracker,
-    // chia BitcoinFeeEstimator.last_mempool_info — the most recent mempool cost / max.
+    // The most recent mempool cost.
     last_mempool_cost: u64,
     mempool_max_size: u64,
 }
@@ -521,7 +513,6 @@ impl FeeEstimator {
         }
     }
 
-    // chia BitcoinFeeEstimator.add_mempool_item.
     pub(crate) fn add_mempool_item(
         &mut self,
         cost: u64,
@@ -537,7 +528,6 @@ impl FeeEstimator {
         });
     }
 
-    // chia BitcoinFeeEstimator.remove_mempool_item.
     pub(crate) fn remove_mempool_item(
         &mut self,
         cost: u64,
@@ -553,7 +543,7 @@ impl FeeEstimator {
         });
     }
 
-    // chia BitcoinFeeEstimator.new_block: a transaction block confirmed these items.
+    // A transaction block confirmed these items.
     pub(crate) fn new_block(
         &mut self,
         block_height: u32,
@@ -572,12 +562,9 @@ impl FeeEstimator {
         self.tracker.process_block(block_height, &items);
     }
 
-    /// The estimated fee-rate (mojos per clvm cost) to be confirmed within `time_offset_seconds`.
-    /// 0.0 when there is not enough history — chia's floor (`estimate_fee_rate` → FeeRateV2(0)).
-    ///
-    /// Mirrors chia `SmartFeeEstimator.get_estimate` → `estimate_result_to_fee_estimate`:
-    /// `parse` maps the tracker's median (fee-rate × 1000 scale) back to fee-per-cost via /1000,
-    /// then the V2→rate step divides by 1000 again (chia's exact conversion).
+    /// The estimated fee-rate (mojos per clvm cost) to be confirmed within `time_offset_seconds`;
+    /// 0.0 when there is not enough history. `parse` maps the tracker's median (fee-rate × 1000
+    /// scale) back to fee-per-cost via /1000, then the V2→rate step divides by 1000 again.
     #[must_use]
     pub fn estimate_fee_rate(&self, time_offset_seconds: u64) -> f64 {
         let r = self.tracker.estimate_fee(time_offset_seconds);
@@ -585,8 +572,8 @@ impl FeeEstimator {
         if parsed < 0.0 { 0.0 } else { parsed / 1000.0 }
     }
 
-    // chia SmartFeeEstimator.parse: median → fee-per-cost, with the one-bucket-above-the-lowest-
-    // failing-bucket fallback. Returns -1.0 when the tracker found no answer at all.
+    // Median → fee-per-cost, with the one-bucket-above-the-lowest-failing-bucket fallback.
+    // Returns -1.0 when the tracker found no answer at all.
     fn parse(&self, r: &EstimateResult) -> f64 {
         if (r.median - -1.0).abs() > f64::EPSILON {
             return r.median / 1000.0;
@@ -600,13 +587,13 @@ impl FeeEstimator {
         self.tracker.buckets[start_index] / 1000.0
     }
 
-    /// The mempool's max cost (chia BitcoinFeeEstimator.mempool_max_size).
+    /// The mempool's max cost.
     #[must_use]
     pub fn mempool_max_size(&self) -> u64 {
         self.mempool_max_size
     }
 
-    /// The last-seen mempool cost (chia BitcoinFeeEstimator.mempool_size).
+    /// The last-seen mempool cost.
     #[must_use]
     pub fn mempool_size(&self) -> u64 {
         self.last_mempool_cost
@@ -618,8 +605,8 @@ impl FeeEstimator {
         &self.tracker
     }
 
-    /// Feed a confirmed-block signal directly (chia `new_block`). Public so integration tests and
-    /// the block-inclusion path can drive the positive signal; the mempool wires this from
+    /// Feed a confirmed-block signal directly. Public so integration tests and the
+    /// block-inclusion path can drive the positive signal; the mempool wires this from
     /// [`crate::mempool::Mempool::new_peak`].
     pub fn ingest_block(
         &mut self,
@@ -662,9 +649,9 @@ mod tests {
         }
     }
 
-    // chia test_steady_fee_pressure, native: sustained identical-fee-rate blocks converge on a
-    // positive estimate, and higher pressure yields a strictly higher estimate. Txs confirm the
-    // NEXT block (wait = 1), so even the shortest target has confirmation data.
+    // Sustained identical-fee-rate blocks converge on a positive estimate, and higher pressure
+    // yields a strictly higher estimate. Txs confirm the next block (wait = 1), so even the
+    // shortest target has confirmation data.
     fn drive_steady(fee: u64, cost: u64) -> FeeEstimator {
         let mut est = FeeEstimator::new(1_000_000);
         let wait = 1u32;
