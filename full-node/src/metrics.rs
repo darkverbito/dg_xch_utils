@@ -1261,8 +1261,10 @@ async fn serve<S: BlockStore + Send + Sync + 'static>(
     listener: TcpListener,
     sources: MetricsSources<S>,
     run: Arc<AtomicBool>,
+    #[cfg_attr(not(feature = "profiling"), allow(unused_variables))]
     debug_endpoints: bool,
 ) {
+    #[cfg(feature = "profiling")]
     let profiling = Arc::new(AtomicBool::new(false));
     while run.load(Ordering::Relaxed) {
         let accept = tokio::time::timeout(ACCEPT_TICK, listener.accept()).await;
@@ -1288,14 +1290,13 @@ async fn serve<S: BlockStore + Send + Sync + 'static>(
             let now = unix_now();
             let snap = sources.sample_liveness().await;
             // A confirm actively in flight (set for the whole drain+confirm window by the block
-            // processor, daemon.rs) counts as progress even when the confirmed peak is frozen mid-commit
-            // — the fix for the Postgres/SAN catch-up doom-loop where a ~70s coin_record INSERT froze
-            // both progress witnesses and the 503 SIGKILLed the node mid-write.
+            // processor, daemon.rs) counts as progress even when the confirmed peak is frozen
+            // mid-commit; otherwise a long coin_record INSERT freezes both progress witnesses and
+            // the 503 kills the node mid-write.
             let follow_inflight_since = sources.follow_inflight_since.load(Ordering::Relaxed);
             let health = sources.health.verdict(&snap, now, follow_inflight_since);
             // Stall self-report: the FIRST 503 of an episode logs one structured dump of what the
-            // node was last doing (see log_stall_dump); a healthy verdict re-arms it. This replaces
-            // inferring a wedged writer from last-span timestamps after 7 silent minutes.
+            // node was last doing (see log_stall_dump); a healthy verdict re-arms it.
             if health.status.starts_with("503") {
                 if sources.health.should_dump_stall() {
                     sources.log_stall_dump(&snap, now);
@@ -1414,7 +1415,8 @@ mod profiling {
     // Sample the process for FLAMEGRAPH_SECONDS and stream back the flamegraph SVG. Runs on its own spawned task
     // (bounded to one concurrent via `profiling`) so /metrics keeps answering during the profile.
     pub(super) async fn handle_flamegraph(mut stream: TcpStream) {
-        match tokio::time::timeout(FLAMEGRAPH_TIMEOUT, sample_flamegraph(FLAMEGRAPH_SECONDS)).await {
+        match tokio::time::timeout(FLAMEGRAPH_TIMEOUT, sample_flamegraph(FLAMEGRAPH_SECONDS)).await
+        {
             Ok(Ok(svg)) => {
                 let header = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: image/svg+xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -1430,7 +1432,8 @@ mod profiling {
             }
             Err(_) => {
                 warn!("flamegraph profiling timed out");
-                let _ = write_simple(&mut stream, "504 Gateway Timeout", "flamegraph timed out").await;
+                let _ =
+                    write_simple(&mut stream, "504 Gateway Timeout", "flamegraph timed out").await;
             }
         }
     }
@@ -1489,7 +1492,8 @@ mod profiling {
             }
             Err(_) => {
                 warn!("heap profile dump timed out");
-                let _ = write_simple(&mut stream, "504 Gateway Timeout", "heap dump timed out").await;
+                let _ =
+                    write_simple(&mut stream, "504 Gateway Timeout", "heap dump timed out").await;
             }
         }
     }

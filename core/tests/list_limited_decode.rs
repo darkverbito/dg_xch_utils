@@ -146,7 +146,7 @@ fn overstated_claim_errors_without_parsing_the_phantom_tail() {
     let limited = RegisterForPhUpdates::from_bytes_limited(&mut Cursor::new(raw.as_slice()), v, 4);
     assert!(
         limited.is_err(),
-        "the field after the over-claimed list fails at EOF, as in chia"
+        "the field after the over-claimed list fails at EOF"
     );
 }
 

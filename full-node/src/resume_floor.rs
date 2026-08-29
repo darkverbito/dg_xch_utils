@@ -5,13 +5,13 @@
 // The floor MUST be measured by prev-hash walk from the peak, for two reasons:
 //   1. `get_block_record_by_height` is main-chain-only on every backend (sqlite/postgres
 //      `in_main_chain = 1`; mmap `heights.dat` is populated only by `set_peak`). Epoch-depth
-//      backfill writes CANDIDATE records, which a by-height read never sees — a by-height floor
-//      sits at the confirmed span base forever, and every restart re-runs the full weight-proof
-//      fetch + multi-minute validation + header backfill it had already done.
+//      backfill writes CANDIDATE records, which a by-height read never sees, so a by-height floor
+//      sits at the confirmed span base forever and every restart re-runs the weight-proof fetch,
+//      validation and header backfill it had already done.
 //   2. A by-height binary search assumes hole-free monotone presence. A mid-span record hole (a
 //      lost candidate link batch on mmap; a `synchronous_commit=off` suffix drop on Postgres)
-//      above the by-height floor reads as "nothing to repair" while the stage walk keeps dying
-//      on the hole — the MissingRecord livelock.
+//      above the by-height floor reads as "nothing to repair" while the stage walk keeps dying on
+//      the hole, which livelocks the resume.
 // The prev-hash walk reads records BY HASH (candidate-visible on every backend) and detects a hole
 // naturally: the walk breaks exactly at the record whose parent is missing.
 
@@ -262,8 +262,7 @@ mod tests {
         assert_hole_detected_and_converges(&store).await;
     }
 
-    // Regression guard: a clean full-history chain (the genesis-synced sqlite legs that never
-    // stalled) short-circuits exactly as before.
+    // A clean full-history chain short-circuits.
     #[tokio::test]
     async fn clean_genesis_chain_reaches_the_floor_on_sqlite() {
         let store = sqlite_store().await;

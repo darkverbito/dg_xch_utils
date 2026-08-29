@@ -6,7 +6,7 @@ mod common;
 //   - after the exchange, v3-tabled types leave the time-based limiter and bounded request
 //     types are admitted through in-flight windows (window 2 for every request type);
 //   - an invalid configure (bounding one of OUR unlimited response types, empty, oversized) is
-//     INVALID_HANDSHAKE — close;
+//     an invalid handshake — close;
 //   - localhost/exempt peers bypass WINDOW ENFORCEMENT but v3 still activates. The enforcement
 //     test below swaps the peer-map entry's recorded host to a non-loopback address to exercise
 //     the enforcement arm over the loopback wire.

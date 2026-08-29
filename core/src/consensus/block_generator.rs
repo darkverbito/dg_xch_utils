@@ -1171,8 +1171,8 @@ fn build_generator_tree(spends: &[CoinSpend]) -> Result<SExp<'static>, ClvmError
 
 /// The block producer's plain (uncompressed) generator for an ORDERED spend sequence. The
 /// wire format holds the spends in REVERSE input order; [`simple_solution_generator`]
-/// preserves input order, so this wrapper reverses before assembling. Byte-parity is
-/// pinned by `chia_rs_solution_generator_byte_parity` below.
+/// preserves input order, so this wrapper reverses before assembling. Byte-parity against the
+/// reference encoder is pinned by the tests below.
 ///
 /// The plain form is the uncompressed sibling of the back-reference-compressed generator:
 /// identical tree, identical consensus validity (post-SF9: starts `ff01`, canonical
@@ -1197,7 +1197,7 @@ pub fn solution_generator_from_coin_spends(
 /// - is never larger than the plain form, and strictly smaller whenever a ≥4-byte subtree repeats —
 ///   which is what lets a block pack more spends under `MAX_BLOCK_COST_CLVM`.
 ///
-/// Byte-parity is pinned by `compressed_generator_matches_chia_rs_backrefs` below.
+/// Byte-parity against the reference back-reference encoder is pinned by the tests below.
 ///
 /// # Errors
 /// Propagates [`build_generator_tree`]'s CLVM parse errors and the serializer's `io::Error`.
@@ -3038,7 +3038,7 @@ mod producer_tests {
         assert_eq!(
             generator.as_ref(),
             expected.as_slice(),
-            "solution_generator_from_coin_spends must emit chia_rs solution_generator's exact bytes"
+            "solution_generator_from_coin_spends must emit the reference bytes exactly"
         );
     }
 
@@ -3092,7 +3092,7 @@ mod producer_tests {
         assert_eq!(
             generator.as_ref(),
             expected.as_slice(),
-            "compressed_solution_generator must emit chia_rs solution_generator_backrefs's exact bytes"
+            "compressed_solution_generator must emit the reference back-reference bytes exactly"
         );
     }
 

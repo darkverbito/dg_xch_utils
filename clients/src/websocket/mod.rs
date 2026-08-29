@@ -46,7 +46,7 @@ use tokio_tungstenite::{Connector, connect_async_tls_with_config};
 
 // Chia block responses (a batch of full blocks, or a weight proof) routinely exceed tungstenite's default
 // 16 MiB per-frame cap — an 18 MB `RespondBlocks` is rejected as `MessageTooLong`, stalling body-fill. Match
-// chia's 50 MB message ceiling (`chia/server/server.py`) with headroom on both the message and frame limits.
+// the protocol's 50 MB message ceiling, with headroom on both the message and frame limits.
 fn large_message_ws_config() -> WebSocketConfig {
     WebSocketConfig::default()
         .max_message_size(Some(64 << 20))
@@ -76,8 +76,8 @@ pub struct WsClient {
     pub connection: Arc<RwLock<WebsocketConnection>>,
     pub client_config: Arc<WsClientConfig>,
     pub handshake: Option<Handshake>,
-    /// Per-connection OUTBOUND self-throttle for messages WE send to this dialed peer (chia's
-    /// `outbound_rate_limiter`). `Some` on full-node dials (`WsClientConfig::rate_limited`), `None`
+    /// Per-connection OUTBOUND self-throttle for messages WE send to this dialed peer.
+    /// `Some` on full-node dials (`WsClientConfig::rate_limited`), `None`
     /// otherwise; see [`WsClient::send`].
     outbound_limiter: Option<Arc<OutboundLimiter>>,
     handle: JoinHandle<()>,
@@ -235,7 +235,7 @@ impl WsClient {
         } else {
             None
         };
-        // The send-side companion (chia's `outbound_rate_limiter`): paces frequency-capped messages WE
+        // The send-side companion of the inbound limiter: paces frequency-capped messages WE
         // send to this peer against ITS budget so a re-gossip burst cannot get us banned. Same gate as
         // the inbound limiter — installed only on full-node links.
         let outbound_limiter = if client_config.rate_limited {
@@ -310,12 +310,12 @@ impl WsClient {
         self.handle.is_finished()
     }
 
-    /// Send `msg` to this dialed peer, self-throttling first when the outbound limiter is installed
-    /// (chia's `outbound_rate_limiter`). The peer's negotiated capabilities (from its handshake reply)
-    /// select the v1/v2 numbers; a frequency-capped over-budget message is paced (`_wait_and_retry`)
-    /// WITHOUT holding the connection write lock, so an `Unlimited` serve reply is never stalled behind
-    /// it. A dropped message (exempt over budget, or the bounded attempt cap) is logged and swallowed,
-    /// exactly as chia returns without sending. With no limiter this writes directly.
+    /// Send `msg` to this dialed peer, self-throttling first when the outbound limiter is
+    /// installed. The peer's negotiated capabilities (from its handshake reply) select the v1/v2
+    /// numbers; a frequency-capped over-budget message is paced WITHOUT holding the connection
+    /// write lock, so an `Unlimited` serve reply is never stalled behind it. A dropped message
+    /// (exempt over budget, or the bounded attempt cap) is logged and swallowed. With no limiter
+    /// this writes directly.
     pub async fn send(&self, msg: ChiaMessage) -> Result<(), Error> {
         if let Some(limiter) = &self.outbound_limiter {
             let caps = self
@@ -381,7 +381,7 @@ pub struct WsClientConfig {
     pub software_version: Option<String>,
     pub protocol_version: ChiaProtocolVersion,
     pub additional_headers: Option<HashMap<String, String>>,
-    /// Install the per-connection inbound rate limiter on this link (chia's `inbound_rate_limiter`).
+    /// Install the per-connection inbound rate limiter on this link.
     /// Set by the p2p full-node dialer; false for harvester/farmer/wallet client roles.
     pub rate_limited: bool,
 }

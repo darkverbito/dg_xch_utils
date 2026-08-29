@@ -1,7 +1,7 @@
 // Two-branch delta chains with a per-height synthetic coin lineage — the at-scale reorg
 // fixture shared by tests/long_reorg_scale.rs and tests/reorg_while_shed.rs. Block h on branch
 // `tag` creates coin L(tag, h) and spends L(tag, h-1); the FIRST block of each branch spends a
-// fork-common coin both branches contend for (chia's `_spend_reorg_coin` shape). Branch A (+10
+// fork-common coin both branches contend for. Branch A (+10
 // weight/block) is the incumbent peak; branch B (+8/block, one block longer, tip jumping past
 // the A tip) parks WHOLLY as orphan candidates and flips in ONE reorg — so every coin above the
 // fork has real unwind work: abandoned creations deleted, the below-fork spend reverted, the

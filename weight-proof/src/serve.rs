@@ -5,7 +5,7 @@
 // Sampling reuses the SAME CPython-`random.Random` port and the SAME `_get_weights_for_sampling` /
 // `_sample_sub_epoch` mirrors the validator uses (`crate::py_random`, `crate::get_weights_for_sampling`,
 // `crate::sample_sub_epoch`) — one implementation on both sides, so the builder's sampled sub-epoch set
-// is byte-for-byte the set any chia validator derives from the same seed (same rng call order:
+// is byte-for-byte the set any conforming validator derives from the same seed (same rng call order:
 // seed → the `int(queries)+1` `random()` draws → sort).
 
 use crate::WeightProofError;
@@ -96,7 +96,7 @@ impl From<WeightProofError> for ServeError {
 }
 
 impl ServeError {
-    /// True for the chia-mirrored refusal paths where the peer simply gets no reply.
+    /// True for the refusal paths where the peer simply gets no reply.
     #[must_use]
     pub fn is_refusal(&self) -> bool {
         matches!(
@@ -111,7 +111,7 @@ impl ServeError {
 // An in-RAM view of one contiguous main-chain span — the counterpart of the reference's
 // `get_block_records_in_range` + `get_header_blocks_in_range(tx_filter=False)` dict pair plus
 // `height_to_hash`. Heights that don't resolve in the store are simply
-// absent (chia's range fetch likewise collects only existing hashes); a later lookup miss errors.
+// absent, since the range fetch collects only existing hashes; a later lookup miss errors.
 struct ChainCache {
     height_to_hash: HashMap<u32, Bytes32>,
     records: HashMap<Bytes32, BlockRecord>,
@@ -245,7 +245,7 @@ where
         tip_rec: &BlockRecord,
     ) -> Result<WeightProof, ServeError> {
         info!(tip = %tip_rec.header_hash, height = tip_rec.height, "create weight proof");
-        // The ses index must reach the tip before anything else (chia's get_ses_heights is pre-built).
+        // The ses index must reach the tip before anything else.
         self.extend_ses_index(st, tip_rec.height).await?;
         let ses_blocks = st.ses_blocks.clone();
 
@@ -1290,6 +1290,10 @@ mod tests {
                     signage_point_index: 0,
                     pos_ss_cc_challenge_hash: Bytes32::default(),
                     proof_of_space: ProofOfSpace {
+                        version: 0,
+                        plot_index: 0,
+                        meta_group: 0,
+                        strength: 0,
                         challenge: Bytes32::default(),
                         pool_public_key: None,
                         pool_contract_puzzle_hash: Some(Bytes32::default()),
@@ -1597,7 +1601,7 @@ mod tests {
         );
     }
 
-    // The oracle-gate regression: a proof built by the SERVER must pass the VALIDATOR's phase 2:
+    // A proof built by the SERVER must pass the VALIDATOR's phase 2:
     // `_get_last_ses_hash` reads the on-chain summary commitment out of the recent
     // chain's finished sub slots, `_map_sub_epoch_summaries` rebuilds the summary chain
     // from our emitted SubEpochData anchored on GENESIS_CHALLENGE, and the last reconstructed hash

@@ -34,13 +34,14 @@ pub fn extract_num<T: AsRef<[u8]>>(
 // (regardless of 'num_bits'). In practice it can be ensured by allocating
 // extra 7 bytes to all memory buffers passed to this function.
 pub fn slice_u64from_bytes<T: AsRef<[u8]>>(bytes: T, start_bit: u32, num_bits: u32) -> u64 {
-    let mut bytes = bytes.as_ref().to_vec();
+    let bytes = bytes.as_ref();
     let mut start_bit = start_bit;
+    let mut offset = 0usize;
     if start_bit + num_bits > 64 {
-        bytes.push((start_bit / 8) as u8);
+        offset = (start_bit / 8) as usize;
         start_bit %= 8;
     }
-    let mut tmp = bytes_to_u64(&bytes);
+    let mut tmp = bytes_to_u64(&bytes[offset.min(bytes.len())..]);
     tmp <<= start_bit;
     tmp >>= 64 - num_bits;
     tmp
@@ -50,7 +51,10 @@ pub fn slice_u64from_bytes_full<T: AsRef<[u8]>>(bytes: T, start_bit: u32, num_bi
     let last_bit = start_bit + num_bits;
     let mut r = slice_u64from_bytes(bytes.as_ref(), start_bit, num_bits);
     if start_bit % 8 + num_bits > 64 {
-        r |= bytes.as_ref()[(last_bit / 8) as usize] as u64 >> (8 - last_bit % 8);
+        let index = (last_bit / 8) as usize;
+        if index < bytes.as_ref().len() {
+            r |= u64::from(bytes.as_ref()[index]) >> (8 - last_bit % 8);
+        }
     }
     r
 }

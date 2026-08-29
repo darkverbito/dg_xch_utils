@@ -181,7 +181,7 @@ async fn service_index_present_when_enabled() {
     );
 }
 
-// Port of chia `test_set_spent` + `test_rollback` (spent_index update): a coin created below the fork
+// A coin created below the fork
 // and spent above it is marked spent at the spend height, then un-spent by a rollback to the fork —
 // the removal is reverted (spent_index -> 0) while the coin itself survives (created below the fork).
 #[tokio::test]
@@ -204,7 +204,7 @@ async fn coin_spent_above_fork_is_unspent_by_rollback() {
     assert_eq!(created.confirmed_block_index, 5_000_000);
     assert_eq!(created.spent_block_index, 0);
 
-    // Spent at 5_000_010 (chia set_spent).
+    // Spent at 5_000_010.
     store
         .apply_block(5_000_010, 1_700_000_100, &[], std::slice::from_ref(&name))
         .await
@@ -246,7 +246,7 @@ async fn coin_spent_above_fork_is_unspent_by_rollback() {
     );
 }
 
-// Port of chia `test_num_unspent`: after applying a batch of additions and spending a subset, exactly
+// After applying a batch of additions and spending a subset, exactly
 // the un-spent coins read back with spent_index == 0.
 #[tokio::test]
 async fn unspent_count_reflects_partial_spend() {
@@ -318,10 +318,9 @@ async fn multi_get_large_batch_returns_present_skips_absent() {
     }
 }
 
-// T0-4: `rollback_to_in` shares the batch's transaction — dropped, the fork revert never
-// happened; committed, it lands together with the branch re-applies staged after it (the
-// engine's single-transaction reorg shape, chia blockchain.py add_block's
-// `async with self.block_store.transaction():`).
+// `rollback_to_in` shares the batch's transaction: dropped, the fork revert never happened;
+// committed, it lands together with the branch re-applies staged after it — the engine's
+// single-transaction reorg shape.
 #[tokio::test]
 async fn rollback_to_in_is_atomic_with_the_batch() {
     use dg_xch_stores::BlockStore;
@@ -400,11 +399,9 @@ async fn rollback_to_in_is_atomic_with_the_batch() {
     assert_eq!(respent.spent_block_index, 11);
 }
 
-// The wallet-serve read caps: `max_items` lives IN the store query — a running
-// LIMIT budget for the sqlite/postgres backends, a scan cut-off for mmap — mirroring chia's
-// `max_items` parameter on `get_coin_states_by_puzzle_hashes` / `get_coin_states_by_ids`
-// (coin_store.py:486/552) and the hint store's `LIMIT` (hint_store.py:26/42). Never
-// fetch-then-truncate: a dust-storm puzzle hash must not materialize an unbounded row set.
+// The wallet-serve read caps: `max_items` lives IN the store query — a running LIMIT budget for
+// the sqlite/postgres backends, a scan cut-off for mmap. Never fetch-then-truncate: a dust-storm
+// puzzle hash must not materialize an unbounded row set.
 #[cfg(feature = "coin-index")]
 #[tokio::test]
 async fn coin_state_queries_are_bounded_by_max_items() {
@@ -452,7 +449,7 @@ async fn coin_state_queries_are_bounded_by_max_items() {
     }
 }
 
-// ---- batch_coin_states_by_puzzle_hashes (chia coin_store.py:590) — the RequestPuzzleState read ----
+// ---- batch_coin_states_by_puzzle_hashes — the RequestPuzzleState read ----
 
 #[cfg(feature = "coin-index")]
 mod batch_puzzle_state {
@@ -508,7 +505,7 @@ mod batch_puzzle_state {
         all
     }
 
-    // chia coin_store.py:684-687: everything fits max_items → (all, None), ordered by height.
+    // Everything fits max_items → (all, None), ordered by height.
     #[tokio::test]
     async fn single_page_is_finished_and_height_ordered() {
         let store = common::new_store().await;
@@ -525,7 +522,7 @@ mod batch_puzzle_state {
         assert_eq!(heights, sorted, "ascending activity height");
     }
 
-    // chia coin_store.py:689-703: over max_items → the last state is the next page's floor and NO
+    // Over max_items → the last state is the next page's floor and NO
     // state from that height leaks into this page (a block is never split across pages). Driving
     // the page loop to completion recovers exactly the seeded set with no duplicates.
     #[tokio::test]
@@ -581,8 +578,7 @@ mod batch_puzzle_state {
         );
     }
 
-    // The spent/unspent filter legs (chia's require_spent/require_unspent predicates,
-    // coin_store.py:621-633) — and both-false short-circuits to a finished empty page.
+    // The spent/unspent filter legs, and both-false short-circuiting to a finished empty page.
     #[tokio::test]
     async fn spent_unspent_filters_partition_the_set() {
         let store = common::new_store().await;
@@ -619,10 +615,10 @@ mod batch_puzzle_state {
             .batch_coin_states_by_puzzle_hashes(&[PH()], 0, &filters(false, false, true, 0), 50_000)
             .await
             .unwrap();
-        assert!(neither.is_empty(), "chia :631-633 — no coin is both");
+        assert!(neither.is_empty(), "no coin is both spent and unspent");
         assert_eq!(next, None);
 
-        // The min_height floor is created-OR-spent (chia's confirmed>=? OR spent>=?): the coin
+        // The min_height floor is created-OR-spent (confirmed >= ? OR spent >= ?): the coin
         // created at 10 but spent at 12 still surfaces above a floor of 12.
         let (active, _) = store
             .batch_coin_states_by_puzzle_hashes(&[PH()], 12, &filters(true, true, true, 0), 50_000)
@@ -632,7 +628,7 @@ mod batch_puzzle_state {
         assert_eq!(active[0].coin.name(), victim);
     }
 
-    // min_amount (chia's `amount >= ?` on the big-endian blob, coin_store.py:623/646).
+    // min_amount: `amount >= ?` on the big-endian blob.
     #[tokio::test]
     async fn min_amount_filters_dust() {
         let store = common::new_store().await;
@@ -675,7 +671,7 @@ mod batch_puzzle_state {
         assert_eq!(whale[0].coin.amount, 1 << 40);
     }
 
-    // include_hinted (chia's hint join, coin_store.py:655-675): a coin whose OWN puzzle hash is
+    // include_hinted: a coin whose OWN puzzle hash is
     // foreign but whose HINT is the requested hash (the CAT/NFT shape) surfaces iff
     // include_hinted; a plain+hinted overlap dedups by coin id.
     #[cfg(feature = "hint")]

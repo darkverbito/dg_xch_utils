@@ -132,8 +132,8 @@ mod tests {
 
     /// Rebuild the legacy blob for a wire-layout record byte-for-byte: the legacy encoder
     /// wrote a u32-BE 0x64 length prefix ahead of each 100-byte VDF output and was otherwise
-    /// identical. Pinned here structurally — independent of the shipped legacy decoder — so
-    /// the compat path is proven against the layout itself, not against its own inverse.
+    /// identical. Built structurally here, independent of the shipped legacy decoder, so the
+    /// compat path is proven against the layout itself and not against its own inverse.
     fn legacy_blob_of(chia: &[u8]) -> Vec<u8> {
         const PREFIX: [u8; 4] = 100u32.to_be_bytes();
         let mut out = Vec::with_capacity(chia.len() + 8);

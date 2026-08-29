@@ -31,7 +31,7 @@ async fn apply_block_on(
 ) -> Result<(), StoreError> {
     // Batches are sorted by coin_name BEFORE chunking (see lib.rs sort_additions_by_name): each
     // statement's rows then probe adjacent pkey leaf pages instead of one random multi-GB btree
-    // descent per coin — the measured confirm bottleneck on high-latency storage.
+    // descent per coin, which dominates the confirm on high-latency storage.
     let additions = crate::sort_additions_by_name(additions);
     for chunk in additions.chunks(ADDITIONS_PER_STATEMENT) {
         let mut qb = sqlx::QueryBuilder::new(

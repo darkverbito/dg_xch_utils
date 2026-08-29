@@ -10,6 +10,7 @@ pub mod decompressor;
 pub mod disk_plot;
 pub mod fx_generator;
 pub mod plot_reader;
+pub mod plot_writer;
 // pub mod plotting;
 pub const PROOF_X_COUNT: usize = 64;
 const BB_PLOT_VERSION: u32 = 1;

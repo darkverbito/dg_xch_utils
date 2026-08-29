@@ -9,8 +9,8 @@ use crate::consensus::{missing, rejected};
 use std::collections::HashMap;
 use std::io::Error;
 
-// chia get_signage_point_vdf_info. Returns
-// (cc_vdf_challenge, rc_vdf_challenge, cc_vdf_input, rc_vdf_input, cc_vdf_iters, rc_vdf_iters);
+// Returns (cc_vdf_challenge, rc_vdf_challenge, cc_vdf_input, rc_vdf_input, cc_vdf_iters,
+// rc_vdf_iters);
 // rc_vdf_input is always the identity element and cc_vdf_iters == rc_vdf_iters == sp_vdf_iters.
 #[allow(clippy::type_complexity)]
 pub fn get_signage_point_vdf_info(

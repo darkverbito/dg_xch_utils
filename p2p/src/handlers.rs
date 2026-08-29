@@ -889,7 +889,7 @@ impl FullNodeHandler {
                     if !self.api.accept_inbound_timelord(host) {
                         log::info!(
                             "Not accepting inbound TIMELORD connection from {host:?}: \
-                             localhost/exempt networks only (chia CHIA-3995)"
+                             localhost/exempt networks only"
                         );
                         return close_peer(peers, peer_id, None).await;
                     }

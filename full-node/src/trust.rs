@@ -217,8 +217,8 @@ mod tests {
         );
     }
 
-    // Case 3 (regression from bd1a503): node-id trust is independent of host — trusted with no host
-    // AND with an arbitrary non-loopback host; a non-member stays untrusted at that same host.
+    // Node-id trust is independent of host: trusted with no host AND with an arbitrary
+    // non-loopback host, while a non-member stays untrusted at that same host.
     #[test]
     fn node_id_trust_is_independent_of_host() {
         let policy = TrustPolicy::new(HashSet::from([id(0xaa)]));

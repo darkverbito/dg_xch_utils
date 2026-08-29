@@ -115,6 +115,17 @@ pub struct ConsensusConstants {
     pub plot_filter_64_height: u32,
     pub plot_filter_32_height: u32,
 
+    // proof of space 2 (activates with hard fork 2): the fixed v2 plot size, the strength range a
+    // plot may choose, the v1 phase out window, and the v2 plot filter with its own schedule
+    pub number_zero_bits_plot_filter_v2: u8,
+    pub plot_size_v2: u8,
+    pub min_plot_strength: u8,
+    pub max_plot_strength: u8,
+    pub plot_v1_phase_out_epoch_bits: u8,
+    pub plot_filter_v2_first_adjustment_height: u32,
+    pub plot_filter_v2_second_adjustment_height: u32,
+    pub plot_filter_v2_third_adjustment_height: u32,
+
     //This is NOT standard, but makes some things easier
     pub bech32_prefix: &'static str,
     pub is_testnet: bool,
@@ -209,6 +220,14 @@ pub const MAINNET: ConsensusConstants = ConsensusConstants {
     plot_filter_128_height: 10_542_000,
     plot_filter_64_height: 15_592_000,
     plot_filter_32_height: 20_643_000,
+    number_zero_bits_plot_filter_v2: 5,
+    plot_size_v2: 28,
+    min_plot_strength: 2,
+    max_plot_strength: 32,
+    plot_v1_phase_out_epoch_bits: 8,
+    plot_filter_v2_first_adjustment_height: 0xFFFF_FFFB,
+    plot_filter_v2_second_adjustment_height: 0xFFFF_FFFC,
+    plot_filter_v2_third_adjustment_height: 0xFFFF_FFFD,
     bech32_prefix: "xch",
     is_testnet: false,
     simulated: false,

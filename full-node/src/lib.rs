@@ -14,7 +14,7 @@ pub use config::{Backend, Config, RpcTlsMode};
 pub use daemon::{Node, OutboundPeers, open_backend, outbound_on_connect};
 pub use rpc::{
     BlockchainStateSummary, CoinQueryWindow, NodeRpc, NodeRpcHandler, NodeRpcLive, RpcError,
-    RpcTlsContext, build_rpc_tls_context,
+    RpcTlsContext, SimControl, build_rpc_tls_context,
 };
 pub use trust::TrustPolicy;
 pub use tx_queue::TxQueue;

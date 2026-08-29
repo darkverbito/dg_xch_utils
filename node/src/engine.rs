@@ -619,7 +619,7 @@ where
     /// transaction (`stage_block_pre_in`'s archive rows), handed over uncommitted so the whole
     /// catch-up window costs ONE writer transaction and ONE fsync: archive + coins + peak commit
     /// together (the archive-before-peak ordering constraint is satisfied inside the single
-    /// transaction; previously the staging commit was a second serialized writer round-trip per
+    /// transaction, so the staging commit is not a second serialized writer round-trip per
     /// window). When nothing confirms (an empty `deltas` — e.g. the whole window failed its VDF
     /// drain) the carried batch is DROPPED, rolling the staged archive rows back — the window
     /// retries and re-stages wholesale (`begin()`'s rollback guard clears the dangling

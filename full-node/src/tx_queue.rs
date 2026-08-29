@@ -347,7 +347,7 @@ mod tests {
         assert_eq!(
             order,
             vec![p2, p3, p1, p4],
-            "chia's DRR vector: cheapest affordable top transaction services first, \
+            "DRR: the cheapest affordable top transaction services first, \
              the no-cost-info peer prices at max_tx_clvm_cost and goes last"
         );
     }

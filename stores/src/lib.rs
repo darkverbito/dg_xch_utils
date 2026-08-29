@@ -23,9 +23,8 @@ pub use types::{BatchHandle, BlockStatus, Savepoint};
 // Sort one block's coin-delta batches by coin_name BEFORE the apply chunks them into
 // statements. The names are hashes, so block order is random with respect to the coin_record
 // primary key: every row becomes an independent random descent into the multi-GB pkey btree — a
-// distinct, uncached leaf page, i.e. a distinct random read, which is the measured confirm
-// bottleneck on high-latency storage (a single mid-confirm read observed stalled 25+ s on an
-// iSCSI leg). Sorting ONCE over the whole batch and then chunking makes each chunk
+// distinct, uncached leaf page, i.e. a distinct random read, which dominates the confirm on
+// high-latency storage. Sorting ONCE over the whole batch and then chunking makes each chunk
 // key-contiguous, so its descents share btree path prefixes and touch few distinct leaf pages,
 // and gives storage read-ahead something to work with. No semantic effect: the upsert
 // (ON CONFLICT / INSERT OR REPLACE over unique names) and the spent-update are

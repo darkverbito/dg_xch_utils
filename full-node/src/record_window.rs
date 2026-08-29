@@ -34,10 +34,10 @@ pub(crate) fn record_window_capacity(constants: &ConsensusConstants) -> usize {
 }
 
 // The ancestor record map for the consensus walks, `depth`-sized by `difficulty_record_depth`,
-// served from the shared window with store fallback per miss. The produced map is byte-identical
-// to the old pure store walk (same chain, same break-on-miss and stop-at-genesis semantics): the
-// window only ever holds records previously fetched from this same store, keyed by header hash,
-// and a record is immutable per hash. Fetched misses are folded back into the window (ascending
+// served from the shared window with store fallback per miss. The map is identical to a pure store
+// walk (same chain, same break-on-miss and stop-at-genesis semantics): the window only ever holds
+// records fetched from this same store, keyed by header hash, and a record is immutable per hash.
+// Fetched misses are folded back into the window (ascending
 // height, so `BlockRecordCache`'s lowest-first eviction keeps the window contiguous below the
 // newest head).
 pub(crate) async fn windowed_records_map<S: BlockStore + Send + Sync>(
@@ -273,7 +273,7 @@ mod tests {
         assert_eq!(
             cold_reads,
             u64::from(depth_cold),
-            "cold start pays the full window once — and this is what the OLD code paid per call"
+            "cold start pays the full window once"
         );
 
         // One follow window later: only the 32 new head records are fetched.

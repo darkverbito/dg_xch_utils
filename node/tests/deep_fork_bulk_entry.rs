@@ -6,8 +6,8 @@
 // deep-fork arm re-enters through the BULK pipeline — headers-first candidates + the
 // reservation-window out-of-order body download + per-block confirm (`Chaser::sync_range`, the
 // exact path `Node::bulk_sync`'s `fast_sync_with_summaries` drives) — where the engine's
-// single-transaction reorg (T0-4) flips the chain the moment the branch outweighs the peak.
-// That entry had NO test at any scale (DIVERGENCES.md OPEN row); these pin it:
+// single-transaction reorg flips the chain the moment the branch outweighs the peak. These pin
+// that entry:
 //
 //   1. the mid-band escalation: a fork with a REAL shared ancestor 20 back (not a disjoint
 //      chain) still signals DeepFork after a bounded backward probe, store untouched;

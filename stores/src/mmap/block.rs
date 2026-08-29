@@ -43,7 +43,7 @@ impl BlockEntry {
     }
 }
 
-// Legacy-tolerant (pre-#155 blobs decode via the fallback walk; see record_compat.rs).
+// Legacy-tolerant: older blobs decode via the fallback walk; see record_compat.rs.
 use crate::record_compat::decode_record;
 
 impl MmapStore {
@@ -427,8 +427,7 @@ impl BlockStore for MmapStore {
         &self,
         ses_hash: &Bytes32,
     ) -> Result<Option<Vec<u8>>, StoreError> {
-        // chia BlockStore.get_sub_epoch_challenge_segments (block_store.py:173-192), minus the
-        // decode: table lookup → frame read; the bytes stay opaque SubEpochSegments.
+        // Table lookup → frame read; the bytes stay opaque SubEpochSegments, no decode here.
         let Some(index) = self.segments_tbl.find(ses_hash)? else {
             return Ok(None);
         };
@@ -444,11 +443,10 @@ impl BlockStore for MmapStore {
         ses_hash: &Bytes32,
         bytes: &[u8],
     ) -> Result<(), StoreError> {
-        // chia BlockStore.persist_sub_epoch_challenge_segments (block_store.py:164-171). The
-        // libbitcoin ordering: frame appended and synced before the table link lands, so a torn
-        // shutdown loses the segments (rebuildable), never the table. Re-persist repoints the
-        // existing entry; the old frame becomes unreferenced (append-only, chia's
-        // INSERT OR REPLACE semantics).
+        // Frame appended and synced before the table link lands, so a torn shutdown loses the
+        // segments (rebuildable), never the table. Re-persist repoints the existing entry and the
+        // old frame becomes unreferenced — this store is append-only, so an upsert cannot
+        // overwrite in place.
         let _w = self.write_lock.lock().await;
         let off = self.segments.append(bytes).await?;
         self.segments.sync().await?;

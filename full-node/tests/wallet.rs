@@ -267,10 +267,8 @@ async fn second_registration_returns_no_new_receiver() {
     assert_eq!(notifier.subscriber_count().await, 0);
 }
 
-// The per-peer combined subscription cap for an UNTRUSTED peer must match the
-// `max_subscribe_items` = 200,000 (initial-config.yaml:437, ). The default
-// notifier trusts no one, so every peer resolves untrusted — the regression guard for the additive
-// default.
+// The per-peer combined subscription cap for an UNTRUSTED peer is 200,000. The default notifier
+// trusts no one, so every peer resolves untrusted.
 #[tokio::test]
 async fn subscription_cap_matches_chia_untrusted_max_subscribe_items() {
     assert_eq!(
@@ -494,6 +492,6 @@ fn p2p_puzzle_hash_batch_cap_matches_the_store_constant() {
     assert_eq!(
         dg_xch_p2p::handlers::MAX_PUZZLE_HASH_BATCH_SIZE as usize,
         dg_xch_stores::traits::MAX_PUZZLE_HASH_BATCH_SIZE,
-        "p2p decode cap and store batch bound must stay in lockstep (chia coin_store.py:588)"
+        "p2p decode cap and store batch bound must stay in lockstep"
     );
 }

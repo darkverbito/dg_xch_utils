@@ -8,7 +8,6 @@ use crate::blockchain::sub_epoch_summary::SubEpochSummary;
 use crate::consensus::constants::ConsensusConstants;
 use std::io::Error;
 
-// chia header_block_to_sub_block_record.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn header_block_to_sub_block_record(
     constants: &ConsensusConstants,

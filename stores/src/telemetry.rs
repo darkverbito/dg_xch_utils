@@ -1,24 +1,16 @@
 //! Read-only store telemetry recorded by the backends and rendered by the node's `/metrics`
-//! responder. Every instrument here exists to answer a diagnostic question that otherwise has to be
-//! answered by hand during a live incident:
+//! responder: phase-labelled commit latency, and the WAL gauges + checkpoint counters that say
+//! whether the WAL is bounded and the checkpointer is keeping up.
 //!
-//!   - "Did a store/confirm change regress commit latency in either band?" — the per-block-commit
-//!     catch-up crawl was previously inferred from sqlx slow-statement log spam; the phase-labelled
-//!     commit histogram answers it in one PromQL query.
-//!   - "Is the WAL bounded and is the checkpointer keeping up?" — the WAL file can grow into the
-//!     hundreds of MiB before a checkpoint catches up; the WAL gauges + checkpoint counters make that
-//!     visible directly instead of by listing the `-wal` file size by hand.
-//!
-//! All plain atomics, recorded on paths that already did the work being measured (the COMMIT and the
-//! `wal_checkpoint` pragma) — no store logic changes, zero cost beyond a clock read and a few
-//! relaxed fetch_adds.
+//! All plain atomics, recorded on paths that already did the work being measured (the COMMIT and
+//! the `wal_checkpoint` pragma).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Histogram bucket upper bounds in seconds, shared by the commit and checkpoint histograms.
-/// Spans a healthy local-fsync commit (~10 ms) through the iSCSI ~100 ms/fsync band up to the
-/// multi-minute batch-commit / checkpoint stalls we have observed live; +Inf is implicit (`count`).
+/// Spans a healthy local-fsync commit (~10 ms) through the ~100 ms/fsync network-storage band up
+/// to multi-minute batch-commit and checkpoint stalls; +Inf is implicit (`count`).
 pub const DURATION_BUCKETS_SECS: [f64; 12] = [
     0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 15.0, 60.0, 120.0,
 ];
@@ -83,33 +75,30 @@ pub struct StoreTelemetry {
     /// Writer batch commits while in the NEAR-TIP band (`near_tip = true`: one transaction per
     /// confirmed block, active WAL checkpointer).
     pub commit_near_tip: DurationHistogram,
-    /// Unix second of the last successful writer COMMIT (0 = none yet this process) — the
-    /// "what was it last doing" witness the stall dump reads.
+    /// Unix second of the last successful writer COMMIT (0 = none yet this process); read by the
+    /// stall dump.
     pub last_commit_unix: AtomicU64,
     /// Completed `wal_checkpoint(PASSIVE)` pragmas on the dedicated checkpointer connection.
     pub checkpoint: DurationHistogram,
     /// WAL frames copied into the main DB by checkpoints (the pragma's `checkpointed` column).
     pub wal_frames_checkpointed_total: AtomicU64,
-    /// WAL length in frames as of the last checkpoint (the pragma's `log` column) — the bounded-WAL
-    /// witness in the checkpointer's own units.
+    /// WAL length in frames as of the last checkpoint (the pragma's `log` column).
     pub wal_frames: AtomicU64,
     /// Checkpoints that returned busy=1 (could not complete a full pass — a reader or the writer
-    /// held the WAL). A persistently-busy checkpointer is one that is NOT keeping up.
+    /// held the WAL). A persistently-busy checkpointer is not keeping up.
     pub checkpoint_busy_total: AtomicU64,
-    /// Checkpoint pragmas that failed outright (I/O or lock errors). Best-effort retries hide these
-    /// from the logs; a climbing counter here means the WAL is not being drained at all.
+    /// Checkpoint pragmas that failed outright (I/O or lock errors); retries keep these out of the
+    /// logs, so a climbing counter here means the WAL is not being drained at all.
     pub checkpoint_errors_total: AtomicU64,
     /// Block-record point reads executed on the read path (`get_block_record`,
-    /// `get_block_record_by_height`, and each element of a multi-get) — the counted witness of
-    /// the sync staging loop's per-block read serialization (the unmeasured catch-up residue).
+    /// `get_block_record_by_height`, and each element of a multi-get).
     pub record_reads: AtomicU64,
     /// Coin-record point reads executed on the read path (`get_coin_record` and each element of
-    /// `get_coin_records`) — the confirmed-set validation read volume, counted separately from
-    /// the record reads so the residue attribution can split the two.
+    /// `get_coin_records`), counted separately from the record reads.
     pub coin_reads: AtomicU64,
-    /// Read-pool connections currently idle in the pool, sampled by the checkpointer. In WAL mode an
-    /// idle pooled reader can hold a read mark at an old WAL position and block the checkpoint reset —
-    /// a high idle count while `wal_frames` refuses to fall names the reader that pins the WAL.
+    /// Read-pool connections currently idle in the pool, sampled by the checkpointer. In WAL mode
+    /// an idle pooled reader can hold a read mark at an old WAL position and block the checkpoint
+    /// reset, so a high idle count while `wal_frames` refuses to fall names the pinning reader.
     pub read_pool_idle: AtomicU64,
     /// Read-pool total connections (idle + in-use), sampled by the checkpointer.
     pub read_pool_size: AtomicU64,
@@ -127,9 +116,8 @@ mod tests {
     use super::{DURATION_BUCKETS_SECS, DurationHistogram};
     use std::sync::atomic::Ordering;
 
-    // Cumulative bucket semantics: an observation lands in ITS bucket and every wider one, and the
-    // +Inf count includes observations past the last bound — the exact shape PromQL
-    // histogram_quantile expects.
+    // Cumulative bucket semantics: an observation lands in its bucket and every wider one, and the
+    // +Inf count includes observations past the last bound.
     #[test]
     fn record_is_cumulative() {
         let h = DurationHistogram::default();

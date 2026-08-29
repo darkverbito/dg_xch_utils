@@ -36,7 +36,7 @@ fn every_chia_2_7_1_code_is_recognized() {
         assert_ne!(
             t,
             ProtocolMessageTypes::Unknown,
-            "chia 2.7.1 code {code} must be recognized (unknown-type disconnect parity depends on the sets matching)"
+            "code {code} must be recognized (the unknown-type disconnect depends on the sets matching)"
         );
         assert_eq!(
             t as u8, *code,
@@ -53,7 +53,7 @@ fn codes_chia_does_not_define_stay_unknown() {
         assert_eq!(
             ProtocolMessageTypes::from(code),
             ProtocolMessageTypes::Unknown,
-            "code {code} is not a chia 2.7.1 message type and must map to Unknown"
+            "code {code} is not a defined message type and must map to Unknown"
         );
     }
 }
@@ -71,7 +71,7 @@ fn error_message_wire_shape_matches_chia() {
     chia_bytes.push(0u8);
 
     let decoded = ErrorMessage::from_bytes(&mut Cursor::new(chia_bytes.as_slice()), v)
-        .expect("chia-shaped Error decodes");
+        .expect("wire-shaped Error decodes");
     assert_eq!(decoded.code, -13);
     assert_eq!(decoded.message, "no fee");
     assert_eq!(decoded.data, None);

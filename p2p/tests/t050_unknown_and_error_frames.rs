@@ -120,7 +120,7 @@ async fn unknown_message_type_disconnects_and_bans() {
         server
             .bans
             .is_banned(&"127.0.0.1".parse::<std::net::IpAddr>().unwrap()),
-        "the host gets chia's short INTERNAL_PROTOCOL_ERROR ban"
+        "the host gets the short internal-protocol-error ban"
     );
 
     // And the ban is enforced at the accept path: an immediate reconnect is refused.

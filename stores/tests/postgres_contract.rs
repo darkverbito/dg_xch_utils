@@ -133,8 +133,8 @@ async fn postgres_serves_the_block_and_coin_contract() {
     assert!(!unspent.spent, "the coin is unspent again after the reorg");
 }
 
-// The persisted weight-proof segment seam, identical expectations to the SQLite/mmap backends
-// (chia's sub_epoch_segments_v3, block_store.py:85-88). Env-gated like the contract test above.
+// The persisted weight-proof segment seam, identical expectations to the SQLite/mmap backends.
+// Env-gated like the contract test above.
 #[tokio::test]
 #[ignore = "requires a dedicated Postgres test database (DGXCH_PG_URL)"]
 async fn postgres_sub_epoch_segments_round_trip_and_replace() {
@@ -168,7 +168,7 @@ async fn postgres_sub_epoch_segments_round_trip_and_replace() {
     );
 }
 
-// T0-4: the single-transaction reorg on Postgres — `rollback_to_in` (which also SET LOCALs
+// The single-transaction reorg on Postgres: `rollback_to_in` (which also SET LOCALs
 // synchronous_commit = on for the reorg transaction), the branch re-apply, and the peak-less
 // abort path all share the batch's transaction: dropped, nothing happened; committed, one unit.
 // Env-gated like the contract test above.
@@ -266,9 +266,9 @@ async fn postgres_rollback_to_in_is_atomic_with_the_batch() {
     assert!(respent.spent && respent.spent_block_index == 11);
 }
 
-// The batch_coin_states_by_puzzle_hashes contract on the Postgres backend (chia
-// coin_store.py:590): the same paging + filter + hint semantics the SQLite leg proves in
-// coin_store.rs, against the GREATEST()-ordered SQL leg. Requires the coin-index/hint features
+// The batch_coin_states_by_puzzle_hashes contract on the Postgres backend: the same paging +
+// filter + hint semantics the SQLite leg proves in coin_store.rs, against the GREATEST()-ordered
+// SQL leg. Requires the coin-index/hint features
 // the `postgres` full-node profile enables.
 #[cfg(all(feature = "coin-index", feature = "hint"))]
 #[tokio::test]
