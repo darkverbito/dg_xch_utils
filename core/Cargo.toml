@@ -19,6 +19,7 @@ dg_parser_macro = {path = "../parser_macro", version="3.0.0"}
 dg_xch_serialize = {path = "../serialize", version="3.0.0"}
 futures-util = "0.3.32"
 hex = "0.4.3"
+ring = "0.17.14"
 hkdf = "0.12.4"
 hyper = {version="1.8.1", features=["full"]}
 hyper-util = {version="0.1.20", features=["full"]}

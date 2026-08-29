@@ -7,14 +7,12 @@ use dg_xch_core::blockchain::coin::Coin;
 use dg_xch_core::blockchain::coin_spend::CoinSpend;
 use dg_xch_core::blockchain::sized_bytes::{Bytes32, Bytes96};
 use dg_xch_core::blockchain::spend_bundle::SpendBundle;
-use dg_xch_core::clvm::parser::sexp_from_bytes_backrefs;
 use dg_xch_core::clvm::program::SerializedProgram;
 use dg_xch_core::clvm::sexp::{AtomBuf, PairBuf, SExp};
 use dg_xch_core::clvm::tree_hash_cache::TreeHashCache;
 use dg_xch_core::consensus::block_generator::conditions_from_spend_bundle;
 use dg_xch_core::consensus::constants::MAINNET;
 use dg_xch_core::traits::SizedBytes;
-use std::io::Cursor;
 use std::sync::Arc;
 
 // Deterministic xorshift64* — no dependencies, reproducible cases.

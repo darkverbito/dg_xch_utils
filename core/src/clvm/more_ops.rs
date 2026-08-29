@@ -17,8 +17,6 @@ use num_integer::Integer;
 use num_traits::{Signed, Zero};
 #[cfg(feature = "bls")]
 use once_cell::sync::Lazy;
-use sha2::Digest;
-use sha2::Sha256;
 use std::ops::BitAndAssign;
 use std::ops::BitOrAssign;
 use std::ops::BitXorAssign;
@@ -246,7 +244,11 @@ pub fn op_sha256<D: Dialect>(
 ) -> Result<(u64, NodePtr), ClvmError> {
     let mut cost = SHA256_BASE_COST;
     let mut byte_count: usize = 0;
-    let mut hasher = Sha256::new();
+    // ring's SHA-256 (BoringSSL's vectorized block function) sustains ~1.5x the sha2 crate's
+    // software throughput on x86 without SHA-NI and edges it on aarch64 NEON — and cost-maxed
+    // mainnet blocks exist that hash ~5 GiB through this one operator (2 cost/byte), where that
+    // ratio is the whole body-validation wall clock.
+    let mut hasher = ring::digest::Context::new(&ring::digest::SHA256);
     let mut cursor = ArgCursor::new(args);
     while let Some(arg) = cursor.next(arena) {
         cost += SHA256_COST_PER_ARG;
@@ -256,7 +258,7 @@ pub fn op_sha256<D: Dialect>(
         hasher.update(blob.as_ref());
     }
     cost += byte_count as u64 * SHA256_COST_PER_BYTE;
-    let digest = hasher.finalize();
+    let digest = hasher.finish();
     // DGXCH_TRACE_SHA256=1 logs every sha256 call's args + digest. Checked once per
     // process; a per-call env read would serialize across replay workers.
     static TRACE_SHA256: std::sync::LazyLock<bool> =
@@ -276,12 +278,13 @@ pub fn op_sha256<D: Dialect>(
             "sha256_trace:{} ->{}",
             dump,
             digest
+                .as_ref()
                 .iter()
                 .map(|b| format!("{b:02x}"))
                 .collect::<String>()
         );
     }
-    new_atom_and_cost(arena, cost, &digest)
+    new_atom_and_cost(arena, cost, digest.as_ref())
 }
 
 pub fn op_add<D: Dialect>(
@@ -1247,6 +1250,37 @@ mod tests {
     use crate::clvm::utils::INFINITE_COST;
     use crate::errors::ClvmError;
     use num_bigint::BigInt;
+
+    #[test]
+    fn op_sha256_matches_the_reference_digest() {
+        use sha2::Digest;
+        let mut arena = crate::clvm::arena::Arena::new();
+        for blobs in [
+            vec![b"".to_vec()],
+            vec![b"chia".to_vec()],
+            vec![vec![0xAB; 31], vec![0xCD; 64]],
+            vec![vec![0x01; 1_000_000]],
+        ] {
+            let mut reference = sha2::Sha256::new();
+            for b in &blobs {
+                reference.update(b);
+            }
+            let mut args = arena.new_atom(&[]).expect("nil");
+            for b in blobs.iter().rev() {
+                let item = arena.new_atom(b).expect("atom");
+                args = arena.new_pair(item, args).expect("pair");
+            }
+            let (_, out) = super::op_sha256(
+                &mut arena,
+                args,
+                u64::MAX,
+                &crate::clvm::dialect::ChiaDialect::new(0),
+            )
+            .expect("op runs");
+            let got = arena.atom(out).expect("digest atom");
+            assert_eq!(got.as_ref(), reference.finalize().as_slice());
+        }
+    }
 
     fn run_op(op: u8, args: &[SExp<'static>]) -> Result<SExp<'static>, ClvmError> {
         let mut items = vec![SExp::from(op)];
