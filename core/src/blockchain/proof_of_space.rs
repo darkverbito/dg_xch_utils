@@ -636,7 +636,7 @@ mod tests {
             .to_bytes(ChiaProtocolVersion::default())
             .expect("serializes");
         let parsed =
-            ProofOfSpace::from_bytes_full(&bytes, ChiaProtocolVersion::default()).expect("parses");
+            ProofOfSpace::from_bytes_exact(&bytes, ChiaProtocolVersion::default()).expect("parses");
         assert_eq!(
             parsed
                 .to_bytes(ChiaProtocolVersion::default())
@@ -718,7 +718,7 @@ mod tests {
                     .expect("proof");
                 buf[offset(true)] |= 1 << bit;
                 assert!(
-                    ProofOfSpace::from_bytes_full(&buf, v).is_err(),
+                    ProofOfSpace::from_bytes_exact(&buf, v).is_err(),
                     "prefix bit {bit} accepted on version {version}"
                 );
             }
@@ -730,9 +730,9 @@ mod tests {
         let v = ChiaProtocolVersion::default();
         // Both set and neither set are rejected at parse; the v1 path stays lenient.
         let both = make_pos(1, true, true, 0).to_bytes(v).expect("proof");
-        assert!(ProofOfSpace::from_bytes_full(&both, v).is_err());
+        assert!(ProofOfSpace::from_bytes_exact(&both, v).is_err());
         let neither = make_pos(1, false, false, 0).to_bytes(v).expect("proof");
-        assert!(ProofOfSpace::from_bytes_full(&neither, v).is_err());
+        assert!(ProofOfSpace::from_bytes_exact(&neither, v).is_err());
         assert!(
             make_pos(2, true, false, 0).to_bytes(v).is_err(),
             "unknown version serialized"
