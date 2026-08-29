@@ -208,6 +208,9 @@ pub struct NodeRpc<S> {
     tx_announce: Arc<Mutex<Vec<NewTransaction>>>,
     // Daemon live-state, attached once by spawn_rpc_server (None in store-only unit tests).
     live: OnceLock<NodeRpcLive>,
+    // Simulator block-production control, attached once when a simulator serves this RPC. `None` on a
+    // production node, where the simulator endpoints answer 404.
+    sim: OnceLock<Arc<dyn SimControl>>,
 }
 
 impl<S> NodeRpc<S>
@@ -229,12 +232,19 @@ where
             synced,
             tx_announce,
             live: OnceLock::new(),
+            sim: OnceLock::new(),
         }
     }
 
     /// Attach the daemon's live state (idempotent — the first attach wins).
     pub fn attach_live(&self, live: NodeRpcLive) {
         let _ = self.live.set(live);
+    }
+
+    /// Attach a simulator's block-production control, enabling the `farm_block` / `set_auto_farming`
+    /// / `get_auto_farming` endpoints (idempotent — the first attach wins).
+    pub fn attach_sim(&self, sim: Arc<dyn SimControl>) {
+        let _ = self.sim.set(sim);
     }
 
     #[must_use]
@@ -1408,6 +1418,46 @@ struct HeightReq {
 }
 
 #[derive(Deserialize)]
+struct FarmBlockReq {
+    address: String,
+    #[serde(default = "one")]
+    blocks: i64,
+    #[serde(default)]
+    guarantee_tx_block: bool,
+}
+
+const fn one() -> i64 {
+    1
+}
+
+#[derive(Deserialize)]
+struct AutoFarmReq {
+    // The request field is `auto_farm`; accept the older name too.
+    #[serde(rename = "auto_farm", alias = "should_auto_farm")]
+    auto_farm: bool,
+}
+
+/// The block-production control a simulator attaches to the RPC, adding the `farm_block`,
+/// `set_auto_farming` and `get_auto_farming` endpoints. A production node attaches none, and those
+/// endpoints 404.
+#[async_trait]
+pub trait SimControl: Send + Sync {
+    /// Farm `blocks` blocks whose rewards pay `address` (a bech32 puzzle-hash address), sealing any
+    /// pending mempool transactions; `guarantee_tx_block` forces each to be a transaction block.
+    async fn farm_block(
+        &self,
+        address: &str,
+        blocks: u32,
+        guarantee_tx_block: bool,
+    ) -> Result<(), String>;
+    /// Set auto-farming (a block is sealed whenever a wallet submits a transaction); returns the new
+    /// state.
+    fn set_auto_farming(&self, should_auto_farm: bool) -> bool;
+    /// Whether auto-farming is on.
+    fn auto_farming(&self) -> bool;
+}
+
+#[derive(Deserialize)]
 struct NamesReq {
     names: Vec<Bytes32>,
     #[serde(flatten)]
@@ -1416,7 +1466,18 @@ struct NamesReq {
 
 #[derive(Deserialize)]
 struct NameReq {
-    name: Bytes32,
+    name: String,
+}
+
+// A coin id must be exactly 32 bytes. The message is the one wallets match on to surface a "bad
+// coin id", so it is part of the RPC contract.
+fn coin_id_from_hex(s: &str) -> Result<Bytes32, RpcError> {
+    use std::str::FromStr;
+    let hex = s.strip_prefix("0x").unwrap_or(s);
+    if hex.len() != 64 {
+        return Err(RpcError::BadRequest("bad bytes32 initializer".to_string()));
+    }
+    Bytes32::from_str(s).map_err(|_| RpcError::BadRequest("bad bytes32 initializer".to_string()))
 }
 
 #[cfg(feature = "coin-index")]
@@ -1452,6 +1513,14 @@ struct PushTxReq {
 #[derive(Deserialize)]
 struct HintReq {
     hint: Bytes32,
+    #[serde(flatten)]
+    window: CoinQueryWindow,
+}
+
+#[cfg(feature = "hint")]
+#[derive(Deserialize)]
+struct HintsReq {
+    hints: Vec<Bytes32>,
     #[serde(flatten)]
     window: CoinQueryWindow,
 }
@@ -1599,9 +1668,14 @@ where
     }
 
     // Dispatch one request. `Ok(None)` = unknown endpoint (HTTP 404); `Ok(Some(map))` = the
-    // response object BEFORE the success flag is stamped; `Err` = the error envelope.
+    // response object BEFORE the success flag is stamped; `Err` = the error envelope. Public so the
+    // plain-HTTP control facade can serve the same RPC surface as the mTLS server.
     #[allow(clippy::too_many_lines)]
-    async fn route(&self, path: &str, body: &[u8]) -> Result<Option<Map<String, Value>>, RpcError> {
+    pub async fn route(
+        &self,
+        path: &str,
+        body: &[u8],
+    ) -> Result<Option<Map<String, Value>>, RpcError> {
         let out = match path {
             "/get_blockchain_state" => {
                 let summary = self.rpc.get_blockchain_state().await?;
@@ -1730,9 +1804,10 @@ where
             }
             "/get_coin_record_by_name" => {
                 let req: NameReq = parse(body)?;
+                let name = coin_id_from_hex(&req.name)?;
                 envelope(
                     "coin_record",
-                    &self.rpc.get_coin_record_by_name(&req.name).await?,
+                    &self.rpc.get_coin_record_by_name(&name).await?,
                 )?
             }
             #[cfg(feature = "coin-index")]
@@ -1797,6 +1872,15 @@ where
                         .get_coin_records_by_hint(&req.hint, req.window)
                         .await?,
                 )?
+            }
+            #[cfg(feature = "hint")]
+            "/get_coin_records_by_hints" => {
+                let req: HintsReq = parse(body)?;
+                let mut records = Vec::new();
+                for hint in &req.hints {
+                    records.extend(self.rpc.get_coin_records_by_hint(hint, req.window).await?);
+                }
+                envelope("coin_records", &records)?
             }
             #[cfg(feature = "coin-index")]
             "/get_additions_and_removals" => {
@@ -1900,6 +1984,33 @@ where
             ),
             "/get_version" => obj_with("version", Value::from(env!("CARGO_PKG_VERSION"))),
             "/healthz" => Map::new(),
+            "/farm_block" => {
+                let Some(sim) = self.rpc.sim.get() else {
+                    return Ok(None);
+                };
+                let req: FarmBlockReq = parse(body)?;
+                let blocks = u32::try_from(req.blocks.max(0)).unwrap_or(u32::MAX);
+                sim.farm_block(&req.address, blocks, req.guarantee_tx_block)
+                    .await
+                    .map_err(RpcError::BadRequest)?;
+                Map::new()
+            }
+            "/set_auto_farming" => {
+                let Some(sim) = self.rpc.sim.get() else {
+                    return Ok(None);
+                };
+                let req: AutoFarmReq = parse(body)?;
+                obj_with(
+                    "auto_farm_enabled",
+                    Value::from(sim.set_auto_farming(req.auto_farm)),
+                )
+            }
+            "/get_auto_farming" => {
+                let Some(sim) = self.rpc.sim.get() else {
+                    return Ok(None);
+                };
+                obj_with("auto_farm_enabled", Value::from(sim.auto_farming()))
+            }
             _ => return Ok(None),
         };
         Ok(Some(out))

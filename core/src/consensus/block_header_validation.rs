@@ -5,7 +5,7 @@
 use crate::blockchain::block_record::BlockRecord;
 use crate::blockchain::class_group_element::ClassgroupElement;
 use crate::blockchain::header_block::HeaderBlock;
-use crate::blockchain::proof_of_space::ProofOfSpace;
+use crate::blockchain::proof_of_space::{ProofOfSpace, is_v1_phased_out};
 use crate::blockchain::sized_bytes::{Bytes32, Bytes48, Bytes96};
 use crate::blockchain::vdf_info::VdfInfo;
 use crate::blockchain::vdf_proof::VdfProof;
@@ -16,7 +16,7 @@ use crate::consensus::difficulty_adjustment::can_finish_sub_and_full_epoch;
 use crate::consensus::get_block_challenge::{get_block_challenge, pre_sp_tx_block_height};
 use crate::consensus::make_sub_epoch_summary::make_sub_epoch_summary;
 use crate::consensus::pot_iterations::{
-    calculate_ip_iters, calculate_iterations_quality, calculate_sp_interval_iters,
+    calculate_ip_iters, calculate_iterations_quality_for_proof, calculate_sp_interval_iters,
     calculate_sp_iters, is_overflow_block,
 };
 use crate::consensus::vdf_info_computation::get_signage_point_vdf_info;
@@ -143,17 +143,27 @@ pub fn validate_pospace_and_get_required_iters(
     cc_sp_hash: Bytes32,
     height: u32,
     difficulty: u64,
-    _prev_transaction_block_height: u32,
+    prev_transaction_block_height: u32,
 ) -> Result<Option<u64>, Error> {
+    // A v1 proof past the phase-out window is no longer a valid proof of space.
+    if proof_of_space.version == 0
+        && is_v1_phased_out(
+            proof_of_space.proof.as_ref(),
+            prev_transaction_block_height,
+            constants,
+        )
+    {
+        return Ok(None);
+    }
     let Some(q_str) =
         verifier.pospace_quality_string(constants, proof_of_space, challenge, cc_sp_hash, height)
     else {
         return Ok(None);
     };
-    Ok(Some(calculate_iterations_quality(
-        constants.difficulty_constant_factor,
+    Ok(Some(calculate_iterations_quality_for_proof(
+        constants,
+        proof_of_space,
         q_str,
-        proof_of_space.size,
         difficulty,
         cc_sp_hash,
     )))
