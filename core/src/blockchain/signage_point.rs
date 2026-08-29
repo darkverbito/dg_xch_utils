@@ -3,18 +3,9 @@ use crate::blockchain::vdf_proof::VdfProof;
 use dg_xch_macros::ChiaSerial;
 use serde::{Deserialize, Serialize};
 
-/// A signage point, mirroring chia `chia/consensus/signage_point.py::SignagePoint`. All four VDF/proof
-/// fields are `Option` because chia represents the sub-slot-start signage point (signage-point index 0)
-/// as `SignagePoint(None, None, None, None)` — the point at the very start of a sub slot has no signage
-/// VDFs of its own; it is validated against the sub-slot boundary (the cc/rc challenge). Indices 1..64
-/// carry the real signage-chain VDFs.
-///
-/// WIRE NOTE: this is an internal store/RPC type, NOT a standalone network message. The p2p gossip uses
-/// `NewSignagePointOrEndOfSubSlot` (indices/hashes) and the pull uses `RespondSignagePoint` (which carries
-/// non-optional `VdfInfo`/`VdfProof` directly). Its `ChiaSerialize` encoding (now with a 1-byte presence
-/// tag per field, exactly like chia's `parse_optional`) is only exercised inside `SignagePointOrEOS`
-/// (the RPC `get_signage_point_or_eos` response, which travels as serde JSON in practice, `null` per
-/// absent field). Chia's `SignagePoint` is likewise never sent as a top-level protocol payload.
+/// All four VDF/proof fields are `Option`: the sub-slot-start signage point (index 0)
+/// has no signage VDFs of its own and is validated against the sub-slot boundary.
+/// Internal store/RPC type, not a standalone network message.
 #[derive(ChiaSerial, Clone, PartialEq, Eq, Serialize, Deserialize, Debug)]
 pub struct SignagePoint {
     pub cc_vdf: Option<VdfInfo>,
@@ -24,9 +15,7 @@ pub struct SignagePoint {
 }
 
 impl SignagePoint {
-    /// The sub-slot-start signage point (signage-point index 0) — chia `SignagePoint(None, None, None,
-    /// None)`. Carries no signage VDFs; a declare/candidate at index 0 is validated/built against the
-    /// sub-slot boundary instead.
+    /// The sub-slot-start signage point (index 0), carrying no signage VDFs.
     #[must_use]
     pub fn sub_slot_start() -> Self {
         Self {
@@ -89,8 +78,7 @@ mod tests {
 
     #[test]
     fn sub_slot_start_signage_point_round_trips() {
-        // chia SignagePoint(None, None, None, None) — the index-0 SP. Each absent field is a single 0x00
-        // presence tag (chia parse_optional), so the whole SP encodes to exactly four zero bytes.
+        //each absent field is a single 0x00 presence tag, so the index-0 SP encodes to four zero bytes
         let sp = SignagePoint::sub_slot_start();
         assert!(sp.is_sub_slot_start());
         let v = ChiaProtocolVersion::default();
@@ -105,8 +93,7 @@ mod tests {
 
     #[test]
     fn garbage_presence_tag_errs_not_panics() {
-        // A non-0/1 presence byte is a malformed optional (chia raises ValueError); the decoder must
-        // return Err, never panic.
+        //a non-0/1 presence byte must return Err, never panic
         let v = ChiaProtocolVersion::default();
         let garbage = [2u8, 0, 0, 0];
         assert!(SignagePoint::from_bytes(&mut Cursor::new(&garbage[..]), v).is_err());

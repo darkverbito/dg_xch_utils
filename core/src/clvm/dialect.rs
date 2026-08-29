@@ -5,7 +5,7 @@ pub trait Dialect {
     fn apply_kw(&self) -> &[u8];
     fn print_kw(&self) -> &[u8];
     // The active CLVM flag set — operators with flag-dependent behavior (size limits, cost-model
-    // selection) read it, exactly as clvmr passes flags into every operator.
+    // selection) read it.
     fn flags(&self) -> u32;
     fn op(
         &self,
@@ -117,11 +117,8 @@ impl Dialect for ChiaDialect {
             // 35 - Not Used
             36 => op_softfork,
             48 => op_coinid,
-            // 49..=59 — the CLVM BLS operators. clvmr 0.17.7 `src/chia_dialect.rs`
-            // dispatches these UNCONDITIONALLY in the base dialect (the 2.0 hard fork moved
-            // the BLS extension outside the softfork guard, and clvmr replays every height
-            // with them wired); before this port they fell through to `op_unknown`, which is
-            // exactly the live 9,179,161 `InvalidBlockCost` wedge.
+            // 49..=59 — the CLVM BLS operators, dispatched unconditionally in the base
+            // dialect: the 2.0 hard fork moved the BLS extension outside the softfork guard.
             49 => op_bls_g1_subtract,
             50 => op_bls_g1_multiply,
             51 => op_bls_g1_negate,
@@ -134,9 +131,8 @@ impl Dialect for ChiaDialect {
             58 => op_bls_pairing_identity,
             59 => op_bls_verify,
             60 => {
-                // clvmr: DISABLE_OP disables modpow unless the new cost model
-                // bounds it (the soft-fork-8 "forked out" operator, re-enabled at
-                // hard fork 2).
+                // DISABLE_OP disables modpow unless the new cost model bounds it
+                // (forked out by soft fork 8, re-enabled at hard fork 2).
                 if (self.flags & DISABLE_OP) != 0 && (self.flags & NEW_COST_MODEL) == 0 {
                     return Err(ClvmError::Unimplemented(v));
                 }

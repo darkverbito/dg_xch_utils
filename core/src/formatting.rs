@@ -64,10 +64,8 @@ pub fn u64_to_bytes(v: u64) -> Vec<u8> {
 
 #[allow(clippy::cast_possible_truncation)]
 pub fn bigint_to_bytes(v: &BigInt, signed: bool) -> Vec<u8> {
-    // Minimal big-endian two's-complement, chia's int_to_bytes. The previous word-juggling
-    // port corrupted the sign-pad byte whenever the magnitude filled its u32 words exactly
-    // (e.g. +0xCECD48C0 -> C0CECD48C0; -2^31 likewise). num-bigint's to_signed_bytes_be
-    // is the canonical encoding; strip redundant sign bytes to minimal form.
+    // Minimal big-endian two's-complement. num-bigint's to_signed_bytes_be is the
+    // canonical encoding; strip redundant sign bytes to minimal form.
     if v.is_zero() {
         return vec![];
     }
@@ -174,8 +172,8 @@ pub fn u64_from_bigint(item: &BigInt) -> Result<u64, Error> {
         .ok_or(Error::new(ErrorKind::InvalidData, "u64::MAX overflow"))
 }
 
-/// Saturating decode of a signed CLVM time-lock argument into the `u32` slot chia
-/// stores `ASSERT_HEIGHT_*` / `ASSERT_BEFORE_HEIGHT_*` bounds in.
+/// Saturating decode of a signed CLVM time-lock argument into the `u32` slot the
+/// `ASSERT_HEIGHT_*` / `ASSERT_BEFORE_HEIGHT_*` bounds are stored in.
 ///
 /// CLVM integers are signed two's-complement, but the height fields are `u32`.
 /// A negative bound clamps to `0` and an out-of-range positive bound (`> u32::MAX`)
@@ -186,9 +184,6 @@ pub fn u64_from_bigint(item: &BigInt) -> Result<u64, Error> {
 ///   unreachable and fails.
 /// - `ASSERT_BEFORE_HEIGHT_*` (satisfied when `block_height < bound`): a negative
 ///   bound is unsatisfiable and fails, an overflow bound is trivially satisfied.
-///
-/// This mirrors chia's canonical behavior exactly (see
-/// `chia/_tests/core/full_node/test_conditions.py::test_condition`).
 #[must_use]
 pub fn saturating_u32_from_bigint(item: &BigInt) -> u32 {
     if item.is_negative() {
@@ -198,8 +193,8 @@ pub fn saturating_u32_from_bigint(item: &BigInt) -> u32 {
     }
 }
 
-/// Saturating decode of a signed CLVM time-lock argument into the `u64` slot chia
-/// stores `ASSERT_SECONDS_*` / `ASSERT_BEFORE_SECONDS_*` bounds in.
+/// Saturating decode of a signed CLVM time-lock argument into the `u64` slot the
+/// `ASSERT_SECONDS_*` / `ASSERT_BEFORE_SECONDS_*` bounds are stored in.
 ///
 /// The seconds analogue of [`saturating_u32_from_bigint`]: a negative bound clamps
 /// to `0`, an out-of-range positive bound (`> u64::MAX`) clamps to `u64::MAX`, and

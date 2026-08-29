@@ -15,9 +15,7 @@ pub struct CoinRecord {
     pub spent: bool,
 }
 
-/// The newest unspent version of a singleton, addressed by puzzle hash — chia's
-/// `UnspentLineageInfo` (chia/types/mempool_item.py:19-22, produced by
-/// `CoinStore.get_unspent_lineage_info_for_puzzle_hash`, coin_store.py:795-818). The mempool
+/// The newest unspent version of a singleton, addressed by puzzle hash. The mempool
 /// rebases a fast-forward-eligible spend of an older singleton version onto this coin.
 #[derive(Copy, Clone, PartialEq, Eq, Serialize, Deserialize, Debug)]
 pub struct UnspentLineageInfo {

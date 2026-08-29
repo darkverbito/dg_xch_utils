@@ -1,19 +1,8 @@
-//! Port of `chia/_tests/blockchain/test_get_block_generator.py`.
+//! Block-level generator assembly for a block that references prior blocks' generators:
+//! the block must carry a generator; the referenced generators are resolved by height and
+//! supplied to the executor in ref-list order.
 //!
-//! Chia's `get_block_generator(lookup, block_record)` assembles a block-level
-//! generator from a block that references prior blocks' generators: it requires
-//! the block to carry a generator, looks the referenced generators up by height
-//! through a storage callback, and returns a `BlockGenerator(program, refs)`.
-//!
-//! dg_xch does NOT wire this resolution. `node/src/engine.rs` fails closed on any
-//! non-empty `transactions_generator_ref_list` ("generator ref list resolution
-//! not wired in this phase") and hardcodes empty refs. The `core` executor
-//! (`execute_block_generator_result`) already consumes *caller-supplied* resolved
-//! refs (see `historical_generator_ref_block_4671894...` in block_generator.rs),
-//! but nothing fetches them from storage. These tests encode chia's contract; the
-//! ref-resolving one is `#[ignore]`d until storage-side ref resolution lands.
-//!
-//! No Chia crate is used; fixtures are vendored bytes.
+//! Fixtures are vendored bytes.
 
 use dg_xch_core::clvm::program::{Program, SerializedProgram};
 use dg_xch_core::clvm::sexp::SExp;
@@ -32,9 +21,8 @@ fn generator_line(fixture: &str) -> SerializedProgram {
     SerializedProgram::from_hex(fixture.lines().next().unwrap()).unwrap()
 }
 
-// chia test_no_refs: with an empty ref list, generator assembly succeeds without
-// ever invoking the lookup callback. dg_xch's empty-ref path is fully supported,
-// so this is locked in as live behavior.
+// With an empty ref list, generator assembly succeeds without ever invoking the lookup
+// callback.
 #[test]
 fn no_refs_generator_assembles_without_lookup() {
     let output = SExp::from(vec![SExp::from(Vec::<SExp>::new())]);
@@ -54,13 +42,13 @@ fn no_refs_generator_assembles_without_lookup() {
     assert!(conds.spends.is_empty());
 }
 
-// chia test_get_block_generator: a block that references a prior block's generator
+// A block that references a prior block's generator
 // validates once that generator is resolved (by height) from storage and supplied in
 // ref-list order. Block 4,671,894 references the height-4,671,893 generator. With the
-// reference resolved the block executes and yields conditions; the former unwired
-// empty-ref path (engine.rs fail-closed hardcode) cannot reproduce them.
+// reference resolved the block executes and yields conditions; an empty-ref run cannot
+// reproduce them.
 //
-// Ref resolution now wired: node/src/engine.rs::resolve_generator_refs fetches each
+// node/src/engine.rs::resolve_generator_refs fetches each
 // referenced generator from the confirmed chain (dg_xch_stores get_generator_at_height)
 // and validate_body supplies them. The storage-side resolution is exercised end to end
 // in node/tests/generator_ref_resolution.rs; this asserts the executor-level contract.
@@ -88,8 +76,8 @@ fn ref_list_block_resolves_prior_generator_from_storage() {
         "a validated transaction block has a positive execution cost"
     );
 
-    // The former unwired path hardcoded empty refs; it cannot reproduce the resolved
-    // conditions (the generator consumes the reference argument).
+    // An empty-ref run cannot reproduce the resolved conditions (the generator consumes
+    // the reference argument).
     let unresolved = BlockGeneratorInput {
         generator_refs: Vec::new(),
         ..resolved
@@ -97,10 +85,10 @@ fn ref_list_block_resolves_prior_generator_from_storage() {
     assert_ne!(execute_block_generator_result(&unresolved), Ok(conds));
 }
 
-// chia validate_block_body checks a block's generator_refs_root against the hash of its
-// ref-list heights (transactions_generator_refs_root). engine.rs::validate_body now computes
-// this from the ACTUAL referenced heights (formerly hardcoded `&[]`) and rejects a block whose
-// ti.generator_refs_root disagrees. These lock the rejection predicate that branch relies on.
+// A block's generator_refs_root is checked against the hash of its ref-list heights
+// (transactions_generator_refs_root). engine.rs::validate_body computes this from the
+// ACTUAL referenced heights and rejects a block whose ti.generator_refs_root disagrees.
+// These lock the rejection predicate that branch relies on.
 #[test]
 fn generator_refs_root_is_order_sensitive() {
     let ab = transactions_generator_refs_root(&[4_671_893, 4_671_894]).unwrap();

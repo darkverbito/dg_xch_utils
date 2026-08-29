@@ -1,14 +1,9 @@
-//! chia's wallet-facing `MerkleSet` — the tree construction and INCLUSION/EXCLUSION proof
-//! generation behind `request_additions` / `request_removals` (CNI `full_node_api.py:1372/:1455`:
-//! `MerkleSet(leafs)` + `is_included_already_hashed(item)`), whose proofs a light wallet verifies
-//! against the block header's foliage `additions_root` / `removals_root`.
+//! The wallet-facing `MerkleSet` — the tree construction and INCLUSION/EXCLUSION proof
+//! generation behind `request_additions` / `request_removals`, whose proofs a light wallet
+//! verifies against the block header's foliage `additions_root` / `removals_root`.
 //!
-//! Ported verbatim from `chia_rs`'s `chia-consensus` crate, version 0.42.1 — the exact pin CNI
-//! 2.7.1 imports `MerkleSet` from (`pyproject.toml: chia_rs = ">=0.42.1, <0.43"`):
-//! `chia-consensus-0.42.1/src/merkle_tree.rs` (tree + proofs) and `src/merkle_set.rs` (the node
-//! hash). The proof byte encoding is consensus-frozen (0.37.0 and 0.42.1 are byte-identical);
-//! byte-parity is pinned against proof hex emitted by the real `chia_rs` 0.42.1 `MerkleSet`
-//! (`core/tests/merkle_set_proofs.rs` + the block-5,000,000 fixtures in `full-node/tests`).
+//! The proof byte encoding is consensus-frozen; byte-parity is pinned by
+//! `core/tests/merkle_set_proofs.rs` and the block-5,000,000 fixtures in `full-node/tests`.
 //!
 //! The producer/validator-side ROOT computation (`block_generator.rs::merkle_set_root`) is the
 //! collapsed single-pass recursion over the same node hashing; this module additionally retains
@@ -22,29 +17,29 @@
 
 use crate::utils::hash_256;
 
-/// The 30-byte zero prefix + two node-type bytes that domain-separate a middle-node hash —
-/// chia_rs `merkle_set.rs::hash` (`Sha256(0u8*30 || encode_type(l) || encode_type(r) || l || r)`).
+/// The 30-byte zero prefix + two node-type bytes that domain-separate a middle-node hash:
+/// `Sha256(0u8*30 || encode_type(l) || encode_type(r) || l || r)`.
 const HASH_PREFIX: [u8; 30] = [0u8; 30];
 
-/// The empty-set root / empty-subtree hash (all zeros) — chia_rs `merkle_set.rs::BLANK`.
+/// The empty-set root / empty-subtree hash (all zeros).
 pub const BLANK: [u8; 32] = [0u8; 32];
 
-// sha256(bytes([0] * 32)) — the nodes_vec placeholder hash chia_rs stores for inserted Empty
-// nodes (merkle_tree.rs::EMPTY_NODE_HASH). Never enters a proof or a root; kept for fidelity.
+// sha256(bytes([0] * 32)) — the nodes_vec placeholder hash for inserted Empty nodes.
+// Never enters a proof or a root.
 const EMPTY_NODE_HASH: [u8; 32] = [
     0x66, 0x68, 0x7a, 0xad, 0xf8, 0x62, 0xbd, 0x77, 0x6c, 0x8f, 0xc1, 0x8b, 0x8e, 0x9f, 0x8e, 0x20,
     0x08, 0x97, 0x14, 0x85, 0x6e, 0xe2, 0x33, 0xb3, 0x90, 0x2a, 0x59, 0x1d, 0x0d, 0x5f, 0x29, 0x25,
 ];
 
-// Proof byte codes (merkle_tree.rs).
+// Proof byte codes.
 const EMPTY: u8 = 0;
 const TERMINAL: u8 = 1;
 const MIDDLE: u8 = 2;
 const TRUNCATED: u8 = 3;
 
-/// Node classification for hash computation — chia_rs `merkle_set.rs::NodeType`. `MidDbl` is a
-/// middle node whose subtree collapses to a terminal pair (both children terminals, or a
-/// one-sided chain ending in such a pair); it decides where Empty nodes must be inserted.
+/// Node classification for hash computation. `MidDbl` is a middle node whose subtree
+/// collapses to a terminal pair (both children terminals, or a one-sided chain ending in
+/// such a pair); it decides where Empty nodes must be inserted.
 #[derive(PartialEq, Eq, Copy, Clone, Debug)]
 enum NodeType {
     Empty,
@@ -61,7 +56,7 @@ fn encode_type(t: NodeType) -> u8 {
     }
 }
 
-// chia_rs merkle_set.rs::hash — the domain-separated middle-node hash.
+// the domain-separated middle-node hash
 fn hash(ltype: NodeType, rtype: NodeType, left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
     let mut buf = Vec::with_capacity(30 + 2 + 32 + 32);
     buf.extend_from_slice(&HASH_PREFIX);
@@ -72,7 +67,7 @@ fn hash(ltype: NodeType, rtype: NodeType, left: &[u8; 32], right: &[u8; 32]) -> 
     hash_256(buf)
 }
 
-// chia_rs merkle_tree.rs::hash_leaf — the single-leaf root is Sha256(TERMINAL || leaf).
+// the single-leaf root is Sha256(TERMINAL || leaf)
 fn hash_leaf(leaf: &[u8; 32]) -> [u8; 32] {
     let mut buf = Vec::with_capacity(33);
     buf.push(NodeType::Term as u8);
@@ -84,7 +79,7 @@ fn get_bit(val: &[u8; 32], bit: u8) -> bool {
     (val[(bit / 8) as usize] & (0x80 >> (bit & 7))) != 0
 }
 
-/// The stored node shape — chia_rs `merkle_tree.rs::ArrayTypes` (indexes into `nodes_vec`).
+/// The stored node shape (indexes into `nodes_vec`).
 #[derive(PartialEq, Debug, Copy, Clone)]
 enum ArrayTypes {
     Leaf,
@@ -104,7 +99,7 @@ impl From<ArrayTypes> for NodeType {
 }
 
 /// A malformed proof (bad node code, truncated bytes, mis-positioned leaf, trailing bytes, or
-/// proof-of-a-truncated-subtree) — chia_rs `merkle_tree.rs::SetError`.
+/// proof-of-a-truncated-subtree).
 #[derive(Debug, PartialEq, Eq)]
 pub struct SetError;
 
@@ -116,8 +111,7 @@ impl std::fmt::Display for SetError {
 
 impl std::error::Error for SetError {}
 
-/// A retained merkle set over 32-byte leaves: all nodes in a vec, root last — chia_rs
-/// `merkle_tree.rs::MerkleSet` (the class CNI exposes to `full_node_api.py` as `MerkleSet`).
+/// A retained merkle set over 32-byte leaves: all nodes in a vec, root last.
 #[derive(PartialEq, Debug, Clone, Default)]
 pub struct MerkleSet {
     nodes_vec: Vec<(ArrayTypes, [u8; 32])>,
@@ -127,8 +121,8 @@ pub struct MerkleSet {
 }
 
 impl MerkleSet {
-    /// Build the set from (already-hashed) 32-byte leaves; order and duplicates do not affect the
-    /// tree — chia_rs `MerkleSet::from_leafs` (the `MerkleSet(leafs)` constructor).
+    /// Build the set from (already-hashed) 32-byte leaves; order and duplicates do not
+    /// affect the tree.
     #[must_use]
     pub fn from_leafs(leafs: &mut [[u8; 32]]) -> MerkleSet {
         let mut merkle_tree = MerkleSet {
@@ -143,7 +137,7 @@ impl MerkleSet {
         merkle_tree
     }
 
-    /// Rebuild a (possibly truncated) tree from proof bytes — chia_rs `MerkleSet::from_proof`.
+    /// Rebuild a (possibly truncated) tree from proof bytes.
     ///
     /// # Errors
     /// Returns [`SetError`] on any malformed proof (never panics on attacker bytes).
@@ -156,8 +150,8 @@ impl MerkleSet {
         Ok(merkle_tree)
     }
 
-    // chia_rs merkle_tree.rs::deserialize_proof_impl — iterative pre-order parse with a leaf
-    // position audit (each TERMINAL's bits must match the branch route that reaches it).
+    // Iterative pre-order parse with a leaf position audit (each TERMINAL's bits must match
+    // the branch route that reaches it).
     fn deserialize_proof_impl(&mut self, proof: &[u8]) -> Result<(), SetError> {
         enum ParseOp {
             Node,
@@ -279,8 +273,7 @@ impl MerkleSet {
         }
     }
 
-    /// The set's root hash — chia_rs `MerkleSet::get_root` (`compute_merkle_set_root` parity:
-    /// empty → all-zeros, single leaf → `Sha256(1 || leaf)`).
+    /// The set's root hash: empty → all-zeros, single leaf → `Sha256(1 || leaf)`.
     #[must_use]
     pub fn get_root(&self) -> [u8; 32] {
         let Some(last) = self.nodes_vec.last() else {
@@ -293,11 +286,10 @@ impl MerkleSet {
         }
     }
 
-    /// Produce the proof that `leaf` is / is not in the set — chia_rs `MerkleSet::generate_proof`,
-    /// CNI's `is_included_already_hashed`. `true` = proof-of-INCLUSION, `false` =
-    /// proof-of-EXCLUSION; the proof bytes verify against [`MerkleSet::get_root`] via
-    /// [`validate_merkle_proof`]. On a tree rebuilt `from_proof` the proof bytes come back empty
-    /// (truncated subtrees don't round-trip).
+    /// Produce the proof that `leaf` is / is not in the set. `true` = proof-of-INCLUSION,
+    /// `false` = proof-of-EXCLUSION; the proof bytes verify against [`MerkleSet::get_root`]
+    /// via [`validate_merkle_proof`]. On a tree rebuilt `from_proof` the proof bytes come
+    /// back empty (truncated subtrees don't round-trip).
     ///
     /// # Errors
     /// Returns [`SetError`] if the lookup walks into a truncated subtree.
@@ -383,8 +375,8 @@ impl MerkleSet {
         }
     }
 
-    // chia_rs merkle_tree.rs::generate_merkle_tree_recurse — the radix sort that also retains
-    // every node (the proof-capable sibling of block_generator.rs::merkle_set_recurse).
+    // The radix sort that also retains every node (the proof-capable sibling of
+    // block_generator.rs::merkle_set_recurse).
     fn generate_merkle_tree_recurse(
         &mut self,
         range: &mut [[u8; 32]],
@@ -493,9 +485,9 @@ impl MerkleSet {
     }
 }
 
-// chia_rs merkle_tree.rs::pad_middles_for_proof_gen — re-introduce the collapsed one-sided levels
-// between `depth` and the first bit where the two leaves of a double-terminal subtree diverge, so
-// the proof's path structure exactly matches the leaves' bits.
+// Re-introduce the collapsed one-sided levels between `depth` and the first bit where the
+// two leaves of a double-terminal subtree diverge, so the proof's path structure exactly
+// matches the leaves' bits.
 fn pad_middles_for_proof_gen(proof: &mut Vec<u8>, left: &[u8; 32], right: &[u8; 32], depth: u8) {
     let left_bit = get_bit(left, depth);
     let right_bit = get_bit(right, depth);
@@ -514,9 +506,8 @@ fn pad_middles_for_proof_gen(proof: &mut Vec<u8>, left: &[u8; 32], right: &[u8; 
     }
 }
 
-/// Verify `proof` against `root`: `Ok(true)` proves `item` IS in the set, `Ok(false)` proves it is
-/// NOT — chia_rs `merkle_tree.rs::validate_merkle_proof` (what a wallet runs against the foliage
-/// root; tests use it to close the serve→verify loop).
+/// Verify `proof` against `root`: `Ok(true)` proves `item` IS in the set, `Ok(false)` proves
+/// it is NOT — what a wallet runs against the foliage root.
 ///
 /// # Errors
 /// Returns [`SetError`] if the proof is malformed or does not hash to `root`.
@@ -557,9 +548,8 @@ mod tests {
         hash_256(buf)
     }
 
-    // chia_rs merkle_set.rs::merkle_set_test_cases — the ported root corpus (duplicates,
-    // rotations, singles/pairs/triples/quads, and the special-shape trees), asserted against
-    // MerkleSet::from_leafs().get_root().
+    // Root corpus: duplicates, rotations, singles/pairs/triples/quads, and the special-shape
+    // trees, asserted against MerkleSet::from_leafs().get_root().
     #[allow(clippy::many_single_char_names)]
     fn merkle_set_test_cases() -> Vec<([u8; 32], Vec<[u8; 32]>)> {
         let a = hx("7000000000000000000000000000000000000000000000000000000000000000");
@@ -668,8 +658,8 @@ mod tests {
         ]
     }
 
-    // Roots + full proof round-trips (inclusion for every leaf, exclusion for probes) over the
-    // ported chia_rs corpus — the merkle_tree.rs::test_merkle_set / test_tree analog.
+    // Roots + full proof round-trips (inclusion for every leaf, exclusion for probes) over
+    // the corpus.
     #[test]
     fn ported_chia_rs_corpus_roots_and_proof_round_trips() {
         for (root, leafs) in merkle_set_test_cases() {
@@ -709,8 +699,8 @@ mod tests {
         }
     }
 
-    // chia_rs merkle_tree.rs::test_proofs_must_be_complete — the pinned proof hex: every level
-    // down to the leaf pair is present (no collapsing), for inclusion AND exclusion.
+    // Pinned proof hex: every level down to the leaf pair is present (no collapsing), for
+    // inclusion AND exclusion.
     #[test]
     fn pinned_chia_rs_complete_proof_vector() {
         let a = hx("c000000000000000000000000000000000000000000000000000000000000000");
@@ -733,16 +723,14 @@ mod tests {
         assert_eq!(hex::encode(&proof), expected);
     }
 
-    // chia_rs merkle_tree.rs::test_deserialize_malicious_proof — a deep MIDDLE-only chain must
-    // error (depth bound), not exhaust memory or panic.
+    // A deep MIDDLE-only chain must error (depth bound), not exhaust memory or panic.
     #[test]
     fn malicious_middle_chain_is_rejected() {
         let malicious_proof = vec![MIDDLE; 40000];
         assert!(MerkleSet::from_proof(&malicious_proof).is_err());
     }
 
-    // chia_rs merkle_tree.rs::test_bad_proofs_2 — a TERMINAL leaf on the wrong side of its bit
-    // route fails the position audit.
+    // A TERMINAL leaf on the wrong side of its bit route fails the position audit.
     #[test]
     fn mispositioned_leaf_fails_the_audit() {
         let mut bad_proof: Vec<u8> = Vec::new();
@@ -760,8 +748,7 @@ mod tests {
         assert_eq!(MerkleSet::from_proof(&bad_proof), Err(SetError));
     }
 
-    // Truncated / trailing byte streams error (never panic) — the decoder-fuzz analog of
-    // chia_rs's test_bad_proofs, plus arbitrary garbage prefixes.
+    // Truncated / trailing byte streams error (never panic), plus arbitrary garbage prefixes.
     #[test]
     fn truncated_and_garbage_proofs_error_not_panic() {
         let a = hx("c000000000000000000000000000000000000000000000000000000000000000");

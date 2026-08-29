@@ -1,15 +1,10 @@
-//! Port of `chia/_tests/core/full_node/test_generator_tools.py`.
-//!
-//! Chia's `tx_removals_and_additions(SpendBundleConditions)` splits a block's
-//! executed conditions into the coins it removes (the spent coin ids) and the
-//! coins it adds (every CREATE_COIN output, parented to its spend). dg_xch has
-//! no single `tx_removals_and_additions`; the same split is
+//! Splitting a block's executed conditions into the coins it removes (the spent coin ids)
+//! and the coins it adds (every CREATE_COIN output, parented to its spend):
 //! `removals_for_conditions` + `additions_for_conditions` in
-//! `core/src/consensus/block_generator.rs`. We drive both through a real
-//! generator execution so the parse -> aggregate -> extract path is exercised
-//! end to end, exactly as the chia oracle does via `get_spends_for_trusted_block`.
+//! `core/src/consensus/block_generator.rs`. Both are driven through a real generator
+//! execution so the parse -> aggregate -> extract path is exercised end to end.
 //!
-//! No Chia crate is used; the `TEST_GENERATOR` fixture is vendored as bytes.
+//! The `TEST_GENERATOR` fixture is vendored as bytes.
 
 use dg_xch_core::blockchain::coin::Coin;
 use dg_xch_core::blockchain::condition_with_args::ConditionWithArgs;
@@ -86,7 +81,7 @@ fn empty_conditions() -> SpendBundleConditions {
 
 // --- tx_removals_and_additions ---------------------------------------------
 
-// chia test_tx_removals_and_additions: two spends, each creating three coins
+// Two spends, each creating three coins
 // (one non-zero amount, two zero-amount with a long hint). Removals are the two
 // spent coin ids, additions are all six created coins parented to their spend.
 #[test]
@@ -161,7 +156,7 @@ fn tx_removals_and_additions_split_removed_and_created_coins() {
     assert_eq!(additions, expected_additions);
 }
 
-// chia test_empty_conditions: tx_removals_and_additions(None) == ([], []).
+// Empty conditions yield ([], []).
 #[test]
 fn empty_conditions_have_no_removals_or_additions() {
     let conds = empty_conditions();
@@ -171,24 +166,15 @@ fn empty_conditions_have_no_removals_or_additions() {
 
 // --- get_spends_for_trusted_block (TEST_GENERATOR) -------------------------
 
-// chia's `TEST_GENERATOR` is "a malicious generator which should fail": a `830f4240`
-// (quote 1_000_000) loop counter drives ~1024 conditions with a runaway CLVM cost.
-// chia's `get_spends_for_trusted_block` STRUCTURALLY extracts the single spend
-// (coin 0101..*32 / puzzle 0x80 / amount 123, 1024 conditions) WITHOUT enforcing
-// block cost — it is a trusted fast-path used only on already-validated blocks.
-//
-// dg_xch has no such cost-bypassing trusted extractor; its only entry point,
-// `execute_block_generator_result`, is the full cost-accounted validator. So it
-// correctly REJECTS this malicious generator. Under the compact-arena VM
-// the rejection is `GeneratorRuntimeError`: the runaway loop allocates pairs
-// faster than it accrues cost and trips the clvm_rs consensus pair-pool limit
-// (MAX_NUM_PAIRS = 62,500,000, allocator.rs 0.17.7) at ~10.99e9 accrued cost,
-// just before the block cost roof (the pre-arena VM had no allocation limits and
-// reached CostExceeded(10,996,208,030) instead — same rejection, different code).
-// clvm_rs counts eval pairs identically (one new_pair per operand via cons_op;
-// checkpoint restores convert freed pairs to ghost pairs, leaving the limit
-// accounting unchanged), so TooManyPairs is the mainnet-faithful outcome.
-// (A trusted structural spend extractor is out of scope for this harvest.)
+// `TEST_GENERATOR` is a malicious generator: a `830f4240` (quote 1_000_000) loop counter
+// drives ~1024 conditions with a runaway CLVM cost. A trusted structural extractor would
+// return the single spend (coin 0101..*32 / puzzle 0x80 / amount 123, 1024 conditions)
+// without enforcing block cost; the only entry point here,
+// `execute_block_generator_result`, is the full cost-accounted validator, so it correctly
+// REJECTS this generator. Under the compact-arena VM the rejection is
+// `GeneratorRuntimeError`: the runaway loop allocates pairs faster than it accrues cost
+// and trips the consensus pair-pool limit (MAX_NUM_PAIRS = 62,500,000) just before the
+// block cost roof.
 const TEST_GENERATOR_HEX: &str = "ff02ffff01ff02ffff01ff04ffff04ffff04ffff01a00101010101010101010101010101010101010101010101010101010101010101ffff04ffff04ffff0101ffff02ff02ffff04ff02ffff04ff05ffff04ff0bffff04ff17ff80808080808080ffff01ff7bffff80ffff018080808080ff8080ff8080ffff04ffff01ff02ffff03ff17ffff01ff04ff05ffff04ff0bffff02ff02ffff04ff02ffff04ff05ffff04ff0bffff04ffff11ff17ffff010180ff8080808080808080ff8080ff0180ff018080ffff04ffff01ff42ff24ff8568656c6c6fffa0010101010101010101010101010101010101010101010101010101010101010180ffff04ffff01ff43ff24ff8568656c6c6fffa0010101010101010101010101010101010101010101010101010101010101010180ffff04ffff01830f4240ff0180808080";
 
 fn legacy_input(generator: SerializedProgram, height: u32) -> BlockGeneratorInput {
@@ -204,8 +190,8 @@ fn legacy_input(generator: SerializedProgram, height: u32) -> BlockGeneratorInpu
 #[test]
 fn malicious_test_generator_is_rejected_for_exceeding_block_cost() {
     let generator = SerializedProgram::from_hex(TEST_GENERATOR_HEX).unwrap();
-    // chia's trusted extractor bypasses cost and returns spends; dg_xch's strict
-    // full-validation path refuses the runaway generator (pair-pool limit, see above).
+    // The strict full-validation path refuses the runaway generator (pair-pool limit,
+    // see above).
     assert_eq!(
         execute_block_generator_result(&legacy_input(generator, 100)),
         Err(ChiaError::GeneratorRuntimeError)

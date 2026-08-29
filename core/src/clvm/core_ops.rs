@@ -121,8 +121,6 @@ pub fn op_eq<D: Dialect>(
 mod tests {
     //! Behavioral tests for the core CLVM operators. Operands are quoted so the
     //! eval loop pre-evaluates them to literals before the operator is applied.
-    //! Results follow canonical CLVM operator semantics (clvm `operators.py` /
-    //! chia_rs `core_ops.rs`); several appear in chia-blockchain fixtures.
     use crate::clvm::program::Program;
     use crate::clvm::sexp::SExp;
     use crate::clvm::utils::INFINITE_COST;

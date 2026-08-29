@@ -2,24 +2,18 @@
 //! length before the reader is proven to hold that many bytes.
 //!
 //! A length-prefixed field (`String`, byte `Vec<u8>`, generic `Vec<T>`, `HashMap<K,V>`) carries a
-//! u32-BE count, so a hostile peer can claim up to `0xFFFF_FFFF` (~4 GiB) in a few bytes. The old
-//! failure mode was `vec![0u8; claimed]` (or `with_capacity(claimed)`) *before* the payload was
-//! read: the decoder zero-fills/reserves multiple GiB of transient heap and only errors afterward,
-//! when the trailing `read_exact` comes up short. Every inbound p2p message is streamable-decoded,
-//! so a single peer could OOM the node. The fix (see `serialize/src/lib.rs`, `2497463`) bounds the
-//! declared length against the bytes actually remaining before allocating — mirroring chia's
-//! `parse_bytes`/`parse_str` (`chia/util/streamable.py`), which read exactly `length` bytes from
-//! the buffer and error if short, never pre-zeroing a garbage length, and `parse_list`, which grows
-//! an empty list rather than pre-sizing to the claimed count.
+//! u32-BE count, so a hostile peer can claim up to `0xFFFF_FFFF` (~4 GiB) in a few bytes.
+//! Every inbound p2p message is streamable-decoded, so pre-allocating the claimed length
+//! would let a single peer OOM the node. The decoder (`serialize/src/lib.rs`) bounds the
+//! declared length against the bytes actually remaining before allocating.
 //!
-//! Why this file exists alongside the `is_err()` ports in `streamable_wire.rs`: asserting only that
-//! an over-claim returns `Err` is an *insufficient* regression lock. If the guard were removed and
-//! `vec![0u8; claimed]` reintroduced, the 4 GiB allocation would still succeed on a large-RAM host,
-//! get zero-filled, and *then* fail the trailing `read_exact` — so the decode still returns `Err`
-//! and the `is_err()` test still passes, green, while the node is once again OOM-vulnerable. The
-//! only lock that actually catches the bomb is a positive bound on bytes allocated *during* the
-//! decode. This file installs a counting global allocator and asserts exactly that: decoding an
-//! over-claim allocates a bounded, tiny amount — never anything close to the claimed length.
+//! Asserting only that an over-claim returns `Err` is an insufficient regression lock: an
+//! unguarded `vec![0u8; claimed]` would still succeed on a large-RAM host, get zero-filled,
+//! and *then* fail the trailing `read_exact` — the decode still returns `Err` while the
+//! node is OOM-vulnerable. The only lock that actually catches the bomb is a positive
+//! bound on bytes allocated *during* the decode. This file installs a counting global
+//! allocator and asserts exactly that: decoding an over-claim allocates a bounded, tiny
+//! amount — never anything close to the claimed length.
 
 use dg_xch_serialize::{ChiaProtocolVersion, ChiaSerialize};
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -196,7 +190,7 @@ fn legit_values_round_trip_byte_identically() {
         T: ChiaSerialize + PartialEq + std::fmt::Debug,
     {
         let bytes = value.to_bytes(V).unwrap();
-        let back = T::from_bytes_full(&bytes, V).unwrap();
+        let back = T::from_bytes_exact(&bytes, V).unwrap();
         assert_eq!(back, value, "structural round-trip");
         assert_eq!(back.to_bytes(V).unwrap(), bytes, "byte-identical re-encode");
     }
@@ -217,7 +211,7 @@ fn legit_values_round_trip_byte_identically() {
     map.insert(3, 30);
     let bytes = map.to_bytes(V).unwrap();
     assert_eq!(
-        HashMap::<u32, u32>::from_bytes_full(&bytes, V).unwrap(),
+        HashMap::<u32, u32>::from_bytes_exact(&bytes, V).unwrap(),
         map,
         "HashMap structural round-trip"
     );
@@ -227,9 +221,7 @@ fn legit_values_round_trip_byte_identically() {
 //
 // The (claimed_len, actual_len) property the guard enforces: whenever `claimed > actual`, the decode
 // rejects and allocates a bounded amount (never proportional to `claimed`). A deterministic sweep
-// stands in for a proptest here — the `dg_xch_serialize` crate carries no proptest dependency and
-// the repo's existing decoder-fuzz tests (`clvm::parser::decoder_never_panics_on_garbage`) use the
-// same deterministic-walk idiom.
+// over the claim/actual grid.
 
 #[test]
 fn overclaim_sweep_bounds_allocation_for_all_claims() {

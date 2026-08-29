@@ -41,7 +41,7 @@ impl FullBlock {
         self.reward_chain_block.height
     }
 
-    /// chia_rs `FullBlock::header_hash` — the block id, hashed from the foliage.
+    /// The block id, hashed from the foliage.
     ///
     /// # Errors
     /// Returns an error if the foliage fails to serialize.
@@ -54,12 +54,8 @@ impl FullBlock {
         self.foliage_transaction_block.is_some()
     }
 
-    /// chia `get_block_header(block)` (`chia/consensus/generator_tools.py:13-51`) with
-    /// `removals_and_additions=None` — the `tx_filter=False` view a node serves in weight-proof recent
-    /// chains and header ranges (`chia/consensus/blockchain.py:905-906`). Strips the transaction
-    /// generator/ref-list and carries the empty BIP158 filter: `PyBIP158([]).GetEncoded()` is the single
-    /// byte `0x00` (the N=0 GCS element count), the same constant chia's fast path hardcodes
-    /// (`chia/full_node/full_block_utils.py:311`).
+    /// The header view of this block: strips the transaction generator/ref-list and
+    /// carries the empty BIP158 filter (the single byte `0x00`).
     #[must_use]
     pub fn get_block_header(&self) -> HeaderBlock {
         HeaderBlock {

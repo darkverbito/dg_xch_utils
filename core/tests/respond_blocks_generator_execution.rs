@@ -3,18 +3,12 @@
 // `respond_blocks_real_wire.rs` proves only that the back-reference-aware decoder consumes the exact
 // on-wire byte length and that the raw bytes round-trip. It never runs the generator: the ChiaSerialize
 // decode keeps the RAW slice and discards the parsed tree, so a back-reference that resolves to the wrong
-// (but same-length) subtree would still pass that round-trip yet fail consensus. This is the gap that let
-// `InvalidBlockSolution` reach production while the wire tests stayed green.
+// (but same-length) subtree would still pass that round-trip yet fail consensus.
 //
 // Here we DECOMPRESS the generator (`to_program_backrefs`), RUN it, and drive the full body path
 // (`execute_block_generator_result`), asserting the produced cost equals the block's own
 // `transactions_info.cost`. Stages are split so a failure names the stage (decode vs run vs conditions vs
 // cost) instead of collapsing to `InvalidBlockSolution`.
-//
-// Two defects were rooted here: a rejected zero-arg REMARK condition and an under-counted `coinid`
-// operator (missing the 32-byte result's malloc cost) made the height-9138874 batch fail. Both are
-// fixed; this test is now live and asserts the real cost on every self-contained transaction block in
-// the fixture.
 
 use dg_xch_core::clvm::program::{Program, SerializedProgram};
 use dg_xch_core::clvm::utils::{COST_CONDITIONS, ENABLE_KECCAK_OPS_OUTSIDE_FORK};
@@ -61,7 +55,7 @@ fn real_mainnet_generator_executes_to_block_cost() {
             panic!("height {height}: back-reference decode failed: {error:?}")
         });
 
-        // Stage 2 — run the post-hard-fork simple generator with NIL args (mirrors run_block_generator2).
+        // Stage 2 — run the post-hard-fork simple generator with NIL args.
         let flags = COST_CONDITIONS | ENABLE_KECCAK_OPS_OUTSIDE_FORK;
         let run = program.run(MAINNET.max_block_cost_clvm, flags, &Program::default());
         assert!(
@@ -88,9 +82,8 @@ fn real_mainnet_generator_executes_to_block_cost() {
         checked += 1;
     }
 
-    // The fixture carries several self-contained transaction blocks (heights 9138874, 9138880, ...
-    // — the batch that stalled the live node). Require more than one so the fix is proven on multiple
-    // real blocks, not a single fixture.
+    // The fixture carries several self-contained transaction blocks (heights 9138874, 9138880, ...).
+    // Require more than one so the assertion covers multiple real blocks, not a single fixture.
     assert!(
         checked >= 2,
         "fixture must contain at least two self-contained transaction-block generators to execute; got {checked}",
