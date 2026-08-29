@@ -2500,9 +2500,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> StoreApi<S> {
             if let Some(tx_peak) = tx_peak
                 && iters.candidate_sp_total_iters <= tx_peak.total_iters
             {
-                debug!(
-                    "candidate: sp at/before the tx-peak window -> empty block"
-                );
+                debug!("candidate: sp at/before the tx-peak window -> empty block");
                 coerce_empty = true;
             }
         }
@@ -4156,10 +4154,7 @@ where
             };
             broadcast_new_peak_wallet(&self.net, &wallets, &announce).await;
         }
-        info!(
-            height,
-            "sync-end transition fired"
-        );
+        info!(height, "sync-end transition fired");
     }
 
     // The transaction block framing a peak: walk from the peak to the nearest record carrying a
@@ -6467,9 +6462,7 @@ async fn assemble_infusion_block<S: BlockStore + CoinStore + Send + Sync + 'stat
         .await
         .get_finished_sub_slots(challenge_in_chain, last_slot_cc_hash);
     let Some(finished_sub_slots) = finished_sub_slots else {
-        debug!(
-            "infusion point: finished sub-slots not connected"
-        );
+        debug!("infusion point: finished sub-slots not connected");
         return None;
     };
 
@@ -6567,10 +6560,9 @@ async fn assemble_infusion_block<S: BlockStore + CoinStore + Send + Sync + 'stat
 ///      the previous block by walking back from the peak matching `reward_infusion_new_challenge`
 ///      — genesis (`target_rc_hash == GENESIS_CHALLENGE`) ⇒ `prev_b = None`;
 ///   3. collect the finished sub-slots from `challenge_in_chain` to `last_slot_cc_hash`;
-///   4. next SSI/difficulty and the SP total-iters from the pos sub-slot start
-///     ;
-///   5. assemble via [`unfinished_block_to_full_block`], check the pool signature
-///     , then run it through the engine (`add_block` → set peak) exactly as a peer's
+///   4. next SSI/difficulty and the SP total-iters from the pos sub-slot start;
+///   5. assemble via [`unfinished_block_to_full_block`], check the pool signature, then run it
+///      through the engine (`add_block` → set peak) exactly as a peer's
 ///      block: [`Node::follow_step_blocks`] validates, confirms, fires the S8 farmed-header match, and
 ///      returns the new peak. On a new peak the node broadcasts `NewPeak` (+ `NewPeakTimelord`) and
 ///      advances the slot state — the driver's post-confirm side effects, mirrored here.
