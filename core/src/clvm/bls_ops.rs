@@ -4,6 +4,7 @@
 
 use crate::clvm::arena::{Arena, NodePtr};
 use crate::clvm::dialect::Dialect;
+use crate::clvm::pure_ops::OpOut;
 use crate::errors::ClvmError;
 
 #[cfg(feature = "bls")]
@@ -387,11 +388,11 @@ fn get_varargs<const N: usize>(
 /// First argument minus the rest; empty input is the identity.
 #[cfg(feature = "bls")]
 pub fn op_bls_g1_subtract<D: Dialect>(
-    arena: &mut Arena,
+    arena: &Arena,
     args: NodePtr,
     max_cost: u64,
     _dialect: &D,
-) -> Result<(u64, NodePtr), ClvmError> {
+) -> Result<(u64, OpOut), ClvmError> {
     let mut cost = BLS_G1_SUBTRACT_BASE_COST;
     check_cost(cost, max_cost)?;
     let mut total = bls_g1::identity();
@@ -410,17 +411,17 @@ pub fn op_bls_g1_subtract<D: Dialect>(
         }
         is_first = false;
     }
-    new_atom_and_cost(arena, cost, &bls_g1::to_compressed(&total))
+    new_atom_and_cost(cost, &bls_g1::to_compressed(&total))
 }
 
 /// Point times a (group-order-reduced) integer scalar.
 #[cfg(feature = "bls")]
 pub fn op_bls_g1_multiply<D: Dialect>(
-    arena: &mut Arena,
+    arena: &Arena,
     args: NodePtr,
     max_cost: u64,
     dialect: &D,
-) -> Result<(u64, NodePtr), ClvmError> {
+) -> Result<(u64, OpOut), ClvmError> {
     let [point, scalar] = get_args::<2>(arena, args, "g1_multiply")?;
     let mut cost = BLS_G1_MULTIPLY_BASE_COST;
     check_cost(cost, max_cost)?;
@@ -438,18 +439,18 @@ pub fn op_bls_g1_multiply<D: Dialect>(
     check_cost(cost, max_cost)?;
     let scalar = mod_group_order(&scalar);
     g1_scalar_multiply(&mut total, scalar.to_bytes_be().1.as_slice());
-    new_atom_and_cost(arena, cost, &bls_g1::to_compressed(&total))
+    new_atom_and_cost(cost, &bls_g1::to_compressed(&total))
 }
 
 /// Flip the compressed sign bit; the point is validated unless `RELAXED_BLS` (hard fork 2)
 /// is set; compressed infinity passes through unchanged.
 #[cfg(feature = "bls")]
 pub fn op_bls_g1_negate<D: Dialect>(
-    arena: &mut Arena,
+    arena: &Arena,
     args: NodePtr,
     _max_cost: u64,
     dialect: &D,
-) -> Result<(u64, NodePtr), ClvmError> {
+) -> Result<(u64, OpOut), ClvmError> {
     let strict = (dialect.flags() & RELAXED_BLS) == 0;
     let [point] = get_args::<1>(arena, args, "g1_negate")?;
     let mut blob: [u8; 48] = atom(arena, point, "g1_negate")?
@@ -467,21 +468,21 @@ pub fn op_bls_g1_negate<D: Dialect>(
     if (blob[0] & 0xe0) == 0xc0 {
         // Compressed infinity: negation is a no-op; pass the argument through, charging
         // the allocation cost anyway.
-        Ok((BLS_G1_NEGATE_BASE_COST + 48 * MALLOC_COST_PER_BYTE, point))
+        Ok((BLS_G1_NEGATE_BASE_COST + 48 * MALLOC_COST_PER_BYTE, OpOut::Same(point)))
     } else {
         blob[0] ^= 0x20;
-        new_atom_and_cost(arena, BLS_G1_NEGATE_BASE_COST, &blob)
+        new_atom_and_cost(BLS_G1_NEGATE_BASE_COST, &blob)
     }
 }
 
 /// N-ary G2 sum; empty input is the identity.
 #[cfg(feature = "bls")]
 pub fn op_bls_g2_add<D: Dialect>(
-    arena: &mut Arena,
+    arena: &Arena,
     args: NodePtr,
     max_cost: u64,
     _dialect: &D,
-) -> Result<(u64, NodePtr), ClvmError> {
+) -> Result<(u64, OpOut), ClvmError> {
     let mut cost = BLS_G2_ADD_BASE_COST;
     check_cost(cost, max_cost)?;
     let mut total = bls_g2::identity();
@@ -493,17 +494,17 @@ pub fn op_bls_g2_add<D: Dialect>(
         check_cost(cost, max_cost)?;
         bls_g2::add_assign(&mut total, &point);
     }
-    new_atom_and_cost(arena, cost, &bls_g2::to_compressed(&total))
+    new_atom_and_cost(cost, &bls_g2::to_compressed(&total))
 }
 
 /// First argument minus the rest; empty input is the identity.
 #[cfg(feature = "bls")]
 pub fn op_bls_g2_subtract<D: Dialect>(
-    arena: &mut Arena,
+    arena: &Arena,
     args: NodePtr,
     max_cost: u64,
     _dialect: &D,
-) -> Result<(u64, NodePtr), ClvmError> {
+) -> Result<(u64, OpOut), ClvmError> {
     let mut cost = BLS_G2_SUBTRACT_BASE_COST;
     check_cost(cost, max_cost)?;
     let mut total = bls_g2::identity();
@@ -521,17 +522,17 @@ pub fn op_bls_g2_subtract<D: Dialect>(
         }
         is_first = false;
     }
-    new_atom_and_cost(arena, cost, &bls_g2::to_compressed(&total))
+    new_atom_and_cost(cost, &bls_g2::to_compressed(&total))
 }
 
 /// Point times a (group-order-reduced) integer scalar.
 #[cfg(feature = "bls")]
 pub fn op_bls_g2_multiply<D: Dialect>(
-    arena: &mut Arena,
+    arena: &Arena,
     args: NodePtr,
     max_cost: u64,
     dialect: &D,
-) -> Result<(u64, NodePtr), ClvmError> {
+) -> Result<(u64, OpOut), ClvmError> {
     let [point, scalar] = get_args::<2>(arena, args, "g2_multiply")?;
     let mut cost = BLS_G2_MULTIPLY_BASE_COST;
     check_cost(cost, max_cost)?;
@@ -549,18 +550,18 @@ pub fn op_bls_g2_multiply<D: Dialect>(
     check_cost(cost, max_cost)?;
     let scalar = mod_group_order(&scalar);
     bls_g2::scalar_multiply(&mut total, scalar.to_bytes_be().1.as_slice());
-    new_atom_and_cost(arena, cost, &bls_g2::to_compressed(&total))
+    new_atom_and_cost(cost, &bls_g2::to_compressed(&total))
 }
 
 /// Flip the compressed sign bit; validated unless `RELAXED_BLS`; compressed infinity
 /// passes through unchanged.
 #[cfg(feature = "bls")]
 pub fn op_bls_g2_negate<D: Dialect>(
-    arena: &mut Arena,
+    arena: &Arena,
     args: NodePtr,
     _max_cost: u64,
     dialect: &D,
-) -> Result<(u64, NodePtr), ClvmError> {
+) -> Result<(u64, OpOut), ClvmError> {
     let strict = (dialect.flags() & RELAXED_BLS) == 0;
     let [point] = get_args::<1>(arena, args, "g2_negate")?;
     let mut blob: [u8; 96] = atom(arena, point, "g2_negate")?
@@ -576,21 +577,21 @@ pub fn op_bls_g2_negate<D: Dialect>(
         )));
     }
     if (blob[0] & 0xe0) == 0xc0 {
-        Ok((BLS_G2_NEGATE_BASE_COST + 96 * MALLOC_COST_PER_BYTE, point))
+        Ok((BLS_G2_NEGATE_BASE_COST + 96 * MALLOC_COST_PER_BYTE, OpOut::Same(point)))
     } else {
         blob[0] ^= 0x20;
-        new_atom_and_cost(arena, BLS_G2_NEGATE_BASE_COST, &blob)
+        new_atom_and_cost(BLS_G2_NEGATE_BASE_COST, &blob)
     }
 }
 
 /// Hash a message to G1 with an optional explicit DST (default: the G1 AUG-scheme DST).
 #[cfg(feature = "bls")]
 pub fn op_bls_map_to_g1<D: Dialect>(
-    arena: &mut Arena,
+    arena: &Arena,
     args: NodePtr,
     max_cost: u64,
     _dialect: &D,
-) -> Result<(u64, NodePtr), ClvmError> {
+) -> Result<(u64, OpOut), ClvmError> {
     let ([msg, dst], argc) = get_varargs::<2>(arena, args, "g1_map")?;
     if !(1..=2).contains(&argc) {
         return Err(ClvmError::InvalidArgCount(format!(
@@ -610,18 +611,18 @@ pub fn op_bls_map_to_g1<D: Dialect>(
     cost += dst.len() as u64 * BLS_MAP_TO_G1_COST_PER_DST_BYTE;
     check_cost(cost, max_cost)?;
     let point = g1_hash_to_g1(&msg, &dst);
-    new_atom_and_cost(arena, cost, &bls_g1::to_compressed(&point))
+    new_atom_and_cost(cost, &bls_g1::to_compressed(&point))
 }
 
 /// Hash a message to G2 with an optional explicit DST (default: the G2 AUG-scheme DST).
 /// No interim cost check between the message and DST byte charges.
 #[cfg(feature = "bls")]
 pub fn op_bls_map_to_g2<D: Dialect>(
-    arena: &mut Arena,
+    arena: &Arena,
     args: NodePtr,
     max_cost: u64,
     _dialect: &D,
-) -> Result<(u64, NodePtr), ClvmError> {
+) -> Result<(u64, OpOut), ClvmError> {
     let ([msg, dst], argc) = get_varargs::<2>(arena, args, "g2_map")?;
     if !(1..=2).contains(&argc) {
         return Err(ClvmError::InvalidArgCount(format!(
@@ -640,18 +641,18 @@ pub fn op_bls_map_to_g2<D: Dialect>(
     cost += dst.len() as u64 * BLS_MAP_TO_G2_COST_PER_DST_BYTE;
     check_cost(cost, max_cost)?;
     let point = bls_g2::hash_to_g2(&msg, &dst);
-    new_atom_and_cost(arena, cost, &bls_g2::to_compressed(&point))
+    new_atom_and_cost(cost, &bls_g2::to_compressed(&point))
 }
 
 /// A flat list of `(G1, G2)` pairs; returns nil iff the aggregated pairing is the
 /// identity, otherwise the program TERMINATES with an error.
 #[cfg(feature = "bls")]
 pub fn op_bls_pairing_identity<D: Dialect>(
-    arena: &mut Arena,
+    arena: &Arena,
     args: NodePtr,
     max_cost: u64,
     _dialect: &D,
-) -> Result<(u64, NodePtr), ClvmError> {
+) -> Result<(u64, OpOut), ClvmError> {
     let mut cost = BLS_PAIRING_BASE_COST;
     check_cost(cost, max_cost)?;
     let mut items = Vec::<(blst::blst_p1, blst::blst_p2)>::new();
@@ -667,7 +668,7 @@ pub fn op_bls_pairing_identity<D: Dialect>(
         items.push((g1, g2));
     }
     if bls_g2::aggregate_pairing(&items) {
-        Ok((cost, NodePtr::NIL))
+        Ok((cost, OpOut::Same(NodePtr::NIL)))
     } else {
         Err(ClvmError::InvalidInput(
             "bls_pairing_identity failed".to_string(),
@@ -679,11 +680,11 @@ pub fn op_bls_pairing_identity<D: Dialect>(
 /// otherwise the program TERMINATES with an error.
 #[cfg(feature = "bls")]
 pub fn op_bls_verify<D: Dialect>(
-    arena: &mut Arena,
+    arena: &Arena,
     args: NodePtr,
     max_cost: u64,
     _dialect: &D,
-) -> Result<(u64, NodePtr), ClvmError> {
+) -> Result<(u64, OpOut), ClvmError> {
     let mut cost = BLS_PAIRING_BASE_COST;
     check_cost(cost, max_cost)?;
     let (sig_node, mut rest) = split(arena, args)?;
@@ -704,7 +705,7 @@ pub fn op_bls_verify<D: Dialect>(
         items.push((pk, msg));
     }
     if bls_g2::aggregate_verify(&signature, &items) {
-        Ok((cost, NodePtr::NIL))
+        Ok((cost, OpOut::Same(NodePtr::NIL)))
     } else {
         Err(ClvmError::InvalidInput("bls_verify failed".to_string()))
     }
@@ -717,11 +718,11 @@ pub fn op_bls_verify<D: Dialect>(
 macro_rules! bls_stub {
     ($name:ident) => {
         pub fn $name<D: Dialect>(
-            _arena: &mut Arena,
+            _arena: &Arena,
             _args: NodePtr,
             _max_cost: u64,
             _dialect: &D,
-        ) -> Result<(u64, NodePtr), ClvmError> {
+        ) -> Result<(u64, OpOut), ClvmError> {
             Err(ClvmError::Unsupported(format!(
                 "{} requires dg_xch_core to be built with the `bls` feature",
                 stringify!($name)

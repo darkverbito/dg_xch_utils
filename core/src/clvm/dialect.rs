@@ -1,4 +1,5 @@
 use crate::clvm::arena::{Arena, NodePtr};
+use crate::clvm::pure_ops::OpOut;
 
 pub trait Dialect {
     fn quote_kw(&self) -> &[u8];
@@ -47,7 +48,7 @@ impl ChiaDialect {
         ChiaDialect { flags }
     }
 }
-type OpFn = fn(&mut Arena, NodePtr, u64, &ChiaDialect) -> Result<(u64, NodePtr), ClvmError>;
+type OpFn = fn(&Arena, NodePtr, u64, &ChiaDialect) -> Result<(u64, OpOut), ClvmError>;
 impl Dialect for ChiaDialect {
     fn op(
         &self,
@@ -72,7 +73,8 @@ impl Dialect for ChiaDialect {
                     .unwrap_or(0);
                 Err(ClvmError::Unimplemented(b0))
             } else {
-                op_unknown(arena, o, argument_list, max_cost, self)
+                let (cost, out) = op_unknown(arena, o, argument_list, max_cost, self)?;
+                out.materialize(arena, cost)
             };
         };
         let f: OpFn = match v {
@@ -143,11 +145,16 @@ impl Dialect for ChiaDialect {
                 return if (self.flags & NO_UNKNOWN_OPS) != 0 {
                     Err(ClvmError::Unimplemented(v))
                 } else {
-                    op_unknown(arena, o, argument_list, max_cost, self)
+                    let (cost, out) = op_unknown(arena, o, argument_list, max_cost, self)?;
+                    out.materialize(arena, cost)
                 };
             }
         };
-        f(arena, argument_list, max_cost, self)
+        // The operator reads through `&*arena` and cannot allocate; its description is
+        // materialized here under `&mut arena`, the single allocation site for the whole
+        // operator surface.
+        let (cost, out) = f(&*arena, argument_list, max_cost, self)?;
+        out.materialize(arena, cost)
     }
 
     fn quote_kw(&self) -> &[u8] {

@@ -242,6 +242,26 @@ impl Arena {
         }
     }
 
+    /// Atoms materialized in the heap. Excludes inline small atoms, which occupy no storage —
+    /// the ghost counters track those for the consensus limit. Interning must reduce this without
+    /// changing any tree's hash.
+    #[must_use]
+    pub fn stored_atom_count(&self) -> usize {
+        self.atom_vec.len()
+    }
+
+    /// Pairs materialized in the pool.
+    #[must_use]
+    pub fn stored_pair_count(&self) -> usize {
+        self.pair_vec.len()
+    }
+
+    /// Bytes held in the atom heap.
+    #[must_use]
+    pub fn stored_heap_bytes(&self) -> usize {
+        self.u8_vec.len()
+    }
+
     pub fn new_atom(&mut self, v: &[u8]) -> Result<NodePtr, ClvmError> {
         let start = self.u8_vec.len();
         if start + self.ghost_heap + v.len() > HEAP_LIMIT {

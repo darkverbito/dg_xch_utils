@@ -7,6 +7,7 @@ use std::cmp::Ordering;
 use std::fmt::Display;
 use std::ops::{Add, AddAssign, Div, Mul, MulAssign, Rem, Sub, SubAssign};
 
+#[derive(Clone)]
 pub enum SExpNumber {
     I128(i128),
     BigInt(BigInt),
