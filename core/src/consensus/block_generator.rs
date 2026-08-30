@@ -47,39 +47,52 @@ pub struct BlockGeneratorFlags {
 }
 
 impl BlockGeneratorFlags {
-    // CLVM flag ladder, keyed on the block's OWN height. The ladder is CUMULATIVE:
-    // - hard fork 1 (mainnet 5,496,000): the simple generator plus post-fork condition
-    //   accounting (`COST_CONDITIONS` switches announcement limits to per-condition
-    //   costing) and keccak.
-    // - soft fork 8 (mainnet 8,655,000): op_modpow disabled and division-family
-    //   operand caps (DISABLE_OP | LIMITS).
-    // - hard fork 2 (unscheduled): the bounded NEW_COST_MODEL; the dialect neuters
-    //   DISABLE_OP/LIMITS once NEW_COST_MODEL is set.
-    // - soft fork 9 (mainnet 8,655,000 — SAME height as soft fork 8): of the SF9 set only
-    //   CANONICAL_INTS is a VM flag, so it is the ONLY member wired into `clvm_flags` here.
-    //   SIMPLE_GENERATOR (generator-ref ban + canonical-serialization + simple quote shape)
-    //   and LIMIT_SPENDS (6,000-spend cap) are enforced as BODY rules in
-    //   `validate_transaction_block`, keyed on prev-tx height.
+    /// The CLVM flag ladder, keyed on the block's own height.
+    ///
+    /// This mirrors chia's `get_flags_for_height_and_constants`, and the structure matters as much
+    /// as the membership: hard fork 2 and soft fork 8 are mutually exclusive branches, not
+    /// cumulative steps, because once the hard fork lands it stops disabling the operators soft
+    /// fork 8 turned off. Likewise `LIMITS` applies only in the window between soft fork 9 and hard
+    /// fork 2, since the bounded cost model subsumes it.
+    ///
+    /// Getting an activation height wrong is a consensus divergence in whichever direction it
+    /// errs: enabling a rule early makes this node reject blocks the network accepted, and enabling
+    /// it late makes it accept blocks the network rejected. Two of these were previously keyed on
+    /// hard fork 1 rather than their real forks — see `flag_ladder.rs` for the boundary tests that
+    /// now pin every transition.
     #[must_use]
     pub fn for_height(constants: &ConsensusConstants, height: u32) -> Self {
         let mut clvm_flags = 0u32;
-        if height >= constants.hard_fork_height {
-            clvm_flags |= COST_CONDITIONS | ENABLE_KECCAK_OPS_OUTSIDE_FORK;
+
+        if height >= constants.hard_fork2_height {
+            // Hard fork 2 ("Chia 3.0", unscheduled): keccak outside the softfork guard, flat
+            // condition costs, the bounded cost model, and BLS negate accepting invalid points.
+            // ENABLE_SECP_OPS belongs here too and is deliberately absent: the secp operators are
+            // not implemented, and setting a flag whose operators are missing is precisely how
+            // opcodes get silently absorbed by `op_unknown` for a token cost.
+            clvm_flags |= ENABLE_KECCAK_OPS_OUTSIDE_FORK | COST_CONDITIONS | NEW_COST_MODEL
+                | RELAXED_BLS;
+        } else if height >= constants.soft_fork8_height {
+            // Soft fork 8 disables modpow — but only until hard fork 2 re-enables it under the
+            // bounded cost model, which is why this is an `else`.
+            clvm_flags |= DISABLE_OP;
         }
-        if height >= constants.soft_fork8_height {
-            clvm_flags |= DISABLE_OP | LIMITS;
-        }
+
         if height >= constants.soft_fork9_height {
             clvm_flags |= CANONICAL_INTS;
+            // The division-family operand caps apply from soft fork 9 until hard fork 2's cost
+            // model subsumes them.
+            if height < constants.hard_fork2_height {
+                clvm_flags |= LIMITS;
+            }
         }
-        if height >= constants.hard_fork2_height {
-            // hard-fork-2 additions: the bounded NEW_COST_MODEL and RELAXED_BLS (BLS negate
-            // operators accept invalid points).
-            clvm_flags |= NEW_COST_MODEL | RELAXED_BLS;
-        }
+
         Self {
             clvm_flags,
-            simple_generator: height >= constants.hard_fork_height,
+            // The simple-generator rules (no generator refs, canonical serialization, a quoted
+            // program) arrive with soft fork 9, not hard fork 1. Keying them on the earlier fork
+            // made this node stricter than consensus across the 3,159,000 blocks between them.
+            simple_generator: height >= constants.soft_fork9_height,
         }
     }
 }
