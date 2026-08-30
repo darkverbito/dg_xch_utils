@@ -271,8 +271,8 @@ fn siphash24(k0: u64, k1: u64, data: &[u8]) -> u64 {
         };
     }
 
-    let (chunks, rem) = data.as_chunks::<8>();
-    for chunk in chunks {
+    let (blocks, rem) = data.as_chunks::<8>();
+    for chunk in blocks {
         let m = u64::from_le_bytes(*chunk);
         v3 ^= m;
         sipround!();
