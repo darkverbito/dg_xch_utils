@@ -467,12 +467,90 @@ cargo +nightly fuzz run run_program
 
 ---
 
+## 8b. The three-phase implementation (completed)
+
+Executed in the order argued for in §9.1: convert operators first, then interning, then
+reclamation. The ordering mattered — see the note on `gc_candidate` below.
+
+### Results on block 4,671,894 (532 spends), the shape that drives peak
+
+| stage | peak | change |
+| --- | --- | --- |
+| baseline | 142.94 MiB | — |
+| Phase 1 — all 49 operators arena-free | 142.94 MiB | **0** |
+| Phase 2 — large-atom interning | 136.68 MiB | −4.4% |
+| Phase 3 — reclamation | **123.03 MiB** | **−13.9% cumulative** |
+
+Correctness was bit-identical at every step: 132 operator vectors, 2400 randomized outcomes
+across six dialects, the 46-block on-chain cost wall, 16 conditions digests. Leak gate 7/7 at
+0 B/run throughout. Throughput 0.399–0.408 Gcost/s against a 0.408–0.413 baseline.
+
+### Phase 1 — operators (commit `5edd5a3`)
+
+All 49 operators take `&Arena` and cannot allocate; they return an `OpOut` description that the
+runtime materializes at a single site. Zero `&mut Arena` remains in `core_ops`, `more_ops`, or
+`bls_ops`. **Directive 3 delivered at no cost in memory or throughput.**
+
+Six variants cover the whole operator set: `Same`, `Pair`, `Number`, `Small`, `Concat`, `Substr`,
+plus `NumberPair` for `divmod`. `Concat` and `Substr` carry source nodes rather than bytes, so
+large results are written straight into the arena with no intermediate buffer.
+
+Two incidental changes: `SExpNumber` derives `Clone`; the arena exposes `stored_atom_count`,
+`stored_pair_count`, `stored_heap_bytes`.
+
+### Phase 2 — interning (commit `ac603ae`)
+
+Only atoms of 32 bytes or more are shared, and **cons cells are never shared**.
+
+The first implementation interned pairs too and cost **52 MiB of peak to save nothing**. The
+reason is arithmetic that should have been done on paper first: a cons cell is 8 bytes, a hash-map
+entry keyed on its two children is roughly four times that, so pair interning cannot break even
+below a 4x repeat rate — and a 19.25M-node block is overwhelmingly distinct. Atom interning has
+the same shape unless the payload dominates the entry, which is why the threshold exists. Small
+integers are inline already and cost no storage, so they never belonged in a table.
+
+Both intern paths charge the ghost counters on a hit, so `MAX_NUM_ATOMS`, `MAX_NUM_PAIRS` and the
+heap ceiling still count every LOGICAL node. Sharing changes what is stored, never what a program
+is permitted to build — without that, a program consing the same cell repeatedly would sail past
+a consensus ceiling it used to hit.
+
+### Phase 3 — reclamation (commit `acac5e9`)
+
+A checkpoint is recorded when an operator application is queued, before its operands are
+evaluated. When the operator returns a self-contained result, the pools are rewound to that point
+before the result is written: everything the operand evaluation allocated is unreachable.
+
+**This is where the Phase-1-first ordering paid off.** clvm_rs needs `gc_candidate` — a
+hand-maintained per-operator predicate — because with the arena threaded through operators the
+runtime can only INSPECT a returned handle and infer whether rewinding around it is safe. With
+`OpOut` the variant states it: `Number` and `Small` are computed from scratch and borrow nothing;
+every other variant references a node that may live inside the region being reclaimed. A
+stale-predicate hazard became a type-level fact.
+
+`Arena::restore` rolls back the ghost counters (reclaimed work must stop counting against the
+consensus ceilings exactly as it stops occupying storage) and clears the intern map wholesale
+(its entries index into pools being truncated; a surviving entry would resolve to whatever later
+occupies the slot — the dangling-index hazard clvm_rs documented and mitigates with debug
+fingerprinting).
+
+### What the measurements corrected
+
+- I reported a "36% peak regression from the operator conversion" and blamed `OpOut::Number`
+  boxing. Both were wrong. Isolating interning behind a compile-time switch showed the conversion
+  costs **zero** (142.94 MiB with interning off, exactly the baseline) and interning was the
+  entire +51.7 MiB.
+- The interning invariant caught that pair interning was inert before the peak measurement could
+  mislead: `atoms 10 then 10, pairs 12 then 12` meant the second identical build deduplicated
+  nothing, because pair interning does not work without atom interning. Peak alone would have
+  read as "interning does not help this workload" — plausible and wrong.
+
+---
+
 ## 9. What remains
 
 ### 9.1 Open, ranked
 
-1. **Convert the remaining 38 operators to `pure_ops`.** Mechanical but multi-day. Run the full
-   suite after each batch. This is what turns the prototype into directive 3 delivered.
+1. ~~Convert the remaining operators.~~ **Done** — see §8b, Phase 1.
 2. **Recursive `Drop` stack overflow.** Deeply-nested CLVM overflows the stack when the `SExp`
    tree is dropped — `PairBuf::Owned` nests a child `SExp`, so ~N frames unwind. The consensus
    generator path builds such trees (`generator.sexp().to_owned()`). Recorded as an ignored red
@@ -481,8 +559,9 @@ cargo +nightly fuzz run run_program
    limits needs a security assessment before rating it.
 3. **Restore `MAX_NUM_ATOMS` / `MAX_NUM_PAIRS`** if the bumpalo branch is ever revived — they
    vanished with `arena.rs` and the restored runtime has no cap at all.
-4. **Take the clvm_rs improvements we skipped**: real reclamation (`3e2ae49`), interning, wider
-   small-atom inlining. Our arena sits at their 2021 state; 143 MiB is not its floor.
+4. ~~Take the clvm_rs improvements we skipped.~~ **Interning and reclamation done** (§8b).
+   Wider small-atom inlining remains: the handle carries 26 bits, and atoms average 1.8 bytes, so
+   more of them could avoid storage entirely.
 5. **Tests still missing**: the interning invariant if we add interning (tree hash unchanged,
    node counts drop); end-to-end throughput after full operator conversion.
 
