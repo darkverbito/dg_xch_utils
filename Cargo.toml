@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
 # The fuzz crate needs nightly (libfuzzer); keep it out of normal workspace builds.
-exclude = ["fuzz"]
+exclude = ["fuzz", "tools/clvm-headtohead"]
 members = [
     "cli",
     "clients",
