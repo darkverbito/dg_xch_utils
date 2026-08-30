@@ -89,7 +89,7 @@ const HEAVY: [(&str, &str, u64); 3] = [
 const PEAK_CEILING_BYTES: usize = 64 * 1024 * 1024;
 
 fn generator_of(hex: &str) -> Vec<u8> {
-    let hex = hex.trim();
+    let hex = hex.lines().next().expect("fixture has content").trim();
     (0..hex.len())
         .step_by(2)
         .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).expect("generator hex"))
@@ -171,6 +171,9 @@ fn the_decompression_and_ref_shapes_stay_under_the_ceiling() {
                     include_str!(
                         "../../core/tests/fixtures/chia_generator_tests/block-4671894.env"
                     )
+                    .lines()
+                    .next()
+                    .expect("fixture has content")
                     .trim(),
                 )
                 .expect("ref generator"),

@@ -46,7 +46,7 @@ const HEAVY: [(&str, &str, u64); 3] = [
 const MIN_GCOST_PER_SEC: f64 = 0.30;
 
 fn generator_of(hex: &str) -> Vec<u8> {
-    let hex = hex.trim();
+    let hex = hex.lines().next().expect("fixture has content").trim();
     (0..hex.len())
         .step_by(2)
         .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).expect("generator hex"))

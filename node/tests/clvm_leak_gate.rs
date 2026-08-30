@@ -87,9 +87,13 @@ const HEAVY_20_SPENDS: &str =
 /// success path leaks on every rejected block, which is attacker-triggerable.
 const MALICIOUS: &str = "ff02ffff01ff02ffff01ff04ffff04ffff04ffff01a00101010101010101010101010101010101010101010101010101010101010101ffff04ffff04ffff0101ffff02ff02ffff04ff02ffff04ff05ffff04ff0bffff04ff17ff80808080808080ffff01ff7bffff80ffff018080808080ff8080ff8080ffff04ffff01ff02ffff03ff17ffff01ff04ff05ffff04ff0bffff02ff02ffff04ff02ffff04ff05ffff04ff0bffff04ffff11ff17ffff010180ff8080808080808080ff8080ff0180ff018080ffff04ffff01ff42ff24ff8568656c6c6fffa0010101010101010101010101010101010101010101010101010101010101010180ffff04ffff01ff43ff24ff8568656c6c6fffa0010101010101010101010101010101010101010101010101010101010101010180ffff04ffff01830f4240ff0180808080";
 
+fn first_line(fixture: &str) -> &str {
+    fixture.lines().next().expect("fixture has content").trim()
+}
+
 fn input_for(hex: &str, height: u32, refs: Vec<GeneratorReference>) -> BlockGeneratorInput {
     BlockGeneratorInput {
-        transactions_generator: SerializedProgram::from_hex(hex.trim())
+        transactions_generator: SerializedProgram::from_hex(first_line(hex))
             .expect("generator fixture is valid hex"),
         generator_refs: refs,
         constants: MAINNET,
@@ -143,7 +147,7 @@ fn a_generator_resolving_a_reference_retains_nothing() {
     let refs = vec![GeneratorReference {
         height: 4_671_893,
         index: 0,
-        generator: SerializedProgram::from_hex(WITH_REF_ENV.trim()).expect("ref generator"),
+        generator: SerializedProgram::from_hex(first_line(WITH_REF_ENV)).expect("ref generator"),
     }];
     assert_flat(
         "with-ref (4671894)",
@@ -211,6 +215,7 @@ fn the_mempool_admission_path_retains_nothing() {
     use dg_xch_core::blockchain::coin_spend::CoinSpend;
     use dg_xch_core::blockchain::condition_with_args::ConditionWithArgs;
     use dg_xch_core::blockchain::sized_bytes::{Bytes32, Bytes96};
+    use dg_xch_core::traits::SizedBytes;
     use dg_xch_core::blockchain::spend_bundle::SpendBundle;
     use dg_xch_core::clvm::program::Program;
     use dg_xch_core::clvm::sexp::SExp;

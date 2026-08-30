@@ -67,7 +67,8 @@ const HEAVY_49_SPENDS: &str =
     include_str!("../../core/tests/fixtures/heavy_generators/block-9189472.txt");
 
 fn generator_of(hex_src: &str) -> SerializedProgram {
-    SerializedProgram::from_hex(hex_src.trim()).expect("generator fixture is valid hex")
+    SerializedProgram::from_hex(hex_src.lines().next().expect("fixture has content").trim())
+        .expect("generator fixture is valid hex")
 }
 
 fn clamped_constants(max_block_cost_clvm: u64) -> ConsensusConstants {

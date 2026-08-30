@@ -55,9 +55,14 @@ fn digest_of(conds: &SpendBundleConditions) -> String {
     hex::encode(Sha256::digest(canonical.as_bytes()))
 }
 
+/// Fixture files carry the generator on line one; later lines are auxiliary data.
+fn first_line(fixture: &str) -> &str {
+    fixture.lines().next().expect("fixture has content").trim()
+}
+
 fn input_for(hex_src: &str, height: u32, refs: Vec<GeneratorReference>) -> BlockGeneratorInput {
     BlockGeneratorInput {
-        transactions_generator: SerializedProgram::from_hex(hex_src.trim())
+        transactions_generator: SerializedProgram::from_hex(first_line(hex_src))
             .expect("generator fixture is valid hex"),
         generator_refs: refs,
         constants: MAINNET,
@@ -112,9 +117,9 @@ fn collect() -> BTreeMap<String, String> {
     let refs = vec![GeneratorReference {
         height: 4_671_893,
         index: 0,
-        generator: SerializedProgram::from_hex(
-            include_str!("../../core/tests/fixtures/chia_generator_tests/block-4671894.env").trim(),
-        )
+        generator: SerializedProgram::from_hex(first_line(include_str!(
+            "../../core/tests/fixtures/chia_generator_tests/block-4671894.env"
+        )))
         .expect("ref generator"),
     }];
     out.insert(
