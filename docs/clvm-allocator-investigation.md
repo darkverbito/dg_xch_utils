@@ -551,6 +551,94 @@ fingerprinting).
 
 ---
 
+## 8c. Consensus audit against the reference implementation
+
+Prompted by asking what else clvm_rs had that we did not, this compared our operator dispatch and
+flag ladder against `chia_rs` and `clvm_rs` directly. It found correctness gaps, not optimizations,
+and they outrank everything in §8b.
+
+Sources cloned for this: `../clvm_rs-history` (1307 commits) and `../chia_rs-history` (3024
+commits). The authority for activation is `chia_rs`
+`crates/chia-consensus/src/spendbundle_validation.rs::get_flags_for_height_and_constants`.
+
+### FIXED — the flag ladder (commit follows §8b)
+
+Three flags were keyed to the wrong fork. None of our gates could see it: the block fixtures sit at
+4,671,894 and 9,179,155..9,179,200, below and above the entire affected window.
+
+| flag | chia activates | we did | effect |
+| --- | --- | --- | --- |
+| `SIMPLE_GENERATOR` | soft fork 9 (8,655,000) | hard fork 1 (5,496,000) | **stricter than consensus for 3,159,000 blocks** — rejects generator refs and non-quoted generators that chia accepts |
+| `COST_CONDITIONS` | hard fork 2 (unscheduled) | hard fork 1 | announcement accounting switched ~3.7M blocks early |
+| keccak-outside-guard | hard fork 2 (unscheduled) | hard fork 1 | flag on, operator absent |
+| `LIMITS` | soft fork 9 | soft fork 8 | identical on mainnet (same height); **diverges on testnet11**, where SF8=3,755,000 and SF9=3,924,000 |
+
+The branch structure was also flattened. Hard fork 2 and soft fork 8 are mutually exclusive in
+chia — the hard fork stops disabling modpow — and `LIMITS` applies only between soft fork 9 and
+hard fork 2, because the bounded cost model subsumes it.
+
+Our own `constants.rs` already documented the correct answer ("Hard fork 2: keccak/secp outside the
+guard, COST_CONDITIONS…"); only the ladder disagreed. `core/tests/flag_ladder.rs` now pins every
+transition against an independent transcription of chia's rules, including a testnet11
+configuration where the two soft forks sit at different heights — mainnet hides that confusion by
+putting them at the same height.
+
+### OPEN — missing operators
+
+Our dispatch stops at opcode 61; chia's reaches 65.
+
+| opcode | operator | chia's gate | size in clvm_rs | status |
+| --- | --- | --- | --- | --- |
+| 62 | `keccak256` | `ENABLE_KECCAK_OPS_OUTSIDE_GUARD` (hard fork 2) **and** softfork extension 1 (**live now**) | 50 lines | missing |
+| 63 | `sha256_tree` | `ENABLE_SHA256_TREE` | 16 lines | missing |
+| 64 | `secp256k1_verify` | `ENABLE_SECP_OPS` (hard fork 2) | 104 lines (with 65) | missing |
+| 65 | `secp256r1_verify` | `ENABLE_SECP_OPS` (hard fork 2) | — | missing |
+| `0x13d61f00` / `0x1c3a8f00` | secp via softfork extension | always, inside the guard | — | missing |
+
+Hard fork 2 is unscheduled (`0xFFFF_FFFA`), so the bare opcodes are not yet reachable. **The
+softfork-guard route is reachable today**, which makes the next item the live one.
+
+### OPEN — `softfork` does not execute its guarded program
+
+Ours reads only the first argument, burns the declared cost, and returns nil. It never reads the
+extension selector and never runs the program.
+
+chia parses four arguments `[cost, extension, program, env]`, resolves the extension to an
+`OperatorSet`, executes the program under it, requires the actual cost to equal the declared cost,
+and discards the guard's allocations on exit via a checkpoint.
+
+The directions matter and this one is the wrong way round:
+
+- the flag-ladder bugs made us **stricter** than consensus — we would reject valid blocks and stall,
+  which is a liveness failure;
+- this makes us **more permissive** — a guarded program that should raise is silently accepted, so
+  we could follow a chain the network rejects.
+
+Our runtime also pre-evaluates operator arguments, so a guarded `(keccak256 …)` is evaluated as an
+ordinary expression before `op_softfork` ever runs; with opcode 62 absent it becomes `op_unknown`,
+yielding nil at token cost rather than a digest.
+
+### Why no existing gate caught any of this
+
+Every gate builds its programs from operators we already implement, and every block fixture sits
+outside the affected height ranges. `opcode_coverage.rs` pins that every opcode *we know about* is
+handled — it cannot know about one we have never heard of. A missing operator, or a rule keyed to
+the wrong fork, is only visible by diffing against the reference implementation.
+
+### Their process, worth adopting
+
+`clvm_rs/docs/new-operator-checklist.md` is their own 13-step procedure for adding a consensus
+operator: test vectors generated against another implementation, inclusion in the operator fuzzer,
+a benchmark to establish cost, a `gc_candidate()` answer, an activation flag that must not collide
+with chia_rs's shared flag space, and an entry in the fuzzing generator's operator table.
+
+One step is a direct check on §8b's design: `gc_candidate()` asks whether an operator returns a
+small atom so the interpreter can free everything its invocation allocated. Our `OpOut` answers
+that structurally — `Number` and `Small` borrow nothing — so the predicate they maintain by hand
+does not exist here.
+
+---
+
 ## 9. What remains
 
 ### 9.1 Open, ranked
