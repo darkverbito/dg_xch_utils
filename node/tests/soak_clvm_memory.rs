@@ -101,10 +101,12 @@ fn clvm_body_validation_is_steady_state() {
     let retained = LIVE.load(Ordering::Relaxed).saturating_sub(base);
     let per_run = retained / ITERS;
 
-    // The prior bug retained 156,320 B/run. The threshold sits ~150x below that and comfortably
-    // above counter jitter, so the gate trips on a real per-run leak without being flaky.
+    // The allocator is exact and a correct VM releases everything on runtime drop, so the true
+    // value is zero; 64 B absorbs incidental one-time growth without admitting a real per-run
+    // leak. 1 KB/run would be gigabytes across a mainnet sync — the scale at which this class of
+    // bug OOM-cycled the node before.
     assert!(
-        per_run < 1024,
+        per_run <= 64,
         "CLVM body validation retained {per_run} B/run ({retained} B over {ITERS} runs) — a memory \
          leak. The arena-Owned-pair bug was 156,320 B/run; anything growing per run means a \
          collection or arena is keeping per-block data. Do NOT relax this threshold to make it pass."
