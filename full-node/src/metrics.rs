@@ -426,6 +426,11 @@ pub struct MetricsSnapshot {
     pub readahead_inflight: u64,
     pub readahead_hits: u64,
     pub readahead_misses: u64,
+    // Block queue: resident PRESENT bytes in the reorder buffer and slots held ahead of the
+    // consumer — the prefetch share of live allocation, so runtime growth can be read with the
+    // queue subtracted.
+    pub queue_resident_bytes: u64,
+    pub queue_len: u64,
     pub sync_from: u64,
     // Per-message-type traffic counters, sorted by label for a stable render.
     pub messages_in: Vec<(&'static str, u64)>,
@@ -533,6 +538,8 @@ impl<S: BlockStore + Send + Sync> MetricsSources<S> {
             readahead_inflight: m.readahead_inflight.load(Ordering::Relaxed),
             readahead_hits: m.readahead_hits.load(Ordering::Relaxed),
             readahead_misses: m.readahead_misses.load(Ordering::Relaxed),
+            queue_resident_bytes: m.queue_resident_bytes.load(Ordering::Relaxed),
+            queue_len: m.queue_len.load(Ordering::Relaxed),
             sync_from: u64::from(self.sync_from),
             messages_in: sorted_counts(&self.net.messages_in),
             messages_out: sorted_counts(&self.net.messages_out),
@@ -845,6 +852,20 @@ pub fn render_metrics(s: &MetricsSnapshot) -> String {
         "Follow windows that fell back to a direct fetch (failed head fetch or replan).",
         "counter",
         s.readahead_misses,
+    );
+    g(
+        &mut out,
+        "fullnode_queue_resident_bytes",
+        "Present block bytes held in the reorder buffer — the prefetch share of live allocation.",
+        "gauge",
+        s.queue_resident_bytes,
+    );
+    g(
+        &mut out,
+        "fullnode_queue_len",
+        "Slots (in-flight + present) the reorder buffer holds ahead of the consumer.",
+        "gauge",
+        s.queue_len,
     );
     g(
         &mut out,
@@ -1730,6 +1751,8 @@ mod tests {
             readahead_inflight: 4,
             readahead_hits: 30,
             readahead_misses: 2,
+            queue_resident_bytes: 268_435_456,
+            queue_len: 96,
             sync_from: 4_575_000,
             messages_in: vec![("new_peak", 7), ("new_transaction", 3)],
             messages_out: vec![("request_transaction", 2)],
@@ -1778,6 +1801,8 @@ mod tests {
         assert!(text.contains("fullnode_follow_fetch_wait_micros_total 777000"));
         assert!(text.contains("fullnode_follow_step_micros_total 1888000"));
         assert!(text.contains("fullnode_readahead_depth 6"));
+        assert!(text.contains("fullnode_queue_resident_bytes 268435456"));
+        assert!(text.contains("fullnode_queue_len 96"));
         assert!(text.contains("fullnode_readahead_inflight_windows 4"));
         assert!(text.contains("fullnode_readahead_hits_total 30"));
         assert!(text.contains("fullnode_readahead_misses_total 2"));
