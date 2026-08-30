@@ -622,7 +622,7 @@ pub fn hints_for_conditions(conds: &SpendBundleConditions) -> Vec<(Bytes32, Byte
 /// `coin_id` yields its `(puzzle_reveal, solution)` programs verbatim. `Ok(None)` when the
 /// generator spends no such coin.
 ///
-/// Post-hard-fork blocks (`simple_generator`, height ≥ `hard_fork_height`) carry the reveal and
+/// Simple-generator blocks (height ≥ `soft_fork9_height`) carry the reveal and
 /// solution directly in the generator's output — the same `(parent puzzle_reveal amount solution)`
 /// spend list [`conditions_from_generator_output`] parses — so extraction is exact. A pre-hard-fork
 /// ROM generator evaluates each puzzle internally and surfaces only the puzzle HASH plus conditions
@@ -2897,8 +2897,9 @@ mod producer_tests {
             "expected a simple (quoted) generator"
         );
 
-        // Run it through OUR validator on the simple path (height >= hard fork => simple_generator).
-        let height = MAINNET.hard_fork_height + 4000;
+        // Run it through OUR validator on the simple path (height >= soft fork 9 =>
+        // simple_generator; it was mis-keyed on hard fork 1 until the ladder fix).
+        let height = MAINNET.soft_fork9_height + 4000;
         let input = BlockGeneratorInput {
             transactions_generator: generator,
             generator_refs: Vec::new(),

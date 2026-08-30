@@ -1,26 +1,21 @@
-// Does the non-allocating operator protocol produce identical results to the shipped one?
+// Invariants of the non-allocating operator protocol, per result shape.
 //
-// `pure_ops` is a prototype of the signature DaOneLuna asked for: operators that take `&Arena`
-// instead of `&mut Arena`, and so cannot allocate at all. The claim it has to survive is narrow and
-// total — for every input, the pure operator and the shipped operator must agree on BOTH the result
-// node's serialized bytes AND the exact cost. Cost is the half that would be easy to get subtly
-// wrong, because the malloc surcharge depends on the encoded length of a result that does not exist
-// yet when the pure operator returns.
+// Operators take `&Arena` and cannot allocate; each returns an `OpOut` the runtime materializes
+// at one site. The equivalence this file originally checked — prototype against the shipped
+// mutable operators — no longer exists to state, since the protocol IS the shipped path (byte
+// and cost goldens live in `clvm_op_vectors`). What still has to hold, per shape:
 //
-// The four operators cover the shapes that stress the protocol differently:
-//   - `f`      returns an existing node, so the protocol should cost literally nothing;
-//   - `c`      builds structure from nodes it never inspects;
-//   - `+`      computes a number whose price depends on its own encoded length;
-//   - `concat` is the worst case — output size is unknown until every argument is walked, and the
-//              result may be large, so a naive protocol would pay an extra full-size copy here.
+//   - `f`      returns an existing node: no storage may move and no malloc surcharge applies;
+//   - `c`      builds exactly one pair from nodes it never inspects, at CONS_COST;
+//   - `+`      prices its result by the ENCODED length, which does not exist until materialize;
+//   - `concat` writes straight into the heap — exactly the output bytes, no intermediate copy.
 //
-// Inputs are generated from a seeded PRNG and deliberately include the degenerate cases: empty
-// arguments, wrong arity, non-atoms where atoms are required, and concatenations large enough that
-// an extra copy would show up in the timing comparison rather than hiding in noise.
+// Inputs come from a seeded PRNG biased toward the encodings that have historically broken
+// things (empty atoms, sign-bit edges, non-canonical zeros, multi-hundred-byte payloads).
 
 use dg_xch_core::clvm::arena::{Arena, NodePtr};
 use dg_xch_core::clvm::dialect::ChiaDialect;
-use dg_xch_core::clvm::pure_ops;
+use dg_xch_core::clvm::pure_ops::{MALLOC_COST_PER_BYTE, OpOut};
 use dg_xch_core::clvm::{core_ops, more_ops};
 
 struct Rng(u64);
@@ -57,230 +52,168 @@ fn gen_atom(rng: &mut Rng) -> Vec<u8> {
     }
 }
 
-/// Build an argument list, occasionally malformed so the error paths are compared too.
-fn gen_args(arena: &mut Arena, rng: &mut Rng, want_pairs: bool) -> NodePtr {
-    let n = rng.below(4);
-    let mut items = Vec::new();
-    for _ in 0..n {
-        let node = if want_pairs && rng.below(3) == 0 {
-            // A pair where an atom is expected — drives the error path.
-            let a = arena.new_atom(&gen_atom(rng)).expect("atom");
-            let b = arena.new_atom(&gen_atom(rng)).expect("atom");
-            arena.new_pair(a, b).expect("pair")
-        } else {
-            arena.new_atom(&gen_atom(rng)).expect("atom")
+fn list_of(arena: &mut Arena, items: &[NodePtr]) -> NodePtr {
+    let mut out = NodePtr::NIL;
+    for item in items.iter().rev() {
+        out = arena.new_pair(*item, out).expect("pair");
+    }
+    out
+}
+
+#[test]
+fn first_moves_no_storage_and_adds_no_surcharge() {
+    let dialect = ChiaDialect::new(0);
+    for seed in 0..300u64 {
+        let mut rng = Rng::new(seed);
+        let mut arena = Arena::new();
+        let a = arena.new_atom(&gen_atom(&mut rng)).expect("atom");
+        let b = arena.new_atom(&gen_atom(&mut rng)).expect("atom");
+        let inner = arena.new_pair(a, b).expect("pair");
+        let args = list_of(&mut arena, &[inner]);
+
+        let stored = (
+            arena.stored_atom_count(),
+            arena.stored_pair_count(),
+            arena.stored_heap_bytes(),
+        );
+        let (cost, out) = core_ops::op_first(&arena, args, u64::MAX, &dialect).expect("f");
+        assert!(
+            matches!(out, OpOut::Same(n) if n == a),
+            "seed {seed}: f returns the node itself"
+        );
+        let (total, node) = out.materialize(&mut arena, cost).expect("materialize");
+        assert_eq!(node, a, "seed {seed}");
+        assert_eq!(
+            total, cost,
+            "seed {seed}: Same must add no malloc surcharge"
+        );
+        assert_eq!(
+            (
+                arena.stored_atom_count(),
+                arena.stored_pair_count(),
+                arena.stored_heap_bytes(),
+            ),
+            stored,
+            "seed {seed}: f moved storage"
+        );
+    }
+}
+
+#[test]
+fn cons_builds_exactly_one_pair_without_reading_its_nodes() {
+    let dialect = ChiaDialect::new(0);
+    for seed in 0..300u64 {
+        let mut rng = Rng::new(seed);
+        let mut arena = Arena::new();
+        let a = arena.new_atom(&gen_atom(&mut rng)).expect("atom");
+        let b = arena.new_atom(&gen_atom(&mut rng)).expect("atom");
+        let args = list_of(&mut arena, &[a, b]);
+
+        let pairs = arena.stored_pair_count();
+        let heap = arena.stored_heap_bytes();
+        let (cost, out) = core_ops::op_cons(&arena, args, u64::MAX, &dialect).expect("c");
+        assert!(
+            matches!(out, OpOut::Pair(x, y) if x == a && y == b),
+            "seed {seed}"
+        );
+        let (total, node) = out.materialize(&mut arena, cost).expect("materialize");
+        assert_eq!(total, cost, "seed {seed}: Pair carries no malloc surcharge");
+        assert_eq!(
+            arena.stored_pair_count(),
+            pairs + 1,
+            "seed {seed}: exactly one pair"
+        );
+        assert_eq!(
+            arena.stored_heap_bytes(),
+            heap,
+            "seed {seed}: no heap bytes for a cons"
+        );
+        let (first, rest) = match arena.node_kind(node) {
+            dg_xch_core::clvm::arena::NodeKind::Pair(f, r) => (f, r),
+            dg_xch_core::clvm::arena::NodeKind::Atom => panic!("seed {seed}: cons made an atom"),
         };
-        items.push(node);
-    }
-    let mut list = NodePtr::NIL;
-    for node in items.into_iter().rev() {
-        list = arena.new_pair(node, list).expect("pair");
-    }
-    list
-}
-
-/// Everything observable about an operator's outcome: the exact cost, and the result rendered so
-/// two different arenas can be compared without sharing handles.
-fn describe(arena: &Arena, r: &Result<(u64, NodePtr), dg_xch_core::errors::ClvmError>) -> String {
-    match r {
-        Ok((cost, node)) => format!("ok {cost} {}", arena.display(*node)),
-        Err(e) => {
-            let mut s = format!("err {e:?}");
-            s.truncate(200);
-            s
-        }
+        assert_eq!((first, rest), (a, b), "seed {seed}");
     }
 }
 
 #[test]
-fn pure_operators_match_the_shipped_operators_exactly() {
-    const CASES: u64 = 3000;
+fn add_prices_by_the_encoded_length_only_at_materialize() {
     let dialect = ChiaDialect::new(0);
-    let mut agreed = 0usize;
-    let mut errors = 0usize;
+    for seed in 0..300u64 {
+        let mut rng = Rng::new(seed);
+        let mut arena = Arena::new();
+        let mut items = Vec::new();
+        for _ in 0..rng.below(4) + 1 {
+            // Canonical integers only: `+` rejects the deliberately broken encodings.
+            let n = (rng.next() as i64) >> rng.below(48);
+            let num = dg_xch_core::clvm::sexp_ext::SExpNumber::I128(i128::from(n));
+            items.push(arena.new_number(&num).expect("number"));
+        }
+        let args = list_of(&mut arena, &items);
 
-    for seed in 0..CASES {
-        // Each operator gets its own arena pair so neither run can observe the other's allocations.
-        for which in 0..4 {
-            let mut rng_a = Rng::new(seed ^ (which as u64) << 32);
-            let mut rng_b = Rng::new(seed ^ (which as u64) << 32);
-            let mut arena_shipped = Arena::new();
-            let mut arena_pure = Arena::new();
-            let args_shipped = gen_args(&mut arena_shipped, &mut rng_a, true);
-            let args_pure = gen_args(&mut arena_pure, &mut rng_b, true);
+        let (cost, out) = more_ops::op_add(&arena, args, u64::MAX, &dialect).expect("+");
+        assert!(
+            matches!(out, OpOut::Number(_)),
+            "seed {seed}: + describes a number"
+        );
+        let (total, node) = out.materialize(&mut arena, cost).expect("materialize");
+        let encoded = arena.atom_len(node).expect("atom result") as u64;
+        assert_eq!(
+            total,
+            cost + encoded * MALLOC_COST_PER_BYTE,
+            "seed {seed}: surcharge must equal the encoded length"
+        );
+    }
+}
 
-            let (shipped, pure) = match which {
-                0 => (
-                    core_ops::op_first(&mut arena_shipped, args_shipped, u64::MAX, &dialect),
-                    pure_ops::apply_pure(
-                        pure_ops::op_first,
-                        &mut arena_pure,
-                        args_pure,
-                        u64::MAX,
-                        &dialect,
-                    ),
-                ),
-                1 => (
-                    core_ops::op_cons(&mut arena_shipped, args_shipped, u64::MAX, &dialect),
-                    pure_ops::apply_pure(
-                        pure_ops::op_cons,
-                        &mut arena_pure,
-                        args_pure,
-                        u64::MAX,
-                        &dialect,
-                    ),
-                ),
-                2 => (
-                    more_ops::op_add(&mut arena_shipped, args_shipped, u64::MAX, &dialect),
-                    pure_ops::apply_pure(
-                        pure_ops::op_add,
-                        &mut arena_pure,
-                        args_pure,
-                        u64::MAX,
-                        &dialect,
-                    ),
-                ),
-                _ => (
-                    more_ops::op_concat(&mut arena_shipped, args_shipped, u64::MAX, &dialect),
-                    pure_ops::apply_pure(
-                        pure_ops::op_concat,
-                        &mut arena_pure,
-                        args_pure,
-                        u64::MAX,
-                        &dialect,
-                    ),
-                ),
-            };
+#[test]
+fn concat_writes_exactly_the_output_bytes() {
+    let dialect = ChiaDialect::new(0);
+    for seed in 0..300u64 {
+        let mut rng = Rng::new(seed);
+        let mut arena = Arena::new();
+        let mut blobs = Vec::new();
+        let mut items = Vec::new();
+        for _ in 0..rng.below(5) + 1 {
+            let blob = gen_atom(&mut rng);
+            items.push(arena.new_atom(&blob).expect("atom"));
+            blobs.push(blob);
+        }
+        let args = list_of(&mut arena, &items);
+        let expected: Vec<u8> = blobs.concat();
 
-            let a = describe(&arena_shipped, &shipped);
-            let b = describe(&arena_pure, &pure);
-            let name = ["first", "cons", "add", "concat"][which];
-            assert_eq!(
-                a, b,
-                "seed {seed} op {name}: the pure operator disagrees with the shipped one.\n\
-                 shipped: {a}\n  pure: {b}"
-            );
-            if shipped.is_err() {
-                errors += 1;
+        let heap = arena.stored_heap_bytes();
+        let logical_heap = arena.counters().2;
+        let (cost, out) = more_ops::op_concat(&arena, args, u64::MAX, &dialect).expect("concat");
+        match &out {
+            OpOut::Concat(nodes, total) => {
+                assert_eq!(*total, expected.len(), "seed {seed}: total must match");
+                assert_eq!(nodes.len(), items.len(), "seed {seed}");
             }
-            agreed += 1;
+            // A single-argument concat may legitimately return the node unchanged.
+            OpOut::Same(_) => {}
+            _ => panic!("seed {seed}: unexpected concat shape"),
+        }
+        let single = matches!(out, OpOut::Same(_));
+        let (_, node) = out.materialize(&mut arena, cost).expect("materialize");
+        let got = arena.atom(node).expect("atom result");
+        assert_eq!(
+            got.as_ref(),
+            expected.as_slice(),
+            "seed {seed}: concat bytes"
+        );
+        if !single {
+            // Interning may satisfy the write from an existing span, so stored growth is AT
+            // MOST the output; the logical count grows by exactly the output either way.
+            assert!(
+                arena.stored_heap_bytes() <= heap + expected.len(),
+                "seed {seed}: heap grew past the output — an intermediate copy"
+            );
+            assert_eq!(
+                arena.counters().2,
+                logical_heap + expected.len(),
+                "seed {seed}: logical heap must grow by exactly the output"
+            );
         }
     }
-
-    eprintln!(
-        "  {agreed} operator invocations agreed exactly ({errors} of them on the error path)"
-    );
-    assert!(
-        errors > 0,
-        "no error-path cases were generated; the comparison only covers success"
-    );
-}
-
-#[test]
-fn the_worst_case_operator_pays_no_extra_copy() {
-    // `concat` is where a naive protocol would lose: returning `Vec<u8>` would copy the whole
-    // result once more than the shipped operator does. Describing the work instead (source nodes +
-    // total length) lets the caller write straight into the arena heap. Compare the two on large
-    // concatenations; the pure path must not be materially slower.
-    use std::time::Instant;
-
-    let dialect = ChiaDialect::new(0);
-    const REPS: usize = 4000;
-
-    let build = |arena: &mut Arena, rng: &mut Rng| {
-        let mut list = NodePtr::NIL;
-        let mut nodes = Vec::new();
-        for _ in 0..8 {
-            let blob: Vec<u8> = (0..2048).map(|_| rng.next() as u8).collect();
-            nodes.push(arena.new_atom(&blob).expect("atom"));
-        }
-        for node in nodes.into_iter().rev() {
-            list = arena.new_pair(node, list).expect("pair");
-        }
-        list
-    };
-
-    let mut arena = Arena::new();
-    let mut rng = Rng::new(0xC0AC);
-    let args = build(&mut arena, &mut rng);
-
-    // Warm both paths so allocation growth is not charged to whichever runs first.
-    for _ in 0..64 {
-        let _ = more_ops::op_concat(&mut arena, args, u64::MAX, &dialect);
-        let _ = pure_ops::apply_pure(pure_ops::op_concat, &mut arena, args, u64::MAX, &dialect);
-    }
-
-    let t0 = Instant::now();
-    for _ in 0..REPS {
-        let r = more_ops::op_concat(&mut arena, args, u64::MAX, &dialect).expect("concat");
-        std::hint::black_box(r.0);
-    }
-    let shipped = t0.elapsed().as_secs_f64();
-
-    let t1 = Instant::now();
-    for _ in 0..REPS {
-        let r = pure_ops::apply_pure(pure_ops::op_concat, &mut arena, args, u64::MAX, &dialect)
-            .expect("concat");
-        std::hint::black_box(r.0);
-    }
-    let pure = t1.elapsed().as_secs_f64();
-
-    let ratio = pure / shipped;
-    eprintln!(
-        "  concat 8x2048 B: shipped {shipped:.4}s, pure {pure:.4}s, ratio {ratio:.2}x over {REPS} reps"
-    );
-    assert!(
-        ratio < 1.5,
-        "the pure protocol is {ratio:.2}x slower on the worst-case operator, which means it is \
-         paying a copy the shipped operator avoids — the description-based design has failed its \
-         central claim"
-    );
-}
-
-#[test]
-fn the_protocol_overhead_is_small_on_a_trivial_operator() {
-    // `concat` mixes two costs: the protocol itself, and moving a `Vec` of source nodes through
-    // the returned description. `f` isolates the first — it reads two pairs and returns an
-    // existing node, so essentially all the time is dispatch. If the protocol had meaningful
-    // fixed overhead it would show here at its worst, since there is no real work to amortize it
-    // against; in a real run the eval loop dwarfs this.
-    use std::time::Instant;
-
-    let dialect = ChiaDialect::new(0);
-    const REPS: usize = 200_000;
-
-    let mut arena = Arena::new();
-    let inner_a = arena.new_atom(&[1, 2, 3]).expect("atom");
-    let inner_b = arena.new_atom(&[4, 5, 6]).expect("atom");
-    let pair = arena.new_pair(inner_a, inner_b).expect("pair");
-    let args = arena.new_pair(pair, NodePtr::NIL).expect("pair");
-
-    for _ in 0..1000 {
-        let _ = core_ops::op_first(&mut arena, args, u64::MAX, &dialect);
-        let _ = pure_ops::apply_pure(pure_ops::op_first, &mut arena, args, u64::MAX, &dialect);
-    }
-
-    let t0 = Instant::now();
-    for _ in 0..REPS {
-        let r = core_ops::op_first(&mut arena, args, u64::MAX, &dialect).expect("first");
-        std::hint::black_box(r.0);
-    }
-    let shipped = t0.elapsed().as_secs_f64();
-
-    let t1 = Instant::now();
-    for _ in 0..REPS {
-        let r = pure_ops::apply_pure(pure_ops::op_first, &mut arena, args, u64::MAX, &dialect)
-            .expect("first");
-        std::hint::black_box(r.0);
-    }
-    let pure = t1.elapsed().as_secs_f64();
-
-    let ratio = pure / shipped;
-    eprintln!(
-        "  first (pure dispatch): shipped {shipped:.4}s, pure {pure:.4}s, ratio {ratio:.2}x over {REPS} reps"
-    );
-    assert!(
-        ratio < 1.5,
-        "the protocol costs {ratio:.2}x on an operator that does no work, so the overhead is in          the dispatch itself and every operator would pay it"
-    );
 }

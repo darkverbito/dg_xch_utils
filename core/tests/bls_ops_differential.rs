@@ -162,7 +162,8 @@ fn run_pubkey_for_exp(atom: &[u8], max_cost: u64) -> Result<(u64, Vec<u8>), Clvm
     let mut arena = Arena::new();
     let dialect = ChiaDialect::new(0);
     let args = atom_list(&mut arena, &[atom.to_vec()]);
-    let (cost, ptr) = op_pubkey_for_exp(&mut arena, args, max_cost, &dialect)?;
+    let (cost, out) = op_pubkey_for_exp(&arena, args, max_cost, &dialect)?;
+    let (cost, ptr) = out.materialize(&mut arena, cost)?;
     let bytes = arena.atom(ptr).expect("atom result").as_ref().to_vec();
     Ok((cost, bytes))
 }
@@ -171,7 +172,8 @@ fn run_point_add(atoms: &[Vec<u8>], max_cost: u64) -> Result<(u64, Vec<u8>), Clv
     let mut arena = Arena::new();
     let dialect = ChiaDialect::new(0);
     let args = atom_list(&mut arena, atoms);
-    let (cost, ptr) = op_point_add(&mut arena, args, max_cost, &dialect)?;
+    let (cost, out) = op_point_add(&arena, args, max_cost, &dialect)?;
+    let (cost, ptr) = out.materialize(&mut arena, cost)?;
     let bytes = arena.atom(ptr).expect("atom result").as_ref().to_vec();
     Ok((cost, bytes))
 }

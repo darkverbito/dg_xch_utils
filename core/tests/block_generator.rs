@@ -544,10 +544,14 @@ fn simple_generator_mode_rejects_complex_generator_shape() {
 }
 
 #[test]
-fn height_flags_select_legacy_before_hardfork() {
-    let before = BlockGeneratorFlags::for_height(&MAINNET, MAINNET.hard_fork_height - 1);
-    let after = BlockGeneratorFlags::for_height(&MAINNET, MAINNET.hard_fork_height);
+fn height_flags_select_legacy_before_soft_fork9() {
+    // The simple generator arrives with soft fork 9, not hard fork 1 — the mis-keying the
+    // ladder fix corrected. Hard fork 1 stays on the legacy path.
+    let at_hf1 = BlockGeneratorFlags::for_height(&MAINNET, MAINNET.hard_fork_height);
+    let before = BlockGeneratorFlags::for_height(&MAINNET, MAINNET.soft_fork9_height - 1);
+    let after = BlockGeneratorFlags::for_height(&MAINNET, MAINNET.soft_fork9_height);
 
+    assert!(!at_hf1.simple_generator);
     assert!(!before.simple_generator);
     assert!(after.simple_generator);
 }

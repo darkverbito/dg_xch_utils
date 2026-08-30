@@ -1260,14 +1260,15 @@ mod tests {
                 let item = arena.new_atom(b).expect("atom");
                 args = arena.new_pair(item, args).expect("pair");
             }
-            let (_, out) = super::op_sha256(
-                &mut arena,
+            let (cost, out) = super::op_sha256(
+                &arena,
                 args,
                 u64::MAX,
                 &crate::clvm::dialect::ChiaDialect::new(0),
             )
             .expect("op runs");
-            let got = arena.atom(out).expect("digest atom");
+            let (_, node) = out.materialize(&mut arena, cost).expect("materialize");
+            let got = arena.atom(node).expect("digest atom");
             assert_eq!(got.as_ref(), reference.finalize().as_slice());
         }
     }
