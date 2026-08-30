@@ -12,6 +12,7 @@ pub mod dialect;
 pub mod more_ops;
 pub mod parser;
 pub mod program;
+pub mod pure_ops;
 pub mod runtime;
 pub mod serialize_backrefs;
 pub mod sexp;
