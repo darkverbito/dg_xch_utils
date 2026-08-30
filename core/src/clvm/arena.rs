@@ -220,9 +220,6 @@ pub struct Checkpoint {
     heap: usize,
     pairs: usize,
     atoms: usize,
-    ghost_atoms: usize,
-    ghost_pairs: usize,
-    ghost_heap: usize,
 }
 
 impl Arena {
@@ -244,8 +241,6 @@ impl Arena {
         arena
     }
 
-    /// Truncate all pools (capacity retained) and reset the ghost counters to their initial
-    /// state (2 ghost atoms + 1 ghost heap byte, standing in for nil/one).
     /// Record the current pool sizes so a later [`Arena::restore`] can discard everything
     /// allocated since.
     #[must_use]
@@ -254,9 +249,6 @@ impl Arena {
             heap: self.u8_vec.len(),
             pairs: self.pair_vec.len(),
             atoms: self.atom_vec.len(),
-            ghost_atoms: self.ghost_atoms,
-            ghost_pairs: self.ghost_pairs,
-            ghost_heap: self.ghost_heap,
         }
     }
 
@@ -264,18 +256,22 @@ impl Arena {
     /// indices are reused, so a stale handle silently denotes a different node. The caller must
     /// know nothing allocated after the checkpoint is reachable.
     ///
-    /// Ghost counters roll back with it, and the intern map is cleared wholesale — its entries
+    /// Rewound storage converts into ghosts rather than falling out of the count: the ceilings
+    /// are consensus, and the reference allocator only grows within a run, so a node minted and
+    /// rewound must still count against them. The intern map is cleared wholesale — its entries
     /// index into the truncated pools.
     pub fn restore(&mut self, cp: Checkpoint) {
+        self.ghost_heap += self.u8_vec.len() - cp.heap;
+        self.ghost_pairs += self.pair_vec.len() - cp.pairs;
+        self.ghost_atoms += self.atom_vec.len() - cp.atoms;
         self.u8_vec.truncate(cp.heap);
         self.pair_vec.truncate(cp.pairs);
         self.atom_vec.truncate(cp.atoms);
-        self.ghost_atoms = cp.ghost_atoms;
-        self.ghost_pairs = cp.ghost_pairs;
-        self.ghost_heap = cp.ghost_heap;
         self.atom_intern.clear();
     }
 
+    /// Truncate all pools (capacity retained) and reset the ghost counters to their initial
+    /// state (2 ghost atoms + 1 ghost heap byte, standing in for nil/one).
     pub fn reset(&mut self) {
         self.atom_intern.clear();
         self.u8_vec.clear();
@@ -1035,5 +1031,45 @@ mod tests {
         assert!(before.0 > 2 && before.1 > 0);
         a.reset();
         assert_eq!(a.counters(), (2, 0, 1));
+    }
+
+    // Red-first: the ceilings read stored + ghost, and chia's counts are monotone within a run
+    // (its allocator only rewinds at softfork teardown). Rolling ghosts back on every restore
+    // lets a program mint nodes inside rewound operand regions without them ever counting, so a
+    // block chia rejects at the cap would pass here. A restore must convert rewound storage into
+    // ghosts, keeping the logical count monotone.
+    #[test]
+    fn rewound_storage_stays_counted_against_the_ceilings() {
+        let mut a = Arena::new();
+        let cp = a.checkpoint();
+        let atoms0 = a.atom_vec.len() + a.ghost_atoms;
+        let pairs0 = a.pair_vec.len() + a.ghost_pairs;
+        let heap0 = a.u8_vec.len() + a.ghost_heap;
+
+        let x = a.new_atom(&[7u8; 40]).unwrap();
+        let y = a.new_atom(&[9u8; 40]).unwrap();
+        a.new_pair(x, y).unwrap();
+        let atoms1 = a.atom_vec.len() + a.ghost_atoms;
+        let pairs1 = a.pair_vec.len() + a.ghost_pairs;
+        let heap1 = a.u8_vec.len() + a.ghost_heap;
+        assert_eq!(atoms1, atoms0 + 2);
+        assert_eq!(pairs1, pairs0 + 1);
+
+        a.restore(cp);
+        assert_eq!(
+            a.atom_vec.len() + a.ghost_atoms,
+            atoms1,
+            "rewound atoms fell out of the count"
+        );
+        assert_eq!(
+            a.pair_vec.len() + a.ghost_pairs,
+            pairs1,
+            "rewound pairs fell out of the count"
+        );
+        assert_eq!(
+            a.u8_vec.len() + a.ghost_heap,
+            heap1,
+            "rewound heap fell out of the count"
+        );
     }
 }
