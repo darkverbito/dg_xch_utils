@@ -544,16 +544,17 @@ fn simple_generator_mode_rejects_complex_generator_shape() {
 }
 
 #[test]
-fn height_flags_select_legacy_before_soft_fork9() {
-    // The simple generator arrives with soft fork 9, not hard fork 1 — the mis-keying the
-    // ladder fix corrected. Hard fork 1 stays on the legacy path.
-    let at_hf1 = BlockGeneratorFlags::for_height(&MAINNET, MAINNET.hard_fork_height);
-    let before = BlockGeneratorFlags::for_height(&MAINNET, MAINNET.soft_fork9_height - 1);
-    let after = BlockGeneratorFlags::for_height(&MAINNET, MAINNET.soft_fork9_height);
+fn height_flags_select_legacy_before_hardfork() {
+    // Generator MODE keys on hard fork 1 — chia's validator picks run_block_generator2 at
+    // HARD_FORK_HEIGHT — while the CLVM flag set stays empty until soft fork 8/9. The two
+    // ladders are separate; conflating them walled a live sync at 5,496,002 with
+    // InvalidBlockCost.
+    let before = BlockGeneratorFlags::for_height(&MAINNET, MAINNET.hard_fork_height - 1);
+    let after = BlockGeneratorFlags::for_height(&MAINNET, MAINNET.hard_fork_height);
 
-    assert!(!at_hf1.simple_generator);
     assert!(!before.simple_generator);
     assert!(after.simple_generator);
+    assert_eq!(after.clvm_flags, 0, "no CLVM flag activates at hard fork 1");
 }
 
 // Soft fork 9 CANONICAL_INTS activates strictly by height (chia_rs

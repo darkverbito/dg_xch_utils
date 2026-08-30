@@ -75,9 +75,12 @@ impl BlockGeneratorFlags {
 
         Self {
             clvm_flags,
-            // Soft fork 9, not hard fork 1: keying it earlier made this node stricter than
-            // consensus for the 3,159,000 blocks between them.
-            simple_generator: height >= constants.soft_fork9_height,
+            // Generator MODE keys on hard fork 1 — chia's validator selects
+            // run_block_generator2 at HARD_FORK_HEIGHT — while the CLVM flag set above stays
+            // empty until soft fork 8/9. The two ladders are separate: keying the mode on soft
+            // fork 9 walled a live sync at 5,496,002 with InvalidBlockCost, since the byte-cost
+            // charge differs between the ROM and direct paths.
+            simple_generator: height >= constants.hard_fork_height,
         }
     }
 }
@@ -622,7 +625,7 @@ pub fn hints_for_conditions(conds: &SpendBundleConditions) -> Vec<(Bytes32, Byte
 /// `coin_id` yields its `(puzzle_reveal, solution)` programs verbatim. `Ok(None)` when the
 /// generator spends no such coin.
 ///
-/// Simple-generator blocks (height ≥ `soft_fork9_height`) carry the reveal and
+/// Simple-generator blocks (height ≥ `hard_fork_height`) carry the reveal and
 /// solution directly in the generator's output — the same `(parent puzzle_reveal amount solution)`
 /// spend list [`conditions_from_generator_output`] parses — so extraction is exact. A pre-hard-fork
 /// ROM generator evaluates each puzzle internally and surfaces only the puzzle HASH plus conditions
@@ -2897,9 +2900,9 @@ mod producer_tests {
             "expected a simple (quoted) generator"
         );
 
-        // Run it through OUR validator on the simple path (height >= soft fork 9 =>
-        // simple_generator; it was mis-keyed on hard fork 1 until the ladder fix).
-        let height = MAINNET.soft_fork9_height + 4000;
+        // Run it through OUR validator on the simple path (height >= hard fork =>
+        // simple_generator, chia's run_block_generator2 selection).
+        let height = MAINNET.hard_fork_height + 4000;
         let input = BlockGeneratorInput {
             transactions_generator: generator,
             generator_refs: Vec::new(),

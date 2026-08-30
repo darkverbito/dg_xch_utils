@@ -563,12 +563,11 @@ commits). The authority for activation is `chia_rs`
 
 ### FIXED — the flag ladder (commit follows §8b)
 
-Three flags were keyed to the wrong fork. None of our gates could see it: the block fixtures sit at
+Two flags were keyed to the wrong fork. None of our gates could see it: the block fixtures sit at
 4,671,894 and 9,179,155..9,179,200, below and above the entire affected window.
 
 | flag | chia activates | we did | effect |
 | --- | --- | --- | --- |
-| `SIMPLE_GENERATOR` | soft fork 9 (8,655,000) | hard fork 1 (5,496,000) | **stricter than consensus for 3,159,000 blocks** — rejects generator refs and non-quoted generators that chia accepts |
 | `COST_CONDITIONS` | hard fork 2 (unscheduled) | hard fork 1 | announcement accounting switched ~3.7M blocks early |
 | keccak-outside-guard | hard fork 2 (unscheduled) | hard fork 1 | flag on, operator absent |
 | `LIMITS` | soft fork 9 | soft fork 8 | identical on mainnet (same height); **diverges on testnet11**, where SF8=3,755,000 and SF9=3,924,000 |
@@ -576,6 +575,15 @@ Three flags were keyed to the wrong fork. None of our gates could see it: the bl
 The branch structure was also flattened. Hard fork 2 and soft fork 8 are mutually exclusive in
 chia — the hard fork stops disabling modpow — and `LIMITS` applies only between soft fork 9 and
 hard fork 2, because the bounded cost model subsumes it.
+
+A correction from the live chain: an earlier revision of this audit also moved the simple-generator
+selection to soft fork 9, reading it as part of the flag ladder. It is not — the generator MODE is a
+separate ladder. Chia's validator selects `run_block_generator2` at `HARD_FORK_HEIGHT`
+(`multiprocess_validation.py`) while `get_flags_for_height_and_constants` returns nothing until soft
+fork 8/9 (verified against chia_rs 0.48.0: flags are 0x0 through 8,654,999, then 0x03000241). The
+soft-fork-9 keying ran the ROM path where mainnet ran the direct path, and the first post-fork tx
+block (5,496,002) rejected with `InvalidBlockCost` — caught by the sync-from validation leg anchored
+at 5,490,000, in the 3.16M-block window none of the fixtures cover.
 
 Our own `constants.rs` already documented the correct answer ("Hard fork 2: keccak/secp outside the
 guard, COST_CONDITIONS…"); only the ladder disagreed. `core/tests/flag_ladder.rs` now pins every

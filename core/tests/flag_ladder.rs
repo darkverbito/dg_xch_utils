@@ -27,7 +27,7 @@ fn expected(constants: &ConsensusConstants, height: u32) -> (u32, bool) {
             flags |= LIMITS;
         }
     }
-    (flags, height >= constants.soft_fork9_height)
+    (flags, height >= constants.hard_fork_height)
 }
 
 /// Every height where behaviour can change, plus the block on either side of it.
@@ -190,8 +190,8 @@ fn a_flag_is_never_enabled_before_its_fork() {
         at_hf1.clvm_flags
     );
     assert!(
-        !at_hf1.simple_generator,
-        "the simple generator must not be active at hard fork 1 — it arrives at soft fork 9"
+        at_hf1.simple_generator,
+        "the simple generator mode arrives exactly at hard fork 1"
     );
 
     // And nothing changes anywhere in the window until soft fork 8.
@@ -202,8 +202,8 @@ fn a_flag_is_never_enabled_before_its_fork() {
             "height {height}: no flag is active in this window"
         );
         assert!(
-            !f.simple_generator,
-            "height {height}: simple generator not yet active"
+            f.simple_generator,
+            "height {height}: the mode stays on after hard fork 1"
         );
     }
     eprintln!("  the hard-fork-1 to soft-fork-8 window is flag-free, as chia has it");
