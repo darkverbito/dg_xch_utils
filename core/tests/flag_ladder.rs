@@ -106,16 +106,34 @@ fn the_ladder_matches_chia_when_the_soft_forks_are_at_different_heights() {
             "height {height} (split soft forks): {:#010x} != {want_flags:#010x}",
             got.clvm_flags
         );
-        assert_eq!(got.simple_generator, want_simple, "height {height}: simple_generator");
+        assert_eq!(
+            got.simple_generator, want_simple,
+            "height {height}: simple_generator"
+        );
     }
 
     // Spell out the window explicitly: between the two soft forks, DISABLE_OP is on and the soft
     // fork 9 set is not.
     let between = BlockGeneratorFlags::for_height(&c, 3_800_000);
-    assert_ne!(between.clvm_flags & DISABLE_OP, 0, "DISABLE_OP should be on after soft fork 8");
-    assert_eq!(between.clvm_flags & LIMITS, 0, "LIMITS belongs to soft fork 9, not 8");
-    assert_eq!(between.clvm_flags & CANONICAL_INTS, 0, "CANONICAL_INTS belongs to soft fork 9");
-    assert!(!between.simple_generator, "the simple generator arrives with soft fork 9");
+    assert_ne!(
+        between.clvm_flags & DISABLE_OP,
+        0,
+        "DISABLE_OP should be on after soft fork 8"
+    );
+    assert_eq!(
+        between.clvm_flags & LIMITS,
+        0,
+        "LIMITS belongs to soft fork 9, not 8"
+    );
+    assert_eq!(
+        between.clvm_flags & CANONICAL_INTS,
+        0,
+        "CANONICAL_INTS belongs to soft fork 9"
+    );
+    assert!(
+        !between.simple_generator,
+        "the simple generator arrives with soft fork 9"
+    );
     eprintln!("  split soft-fork heights hold; the SF8/SF9 window is distinguished");
 }
 
@@ -129,15 +147,35 @@ fn hard_fork_two_supersedes_the_soft_fork_eight_and_nine_rules() {
     let before = BlockGeneratorFlags::for_height(&c, 8_999_999);
     let after = BlockGeneratorFlags::for_height(&c, 9_000_000);
 
-    assert_ne!(before.clvm_flags & DISABLE_OP, 0, "modpow is disabled before hard fork 2");
-    assert_eq!(after.clvm_flags & DISABLE_OP, 0, "hard fork 2 re-enables modpow");
+    assert_ne!(
+        before.clvm_flags & DISABLE_OP,
+        0,
+        "modpow is disabled before hard fork 2"
+    );
+    assert_eq!(
+        after.clvm_flags & DISABLE_OP,
+        0,
+        "hard fork 2 re-enables modpow"
+    );
 
-    assert_ne!(before.clvm_flags & LIMITS, 0, "operand caps apply before hard fork 2");
-    assert_eq!(after.clvm_flags & LIMITS, 0, "the bounded cost model subsumes the caps");
+    assert_ne!(
+        before.clvm_flags & LIMITS,
+        0,
+        "operand caps apply before hard fork 2"
+    );
+    assert_eq!(
+        after.clvm_flags & LIMITS,
+        0,
+        "the bounded cost model subsumes the caps"
+    );
 
     assert_eq!(before.clvm_flags & NEW_COST_MODEL, 0);
     assert_ne!(after.clvm_flags & NEW_COST_MODEL, 0);
-    assert_ne!(after.clvm_flags & COST_CONDITIONS, 0, "flat condition costs arrive with hard fork 2");
+    assert_ne!(
+        after.clvm_flags & COST_CONDITIONS,
+        0,
+        "flat condition costs arrive with hard fork 2"
+    );
     assert_ne!(
         after.clvm_flags & ENABLE_KECCAK_OPS_OUTSIDE_FORK,
         0,
@@ -145,8 +183,15 @@ fn hard_fork_two_supersedes_the_soft_fork_eight_and_nine_rules() {
     );
 
     // Soft fork 9 rules that are NOT superseded stay on.
-    assert_ne!(after.clvm_flags & CANONICAL_INTS, 0, "canonical ints survive hard fork 2");
-    assert!(after.simple_generator, "the simple generator survives hard fork 2");
+    assert_ne!(
+        after.clvm_flags & CANONICAL_INTS,
+        0,
+        "canonical ints survive hard fork 2"
+    );
+    assert!(
+        after.simple_generator,
+        "the simple generator survives hard fork 2"
+    );
     eprintln!("  hard fork 2 supersedes exactly the rules it should");
 }
 
@@ -171,8 +216,14 @@ fn a_flag_is_never_enabled_before_its_fork() {
     // And nothing changes anywhere in the window until soft fork 8.
     for height in [hf1 + 1, 6_000_000, 7_500_000, MAINNET.soft_fork8_height - 1] {
         let f = BlockGeneratorFlags::for_height(&MAINNET, height);
-        assert_eq!(f.clvm_flags, 0, "height {height}: no flag is active in this window");
-        assert!(!f.simple_generator, "height {height}: simple generator not yet active");
+        assert_eq!(
+            f.clvm_flags, 0,
+            "height {height}: no flag is active in this window"
+        );
+        assert!(
+            !f.simple_generator,
+            "height {height}: simple generator not yet active"
+        );
     }
     eprintln!("  the hard-fork-1 to soft-fork-8 window is flag-free, as chia has it");
 }

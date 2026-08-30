@@ -107,16 +107,43 @@ const OPS: &[(&str, u8, &[Kind])] = &[
     ("not", 32, &[Kind::Bool]),
     ("any", 33, &[Kind::Bool, Kind::Bool]),
     ("all", 34, &[Kind::Bool, Kind::Bool]),
-    ("coinid", 48, &[Kind::Bytes32, Kind::Bytes32, Kind::SmallInt]),
-    ("modpow", 60, &[Kind::SmallInt, Kind::SmallInt, Kind::SmallInt]),
+    (
+        "coinid",
+        48,
+        &[Kind::Bytes32, Kind::Bytes32, Kind::SmallInt],
+    ),
+    (
+        "modpow",
+        60,
+        &[Kind::SmallInt, Kind::SmallInt, Kind::SmallInt],
+    ),
     ("mod", 61, &[Kind::SmallInt, Kind::SmallInt]),
 ];
 
 /// Integer literals biased toward the values that have historically broken things: sign
 /// boundaries, canonical-encoding edges, shift limits, and zero.
 const INT_EDGES: &[i64] = &[
-    0, 1, -1, 2, -2, 3, 7, 8, 255, 256, -256, 127, 128, -128, 65535, 65536, -65536, 1_000_000,
-    -1_000_000, i32::MAX as i64, i32::MIN as i64,
+    0,
+    1,
+    -1,
+    2,
+    -2,
+    3,
+    7,
+    8,
+    255,
+    256,
+    -256,
+    127,
+    128,
+    -128,
+    65535,
+    65536,
+    -65536,
+    1_000_000,
+    -1_000_000,
+    i32::MAX as i64,
+    i32::MIN as i64,
 ];
 
 fn atom(bytes: Vec<u8>) -> SExp<'static> {
@@ -160,7 +187,9 @@ fn gen_value(rng: &mut Rng, kind: Kind, depth: u32) -> (SExp<'static>, bool) {
                 (atom(vec![]), false)
             } else {
                 let mut b = v.to_be_bytes().to_vec();
-                while b.len() > 1 && ((b[0] == 0 && b[1] & 0x80 == 0) || (b[0] == 0xff && b[1] & 0x80 != 0)) {
+                while b.len() > 1
+                    && ((b[0] == 0 && b[1] & 0x80 == 0) || (b[0] == 0xff && b[1] & 0x80 != 0))
+                {
                     b.remove(0);
                 }
                 (atom(b), false)
@@ -177,7 +206,14 @@ fn gen_value(rng: &mut Rng, kind: Kind, depth: u32) -> (SExp<'static>, bool) {
             if nest {
                 return (gen_call(rng, depth - 1), true);
             }
-            (if rng.below(2) == 0 { atom(vec![]) } else { atom(vec![1]) }, false)
+            (
+                if rng.below(2) == 0 {
+                    atom(vec![])
+                } else {
+                    atom(vec![1])
+                },
+                false,
+            )
         }
         Kind::Tree => {
             if nest {
@@ -275,8 +311,7 @@ fn generated_programs_match_golden_in_every_flag_mode() {
 
     let stored = std::fs::read_to_string(GOLDEN_PATH)
         .expect("golden missing — harvest once with UPDATE_GOLDEN=1");
-    let stored: BTreeMap<String, String> =
-        serde_json::from_str(&stored).expect("golden parses");
+    let stored: BTreeMap<String, String> = serde_json::from_str(&stored).expect("golden parses");
 
     let mut diverged = Vec::new();
     for (name, got) in &all {
@@ -292,10 +327,22 @@ fn generated_programs_match_golden_in_every_flag_mode() {
          Each name is mode/seed; the seed reproduces the exact program.",
         diverged.len(),
         all.len(),
-        diverged.iter().take(10).cloned().collect::<Vec<_>>().join("\n")
+        diverged
+            .iter()
+            .take(10)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
     );
-    assert_eq!(all.len(), stored.len(), "golden holds entries no seed produces");
-    eprintln!("  {} generated programs hold across both flag modes", all.len());
+    assert_eq!(
+        all.len(),
+        stored.len(),
+        "golden holds entries no seed produces"
+    );
+    eprintln!(
+        "  {} generated programs hold across both flag modes",
+        all.len()
+    );
 }
 
 #[test]

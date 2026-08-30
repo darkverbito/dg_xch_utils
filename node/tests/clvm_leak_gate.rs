@@ -130,7 +130,10 @@ fn assert_flat(label: &str, retained: usize) {
 
 #[test]
 fn a_plain_generator_retains_nothing() {
-    assert_flat("plain (834752)", retained_per_run(&input_for(PLAIN, 834_752, vec![]), 40));
+    assert_flat(
+        "plain (834752)",
+        retained_per_run(&input_for(PLAIN, 834_752, vec![]), 40),
+    );
 }
 
 #[test]
@@ -199,7 +202,10 @@ fn a_generator_that_fails_mid_run_retains_nothing() {
     let _ = execute_block_generator_result(&full);
     let base = LIVE.load(Ordering::Relaxed);
     let result = execute_block_generator_result(&full);
-    assert!(result.is_err(), "the pair-pool limit must reject the runaway loop");
+    assert!(
+        result.is_err(),
+        "the pair-pool limit must reject the runaway loop"
+    );
     drop(result);
     let retained = LIVE.load(Ordering::Relaxed).saturating_sub(base);
     assert_flat("malicious (pair-pool limit, 1 run)", retained);
@@ -215,16 +221,23 @@ fn the_mempool_admission_path_retains_nothing() {
     use dg_xch_core::blockchain::coin_spend::CoinSpend;
     use dg_xch_core::blockchain::condition_with_args::ConditionWithArgs;
     use dg_xch_core::blockchain::sized_bytes::{Bytes32, Bytes96};
-    use dg_xch_core::traits::SizedBytes;
     use dg_xch_core::blockchain::spend_bundle::SpendBundle;
     use dg_xch_core::clvm::program::Program;
     use dg_xch_core::clvm::sexp::SExp;
     use dg_xch_core::consensus::block_generator::conditions_from_spend_bundle;
+    use dg_xch_core::traits::SizedBytes;
 
     let puzzle = Program::to(1_u8);
-    let conditions = vec![ConditionWithArgs::CreateCoin(Bytes32::new([9; 32]), 900, vec![])];
+    let conditions = vec![ConditionWithArgs::CreateCoin(
+        Bytes32::new([9; 32]),
+        900,
+        vec![],
+    )];
     let solution = Program::to(
-        conditions.iter().map(|c| SExp::from(c).to_owned()).collect::<Vec<_>>(),
+        conditions
+            .iter()
+            .map(|c| SExp::from(c).to_owned())
+            .collect::<Vec<_>>(),
     );
     let bundle = SpendBundle {
         coin_spends: vec![CoinSpend {

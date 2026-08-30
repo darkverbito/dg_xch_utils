@@ -33,10 +33,14 @@ const VECTORS: &[(&str, &str, Option<&str>)] = &[
     ("add", "(+ (q . 10) (q . 13))", Some("23")),
     ("add_nil", "(+)", Some("0")),
     ("add_cancel", "(+ (q . -1) (q . 1))", Some("0")),
-    ("add_big", "(+ (q . 0x00ffffffffffffffff) (q . 1))", Some("0x010000000000000000")),
-    ("sub", "(- (q . 5) (q . 11))", None),  // -6; negative display, golden-only
+    (
+        "add_big",
+        "(+ (q . 0x00ffffffffffffffff) (q . 1))",
+        Some("0x010000000000000000"),
+    ),
+    ("sub", "(- (q . 5) (q . 11))", None), // -6; negative display, golden-only
     ("sub_nil", "(-)", Some("0")),
-    ("mul", "(* (q . -128) (q . 2))", None),  // -256; golden-only
+    ("mul", "(* (q . -128) (q . 2))", None), // -256; golden-only
     ("mul_nil", "(*)", Some("1")),
     ("div", "(/ (q . 10) (q . 3))", Some("3")),
     ("div_exact", "(/ (q . 12) (q . 4))", Some("3")),
@@ -44,7 +48,7 @@ const VECTORS: &[(&str, &str, Option<&str>)] = &[
     // does per flag set rather than hand-guess it.
     ("div_neg", "(/ (q . -10) (q . 3))", None),
     ("divmod", "(divmod (q . 10) (q . 3))", Some("(3 . 1)")),
-    ("divmod_neg", "(divmod (q . -10) (q . 3))", None),  // (-4 . 2); golden-only
+    ("divmod_neg", "(divmod (q . -10) (q . 3))", None), // (-4 . 2); golden-only
     // comparison
     ("eq_true", "(= (q . 1) (q . 1))", Some("1")),
     ("eq_false", "(= (q . 1) (q . 2))", Some("()")),
@@ -56,14 +60,38 @@ const VECTORS: &[(&str, &str, Option<&str>)] = &[
     // atoms
     ("strlen", "(strlen (q . \"clvm\"))", Some("4")),
     ("strlen_nil", "(strlen (q . ()))", Some("0")),
-    ("substr", "(substr (q . \"clvm\") (q . 1) (q . 3))", Some("\"lv\"")),
-    ("substr_all", "(substr (q . \"clvm\") (q . 0) (q . 4))", Some("\"clvm\"")),
-    ("substr_empty", "(substr (q . \"clvm\") (q . 2) (q . 2))", Some("()")),
-    ("concat", "(concat (q . \"cl\") (q . \"vm\"))", Some("\"clvm\"")),
+    (
+        "substr",
+        "(substr (q . \"clvm\") (q . 1) (q . 3))",
+        Some("\"lv\""),
+    ),
+    (
+        "substr_all",
+        "(substr (q . \"clvm\") (q . 0) (q . 4))",
+        Some("\"clvm\""),
+    ),
+    (
+        "substr_empty",
+        "(substr (q . \"clvm\") (q . 2) (q . 2))",
+        Some("()"),
+    ),
+    (
+        "concat",
+        "(concat (q . \"cl\") (q . \"vm\"))",
+        Some("\"clvm\""),
+    ),
     ("concat_nil", "(concat)", Some("()")),
     // control
-    ("if_true", "(i (q . 1) (q . \"yes\") (q . \"no\"))", Some("\"yes\"")),
-    ("if_false", "(i (q . ()) (q . \"yes\") (q . \"no\"))", Some("\"no\"")),
+    (
+        "if_true",
+        "(i (q . 1) (q . \"yes\") (q . \"no\"))",
+        Some("\"yes\""),
+    ),
+    (
+        "if_false",
+        "(i (q . ()) (q . \"yes\") (q . \"no\"))",
+        Some("\"no\""),
+    ),
     ("cons", "(c (q . 1) (q . (2 3)))", Some("(1 2 3)")),
     ("first", "(f (q . (1 2)))", Some("1")),
     ("rest", "(r (q . (1 2)))", Some("(2)")),
@@ -73,13 +101,13 @@ const VECTORS: &[(&str, &str, Option<&str>)] = &[
     // shifts and bit logic
     ("ash_left", "(ash (q . 1) (q . 8))", Some("256")),
     ("ash_right", "(ash (q . 256) (q . -8))", Some("1")),
-    ("ash_neg_sticky", "(ash (q . -1) (q . -1))", None),  // -1; golden-only
+    ("ash_neg_sticky", "(ash (q . -1) (q . -1))", None), // -1; golden-only
     ("lsh_left", "(lsh (q . 1) (q . 8))", Some("256")),
     ("lsh_neg_bytes", "(lsh (q . -1) (q . 1))", Some("510")),
     ("logand", "(logand (q . 12) (q . 10))", Some("8")),
     ("logior", "(logior (q . 12) (q . 10))", Some("14")),
     ("logxor", "(logxor (q . 12) (q . 10))", Some("6")),
-    ("lognot_zero", "(lognot (q . ()))", None),  // -1; golden-only
+    ("lognot_zero", "(lognot (q . ()))", None), // -1; golden-only
     ("lognot_neg", "(lognot (q . -1))", Some("0")),
     // boolean
     ("not_nil", "(not (q . ()))", Some("1")),
@@ -100,7 +128,10 @@ const ERROR_VECTORS: &[(&str, &str)] = &[
     ("first_of_atom", "(f (q . 1))"),
     ("rest_of_atom", "(r (q . 1))"),
     ("strlen_of_pair", "(strlen (q . (1)))"),
-    ("substr_backwards", "(substr (q . \"clvm\") (q . 3) (q . 1))"),
+    (
+        "substr_backwards",
+        "(substr (q . \"clvm\") (q . 3) (q . 1))",
+    ),
     ("substr_past_end", "(substr (q . \"clvm\") (q . 0) (q . 5))"),
     ("ash_over_65535", "(ash (q . 1) (q . 65536))"),
     ("softfork_zero_cost", "(softfork (q . 0))"),
@@ -165,9 +196,7 @@ fn structural_vectors() -> Vec<(&'static str, SExp<'static>, Option<String>)> {
 fn run(program: &SExp, flags: u32) -> Result<(u64, SExp<'static>), String> {
     let nil = SExp::Atom(AtomBuf::new(vec![]));
     let mut runtime = ClvmRuntime::new(u64::MAX, flags);
-    runtime
-        .run(program, &nil)
-        .map_err(|e| format!("{e:?}"))
+    runtime.run(program, &nil).map_err(|e| format!("{e:?}"))
 }
 
 fn display_of(sexp: &SExp) -> String {
@@ -204,7 +233,11 @@ fn collect(flags: u32, mode: &str) -> Golden {
         }
         out.insert(
             format!("{mode}/{name}"),
-            GoldenEntry { value: Some(value), cost: Some(cost), error: None },
+            GoldenEntry {
+                value: Some(value),
+                cost: Some(cost),
+                error: None,
+            },
         );
     }
     for (name, program, oracle) in structural_vectors() {
@@ -220,7 +253,11 @@ fn collect(flags: u32, mode: &str) -> Golden {
         }
         out.insert(
             format!("{mode}/{name}"),
-            GoldenEntry { value: Some(value), cost: Some(cost), error: None },
+            GoldenEntry {
+                value: Some(value),
+                cost: Some(cost),
+                error: None,
+            },
         );
     }
     for (name, src) in ERROR_VECTORS {
@@ -234,7 +271,11 @@ fn collect(flags: u32, mode: &str) -> Golden {
         };
         out.insert(
             format!("{mode}/{name}"),
-            GoldenEntry { value: None, cost: None, error: Some(err) },
+            GoldenEntry {
+                value: None,
+                cost: None,
+                error: Some(err),
+            },
         );
     }
     out
@@ -246,8 +287,11 @@ fn operator_vectors_match_golden_in_both_modes() {
     all.extend(collect(MEMPOOL_MODE, "mempool"));
 
     if std::env::var("UPDATE_GOLDEN").is_ok() {
-        std::fs::write(GOLDEN_PATH, serde_json::to_string_pretty(&all).expect("serializes"))
-            .expect("golden file writes");
+        std::fs::write(
+            GOLDEN_PATH,
+            serde_json::to_string_pretty(&all).expect("serializes"),
+        )
+        .expect("golden file writes");
         eprintln!("  wrote {} entries to {GOLDEN_PATH}", all.len());
         return;
     }

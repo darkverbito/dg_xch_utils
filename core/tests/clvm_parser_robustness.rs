@@ -132,8 +132,14 @@ fn arbitrary_bytes_never_panic_the_parser() {
     eprintln!("  {CASES} malformed inputs parsed: {ok} accepted, {err} rejected, 0 panics");
     // Both outcomes must occur, otherwise the corpus is degenerate — all-rejected would mean the
     // inputs never reach the decoder's interesting paths.
-    assert!(ok > 0, "no generated input parsed; the corpus is not reaching the decoder");
-    assert!(err > 0, "every generated input parsed; corruption is not producing invalid encodings");
+    assert!(
+        ok > 0,
+        "no generated input parsed; the corpus is not reaching the decoder"
+    );
+    assert!(
+        err > 0,
+        "every generated input parsed; corruption is not producing invalid encodings"
+    );
 }
 
 #[test]
@@ -164,5 +170,8 @@ fn a_parsed_program_reserializes_to_the_same_bytes() {
     }
 
     eprintln!("  {checked}/{CASES} well-formed programs round-tripped byte-identically");
-    assert!(checked > CASES as usize / 2, "too few programs round-tripped to be meaningful");
+    assert!(
+        checked > CASES as usize / 2,
+        "too few programs round-tripped to be meaningful"
+    );
 }

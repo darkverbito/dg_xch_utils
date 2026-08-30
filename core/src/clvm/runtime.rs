@@ -1,4 +1,4 @@
-use crate::clvm::arena::{Arena, NodeKind, NodePtr, Checkpoint};
+use crate::clvm::arena::{Arena, Checkpoint, NodeKind, NodePtr};
 use crate::clvm::dialect::{ChiaDialect, Dialect};
 use crate::clvm::sexp::SExp;
 use crate::errors::ClvmError;
@@ -277,7 +277,9 @@ impl ClvmRuntime {
                 ))
             }
         } else {
-            let (cost, out) = self.dialect.op(&self.arena, operator, operand_list, max_cost)?;
+            let (cost, out) = self
+                .dialect
+                .op(&self.arena, operator, operand_list, max_cost)?;
             // The operator has finished reading, and its description borrows nothing from the
             // arena when self-contained — so everything the operand evaluation allocated is now
             // unreachable and the pools can be rewound before the result is written. Anything

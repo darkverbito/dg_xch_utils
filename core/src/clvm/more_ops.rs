@@ -124,7 +124,6 @@ pub(crate) fn new_atom_and_cost(cost: u64, buf: &[u8]) -> Result<(u64, OpOut), C
     Ok((cost + c, OpOut::small(buf)))
 }
 
-
 fn malloc_number(cost: u64, n: &SExpNumber) -> Result<(u64, OpOut), ClvmError> {
     // The malloc surcharge depends on the encoded length, which only exists once the arena has
     // written it — the materialization site adds it.
@@ -380,11 +379,7 @@ fn trace_arith(arena: &Arena, op: &str, args: NodePtr, result: &SExpNumber) {
     }
 }
 
-pub fn op_div_impl(
-    arena: &Arena,
-    args: NodePtr,
-    mempool: bool,
-) -> Result<(u64, OpOut), ClvmError> {
+pub fn op_div_impl(arena: &Arena, args: NodePtr, mempool: bool) -> Result<(u64, OpOut), ClvmError> {
     let ((a0, l0), (a1, l1)) = two_ints(arena, args, "/")?;
     let cost = DIV_BASE_COST + ((l0 + l1) as u64) * DIV_COST_PER_BYTE;
     if a1.sign() == Sign::NoSign {
@@ -867,7 +862,10 @@ pub fn op_any<D: Dialect>(
         check_cost(cost, max_cost)?;
         is_any = is_any || arena.non_nil(arg);
     }
-    Ok((cost, OpOut::Same(if is_any { NodePtr::ONE } else { NodePtr::NIL })))
+    Ok((
+        cost,
+        OpOut::Same(if is_any { NodePtr::ONE } else { NodePtr::NIL }),
+    ))
 }
 
 pub fn op_all<D: Dialect>(
@@ -897,7 +895,10 @@ pub fn op_all<D: Dialect>(
                 }
                 let _ = op_print(arena, &print_args, max_cost, dialect);
                 cost += BOOL_COST_PER_ARG * 3;
-                Ok((cost, OpOut::Same(if is_all { NodePtr::ONE } else { NodePtr::NIL })))
+                Ok((
+                    cost,
+                    OpOut::Same(if is_all { NodePtr::ONE } else { NodePtr::NIL }),
+                ))
             } else {
                 // Normal Case
                 let mut cursor = ArgCursor::new(args);
@@ -906,10 +907,16 @@ pub fn op_all<D: Dialect>(
                     check_cost(cost, max_cost)?;
                     is_all = is_all && arena.non_nil(arg);
                 }
-                Ok((cost, OpOut::Same(if is_all { NodePtr::ONE } else { NodePtr::NIL })))
+                Ok((
+                    cost,
+                    OpOut::Same(if is_all { NodePtr::ONE } else { NodePtr::NIL }),
+                ))
             }
         }
-        NodeKind::Atom => Ok((cost, OpOut::Same(if is_all { NodePtr::ONE } else { NodePtr::NIL }))),
+        NodeKind::Atom => Ok((
+            cost,
+            OpOut::Same(if is_all { NodePtr::ONE } else { NodePtr::NIL }),
+        )),
     }
 }
 

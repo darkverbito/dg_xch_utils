@@ -468,7 +468,10 @@ pub fn op_bls_g1_negate<D: Dialect>(
     if (blob[0] & 0xe0) == 0xc0 {
         // Compressed infinity: negation is a no-op; pass the argument through, charging
         // the allocation cost anyway.
-        Ok((BLS_G1_NEGATE_BASE_COST + 48 * MALLOC_COST_PER_BYTE, OpOut::Same(point)))
+        Ok((
+            BLS_G1_NEGATE_BASE_COST + 48 * MALLOC_COST_PER_BYTE,
+            OpOut::Same(point),
+        ))
     } else {
         blob[0] ^= 0x20;
         new_atom_and_cost(BLS_G1_NEGATE_BASE_COST, &blob)
@@ -577,7 +580,10 @@ pub fn op_bls_g2_negate<D: Dialect>(
         )));
     }
     if (blob[0] & 0xe0) == 0xc0 {
-        Ok((BLS_G2_NEGATE_BASE_COST + 96 * MALLOC_COST_PER_BYTE, OpOut::Same(point)))
+        Ok((
+            BLS_G2_NEGATE_BASE_COST + 96 * MALLOC_COST_PER_BYTE,
+            OpOut::Same(point),
+        ))
     } else {
         blob[0] ^= 0x20;
         new_atom_and_cost(BLS_G2_NEGATE_BASE_COST, &blob)

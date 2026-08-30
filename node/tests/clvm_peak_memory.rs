@@ -167,7 +167,9 @@ fn the_decompression_and_ref_shapes_stay_under_the_ceiling() {
     let shapes: [(&str, &str, u32, Vec<GeneratorReference>); 2] = [
         (
             "compressed-834752",
-            include_str!("../../core/tests/fixtures/chia_generator_tests/block-834752-compressed.txt"),
+            include_str!(
+                "../../core/tests/fixtures/chia_generator_tests/block-834752-compressed.txt"
+            ),
             834_752,
             vec![],
         ),

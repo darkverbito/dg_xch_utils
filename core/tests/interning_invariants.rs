@@ -49,7 +49,11 @@ impl Rng {
 fn build(arena: &mut Arena, rng: &mut Rng, depth: u32) -> NodePtr {
     if depth == 0 || rng.below(3) == 0 {
         // Straddle the interning threshold so both the shared and unshared paths are exercised.
-        let n = if rng.below(2) == 0 { rng.below(8) } else { 32 + rng.below(16) };
+        let n = if rng.below(2) == 0 {
+            rng.below(8)
+        } else {
+            32 + rng.below(16)
+        };
         let bytes: Vec<u8> = (0..n).map(|_| rng.next() as u8).collect();
         arena.new_atom(&bytes).expect("atom")
     } else {

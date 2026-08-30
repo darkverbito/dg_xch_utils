@@ -70,8 +70,8 @@ impl BlockGeneratorFlags {
             // ENABLE_SECP_OPS belongs here too and is deliberately absent: the secp operators are
             // not implemented, and setting a flag whose operators are missing is precisely how
             // opcodes get silently absorbed by `op_unknown` for a token cost.
-            clvm_flags |= ENABLE_KECCAK_OPS_OUTSIDE_FORK | COST_CONDITIONS | NEW_COST_MODEL
-                | RELAXED_BLS;
+            clvm_flags |=
+                ENABLE_KECCAK_OPS_OUTSIDE_FORK | COST_CONDITIONS | NEW_COST_MODEL | RELAXED_BLS;
         } else if height >= constants.soft_fork8_height {
             // Soft fork 8 disables modpow — but only until hard fork 2 re-enables it under the
             // bounded cost model, which is why this is an `else`.

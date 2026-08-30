@@ -23,13 +23,19 @@ use dg_xch_core::clvm::arena::{Arena, fits_in_small_atom, len_for_value};
 
 /// Every observation the VM can make of an atom. If two nodes agree on all of these, no CLVM
 /// program can tell them apart, which is the property the optimization must have.
-fn observe(arena: &Arena, node: dg_xch_core::clvm::arena::NodePtr) -> (Vec<u8>, usize, String, bool) {
+fn observe(
+    arena: &Arena,
+    node: dg_xch_core::clvm::arena::NodePtr,
+) -> (Vec<u8>, usize, String, bool) {
     let bytes = arena
         .atom(node)
         .map(|a| a.as_ref().to_vec())
         .expect("atom node has bytes");
     let len = arena.atom_len(node).expect("atom node has a length");
-    let number = arena.number(node).expect("atom node has a number").to_string();
+    let number = arena
+        .number(node)
+        .expect("atom node has a number")
+        .to_string();
     let is_nil = arena.nullp(node);
     (bytes, len, number, is_nil)
 }
@@ -37,14 +43,14 @@ fn observe(arena: &Arena, node: dg_xch_core::clvm::arena::NodePtr) -> (Vec<u8>, 
 /// Values that sit exactly on the inline/heap boundary, where an off-by-one is a consensus change.
 fn boundary_values() -> Vec<Vec<u8>> {
     let mut out: Vec<Vec<u8>> = vec![
-        vec![],             // nil — the empty atom
-        vec![0],            // a bare zero: NOT the canonical encoding of 0
+        vec![],  // nil — the empty atom
+        vec![0], // a bare zero: NOT the canonical encoding of 0
         vec![1],
-        vec![0x7f],         // largest 1-byte positive
-        vec![0x80],         // high bit set: negative, never inline
+        vec![0x7f], // largest 1-byte positive
+        vec![0x80], // high bit set: negative, never inline
         vec![0xff],
-        vec![0, 0x80],      // leading zero protecting a set high bit: canonical
-        vec![0, 0x01],      // leading zero that protects nothing: not canonical
+        vec![0, 0x80], // leading zero protecting a set high bit: canonical
+        vec![0, 0x01], // leading zero that protects nothing: not canonical
         vec![0x00, 0x00],
         vec![0x03, 0xff, 0xff, 0xff], // largest 4-byte value the predicate admits
         vec![0x04, 0x00, 0x00, 0x00], // one above the 4-byte cutoff
@@ -122,7 +128,10 @@ fn an_inline_atom_is_indistinguishable_from_a_heap_atom() {
     }
 
     eprintln!("  boundary values: {inlined} inline, {heaped} heap, all indistinguishable");
-    assert!(inlined > 0 && heaped > 0, "the boundary set must exercise both storage paths");
+    assert!(
+        inlined > 0 && heaped > 0,
+        "the boundary set must exercise both storage paths"
+    );
 }
 
 #[test]
@@ -159,7 +168,11 @@ fn the_inline_predicate_agrees_with_the_arena_across_the_whole_range() {
         let node = arena.new_atom(&bytes).expect("atom allocates");
         let (got, len, _, nil) = observe(&arena, node);
         assert_eq!(got, bytes, "value {v}: bytes changed through the arena");
-        assert_eq!(len, bytes.len(), "value {v}: length changed through the arena");
+        assert_eq!(
+            len,
+            bytes.len(),
+            "value {v}: length changed through the arena"
+        );
         assert_eq!(nil, bytes.is_empty(), "value {v}: nil-ness changed");
 
         if let Some(small) = fits_in_small_atom(&bytes) {
@@ -206,5 +219,8 @@ fn inline_atoms_survive_being_built_into_pairs() {
             );
         }
     }
-    eprintln!("  {} atom/pair combinations preserved their children", cases.len() * 3);
+    eprintln!(
+        "  {} atom/pair combinations preserved their children",
+        cases.len() * 3
+    );
 }

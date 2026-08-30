@@ -76,7 +76,11 @@ fn run_digest(input: &BlockGeneratorInput) -> String {
     let first = digest_of(&conds);
     // Two runs, one digest — pins determinism at full-block scale, not just per-op.
     let again = execute_block_generator_result(input).expect("generator runs");
-    assert_eq!(first, digest_of(&again), "same block, two runs, different conditions");
+    assert_eq!(
+        first,
+        digest_of(&again),
+        "same block, two runs, different conditions"
+    );
     first
 }
 
@@ -91,7 +95,9 @@ fn collect() -> BTreeMap<String, String> {
         ),
         (
             "block-834752-compressed",
-            include_str!("../../core/tests/fixtures/chia_generator_tests/block-834752-compressed.txt"),
+            include_str!(
+                "../../core/tests/fixtures/chia_generator_tests/block-834752-compressed.txt"
+            ),
             834_752,
         ),
         (
@@ -111,7 +117,10 @@ fn collect() -> BTreeMap<String, String> {
         ),
     ];
     for (name, hex_src, height) in standalone {
-        out.insert(name.to_string(), run_digest(&input_for(hex_src, height, vec![])));
+        out.insert(
+            name.to_string(),
+            run_digest(&input_for(hex_src, height, vec![])),
+        );
     }
 
     let refs = vec![GeneratorReference {
@@ -132,7 +141,9 @@ fn collect() -> BTreeMap<String, String> {
     );
 
     let mut blocks = load_range(include_bytes!("fixtures/blocks_9179155_9179186.bin"));
-    blocks.extend(load_range(include_bytes!("fixtures/blocks_9179187_9179200.bin")));
+    blocks.extend(load_range(include_bytes!(
+        "fixtures/blocks_9179187_9179200.bin"
+    )));
     let mut tx_blocks = 0;
     for block in &blocks {
         let Some(generator) = &block.transactions_generator else {
@@ -167,8 +178,11 @@ fn block_conditions_digests_match_golden() {
     let all = collect();
 
     if std::env::var("UPDATE_GOLDEN").is_ok() {
-        std::fs::write(GOLDEN_PATH, serde_json::to_string_pretty(&all).expect("serializes"))
-            .expect("golden file writes");
+        std::fs::write(
+            GOLDEN_PATH,
+            serde_json::to_string_pretty(&all).expect("serializes"),
+        )
+        .expect("golden file writes");
         eprintln!("  wrote {} digests to {GOLDEN_PATH}", all.len());
         return;
     }
@@ -190,6 +204,10 @@ fn block_conditions_digests_match_golden() {
          consensus-identical results for real mainnet blocks",
         diverged.join(", ")
     );
-    assert_eq!(all.len(), stored.len(), "golden file holds digests for blocks no longer tested");
+    assert_eq!(
+        all.len(),
+        stored.len(),
+        "golden file holds digests for blocks no longer tested"
+    );
     eprintln!("  {} block digests hold", all.len());
 }

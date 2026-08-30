@@ -1,6 +1,6 @@
 use crate::clvm::arena::{Arena, NodeKind, NodePtr};
-use crate::clvm::pure_ops::OpOut;
 use crate::clvm::dialect::Dialect;
+use crate::clvm::pure_ops::OpOut;
 use crate::clvm::utils::{atom, check_arg_count, split};
 use crate::errors::ClvmError;
 
@@ -115,7 +115,10 @@ pub fn op_eq<D: Dialect>(
             EQ_BASE_COST + (s0.len() as u64 + s1.len() as u64) * EQ_COST_PER_BYTE,
         )
     };
-    Ok((cost, OpOut::Same(if equal { NodePtr::ONE } else { NodePtr::NIL })))
+    Ok((
+        cost,
+        OpOut::Same(if equal { NodePtr::ONE } else { NodePtr::NIL }),
+    ))
 }
 
 #[cfg(test)]
