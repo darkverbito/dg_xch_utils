@@ -10,7 +10,7 @@ use dg_xch_core::traits::SizedBytes;
 #[must_use]
 pub fn hash_block_256(block_words: &[u32; 16]) -> [u32; 8] {
     let mut bytes = [0u8; 64];
-    for (word, chunk) in block_words.iter().zip(bytes.chunks_exact_mut(4)) {
+    for (word, chunk) in block_words.iter().zip(bytes.as_chunks_mut::<4>().0) {
         chunk.copy_from_slice(&word.to_le_bytes());
     }
     let digest = blake3::hash(&bytes);
