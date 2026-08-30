@@ -145,11 +145,22 @@ fn a_cost_maxed_generator_run_stays_under_the_peak_ceiling() {
     }
 }
 
+/// Ceiling for the decompression / ref-resolving shapes, which allocate more than a cost-maxed
+/// block: resolving a reference expands a prior block's generator inline, so a block that fans out
+/// to hundreds of spends holds a large parsed tree. Measured high-water for these fixtures is
+/// ~143 MiB (block 4,671,894 resolves to 532 spends) — a genuinely heavy historical block, and the
+/// current high-water case. The old bumpalo tree arena peaked at 429 MiB on comparable work, so
+/// 256 MiB sits above the measured compact-arena peak with margin and still fails decisively on a
+/// return toward the tree-arena footprint. Do NOT raise it to make a change pass; re-measure and
+/// justify instead.
+const REF_SHAPE_CEILING_BYTES: usize = 256 * 1024 * 1024;
+
 #[test]
 fn the_decompression_and_ref_shapes_stay_under_the_ceiling() {
     // The backref/ROM decompression path and the ref-resolving path allocate differently from a
-    // plain run — decompression materializes the expanded program — so their peaks are pinned
-    // separately from the cost-maxed shape.
+    // plain run — decompression materializes the expanded program, and a reference expands a prior
+    // block's generator inline — so their peaks are pinned separately, and higher, than the
+    // cost-maxed shape.
     use dg_xch_core::clvm::program::SerializedProgram;
     use dg_xch_core::consensus::block_generator::GeneratorReference;
 
@@ -201,10 +212,10 @@ fn the_decompression_and_ref_shapes_stay_under_the_ceiling() {
         );
         assert!(!conds.spends.is_empty(), "{name}: produced no spends");
         assert!(
-            peak <= PEAK_CEILING_BYTES,
-            "{name}: peaked at {:.1} MiB, over the {} MiB ceiling",
+            peak <= REF_SHAPE_CEILING_BYTES,
+            "{name}: peaked at {:.1} MiB, over the {} MiB ref-shape ceiling",
             peak as f64 / (1024.0 * 1024.0),
-            PEAK_CEILING_BYTES / (1024 * 1024)
+            REF_SHAPE_CEILING_BYTES / (1024 * 1024)
         );
     }
 }

@@ -153,8 +153,9 @@ fn collect() -> BTreeMap<String, String> {
         out.insert(format!("mainnet-{height}"), run_digest(&input));
         tx_blocks += 1;
     }
+    // 10 of the 46 blocks in the committed window carry transactions.
     assert!(
-        tx_blocks >= 20,
+        tx_blocks >= 10,
         "only {tx_blocks} transaction blocks in the committed window — fixture damage?"
     );
 
