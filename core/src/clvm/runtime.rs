@@ -222,6 +222,9 @@ impl ClvmRuntime {
                 self.value_stack.push(inner_first);
                 self.value_stack.push(op_list);
                 self.op_stack.push(Operation::Apply);
+                // Every Apply frame owns a checkpoint; without one this frame would pop an
+                // enclosing frame's and rewind live siblings.
+                self.checkpoint_stack.push(self.arena.checkpoint());
                 return Ok(APPLY_COST);
             }
             return Err(ClvmError::InvalidSyntax(format!(
@@ -260,6 +263,9 @@ impl ClvmRuntime {
             op_atom.as_ref() == self.dialect.apply_kw()
         };
         if is_apply {
+            // This frame's checkpoint is released, not restored: the evaluation continues from
+            // the applied program, whose result may reach anything allocated so far.
+            self.checkpoint_stack.pop();
             if self.arena.arg_count_is(operand_list, 2) {
                 let (new_program, arg_wrap) = self.arena.next(operand_list).ok_or_else(|| {
                     ClvmError::ExpectedPairGotAtom(self.arena.display(operand_list))
@@ -396,5 +402,44 @@ ff04ff02ffff04ffff11ff05ffff010180ff808080808080ff0180ff018080";
         let args = args_serial.to_program().unwrap();
         let (_cost, out) = program.run(INFINITE_COST, 0, &args).unwrap();
         assert_eq!(out.as_int().unwrap(), BigInt::from(120));
+    }
+
+    // Red-first: the pair-operator form pushes an Apply frame with no checkpoint, so a
+    // self-contained result on that path pops the ENCLOSING frame's checkpoint and rewinds the
+    // already-evaluated sibling out from under the pending cons. Operands evaluate right to
+    // left, so the sibling materializes first and sits live across the second apply.
+    #[test]
+    fn inner_atom_operator_leaves_live_siblings_intact() {
+        use crate::clvm::assemble::assemble_text;
+        let nil = SExp::Atom(crate::clvm::sexp::AtomBuf::new(vec![]));
+        let run = |src: &str| {
+            let prog: Program = assemble_text(src).unwrap();
+            let mut rt = ClvmRuntime::new(INFINITE_COST, 0);
+            rt.run(prog.sexp(), &nil).unwrap().1
+        };
+        let left = run("((sha256))");
+        let right = run("(sha256 (q . 1))");
+        let combined = run("(c ((sha256)) (sha256 (q . 1)))");
+        let expect = SExp::Pair(crate::clvm::sexp::PairBuf::from((left, right)));
+        assert_eq!(combined.to_string(), expect.to_string());
+    }
+
+    // Red-first: the apply branch returns without releasing its frame's checkpoint, so every
+    // `a` application leaks one entry for the rest of the run and later frames pop mispaired
+    // checkpoints. The factorial program applies `a` once per recursion step.
+    #[test]
+    fn every_apply_frame_releases_its_checkpoint() {
+        let serial = SerializedProgram::from_hex(FACTORIAL_HEX).unwrap();
+        let program = serial.to_program().unwrap();
+        let args_serial = SerializedProgram::from_hex("ff0580").unwrap();
+        let args = args_serial.to_program().unwrap();
+        let mut runtime = ClvmRuntime::new(INFINITE_COST, 0);
+        let (_cost, out) = runtime.run(program.sexp(), args.sexp()).unwrap();
+        assert_eq!(out.as_int().unwrap().to_u64(), Some(120));
+        assert!(
+            runtime.checkpoint_stack.is_empty(),
+            "{} checkpoint frames leaked across the run",
+            runtime.checkpoint_stack.len()
+        );
     }
 }
