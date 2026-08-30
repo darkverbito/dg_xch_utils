@@ -1,5 +1,7 @@
 [workspace]
 resolver = "3"
+# The fuzz crate needs nightly (libfuzzer); keep it out of normal workspace builds.
+exclude = ["fuzz"]
 members = [
     "cli",
     "clients",

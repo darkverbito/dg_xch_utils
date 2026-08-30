@@ -12,7 +12,8 @@
 // call returning it. Untyped random trees would almost all die on the first argument check and
 // never reach the interesting code; typed ones run deep.
 //
-// Every program is executed under each flag set the consensus dialect can be in, and the outcome —
+// Every program is executed under all six dialect configurations that occur on chain — the fork
+// ladder from genesis through hard fork 2, plus mempool mode — and the outcome —
 // exact cost and printed result, or the exact error — is pinned in
 // `fixtures/clvm_random_differential.json` (UPDATE_GOLDEN=1 re-harvests).
 //
@@ -24,7 +25,10 @@
 
 use dg_xch_core::clvm::runtime::ClvmRuntime;
 use dg_xch_core::clvm::sexp::{AtomBuf, SExp};
-use dg_xch_core::clvm::utils::MEMPOOL_MODE;
+use dg_xch_core::clvm::utils::{
+    CANONICAL_INTS, COST_CONDITIONS, DISABLE_OP, ENABLE_KECCAK_OPS_OUTSIDE_FORK, LIMITS,
+    MEMPOOL_MODE, NEW_COST_MODEL, RELAXED_BLS,
+};
 use std::collections::BTreeMap;
 
 const GOLDEN_PATH: &str = "tests/fixtures/clvm_random_differential.json";
@@ -228,7 +232,24 @@ fn outcome(program: &SExp, flags: u32) -> String {
 
 fn collect() -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
-    for (mode, flags) in [("base", 0u32), ("mempool", MEMPOOL_MODE)] {
+    // The dialect configurations that actually occur on chain, in the order the forks activate
+    // (`BlockGeneratorFlags::for_height`), plus mempool mode. Sweeping the real ladder rather than
+    // an arbitrary flag matrix is what makes a divergence here mean something: every one of these
+    // is a live consensus regime, and the boundaries between them are where divergence has
+    // historically hidden.
+    const HARD_FORK: u32 = COST_CONDITIONS | ENABLE_KECCAK_OPS_OUTSIDE_FORK;
+    const SOFT_FORK8: u32 = HARD_FORK | DISABLE_OP | LIMITS;
+    const SOFT_FORK9: u32 = SOFT_FORK8 | CANONICAL_INTS;
+    const HARD_FORK2: u32 = SOFT_FORK9 | NEW_COST_MODEL | RELAXED_BLS;
+    let ladder: [(&str, u32); 6] = [
+        ("genesis", 0),
+        ("hardfork", HARD_FORK),
+        ("softfork8", SOFT_FORK8),
+        ("softfork9", SOFT_FORK9),
+        ("hardfork2", HARD_FORK2),
+        ("mempool", MEMPOOL_MODE),
+    ];
+    for (mode, flags) in ladder {
         for seed in 0..PROGRAMS {
             let mut rng = Rng::new(seed ^ 0x5EED_1234);
             let program = gen_call(&mut rng, 3);
