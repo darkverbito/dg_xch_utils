@@ -47,6 +47,18 @@ pub enum OpOut {
 }
 
 impl OpOut {
+    /// Whether this result is a freshly computed value that refers to no existing node.
+    ///
+    /// This is the property reclamation needs, and the reason the protocol pays for itself twice:
+    /// with the arena threaded through operators the runtime had to inspect a returned handle and
+    /// infer whether rewinding around it was safe. Here the variant states it. `Number` and
+    /// `Small` are computed from scratch; every other variant borrows a node that may itself have
+    /// been allocated inside the region being reclaimed.
+    #[must_use]
+    pub fn is_self_contained(&self) -> bool {
+        matches!(self, OpOut::Number(_) | OpOut::Small(_))
+    }
+
     /// Fixed-size computed bytes; the 96-byte cap is the largest any operator produces (a G2
     /// point).
     pub fn small(bytes: &[u8]) -> OpOut {

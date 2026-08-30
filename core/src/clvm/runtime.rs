@@ -1,4 +1,4 @@
-use crate::clvm::arena::{Arena, NodeKind, NodePtr};
+use crate::clvm::arena::{Arena, NodeKind, NodePtr, Checkpoint};
 use crate::clvm::dialect::{ChiaDialect, Dialect};
 use crate::clvm::sexp::SExp;
 use crate::errors::ClvmError;
@@ -28,6 +28,10 @@ pub struct ClvmRuntime {
     arena: Arena,
     value_stack: Vec<NodePtr>,
     op_stack: Vec<Operation>,
+    /// One entry per pending operator application, recorded before its operands are evaluated.
+    /// Everything the operand evaluation allocates is garbage once the operator has produced a
+    /// self-contained result, and this is the point it is rewound to.
+    checkpoint_stack: Vec<Checkpoint>,
     max_cost: u64,
 }
 
@@ -39,6 +43,7 @@ impl ClvmRuntime {
             arena: Arena::new(),
             value_stack: vec![],
             op_stack: vec![],
+            checkpoint_stack: vec![],
             max_cost,
         }
     }
@@ -109,6 +114,7 @@ impl ClvmRuntime {
     fn reset(&mut self) {
         self.value_stack.clear();
         self.op_stack.clear();
+        self.checkpoint_stack.clear();
         self.arena.reset();
     }
 
@@ -174,6 +180,7 @@ impl ClvmRuntime {
             Ok(QUOTE_COST)
         } else {
             self.op_stack.push(Operation::Apply);
+            self.checkpoint_stack.push(self.arena.checkpoint());
             self.value_stack.push(operator_node);
             let mut operands = operand_list;
             loop {
@@ -270,9 +277,19 @@ impl ClvmRuntime {
                 ))
             }
         } else {
-            let (cost, result) =
-                self.dialect
-                    .op(&mut self.arena, operator, operand_list, max_cost)?;
+            let (cost, out) = self.dialect.op(&self.arena, operator, operand_list, max_cost)?;
+            // The operator has finished reading, and its description borrows nothing from the
+            // arena when self-contained — so everything the operand evaluation allocated is now
+            // unreachable and the pools can be rewound before the result is written. Anything
+            // else may point into that region, and is left alone.
+            if out.is_self_contained()
+                && let Some(cp) = self.checkpoint_stack.pop()
+            {
+                self.arena.restore(cp);
+            } else {
+                self.checkpoint_stack.pop();
+            }
+            let (cost, result) = out.materialize(&mut self.arena, cost)?;
             self.value_stack.push(result);
             Ok(cost)
         }

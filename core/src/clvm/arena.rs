@@ -223,6 +223,18 @@ impl Default for Arena {
     }
 }
 
+/// A point the pools can be rewound to. Only meaningful while no node allocated after it is
+/// still reachable — see [`Arena::restore`].
+#[derive(Clone, Copy)]
+pub struct Checkpoint {
+    heap: usize,
+    pairs: usize,
+    atoms: usize,
+    ghost_atoms: usize,
+    ghost_pairs: usize,
+    ghost_heap: usize,
+}
+
 impl Arena {
     #[must_use]
     pub fn new() -> Self {
@@ -244,6 +256,44 @@ impl Arena {
 
     /// Truncate all pools (capacity retained) and reset the ghost counters to their initial
     /// state (2 ghost atoms + 1 ghost heap byte, standing in for nil/one).
+    /// Record the current pool sizes so a later [`Arena::restore`] can discard everything
+    /// allocated since.
+    #[must_use]
+    pub fn checkpoint(&self) -> Checkpoint {
+        Checkpoint {
+            heap: self.u8_vec.len(),
+            pairs: self.pair_vec.len(),
+            atoms: self.atom_vec.len(),
+            ghost_atoms: self.ghost_atoms,
+            ghost_pairs: self.ghost_pairs,
+            ghost_heap: self.ghost_heap,
+        }
+    }
+
+    /// Discard everything allocated since `cp`.
+    ///
+    /// SAFETY OF USE: every `NodePtr` handed out after `cp` is invalid afterwards. Indices are
+    /// reused, so a stale handle does not fault — it silently denotes a different node, which in
+    /// a consensus VM is worse than a crash. The caller must know that nothing allocated after the
+    /// checkpoint is still reachable.
+    ///
+    /// The ghost counters are rolled back too: they exist to keep the consensus atom, pair and
+    /// heap ceilings honest, and reclaimed work must stop counting against them exactly as it
+    /// stops occupying storage.
+    ///
+    /// Interned atoms are dropped wholesale rather than selectively: the map indexes into the
+    /// pools being truncated, and an entry surviving a rewind would resolve to whatever later
+    /// occupies its slot. Sharing is rebuilt as atoms recur.
+    pub fn restore(&mut self, cp: Checkpoint) {
+        self.u8_vec.truncate(cp.heap);
+        self.pair_vec.truncate(cp.pairs);
+        self.atom_vec.truncate(cp.atoms);
+        self.ghost_atoms = cp.ghost_atoms;
+        self.ghost_pairs = cp.ghost_pairs;
+        self.ghost_heap = cp.ghost_heap;
+        self.atom_intern.clear();
+    }
+
     pub fn reset(&mut self) {
         self.atom_intern.clear();
         self.u8_vec.clear();

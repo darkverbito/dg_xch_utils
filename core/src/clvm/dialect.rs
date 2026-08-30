@@ -8,13 +8,15 @@ pub trait Dialect {
     // The active CLVM flag set — operators with flag-dependent behavior (size limits, cost-model
     // selection) read it.
     fn flags(&self) -> u32;
+    /// Run an operator and return its DESCRIBED result. Materialization is the caller's, so the
+    /// runtime can decide to reclaim the operand evaluation first.
     fn op(
         &self,
-        arena: &mut Arena,
+        arena: &Arena,
         op: NodePtr,
         args: NodePtr,
         max_cost: u64,
-    ) -> Result<(u64, NodePtr), ClvmError>;
+    ) -> Result<(u64, OpOut), ClvmError>;
 }
 use crate::clvm::bls_ops::{
     op_bls_g1_multiply, op_bls_g1_negate, op_bls_g1_subtract, op_bls_g2_add, op_bls_g2_multiply,
@@ -52,11 +54,11 @@ type OpFn = fn(&Arena, NodePtr, u64, &ChiaDialect) -> Result<(u64, OpOut), ClvmE
 impl Dialect for ChiaDialect {
     fn op(
         &self,
-        arena: &mut Arena,
+        arena: &Arena,
         o: NodePtr,
         argument_list: NodePtr,
         max_cost: u64,
-    ) -> Result<(u64, NodePtr), ClvmError> {
+    ) -> Result<(u64, OpOut), ClvmError> {
         // Single-byte opcode, or None for multi-byte / empty (the op_unknown path).
         let opcode: Option<u8> = match arena.atom(o) {
             Some(atom) => {
@@ -73,8 +75,7 @@ impl Dialect for ChiaDialect {
                     .unwrap_or(0);
                 Err(ClvmError::Unimplemented(b0))
             } else {
-                let (cost, out) = op_unknown(arena, o, argument_list, max_cost, self)?;
-                out.materialize(arena, cost)
+                op_unknown(arena, o, argument_list, max_cost, self)
             };
         };
         let f: OpFn = match v {
@@ -145,16 +146,11 @@ impl Dialect for ChiaDialect {
                 return if (self.flags & NO_UNKNOWN_OPS) != 0 {
                     Err(ClvmError::Unimplemented(v))
                 } else {
-                    let (cost, out) = op_unknown(arena, o, argument_list, max_cost, self)?;
-                    out.materialize(arena, cost)
+                    op_unknown(arena, o, argument_list, max_cost, self)
                 };
             }
         };
-        // The operator reads through `&*arena` and cannot allocate; its description is
-        // materialized here under `&mut arena`, the single allocation site for the whole
-        // operator surface.
-        let (cost, out) = f(&*arena, argument_list, max_cost, self)?;
-        out.materialize(arena, cost)
+        f(arena, argument_list, max_cost, self)
     }
 
     fn quote_kw(&self) -> &[u8] {
