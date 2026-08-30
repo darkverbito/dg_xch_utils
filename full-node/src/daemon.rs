@@ -2884,6 +2884,11 @@ pub struct Node<S = SqliteStore> {
     // download never outruns the trust anchor (the proof validates before
     // sync_from_fork_point ever runs).
     long_sync_anchor: Arc<RwLock<Option<Bytes32>>>,
+    // Whether the `--sync-from` mid-chain anchor span has been staged (headers candidate pass +
+    // epoch-depth backfill). The producer's FOLLOW fill is gated on it while no peak exists yet:
+    // the anchor stages ancestry but sets no peak — the first confirmed body does — so without
+    // this flag the producer waits on a peak that only the producer's own fill can create.
+    sync_from_anchor: Arc<RwLock<Option<u32>>>,
     known_peers: Arc<RwLock<Vec<TimestampedPeerInfo>>>,
     // The INBOUND peer sessions map, owned by the Node so the confirm path can reach wallet-type
     // peers directly: `notify_new_peak` broadcasts `NewPeakWallet` to every peer that handshook as
@@ -3068,6 +3073,7 @@ where
             new_peak_signal: Arc::new(Notify::new()),
             validated_tip: Arc::new(RwLock::new(None)),
             long_sync_anchor: Arc::new(RwLock::new(None)),
+            sync_from_anchor: Arc::new(RwLock::new(None)),
             known_peers: Arc::new(RwLock::new(Vec::new())),
             inbound_peers: Arc::new(RwLock::new(HashMap::new())),
             tx_announce,
@@ -3689,6 +3695,12 @@ where
         self.long_sync_anchor.read().await.is_some()
     }
 
+    // Whether the `--sync-from` anchor span is staged — the producer's FOLLOW fill gate while no
+    // peak exists yet.
+    pub(crate) async fn sync_from_anchored(&self) -> bool {
+        self.sync_from_anchor.read().await.is_some()
+    }
+
     /// Establish — once per landing — the `_sync` trust anchor for a MID-CHAIN deep gap
     ///: a validated weight proof for the heaviest claim (cached
     /// across ticks by [`Node::validated_proof`]), the fork point of its summaries against our
@@ -3877,6 +3889,7 @@ where
         if let Err(e) = chaser.warm_engine_cache().await {
             warn!(error = %e, "sync-from cache warm failed");
         }
+        *self.sync_from_anchor.write().await = Some(start);
         info!(anchor = start, target = h, "sync-from anchor established");
         Ok(true)
     }
@@ -5072,7 +5085,7 @@ async fn follow_fill_claimed<S: BlockStore + CoinStore + Send + Sync + 'static>(
     let peak = node.store.get_peak().await.ok().flatten();
     let local = peak.map_or(0, |(_, h)| h);
     let has_peak = peak.is_some();
-    if node.config.sync_from > 0 && !has_peak {
+    if node.config.sync_from > 0 && !has_peak && !node.sync_from_anchored().await {
         return None; // the driver's anchor_at establishes the mid-chain span first
     }
     if !node.config.genesis_sync && node.config.sync_from == 0 && wants_long_sync(local, claimed) {
@@ -5422,7 +5435,7 @@ async fn sync_driver<S: BlockStore + CoinStore + Send + Sync + 'static>(
         // `--sync-from H`: with no confirmed peak yet, establish the mid-chain anchor first
         // (candidates for the span below H), then fall through to the follow loop which starts
         // at the span's base instead of 0. Retries every tick until a peer serves the proof+span.
-        if node.config.sync_from > 0 && peak.is_none() {
+        if node.config.sync_from > 0 && peak.is_none() && !node.sync_from_anchored().await {
             match node.anchor_at(&registry, node.config.sync_from).await {
                 Ok(true) => {}
                 Ok(false) => continue,
@@ -8576,6 +8589,69 @@ mod tests {
             follow_fill_claimed(&node).await,
             Some(9_208_311),
             "the producer clamps the fetch frontier to the servable outbound tip, not the over-claim",
+        );
+    }
+
+    // Red-first (`--sync-from` wedge): the anchor stages ancestry but sets no peak — the first
+    // confirmed body does — so gating the FOLLOW fill on a peak alone deadlocks the pipeline:
+    // the producer waits on a peak that only its own fill can create, while the driver re-anchors
+    // every tick. Once the anchor is staged the fill must open with no peak in the store.
+    #[tokio::test]
+    async fn follow_fill_opens_the_sync_from_band_once_anchored() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let db = std::env::temp_dir().join(format!(
+            "fn_syncfromband_{}_{nanos}.sqlite",
+            std::process::id()
+        ));
+        let config = Config {
+            target_outbound: None,
+            target_peer_count: None,
+            listen: "127.0.0.1:0".parse().unwrap(),
+            rpc: "127.0.0.1:0".parse().unwrap(),
+            introducer: None,
+            manual_peers: Vec::new(),
+            advertise: None,
+            backend: Backend::Sqlite(db),
+            network_id: "mainnet".to_string(),
+            metrics: None,
+            capture_dir: None,
+            genesis_sync: false,
+            sync_from: 5_490_000,
+            uncompact: false,
+            prefetch_memory_mb: None,
+            prefetch_max_inflight: None,
+            trusted_peers: Vec::new(),
+            trusted_cidrs: Vec::new(),
+            rpc_tls: crate::config::RpcTlsMode::Local,
+            debug_endpoints: false,
+        };
+        let node = Arc::new(Node::boot(config).await.expect("boot"));
+
+        let out_guard = node.peak_book.outbound_guard();
+        node.peak_book.record(
+            out_guard.key(),
+            false,
+            PeakClaim {
+                header_hash: Bytes32::const_new([0xAA; 32]),
+                height: 9_222_868,
+                weight: u128::MAX,
+            },
+        );
+
+        assert_eq!(
+            follow_fill_claimed(&node).await,
+            None,
+            "before the anchor is staged the driver's anchor_at owns the band",
+        );
+
+        *node.sync_from_anchor.write().await = Some(5_489_936);
+        assert_eq!(
+            follow_fill_claimed(&node).await,
+            Some(9_222_868),
+            "once the anchor is staged the fill opens with no peak in the store",
         );
     }
 
