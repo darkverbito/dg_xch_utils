@@ -35,7 +35,7 @@ pub enum OpOut {
     /// Fixed-size computed bytes — sha256/coinid digests (32), G1 points (48), G2 points (96).
     /// The operator already added the malloc surcharge, since the length is a constant there.
     /// Boxed: 96 bytes inline would widen every operator return, and these are the rare results.
-    Small(Box<(([u8; 96]), u8)>),
+    Small(Box<([u8; 96], u8)>),
     /// The concatenation of existing atoms with the total length already known; written straight
     /// into the arena heap with no intermediate buffer.
     Concat(Vec<NodePtr>, usize),
