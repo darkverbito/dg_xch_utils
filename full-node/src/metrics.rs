@@ -1261,8 +1261,7 @@ async fn serve<S: BlockStore + Send + Sync + 'static>(
     listener: TcpListener,
     sources: MetricsSources<S>,
     run: Arc<AtomicBool>,
-    #[cfg_attr(not(feature = "profiling"), allow(unused_variables))]
-    debug_endpoints: bool,
+    #[cfg_attr(not(feature = "profiling"), allow(unused_variables))] debug_endpoints: bool,
 ) {
     #[cfg(feature = "profiling")]
     let profiling = Arc::new(AtomicBool::new(false));
