@@ -128,11 +128,11 @@ pub(crate) fn new_atom_and_cost(cost: u64, buf: &[u8]) -> Result<(u64, OpOut), C
 fn malloc_number(cost: u64, n: &SExpNumber) -> Result<(u64, OpOut), ClvmError> {
     // The malloc surcharge depends on the encoded length, which only exists once the arena has
     // written it — the materialization site adds it.
-    Ok((cost, OpOut::Number(Box::new(n.clone()))))
+    Ok((cost, OpOut::Number(n.clone())))
 }
 
 fn malloc_bigint(cost: u64, n: &BigInt) -> Result<(u64, OpOut), ClvmError> {
-    Ok((cost, OpOut::Number(Box::new(SExpNumber::BigInt(n.clone())))))
+    Ok((cost, OpOut::Number(SExpNumber::BigInt(n.clone()))))
 }
 
 pub fn op_unknown<D: Dialect>(

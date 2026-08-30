@@ -48,7 +48,8 @@ impl Rng {
 /// constructed twice independently and compared.
 fn build(arena: &mut Arena, rng: &mut Rng, depth: u32) -> NodePtr {
     if depth == 0 || rng.below(3) == 0 {
-        let n = rng.below(8);
+        // Straddle the interning threshold so both the shared and unshared paths are exercised.
+        let n = if rng.below(2) == 0 { rng.below(8) } else { 32 + rng.below(16) };
         let bytes: Vec<u8> = (0..n).map(|_| rng.next() as u8).collect();
         arena.new_atom(&bytes).expect("atom")
     } else {
@@ -126,7 +127,7 @@ fn a_trees_hash_does_not_depend_on_sharing() {
     // The invariant clvm_rs's intern fuzz target asserts: interning must leave the tree hash
     // untouched. A tree built with deliberate repetition and the same tree built without must
     // hash identically — otherwise sharing has changed a block's identity.
-    let mut cache = TreeHashCache::new();
+    let mut cache = TreeHashCache::default();
 
     for seed in 0..200u64 {
         let mut rng = Rng::new(seed);
@@ -162,9 +163,10 @@ fn sharing_may_reduce_storage_but_never_the_consensus_accounting() {
     // Interning will legitimately reduce STORED nodes; it must never reduce what the limits count,
     // or a block could pass a ceiling it should have hit.
     //
-    // Today, with no interning, building the same tree twice must double stored nodes. When
-    // sharing lands, that expectation relaxes — but the limit accounting must not move, and this
-    // test is where that gets checked.
+    // Only atoms at or above `INTERN_MIN_ATOM_BYTES` are shared, and pairs never are — a cons
+    // cell is smaller than the map entry that would index it. So a tree of small atoms
+    // legitimately dedups nothing; what must hold either way is that the second build never costs
+    // MORE, and that the limit accounting is untouched.
     let mut arena = Arena::new();
 
     let before_atoms = arena.stored_atom_count();

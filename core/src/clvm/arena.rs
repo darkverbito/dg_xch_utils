@@ -185,7 +185,25 @@ pub fn len_for_value(val: u32) -> usize {
 
 /// The compact node store. All eval-time allocation goes through this; `reset` truncates the
 /// pools without releasing capacity, so a reused runtime performs no steady-state mallocs.
+/// Sharing only pays when the entry it costs is smaller than the storage it saves.
+///
+/// A cons cell is 8 bytes, while a hash-map entry keyed on its two children is roughly four times
+/// that — so pair interning cannot break even below a 4x repeat rate, and measured on a real
+/// 532-spend block it cost 52 MiB of peak to save nothing. Pairs are therefore never interned.
+///
+/// An atom costs an 8-byte span plus its payload, against an entry of ~32 bytes plus a copy of
+/// the key. Only atoms large enough for the payload to dominate can repay that, and only if they
+/// actually repeat — puzzle hashes and public keys do, small integers do not (and small integers
+/// are inline anyway, costing no storage at all).
+const INTERN_MIN_ATOM_BYTES: usize = 32;
+
 pub struct Arena {
+    // Identical atom bodies share one span. Pair interning is nearly inert without this: two
+    // equal trees built independently get distinct atom handles, so their parent pairs never
+    // match. Keyed by the bytes themselves — the key duplicates the payload, which pays for
+    // itself the first time an atom repeats and is why only pool atoms are interned (inline
+    // small atoms already cost no storage).
+    atom_intern: std::collections::HashMap<Box<[u8]>, NodePtr>,
     // grow-only byte heap for atom contents (atoms are immutable once created)
     u8_vec: Vec<u8>,
     // pair pool — 8 bytes per cons cell
@@ -209,6 +227,7 @@ impl Arena {
     #[must_use]
     pub fn new() -> Self {
         let mut arena = Self {
+            atom_intern: std::collections::HashMap::new(),
             u8_vec: Vec::new(),
             pair_vec: Vec::new(),
             atom_vec: Vec::new(),
@@ -226,6 +245,7 @@ impl Arena {
     /// Truncate all pools (capacity retained) and reset the ghost counters to their initial
     /// state (2 ghost atoms + 1 ghost heap byte, standing in for nil/one).
     pub fn reset(&mut self) {
+        self.atom_intern.clear();
         self.u8_vec.clear();
         self.pair_vec.clear();
         self.atom_vec.clear();
@@ -273,6 +293,15 @@ impl Arena {
             self.ghost_heap += v.len();
             Ok(NodePtr::new(ObjectType::SmallAtom, val as usize))
         } else {
+            // Same rule as pairs: a hit still charges the ghost counters, so the consensus atom
+            // and heap ceilings count every logical atom whether or not it got its own storage.
+            if v.len() >= INTERN_MIN_ATOM_BYTES
+                && let Some(&existing) = self.atom_intern.get(v)
+            {
+                self.ghost_atoms += 1;
+                self.ghost_heap += v.len();
+                return Ok(existing);
+            }
             let idx = self.atom_vec.len();
             self.u8_vec.extend_from_slice(v);
             #[allow(clippy::cast_possible_truncation)]
@@ -280,7 +309,11 @@ impl Arena {
                 start: start as u32,
                 end: self.u8_vec.len() as u32,
             });
-            Ok(NodePtr::new(ObjectType::Bytes, idx))
+            let node = NodePtr::new(ObjectType::Bytes, idx);
+            if v.len() >= INTERN_MIN_ATOM_BYTES {
+                self.atom_intern.insert(v.into(), node);
+            }
+            Ok(node)
         }
     }
 

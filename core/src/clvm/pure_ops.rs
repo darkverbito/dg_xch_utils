@@ -29,12 +29,13 @@ pub enum OpOut {
     /// A computed number. The arena encodes it, so the canonical byte form comes from the same
     /// code path as every other number. Its malloc surcharge depends on the encoded length, so
     /// the materialization site adds it after writing — the same order the previous
-    /// `malloc_number` helper used. Boxed: it is not the hot variant, and inline it would widen
-    /// every operator return.
-    Number(Box<SExpNumber>),
+    /// `malloc_number` helper used. Held inline: it is the hot variant, and boxing it put a heap
+    /// allocation on every arithmetic operator — which showed up directly as peak memory.
+    Number(SExpNumber),
     /// Fixed-size computed bytes — sha256/coinid digests (32), G1 points (48), G2 points (96).
     /// The operator already added the malloc surcharge, since the length is a constant there.
-    Small([u8; 96], u8),
+    /// Boxed: 96 bytes inline would widen every operator return, and these are the rare results.
+    Small(Box<(([u8; 96]), u8)>),
     /// The concatenation of existing atoms with the total length already known; written straight
     /// into the arena heap with no intermediate buffer.
     Concat(Vec<NodePtr>, usize),
@@ -51,7 +52,7 @@ impl OpOut {
     pub fn small(bytes: &[u8]) -> OpOut {
         let mut buf = [0u8; 96];
         buf[..bytes.len()].copy_from_slice(bytes);
-        OpOut::Small(buf, bytes.len() as u8)
+        OpOut::Small(Box::new((buf, bytes.len() as u8)))
     }
 
     /// Write the described result into the arena and settle any length-dependent cost. The only
@@ -68,7 +69,7 @@ impl OpOut {
                     .ok_or_else(|| ClvmError::ExpectedAtomGotPair(arena.display(node)))?;
                 Ok((cost + len as u64 * MALLOC_COST_PER_BYTE, node))
             }
-            OpOut::Small(buf, len) => Ok((cost, arena.new_atom(&buf[..len as usize])?)),
+            OpOut::Small(b) => Ok((cost, arena.new_atom(&b.0[..b.1 as usize])?)),
             OpOut::Concat(nodes, total) => Ok((cost, arena.new_concat(total, &nodes)?)),
             OpOut::Substr(node, start, end) => Ok((cost, arena.new_substr(node, start, end)?)),
             OpOut::NumberPair(qr) => {
