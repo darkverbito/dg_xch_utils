@@ -86,6 +86,10 @@ fn generator_of(hex: &str) -> Vec<u8> {
         .collect()
 }
 
+// Peak is process-global; concurrent tests inflate each other's high-water. Serialize every
+// measured region.
+static MEASURE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn run_one(hex: &str, height: u32) -> (u64, usize, usize) {
     let input = BlockGeneratorInput {
         transactions_generator: generator_of(hex).into(),
@@ -106,6 +110,9 @@ fn run_one(hex: &str, height: u32) -> (u64, usize, usize) {
 
 #[test]
 fn a_cost_maxed_generator_run_stays_under_the_peak_ceiling() {
+    let _serial = MEASURE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     for (name, hex, declared_cost) in HEAVY {
         let height: u32 = name.parse().expect("height");
         let (cost, spends, peak) = run_one(hex, height);
@@ -147,6 +154,9 @@ const REF_SHAPE_CEILING_BYTES: usize = 256 * 1024 * 1024;
 
 #[test]
 fn the_decompression_and_ref_shapes_stay_under_the_ceiling() {
+    let _serial = MEASURE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     // The backref/ROM decompression path and the ref-resolving path allocate differently from a
     // plain run — decompression materializes the expanded program, and a reference expands a prior
     // block's generator inline — so their peaks are pinned separately, and higher, than the
@@ -214,6 +224,9 @@ fn the_decompression_and_ref_shapes_stay_under_the_ceiling() {
 
 #[test]
 fn concurrent_window_validation_peak_scales_with_workers_not_blocks() {
+    let _serial = MEASURE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     // Window validation runs several generators at once. Peak must scale with the WORKER count,
     // not the window size — an allocator that retains intermediates makes every concurrent run
     // hold its whole allocation history at the same moment, which is the multiplication that

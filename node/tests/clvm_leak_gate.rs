@@ -91,6 +91,11 @@ fn input_for(hex: &str, height: u32, refs: Vec<GeneratorReference>) -> BlockGene
 /// allocations are not charged to the measured window. The allocator is exact, so a real leak
 /// shows in a handful of iterations — counts are sized to each generator's runtime, not to
 /// statistical need.
+// The counter is process-global and the default harness runs tests on several threads, so an
+// unserialized window counts the other tests' traffic — measured as MB/run of phantom
+// retention on a 10-core host. Every measurement takes this lock.
+static MEASURE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn retained_per_run(input: &BlockGeneratorInput, iters: usize) -> usize {
     for _ in 0..3 {
         let _ = execute_block_generator_result(input);
@@ -115,6 +120,9 @@ fn assert_flat(label: &str, retained: usize) {
 
 #[test]
 fn a_plain_generator_retains_nothing() {
+    let _serial = MEASURE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     assert_flat(
         "plain (834752)",
         retained_per_run(&input_for(PLAIN, 834_752, vec![]), 40),
@@ -123,6 +131,9 @@ fn a_plain_generator_retains_nothing() {
 
 #[test]
 fn a_backref_compressed_generator_retains_nothing() {
+    let _serial = MEASURE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     // The ROM bootstrap / CLVM-side decompression path — the heaviest allocator in the VM.
     assert_flat(
         "compressed (834752)",
@@ -132,6 +143,9 @@ fn a_backref_compressed_generator_retains_nothing() {
 
 #[test]
 fn a_generator_resolving_a_reference_retains_nothing() {
+    let _serial = MEASURE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let refs = vec![GeneratorReference {
         height: 4_671_893,
         index: 0,
@@ -145,6 +159,9 @@ fn a_generator_resolving_a_reference_retains_nothing() {
 
 #[test]
 fn cost_maxed_generators_emitting_many_spends_retain_nothing() {
+    let _serial = MEASURE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     // The site of the 156 KB/run bug: `c` builds the output condition list from owned pairs, so a
     // generator emitting many spends is where owned-pair retention shows up first.
     assert_flat(
@@ -159,6 +176,9 @@ fn cost_maxed_generators_emitting_many_spends_retain_nothing() {
 
 #[test]
 fn a_generator_that_fails_mid_run_retains_nothing() {
+    let _serial = MEASURE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     // Rejected blocks are attacker-triggerable and unbounded in number, so the error path must
     // release exactly like the success path. Two distinct rejection paths:
     //
@@ -198,6 +218,9 @@ fn a_generator_that_fails_mid_run_retains_nothing() {
 
 #[test]
 fn the_mempool_admission_path_retains_nothing() {
+    let _serial = MEASURE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     // `conditions_from_spend_bundle` is the second VM entry point — every transaction a peer
     // relays goes through it, unboundedly and for free, so a leak here is remotely drainable
     // without ever landing a block. The `1` puzzle echoes its solution as the condition list,
@@ -249,6 +272,9 @@ fn the_mempool_admission_path_retains_nothing() {
 
 #[test]
 fn concurrent_validation_retains_nothing() {
+    let _serial = MEASURE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     // Window validation runs generators on several threads. Retention here would compound per
     // worker; it also catches anything shared and per-run that outlives a thread.
     let inputs = [
