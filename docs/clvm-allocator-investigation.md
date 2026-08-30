@@ -7,7 +7,7 @@ Tags marking this state:
 
 | tag | tree | branch | holds |
 | --- | --- | --- | --- |
-| `clvm-allocator-investigation` (`21dce26`) | `dgxch-pr-fold` | `pr49-review-fixes` | test suite, fixtures, fuzz targets, arena-free operator prototype |
+| `clvm-allocator-investigation` (`ddebcd4`) | `dgxch-pr-fold` | `pr49-review-fixes` | test suite, fixtures, fuzz targets, and the completed three-phase implementation (§8b) |
 | `bumpalo-runtime-restored` (`3d463a0`) | `dgxch-bumpalo` | `bumpalo-runtime-restore-wt` | fully restored bumpalo runtime, allocation profiler |
 
 ---
@@ -161,9 +161,14 @@ The compact arena has **no free list and never pops** — 5 pushes, 0 pops or tr
 run. `reset` truncates the pools between runs, not within one. It is monotonic, exactly like a
 bump allocator.
 
-Both designs allocate ~19.25M nodes for that block and neither reclaims. **The entire 7.2×
-difference is node size.** This is why `bump-scope` (the one bump allocator with scoped rewind)
-would not help: it reclaims garbage, and the design that wins isn't reclaiming any.
+Both designs allocate ~19.25M nodes for that block, and at the time of measurement neither
+reclaimed. **The entire 7.2× difference is node size.** This is why `bump-scope` (the one bump
+allocator with scoped rewind) would not have closed it: node size, not garbage, was the gap.
+
+**Corrected by §8b.** "Neither reclaims" described the code as it then stood, not a limit of the
+design. Reclamation was subsequently added to the compact arena and is worth 13.65 MiB on this
+block (136.68 → 123.03) — real, and an order of magnitude smaller than the 883 MiB that
+separated the two representations. The ranking holds: representation first, reclamation second.
 
 ---
 
