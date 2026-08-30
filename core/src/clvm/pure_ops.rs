@@ -1,23 +1,13 @@
-//! The operator result protocol: operators describe, the runtime materializes.
+//! Operator results, described rather than allocated.
 //!
-//! An operator needs the arena mutably only to write its result; every read helper takes
-//! `&Arena`. Separating the two phases lets every operator take `&Arena` — it has no way to
-//! allocate, because it never holds a mutable borrow — and moves all allocation to a single
-//! materialization site in the eval loop. A `Node { allocator, ptr }` bundle cannot exist under
-//! the borrow rules; splitting read from write can.
-//!
-//! The variants name the work so the caller does it without intermediate buffers: `Same` costs
-//! nothing, `Concat` and `Substr` write through the arena's existing zero-copy paths, `Small`
-//! carries fixed-size computed bytes (digests, curve points) inline, and `Number` defers encoding
-//! to the arena so the canonical byte form is produced by the same code path everywhere. `Number`
-//! is boxed and `Small` capped at 96 bytes so the enum stays narrow — every operator return moves
-//! one of these.
+//! Operators read through `&Arena` and cannot allocate; the runtime materializes what they
+//! describe at a single site. Variants name the work so large results are written straight into
+//! the arena with no intermediate buffer.
 
 use crate::clvm::arena::{Arena, NodePtr};
 use crate::clvm::sexp_ext::SExpNumber;
 use crate::errors::ClvmError;
 
-/// The malloc surcharge per byte of a computed result, shared with the operator cost models.
 pub const MALLOC_COST_PER_BYTE: u64 = 10;
 
 /// What an operator produced, described rather than allocated.
@@ -26,49 +16,37 @@ pub enum OpOut {
     Same(NodePtr),
     /// A pair of two existing nodes (`c`, `divmod`).
     Pair(NodePtr, NodePtr),
-    /// A computed number. The arena encodes it, so the canonical byte form comes from the same
-    /// code path as every other number. Its malloc surcharge depends on the encoded length, so
-    /// the materialization site adds it after writing — the same order the previous
-    /// `malloc_number` helper used. Held inline: it is the hot variant, and boxing it put a heap
-    /// allocation on every arithmetic operator — which showed up directly as peak memory.
+    /// A computed number; the arena encodes it. Priced after writing, since the malloc surcharge
+    /// depends on the encoded length. Inline, not boxed: boxing cost a heap allocation per
+    /// arithmetic operator.
     Number(SExpNumber),
-    /// Fixed-size computed bytes — sha256/coinid digests (32), G1 points (48), G2 points (96).
-    /// The operator already added the malloc surcharge, since the length is a constant there.
-    /// Boxed: 96 bytes inline would widen every operator return, and these are the rare results.
+    /// Fixed-size computed bytes: digests (32), G1 (48), G2 (96). Boxed — rare, and 96 bytes
+    /// inline would widen every operator return. The operator prices it; the length is constant.
     Small(Box<([u8; 96], u8)>),
-    /// The concatenation of existing atoms with the total length already known; written straight
-    /// into the arena heap with no intermediate buffer.
+    /// Source atoms plus the total length; written straight into the heap, no intermediate buffer.
     Concat(Vec<NodePtr>, usize),
     /// A zero-copy sub-span of an existing atom.
     Substr(NodePtr, u32, u32),
-    /// Two computed numbers returned as a pair (`divmod`). Both are priced together after
-    /// encoding, matching the previous behaviour of allocating each and summing their lengths.
+    /// Two computed numbers as a pair (`divmod`), priced together after encoding.
     NumberPair(Box<(SExpNumber, SExpNumber)>),
 }
 
 impl OpOut {
-    /// Whether this result is a freshly computed value that refers to no existing node.
-    ///
-    /// This is the property reclamation needs, and the reason the protocol pays for itself twice:
-    /// with the arena threaded through operators the runtime had to inspect a returned handle and
-    /// infer whether rewinding around it was safe. Here the variant states it. `Number` and
-    /// `Small` are computed from scratch; every other variant borrows a node that may itself have
-    /// been allocated inside the region being reclaimed.
+    /// A freshly computed value referring to no existing node. Reclamation needs this: every
+    /// other variant borrows a node that may live inside the region being rewound.
     #[must_use]
     pub fn is_self_contained(&self) -> bool {
         matches!(self, OpOut::Number(_) | OpOut::Small(_))
     }
 
-    /// Fixed-size computed bytes; the 96-byte cap is the largest any operator produces (a G2
-    /// point).
+    /// The 96-byte cap is the largest any operator produces (a G2 point).
     pub fn small(bytes: &[u8]) -> OpOut {
         let mut buf = [0u8; 96];
         buf[..bytes.len()].copy_from_slice(bytes);
         OpOut::Small(Box::new((buf, bytes.len() as u8)))
     }
 
-    /// Write the described result into the arena and settle any length-dependent cost. The only
-    /// place in the operator path that holds a mutable borrow.
+    /// The only place in the operator path holding a mutable borrow.
     #[inline]
     pub fn materialize(self, arena: &mut Arena, cost: u64) -> Result<(u64, NodePtr), ClvmError> {
         match self {

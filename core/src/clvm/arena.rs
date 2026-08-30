@@ -185,24 +185,14 @@ pub fn len_for_value(val: u32) -> usize {
 
 /// The compact node store. All eval-time allocation goes through this; `reset` truncates the
 /// pools without releasing capacity, so a reused runtime performs no steady-state mallocs.
-/// Sharing only pays when the entry it costs is smaller than the storage it saves.
-///
-/// A cons cell is 8 bytes, while a hash-map entry keyed on its two children is roughly four times
-/// that — so pair interning cannot break even below a 4x repeat rate, and measured on a real
-/// 532-spend block it cost 52 MiB of peak to save nothing. Pairs are therefore never interned.
-///
-/// An atom costs an 8-byte span plus its payload, against an entry of ~32 bytes plus a copy of
-/// the key. Only atoms large enough for the payload to dominate can repay that, and only if they
-/// actually repeat — puzzle hashes and public keys do, small integers do not (and small integers
-/// are inline anyway, costing no storage at all).
+/// Sharing only pays when the map entry costs less than the storage it saves. A cons cell is
+/// 8 bytes against a ~32-byte entry, so pairs are never interned — measured, it cost 52 MiB of
+/// peak on a 532-spend block to save nothing. Atoms repay it only when the payload dominates.
 const INTERN_MIN_ATOM_BYTES: usize = 32;
 
 pub struct Arena {
-    // Identical atom bodies share one span. Pair interning is nearly inert without this: two
-    // equal trees built independently get distinct atom handles, so their parent pairs never
-    // match. Keyed by the bytes themselves — the key duplicates the payload, which pays for
-    // itself the first time an atom repeats and is why only pool atoms are interned (inline
-    // small atoms already cost no storage).
+    // Identical atom bodies share one span. Keyed by the bytes; inline small atoms are excluded
+    // since they already cost no storage.
     atom_intern: std::collections::HashMap<Box<[u8]>, NodePtr>,
     // grow-only byte heap for atom contents (atoms are immutable once created)
     u8_vec: Vec<u8>,
@@ -270,20 +260,12 @@ impl Arena {
         }
     }
 
-    /// Discard everything allocated since `cp`.
+    /// Discard everything allocated since `cp`. Every `NodePtr` handed out after it is invalid:
+    /// indices are reused, so a stale handle silently denotes a different node. The caller must
+    /// know nothing allocated after the checkpoint is reachable.
     ///
-    /// SAFETY OF USE: every `NodePtr` handed out after `cp` is invalid afterwards. Indices are
-    /// reused, so a stale handle does not fault — it silently denotes a different node, which in
-    /// a consensus VM is worse than a crash. The caller must know that nothing allocated after the
-    /// checkpoint is still reachable.
-    ///
-    /// The ghost counters are rolled back too: they exist to keep the consensus atom, pair and
-    /// heap ceilings honest, and reclaimed work must stop counting against them exactly as it
-    /// stops occupying storage.
-    ///
-    /// Interned atoms are dropped wholesale rather than selectively: the map indexes into the
-    /// pools being truncated, and an entry surviving a rewind would resolve to whatever later
-    /// occupies its slot. Sharing is rebuilt as atoms recur.
+    /// Ghost counters roll back with it, and the intern map is cleared wholesale — its entries
+    /// index into the truncated pools.
     pub fn restore(&mut self, cp: Checkpoint) {
         self.u8_vec.truncate(cp.heap);
         self.pair_vec.truncate(cp.pairs);
@@ -312,9 +294,7 @@ impl Arena {
         }
     }
 
-    /// Atoms materialized in the heap. Excludes inline small atoms, which occupy no storage —
-    /// the ghost counters track those for the consensus limit. Interning must reduce this without
-    /// changing any tree's hash.
+    /// Atoms materialized in the heap; excludes inline small atoms.
     #[must_use]
     pub fn stored_atom_count(&self) -> usize {
         self.atom_vec.len()
@@ -343,8 +323,8 @@ impl Arena {
             self.ghost_heap += v.len();
             Ok(NodePtr::new(ObjectType::SmallAtom, val as usize))
         } else {
-            // Same rule as pairs: a hit still charges the ghost counters, so the consensus atom
-            // and heap ceilings count every logical atom whether or not it got its own storage.
+            // A hit still charges the ghost counters: the consensus ceilings count every logical
+            // atom, stored or shared.
             if v.len() >= INTERN_MIN_ATOM_BYTES
                 && let Some(&existing) = self.atom_intern.get(v)
             {

@@ -28,9 +28,8 @@ pub struct ClvmRuntime {
     arena: Arena,
     value_stack: Vec<NodePtr>,
     op_stack: Vec<Operation>,
-    /// One entry per pending operator application, recorded before its operands are evaluated.
-    /// Everything the operand evaluation allocates is garbage once the operator has produced a
-    /// self-contained result, and this is the point it is rewound to.
+    /// One per pending application, taken before its operands are evaluated — the point rewound
+    /// to when the operator returns a self-contained result.
     checkpoint_stack: Vec<Checkpoint>,
     max_cost: u64,
 }
@@ -280,10 +279,8 @@ impl ClvmRuntime {
             let (cost, out) = self
                 .dialect
                 .op(&self.arena, operator, operand_list, max_cost)?;
-            // The operator has finished reading, and its description borrows nothing from the
-            // arena when self-contained — so everything the operand evaluation allocated is now
-            // unreachable and the pools can be rewound before the result is written. Anything
-            // else may point into that region, and is left alone.
+            // A self-contained description borrows nothing, so the operand evaluation's
+            // allocations are unreachable and can be rewound before the result is written.
             if out.is_self_contained()
                 && let Some(cp) = self.checkpoint_stack.pop()
             {

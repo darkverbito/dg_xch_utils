@@ -1,25 +1,10 @@
-// Invariants any structure-sharing optimization in the arena must satisfy.
+// What structure sharing in the arena must satisfy.
 //
-// Interning makes identical subtrees share one allocation. Its whole value is that the second
-// occurrence of a subtree costs nothing, which is why it is the most promising lever on the
-// ref-resolving block that dominates our peak: 532 spends that largely share puzzles.
-//
-// Its whole danger is that it is invisible when wrong. Two subtrees that are *nearly* identical
-// must not be merged, and merged nodes must remain indistinguishable from unmerged ones through
-// every observation — otherwise a block means something different than it did before, with no
-// crash to signal it.
-//
-// So this fixes the properties first, before the optimization exists. Written against the arena as
-// it stands (no interning yet), every assertion here holds trivially today; the point is that they
-// must STILL hold once sharing is switched on, and that this file fails loudly if sharing ever
-// merges something it should not.
-//
-// The properties, in the order they matter:
-//   1. structural identity  — equal trees observe equal, distinct trees observe distinct;
-//   2. hash stability       — a tree's hash does not depend on whether its parts were shared;
-//   3. accounting honesty   — sharing may reduce stored nodes but must never reduce the ghost
-//                             counters that enforce the consensus atom/pair limits, or a block
-//                             could pass a limit it should have failed.
+// Sharing is invisible when wrong: nearly-identical subtrees must not merge, and merged nodes must
+// stay indistinguishable from unmerged ones, or a block means something different with no crash to
+// signal it. Three properties — equal trees observe equal and distinct ones distinct; a tree's
+// hash does not depend on sharing; and sharing may reduce stored nodes but never the ghost
+// counters enforcing the consensus limits.
 
 use dg_xch_core::clvm::arena::{Arena, NodePtr};
 use dg_xch_core::clvm::sexp::SExp;
@@ -128,9 +113,7 @@ fn distinct_subtrees_never_merge() {
 
 #[test]
 fn a_trees_hash_does_not_depend_on_sharing() {
-    // The invariant clvm_rs's intern fuzz target asserts: interning must leave the tree hash
-    // untouched. A tree built with deliberate repetition and the same tree built without must
-    // hash identically — otherwise sharing has changed a block's identity.
+    // Interning must leave the tree hash untouched, or sharing has changed a block's identity.
     let mut cache = TreeHashCache::default();
 
     for seed in 0..200u64 {

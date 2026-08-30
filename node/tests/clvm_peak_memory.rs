@@ -1,18 +1,8 @@
-// Peak-memory gate for the CLVM VM.
+// Peak memory for a single run.
 //
-// `soak_clvm_memory.rs` proves the VM RETAINS nothing across runs. That is a different property
-// from how much it holds DURING one run, and a leak-free allocator can still have an enormous
-// high-water mark: a bump allocator frees nothing until end-of-run, so every eval intermediate
-// stays live and peak grows with the program's total allocation rather than its live set. Window
-// validation then multiplies that peak by the worker count, which is what puts a 4 GiB machine at
-// risk even though steady-state RSS is flat.
-//
-// So this gate measures the HIGH-WATER of a single generator run and holds it under a ceiling.
-// The workload is a cost-maxed mainnet generator (~10.9 of the 11B cost limit): the heaviest thing
-// consensus permits in one block, and the shape that stresses allocation hardest.
-//
-// Fixtures are committed (`core/tests/fixtures/heavy_generators/`), so this runs in the normal
-// `cargo test` gate — no corpus, no DB, no network, no chain sync.
+// Retaining nothing across runs is a different property from how much is held DURING one: an
+// allocator that frees only at end-of-run keeps every eval intermediate, and window validation
+// multiplies that by the worker count. Fixtures are committed; no corpus or chain sync.
 
 use dg_xch_core::consensus::block_generator::{
     BlockGeneratorFlags, BlockGeneratorInput, execute_block_generator_result,

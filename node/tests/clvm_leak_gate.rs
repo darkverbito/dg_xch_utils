@@ -1,27 +1,12 @@
-// The memory-leak gate for the CLVM VM — the property that has broken this node twice.
+// The memory-leak gate: the VM must retain nothing across runs.
 //
-// Both prior failures were the same shape: the interpreter stored reference-counted data
-// (`AtomBuf::Owned(Arc<Vec<u8>>)`, `PairBuf::Owned((Arc<SExp>, Arc<SExp>))`) in an allocator that
-// runs no destructors, so the Arc was never decremented and its buffer or subtree leaked. The first
-// leaked ~90 MB per transaction block and OOM-cycled the live node through the tx era; the second
-// leaked 156,320 B per generator run because `c` (cons) builds the output condition list out of
-// owned pairs, and the atoms-only fix did not cover them.
+// Both prior failures stored reference-counted data in an allocator that runs no destructors, so
+// the Arc was never decremented and its buffer or subtree leaked — invisible to a value-asserting
+// test, since nothing computes wrongly and the process just grows. Only a soak sees it.
 //
-// A leak of that class is invisible to a value-asserting unit test: nothing computes wrongly, the
-// process just grows. Only a soak — run the hot path repeatedly and prove live bytes do not grow —
-// can see it. Scale is what makes the threshold matter: at 5M blocks, a 1 KB/run leak is 5 GB.
-// These gates therefore assert essentially ZERO retention, not "small" retention.
-//
-// Coverage is every shape the VM meets on mainnet, because the two historical leaks lived in
-// different ones (owned ATOMS in any run; owned PAIRS only where a generator emits conditions):
-//   - a plain generator                            (block-834752)
-//   - a backref-compressed generator               (block-834752-compressed)  <- ROM bootstrap path
-//   - a generator that resolves a reference block  (block-4671894 + .env)
-//   - cost-maxed generators emitting many spends   (heavy_generators/*)       <- the cons/Owned-pair site
-//   - a malicious generator that fails mid-run     (error path: does the arena still release?)
-//   - concurrent validation                        (window path)
-//
-// Fixtures are committed: no corpus, no DB, no network, no chain sync.
+// The threshold is near zero, not "small": at 5M blocks a 1 KB/run leak is 5 GB. Coverage spans
+// every shape the VM meets, because the two leaks lived in different ones — owned atoms in any
+// run, owned pairs only where a generator emits conditions.
 
 use dg_xch_core::clvm::program::SerializedProgram;
 use dg_xch_core::consensus::block_generator::{

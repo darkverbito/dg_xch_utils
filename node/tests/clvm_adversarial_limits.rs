@@ -1,18 +1,8 @@
-// Adversarial resource-exhaustion inputs against the CLVM VM.
+// Hostile inputs a peer can hand the node for free.
 //
-// Real blocks exercise the honest path; an attacker submits the other kind. Every input here is
-// unsolicited hostile bytes a peer can hand the node for free, and each targets a different
-// resource — cost, parser depth, an oversized length claim, arena reuse. The properties under
-// test are the ones an allocator rewrite is most likely to break:
-//
-//   1. the VM refuses (or bounds) the work instead of running away,
-//   2. the refused run RELEASES everything — an error path that frees only on success leaks on
-//      every rejected block, and rejections are attacker-triggerable and unbounded,
-//   3. the high-water mark stays proportional to the cost actually charged before refusal, so a
-//      cheap rejection cannot be turned into a large allocation spike.
-//
-// Inputs are either committed real generators (clamped to force the cost-limit path), raw bytes,
-// or tiny hand-written CLVM — no synthetic Chialisp, no external corpus.
+// Three properties: the VM refuses or bounds the work; the refused run releases everything, since
+// rejections are attacker-triggerable and unbounded; and the high-water stays proportional to the
+// cost charged before refusal, so a cheap rejection cannot buy a large allocation spike.
 
 use dg_xch_core::clvm::assemble::assemble_text;
 use dg_xch_core::clvm::program::{Program, SerializedProgram};

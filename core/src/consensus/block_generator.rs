@@ -49,39 +49,25 @@ pub struct BlockGeneratorFlags {
 impl BlockGeneratorFlags {
     /// The CLVM flag ladder, keyed on the block's own height.
     ///
-    /// This mirrors chia's `get_flags_for_height_and_constants`, and the structure matters as much
-    /// as the membership: hard fork 2 and soft fork 8 are mutually exclusive branches, not
-    /// cumulative steps, because once the hard fork lands it stops disabling the operators soft
-    /// fork 8 turned off. Likewise `LIMITS` applies only in the window between soft fork 9 and hard
-    /// fork 2, since the bounded cost model subsumes it.
-    ///
-    /// Getting an activation height wrong is a consensus divergence in whichever direction it
-    /// errs: enabling a rule early makes this node reject blocks the network accepted, and enabling
-    /// it late makes it accept blocks the network rejected. Two of these were previously keyed on
-    /// hard fork 1 rather than their real forks — see `flag_ladder.rs` for the boundary tests that
-    /// now pin every transition.
+    /// Hard fork 2 and soft fork 8 are mutually exclusive, not cumulative: the hard fork stops
+    /// disabling what soft fork 8 turned off. `LIMITS` applies only between soft fork 9 and hard
+    /// fork 2, whose cost model subsumes it. Every transition is pinned in `flag_ladder.rs`.
     #[must_use]
     pub fn for_height(constants: &ConsensusConstants, height: u32) -> Self {
         let mut clvm_flags = 0u32;
 
         if height >= constants.hard_fork2_height {
-            // Hard fork 2 ("Chia 3.0", unscheduled): keccak outside the softfork guard, flat
-            // condition costs, the bounded cost model, and BLS negate accepting invalid points.
-            // ENABLE_SECP_OPS belongs here too and is deliberately absent: the secp operators are
-            // not implemented, and setting a flag whose operators are missing is precisely how
-            // opcodes get silently absorbed by `op_unknown` for a token cost.
+            // ENABLE_SECP_OPS belongs here too; it is absent because the secp operators are not
+            // implemented, and a flag without its operators is absorbed by `op_unknown`.
             clvm_flags |=
                 ENABLE_KECCAK_OPS_OUTSIDE_FORK | COST_CONDITIONS | NEW_COST_MODEL | RELAXED_BLS;
         } else if height >= constants.soft_fork8_height {
-            // Soft fork 8 disables modpow — but only until hard fork 2 re-enables it under the
-            // bounded cost model, which is why this is an `else`.
+            // `else`: hard fork 2 re-enables modpow under the bounded cost model.
             clvm_flags |= DISABLE_OP;
         }
 
         if height >= constants.soft_fork9_height {
             clvm_flags |= CANONICAL_INTS;
-            // The division-family operand caps apply from soft fork 9 until hard fork 2's cost
-            // model subsumes them.
             if height < constants.hard_fork2_height {
                 clvm_flags |= LIMITS;
             }
@@ -89,9 +75,8 @@ impl BlockGeneratorFlags {
 
         Self {
             clvm_flags,
-            // The simple-generator rules (no generator refs, canonical serialization, a quoted
-            // program) arrive with soft fork 9, not hard fork 1. Keying them on the earlier fork
-            // made this node stricter than consensus across the 3,159,000 blocks between them.
+            // Soft fork 9, not hard fork 1: keying it earlier made this node stricter than
+            // consensus for the 3,159,000 blocks between them.
             simple_generator: height >= constants.soft_fork9_height,
         }
     }

@@ -76,10 +76,9 @@ enum Kind {
     List,
 }
 
-/// Operators exercised by generation, with the argument kinds each one wants. Deliberately excludes
-/// the BLS group operators: valid curve points are not reachable by random generation, so they
-/// would only ever produce parse errors and would say nothing about the VM's value handling. They
-/// are covered by their own differential suite against an independent implementation.
+/// Operators exercised by generation, with the argument kinds each wants. Excludes the BLS group
+/// operators: random generation cannot reach valid curve points, so they would only produce parse
+/// errors.
 const OPS: &[(&str, u8, &[Kind])] = &[
     ("if", 3, &[Kind::Bool, Kind::Tree, Kind::Tree]),
     ("cons", 4, &[Kind::Tree, Kind::Tree]),
