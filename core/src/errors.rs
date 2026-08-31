@@ -215,3 +215,200 @@ pub enum ChiaError {
     // TOO_MANY_SPENDS: the SF9 6,000-spend block limit.
     TooManySpends = 149,
 }
+
+/// The subsystem bands for [`ErrorCode`]. One band per crate-level error family; codes are
+/// `band << 16 | variant`, append-only, never reused. `Consensus` carries chia's wire error
+/// values verbatim in its low half (as `i16 as u16`) so a code in a log line or an RPC body
+/// can be compared against the reference without translation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u16)]
+pub enum ErrorBand {
+    Consensus = 1,
+    Clvm = 2,
+    Store = 3,
+    Node = 4,
+    Sync = 5,
+    Mempool = 6,
+    Vdf = 7,
+    Peer = 8,
+    Rpc = 9,
+    Wallet = 10,
+    Io = 15,
+}
+
+impl ErrorBand {
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            ErrorBand::Consensus => "consensus",
+            ErrorBand::Clvm => "clvm",
+            ErrorBand::Store => "store",
+            ErrorBand::Node => "node",
+            ErrorBand::Sync => "sync",
+            ErrorBand::Mempool => "mempool",
+            ErrorBand::Vdf => "vdf",
+            ErrorBand::Peer => "peer",
+            ErrorBand::Rpc => "rpc",
+            ErrorBand::Wallet => "wallet",
+            ErrorBand::Io => "io",
+        }
+    }
+}
+
+/// The common error interface: every error family in the workspace reports a stable numeric
+/// code and the band it belongs to, so logs, RPC responses, and cross-crate handling can key
+/// on numbers instead of downcasting concrete types.
+pub trait ErrorCode {
+    fn band(&self) -> ErrorBand;
+    /// The variant's stable index inside its band. Append-only.
+    fn variant(&self) -> u16;
+    /// `band << 16 | variant` — globally unique and stable.
+    fn error_code(&self) -> u32 {
+        (self.band() as u32) << 16 | u32::from(self.variant())
+    }
+}
+
+impl ErrorCode for ChiaError {
+    fn band(&self) -> ErrorBand {
+        ErrorBand::Consensus
+    }
+    fn variant(&self) -> u16 {
+        // The chia wire value itself; negatives keep their two's-complement image so the low
+        // half round-trips through `as i16`.
+        (*self as i16) as u16
+    }
+}
+
+impl ErrorCode for ClvmError {
+    fn band(&self) -> ErrorBand {
+        match self {
+            // A condition failure IS a consensus verdict; surface the wire code, not a
+            // wrapper's.
+            ClvmError::ConditionFailure(inner) => inner.band(),
+            ClvmError::IoError(_) => ErrorBand::Io,
+            _ => ErrorBand::Clvm,
+        }
+    }
+    fn variant(&self) -> u16 {
+        match self {
+            ClvmError::ConditionFailure(inner) => inner.variant(),
+            ClvmError::AtomNotValidU64(_) => 1,
+            ClvmError::BadEncoding => 2,
+            ClvmError::CostExceeded(_, _) => 3,
+            ClvmError::DoubleSpend(_) => 4,
+            ClvmError::DuplicateCreate(_) => 5,
+            ClvmError::ExpectedPairGotAtom(_) => 6,
+            ClvmError::ExpectedAtomGotPair(_) => 7,
+            ClvmError::InvalidApplyArgs(_) => 8,
+            ClvmError::InvalidArgCount(_) => 9,
+            ClvmError::InvalidHex(_) => 10,
+            ClvmError::InvalidInput(_) => 11,
+            ClvmError::InvalidOperator(_) => 12,
+            ClvmError::InvalidOperandList(_) => 13,
+            ClvmError::InvalidOperandArgs(_, _) => 14,
+            ClvmError::InvalidPublicKey(_) => 15,
+            ClvmError::InvalidSyntax(_) => 16,
+            ClvmError::InvalidSignature(_) => 17,
+            ClvmError::InvalidSpendbundle(_) => 18,
+            ClvmError::IoError(_) => 19,
+            ClvmError::NoOperatorFound(_) => 20,
+            ClvmError::NoPostEval => 21,
+            ClvmError::Overflow(_) => 22,
+            ClvmError::PathIntoAtom(_) => 23,
+            ClvmError::PostEvalStackEmpty => 24,
+            ClvmError::Raise(_) => 25,
+            ClvmError::ReservedOperator(_) => 26,
+            ClvmError::SerializationError(_) => 27,
+            ClvmError::TooManyAnnouncements => 28,
+            ClvmError::TooManyAtoms => 29,
+            ClvmError::TooManyPairs => 30,
+            ClvmError::Unimplemented(_) => 31,
+            ClvmError::OutOfMemory => 32,
+            ClvmError::UnexpectedEndOfValues(_) => 33,
+            ClvmError::Unsupported(_) => 34,
+            ClvmError::ValueStackEmpty => 35,
+        }
+    }
+}
+
+/// The unified carrier: a code plus context, convertible from every family so boundaries
+/// (RPC handlers, task returns, cross-crate joins) can hold one type without erasing the
+/// numeric identity.
+#[derive(Debug)]
+pub struct DgError {
+    pub code: u32,
+    pub band: ErrorBand,
+    pub message: String,
+}
+
+impl DgError {
+    pub fn new<E: ErrorCode + fmt::Display>(e: &E) -> Self {
+        Self {
+            code: e.error_code(),
+            band: e.band(),
+            message: e.to_string(),
+        }
+    }
+}
+
+impl fmt::Display for DgError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "[{}:{:#010x}] {}",
+            self.band.name(),
+            self.code,
+            self.message
+        )
+    }
+}
+
+impl Error for DgError {}
+
+impl From<DgError> for std::io::Error {
+    fn from(e: DgError) -> Self {
+        std::io::Error::other(e.to_string())
+    }
+}
+
+impl<E: ErrorCode + fmt::Display> From<&E> for DgError {
+    fn from(e: &E) -> Self {
+        DgError::new(e)
+    }
+}
+
+impl fmt::Display for ChiaError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{self:?} ({})", *self as i16)
+    }
+}
+
+impl Error for ChiaError {}
+
+#[cfg(test)]
+mod error_code_tests {
+    use super::*;
+
+    #[test]
+    fn codes_are_banded_and_stable() {
+        assert_eq!(ChiaError::DoubleSpend.error_code(), 0x0001_0005);
+        // Negative wire values keep their two's-complement image in the low half.
+        assert_eq!(
+            ChiaError::DoesNotExtend.error_code() & 0xFFFF,
+            (-1i16) as u16 as u32
+        );
+        assert_eq!(ClvmError::TooManyAtoms.error_code(), 0x0002_001D);
+        // A condition failure surfaces the consensus code, not a clvm wrapper.
+        let e = ClvmError::ConditionFailure(ChiaError::AssertMyAmountFailed);
+        assert_eq!(e.band(), ErrorBand::Consensus);
+        assert_eq!(e.variant(), 116);
+    }
+
+    #[test]
+    fn dg_error_carries_band_and_code() {
+        let e = DgError::new(&ChiaError::MempoolConflict);
+        assert_eq!(e.band, ErrorBand::Consensus);
+        assert_eq!(e.code, 0x0001_0013);
+        assert!(e.to_string().contains("consensus"));
+    }
+}

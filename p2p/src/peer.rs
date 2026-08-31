@@ -270,3 +270,16 @@ mod tests {
         );
     }
 }
+
+impl dg_xch_core::errors::ErrorCode for AdmitError {
+    fn band(&self) -> dg_xch_core::errors::ErrorBand {
+        dg_xch_core::errors::ErrorBand::Peer
+    }
+    fn variant(&self) -> u16 {
+        match self {
+            AdmitError::InboundCapReached => 1,
+            AdmitError::DuplicateEndpoint => 2,
+            AdmitError::SelfConnection => 3,
+        }
+    }
+}

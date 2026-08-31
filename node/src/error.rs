@@ -51,3 +51,25 @@ impl From<std::io::Error> for NodeError {
         NodeError::Io(e)
     }
 }
+
+use dg_xch_core::errors::{ErrorBand, ErrorCode};
+
+impl ErrorCode for NodeError {
+    fn band(&self) -> ErrorBand {
+        match self {
+            NodeError::Consensus(inner) => inner.band(),
+            NodeError::Store(inner) => inner.band(),
+            NodeError::Io(_) => ErrorBand::Io,
+            _ => ErrorBand::Node,
+        }
+    }
+    fn variant(&self) -> u16 {
+        match self {
+            NodeError::Consensus(inner) => inner.variant(),
+            NodeError::Store(inner) => inner.variant(),
+            NodeError::Io(_) => 1,
+            NodeError::Orphan(_) => 2,
+            NodeError::Invalid(_) => 3,
+        }
+    }
+}

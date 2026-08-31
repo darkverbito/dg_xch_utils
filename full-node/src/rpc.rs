@@ -2251,3 +2251,21 @@ where
         Ok(response)
     }
 }
+
+impl dg_xch_core::errors::ErrorCode for RpcError {
+    fn band(&self) -> dg_xch_core::errors::ErrorBand {
+        match self {
+            RpcError::Store(inner) => inner.band(),
+            RpcError::Mempool(inner) => inner.band(),
+            _ => dg_xch_core::errors::ErrorBand::Rpc,
+        }
+    }
+    fn variant(&self) -> u16 {
+        match self {
+            RpcError::Store(inner) => inner.variant(),
+            RpcError::Mempool(inner) => inner.variant(),
+            RpcError::BadRequest(_) => 1,
+            RpcError::Corrupt(_) => 2,
+        }
+    }
+}

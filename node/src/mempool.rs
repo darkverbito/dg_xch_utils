@@ -2248,3 +2248,34 @@ impl Mempool {
         Ok(dropped)
     }
 }
+
+impl dg_xch_core::errors::ErrorCode for MempoolError {
+    fn band(&self) -> dg_xch_core::errors::ErrorBand {
+        match self {
+            MempoolError::Store(inner) => inner.band(),
+            _ => dg_xch_core::errors::ErrorBand::Mempool,
+        }
+    }
+    fn variant(&self) -> u16 {
+        match self {
+            MempoolError::NoPeak => 1,
+            MempoolError::ZeroCost => 2,
+            MempoolError::CostExceedsMax(_) => 3,
+            MempoolError::UnknownUnspent(_) => 4,
+            MempoolError::DoubleSpend(_) => 5,
+            MempoolError::Conflict(_) => 6,
+            MempoolError::Pending(_, _) => 7,
+            MempoolError::Expired(_, _) => 8,
+            MempoolError::TimelockNotMet(_, _) => 9,
+            MempoolError::ImpossibleTimelock(_, _) => 10,
+            MempoolError::FeeTooLow => 11,
+            MempoolError::FeeNearZero => 12,
+            MempoolError::FeeLimitExceeded => 13,
+            MempoolError::NonCanonicalSolution(_) => 14,
+            MempoolError::AlreadyIncluding(_) => 15,
+            MempoolError::InvalidSpendBundle(_) => 16,
+            MempoolError::Name(_) => 17,
+            MempoolError::Store(inner) => inner.variant(),
+        }
+    }
+}

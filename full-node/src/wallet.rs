@@ -625,3 +625,19 @@ impl LimitedSemaphore {
         })
     }
 }
+
+impl dg_xch_core::errors::ErrorCode for WalletError {
+    fn band(&self) -> dg_xch_core::errors::ErrorBand {
+        match self {
+            WalletError::Store(inner) => inner.band(),
+            _ => dg_xch_core::errors::ErrorBand::Wallet,
+        }
+    }
+    fn variant(&self) -> u16 {
+        match self {
+            WalletError::TooManySubscribers => 1,
+            WalletError::TooManyItems => 2,
+            WalletError::Store(inner) => inner.variant(),
+        }
+    }
+}

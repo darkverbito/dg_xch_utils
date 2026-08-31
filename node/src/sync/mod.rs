@@ -1879,3 +1879,25 @@ mod tests {
         );
     }
 }
+
+impl dg_xch_core::errors::ErrorCode for SyncError {
+    fn band(&self) -> dg_xch_core::errors::ErrorBand {
+        match self {
+            SyncError::Node(inner) => inner.band(),
+            SyncError::Io(_) => dg_xch_core::errors::ErrorBand::Io,
+            _ => dg_xch_core::errors::ErrorBand::Sync,
+        }
+    }
+    fn variant(&self) -> u16 {
+        match self {
+            SyncError::Node(inner) => inner.variant(),
+            SyncError::Io(_) => 1,
+            SyncError::PeerStalled(_) => 2,
+            SyncError::RangeRejected { .. } => 3,
+            SyncError::RangeMismatch { .. } => 4,
+            SyncError::BatchUnlinked { .. } => 5,
+            SyncError::Exhausted(_) => 6,
+            SyncError::DeepFork { .. } => 7,
+        }
+    }
+}

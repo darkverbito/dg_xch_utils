@@ -59,3 +59,25 @@ impl Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+impl dg_xch_core::errors::ErrorCode for Error {
+    fn band(&self) -> dg_xch_core::errors::ErrorBand {
+        dg_xch_core::errors::ErrorBand::Vdf
+    }
+    fn variant(&self) -> u16 {
+        match self {
+            Error::InvalidDiscriminantSize => 1,
+            Error::EmptySeed => 2,
+            Error::InvalidDiscriminant => 3,
+            Error::InvalidFormSize => 4,
+            Error::InvalidProofLength => 5,
+            Error::InvalidCompressedForm => 6,
+            Error::FormNotReduced => 7,
+            Error::InvalidForm => 8,
+            Error::InvalidSegmentIterations => 9,
+            Error::InvalidProofParameters => 10,
+            Error::WitnessTooLarge { .. } => 11,
+            Error::TargetVdfMismatch => 12,
+        }
+    }
+}

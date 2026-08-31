@@ -37,3 +37,20 @@ impl From<std::io::Error> for StoreError {
         StoreError::Io(e)
     }
 }
+
+impl dg_xch_core::errors::ErrorCode for StoreError {
+    fn band(&self) -> dg_xch_core::errors::ErrorBand {
+        match self {
+            StoreError::Io(_) => dg_xch_core::errors::ErrorBand::Io,
+            _ => dg_xch_core::errors::ErrorBand::Store,
+        }
+    }
+    fn variant(&self) -> u16 {
+        match self {
+            StoreError::Backend(_) => 1,
+            StoreError::Io(_) => 2,
+            StoreError::Corrupt(_) => 3,
+            StoreError::Batch(_) => 4,
+        }
+    }
+}
