@@ -5379,6 +5379,10 @@ pub(crate) async fn sync_driver<S: BlockStore + CoinStore + Send + Sync + 'stati
                 inbound_peers.read().await.keys().copied().collect();
             node.peak_book.reconcile(&live);
         }
+        node.sync_metrics.outbound_tip.store(
+            u64::from(node.peak_book.outbound_tip().unwrap_or(0)),
+            Ordering::Relaxed,
+        );
         let target = node.sync_target().await;
         let claimed = target.as_ref().map_or(0, |t| t.height);
         let peak = node.store.get_peak().await.ok().flatten();
@@ -5418,14 +5422,15 @@ pub(crate) async fn sync_driver<S: BlockStore + CoinStore + Send + Sync + 'stati
                 confirm_in_flight,
             ) {
                 warn!(
-                    "decoupled sync pipeline stalled; forced queue rebase (stall reclaim) low_water={} next_fetch={} peak={} generation={} readahead_inflight={} resident_windows={} claimed={}",
+                    "decoupled sync pipeline stalled; forced queue rebase (stall reclaim) low_water={} next_fetch={} peak={} generation={} readahead_inflight={} resident_windows={} claimed={} outbound_tip={:?}",
                     queue.low_water(),
                     queue.next_fetch_height(),
                     local,
                     queue.current_gen(),
                     node.sync_metrics.readahead_inflight.load(Ordering::Relaxed),
                     queue.len(),
-                    claimed
+                    claimed,
+                    node.peak_book.outbound_tip()
                 );
             }
         }
@@ -7624,6 +7629,35 @@ async fn broadcast_new_peak<S: BlockStore + CoinStore + Send + Sync + 'static>(
             msg.data.as_slice().len(),
         );
         let _ = peer.client.send(msg.clone()).await;
+    }
+    // Inbound full-node peers (peers that dialed US) hear peaks too. Without this they got one
+    // on-connect greeting and then silence: their book's claim for us aged past its stale TTL,
+    // and a fetch frontier clamped to a servable tip we never refreshed wedged their sync while
+    // their weight-heaviest target kept riding fresh gossip.
+    let inbound: Vec<Arc<SocketPeer>> = {
+        let mut list = Vec::new();
+        for peer in node.inbound_peers.read().await.values() {
+            if *peer.node_type.read().await == NodeType::FullNode {
+                list.push(peer.clone());
+            }
+        }
+        list
+    };
+    for peer in inbound {
+        let peer_version = *peer.protocol_version.read().await;
+        let Ok(msg) = dg_xch_core::protocols::ChiaMessage::new(
+            dg_xch_core::protocols::ProtocolMessageTypes::NewPeak,
+            peer_version,
+            &peak,
+            None,
+        ) else {
+            continue;
+        };
+        node.net.count_out(
+            dg_xch_core::protocols::ProtocolMessageTypes::NewPeak,
+            msg.data.as_slice().len(),
+        );
+        let _ = peer.send(msg).await;
     }
 }
 

@@ -422,6 +422,10 @@ pub struct MetricsSnapshot {
     // queue subtracted.
     pub queue_resident_bytes: u64,
     pub queue_len: u64,
+    // The highest fresh OUTBOUND peer claim — the servable fetch frontier the follow producer
+    // clamps to. 0 = no live outbound claim. A tip pinned at-or-below the local peak while
+    // claimed runs ahead is the silent-idle wedge signature.
+    pub outbound_tip: u64,
     pub sync_from: u64,
     // Per-message-type traffic counters, sorted by label for a stable render.
     pub messages_in: Vec<(&'static str, u64)>,
@@ -554,6 +558,7 @@ impl<S: BlockStore + Send + Sync> MetricsSources<S> {
             readahead_misses: m.readahead_misses.load(Ordering::Relaxed),
             queue_resident_bytes: m.queue_resident_bytes.load(Ordering::Relaxed),
             queue_len: m.queue_len.load(Ordering::Relaxed),
+            outbound_tip: m.outbound_tip.load(Ordering::Relaxed),
             sync_from: u64::from(self.sync_from),
             messages_in: sorted_counts(&self.net.messages_in),
             messages_out: sorted_counts(&self.net.messages_out),
@@ -873,6 +878,13 @@ pub fn render_metrics(s: &MetricsSnapshot) -> String {
         "Present block bytes held in the reorder buffer — the prefetch share of live allocation.",
         "gauge",
         s.queue_resident_bytes,
+    );
+    g(
+        &mut out,
+        "fullnode_outbound_tip",
+        "Highest fresh OUTBOUND peer claim (the servable fetch frontier the follow producer clamps to); 0 = none.",
+        "gauge",
+        s.outbound_tip,
     );
     g(
         &mut out,
@@ -1550,6 +1562,7 @@ mod tests {
             readahead_misses: 2,
             queue_resident_bytes: 268_435_456,
             queue_len: 96,
+            outbound_tip: 9_100_000,
             sync_from: 4_575_000,
             messages_in: vec![("new_peak", 7), ("new_transaction", 3)],
             messages_out: vec![("request_transaction", 2)],

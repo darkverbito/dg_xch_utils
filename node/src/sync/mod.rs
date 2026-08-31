@@ -345,6 +345,8 @@ pub struct SyncMetrics {
     // (InFlight + Present) held ahead of the consumer.
     pub queue_resident_bytes: AtomicU64,
     pub queue_len: AtomicU64,
+    /// The highest fresh outbound peer claim (the servable fetch frontier); 0 = none.
+    pub outbound_tip: AtomicU64,
 }
 
 #[derive(Debug)]
