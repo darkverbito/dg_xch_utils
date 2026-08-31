@@ -154,3 +154,48 @@ fn agrees_on_candidate_shaped_inputs() {
     }
     eprintln!("  bpsw differential: {checked} candidates agreed");
 }
+
+#[test]
+fn fixed_limb_miller_rabin_matches_the_bigint_ladder() {
+    // Layer 2: the Montgomery fixed-limb MR-2 against the bigint MR-2 it replaces on the hot
+    // width. Same scale knob; every odd shape up to 5 limbs plus the exact fit boundaries.
+    use dg_xch_vdf::testing::{miller_rabin_base2_bigint, miller_rabin_base2_fixed};
+    let scale: u64 = std::env::var("BPSW_DIFFERENTIAL_SCALE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1);
+    let mut rng = Rng(0xB5AD_4ECE_DA1C_E2A9);
+    let mut checked = 0u64;
+    for bits in [64usize, 128, 192, 256, 264, 300, 319, 320] {
+        for _ in 0..(3_000 * scale) {
+            let bytes = bits.div_ceil(8);
+            let mut blob = vec![0u8; bytes];
+            for b in &mut blob {
+                *b = rng.next() as u8;
+            }
+            let mut n = BigUint::from_bytes_be(&blob);
+            n.set_bit(0, true);
+            n.set_bit((bits - 1) as u64, true);
+            let Some(fixed) = miller_rabin_base2_fixed(&n) else {
+                panic!("{bits}-bit candidate did not fit the fixed path");
+            };
+            assert_eq!(
+                fixed,
+                miller_rabin_base2_bigint(&n),
+                "MR-2 diverged at a {bits}-bit candidate: {n}"
+            );
+            checked += 1;
+        }
+    }
+    // Small odds exhaustively: every branch of the s-loop and the tiny-d cases.
+    for n in (3u64..20_000).step_by(2) {
+        let n = BigUint::from(n);
+        assert_eq!(
+            miller_rabin_base2_fixed(&n).unwrap(),
+            miller_rabin_base2_bigint(&n),
+            "MR-2 diverged at {n}"
+        );
+        checked += 1;
+    }
+    eprintln!("  fixed-vs-bigint MR2: {checked} candidates agreed");
+}

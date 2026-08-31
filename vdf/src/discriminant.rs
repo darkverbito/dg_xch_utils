@@ -151,9 +151,12 @@ fn is_probable_prime(n: &BigUint) -> bool {
     // an extra round rejects would make this search continue to a DIFFERENT prime — a consensus
     // fork. Parity means exactly BPSW.
     // Native screen first: a candidate with a small factor never reaches the conversion or
-    // GMP at all. GMP's own trial division rejects exactly the same composites, so the
-    // accept/reject sequence — and therefore the selected prime — is unchanged; only the cost
-    // of rejecting obvious composites moves (~3 of 4 candidates in the hash_prime search).
+    // GMP at all; the reference rejects the same composites, so the selected prime is
+    // unchanged. The FULL native Baillie-PSW below is verdict-identical (bpsw_differential.rs,
+    // millions of candidates) but measured SLOWER than the reference on both targets — 2.4x on
+    // a Xeon, 2.6x on the Pi-4's A72 (3.40ms vs 1.30ms per 264-bit search): a powm amortizes
+    // mpz call overhead to nothing and GMP's addmul_1 assembly owns the rest. It stays as
+    // dormant verification infrastructure, not the verdict.
     if let Some(verdict) = small_factor_verdict(n) {
         return verdict;
     }
@@ -297,7 +300,11 @@ pub(crate) fn is_probable_prime_native(n: &BigUint) -> bool {
     if let Some(verdict) = small_factor_verdict(n) {
         return verdict;
     }
-    if !miller_rabin_base2(n) {
+    // The hot width takes the fixed-limb Montgomery ladder; anything wider falls back to the
+    // bigint implementation of the same test. Identical verdicts by differential.
+    let mr2 =
+        crate::mont::miller_rabin_base2_fixed::<5>(n).unwrap_or_else(|| miller_rabin_base2(n));
+    if !mr2 {
         return false;
     }
     // A perfect square passes no Lucas parameter search; the reference rejects it here.
@@ -309,7 +316,7 @@ pub(crate) fn is_probable_prime_native(n: &BigUint) -> bool {
 
 /// Strong Miller–Rabin to base 2: n-1 = d·2^s with d odd; 2^d ≡ ±1, or 2^(d·2^r) ≡ -1 for
 /// some r < s.
-fn miller_rabin_base2(n: &BigUint) -> bool {
+pub(crate) fn miller_rabin_base2(n: &BigUint) -> bool {
     let one = BigUint::one();
     let two = BigUint::from(2u8);
     let n_minus_one = n - &one;

@@ -3,6 +3,7 @@ pub mod error;
 pub mod form;
 pub mod gmp_form;
 mod limbs;
+mod mont;
 pub mod proof;
 pub mod validation;
 
@@ -39,6 +40,14 @@ pub mod testing {
 
     pub fn is_probable_prime_native(n: &BigUint) -> bool {
         crate::discriminant::is_probable_prime_native(n)
+    }
+
+    pub fn miller_rabin_base2_bigint(n: &BigUint) -> bool {
+        crate::discriminant::miller_rabin_base2(n)
+    }
+
+    pub fn miller_rabin_base2_fixed(n: &BigUint) -> Option<bool> {
+        crate::mont::miller_rabin_base2_fixed::<5>(n)
     }
 
     pub fn is_probable_prime_reference(n: &BigUint) -> bool {
