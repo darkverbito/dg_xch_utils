@@ -18,12 +18,12 @@ use dg_xch_core::consensus::constants::ConsensusConstants;
 use dg_xch_core::consensus::fast_forward::{fast_forward_singleton, supports_fast_forward};
 use dg_xch_core::consensus::producer::BlockTransactions;
 use dg_xch_stores::{CoinStore, StoreError};
+use log::{info, warn};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt;
 use std::time::{Duration, Instant};
-use tracing::{info, warn};
 
 // The minimum absolute fee bump a replacement must pay over the items it evicts — 0.00001 XCH,
 // an anti-churn floor.
@@ -1153,8 +1153,8 @@ impl Mempool {
                     None => {
                         // Not expected but handled gracefully.
                         warn!(
-                            coin_id = %coin_id, item = %owner,
-                            "coin indexed but not found in mempool item"
+                            "coin indexed but not found in mempool item coin_id={} item={}",
+                            coin_id, owner
                         );
                         return Err(MempoolError::InvalidSpendBundle(
                             "indexed coin missing from mempool item",
@@ -1736,7 +1736,10 @@ impl Mempool {
                 }
             } else if skipped_items >= PRIORITY_TX_THRESHOLD {
                 if has_special {
-                    info!(item = %item.name, "block assembly: skipping dedup/FF item past priority threshold");
+                    info!(
+                        "block assembly: skipping dedup/FF item past priority threshold item={}",
+                        item.name
+                    );
                     continue;
                 }
                 ProcessedItem {
@@ -1759,11 +1762,14 @@ impl Mempool {
                     Ok(processed) => processed,
                     Err(ProcessError::SkipDedup(why)) => {
                         // Not counted against the skip budget.
-                        info!(item = %item.name, why, "block assembly: dedup skip");
+                        info!("block assembly: dedup skip item={} why={}", item.name, why);
                         continue;
                     }
                     Err(ProcessError::Failed(why)) => {
-                        info!(item = %item.name, why, "block assembly: item failed dedup/FF processing");
+                        info!(
+                            "block assembly: item failed dedup/FF processing item={} why={}",
+                            item.name, why
+                        );
                         skipped_items += 1;
                         continue;
                     }
@@ -2027,7 +2033,10 @@ impl Mempool {
             if !found {
                 // Defensive: indexed as spending this coin but no matching spend; evict rather
                 // than leave a wedged item.
-                warn!(item = %owner, coin = %spend, "FF-indexed item has no matching spend; evicting");
+                warn!(
+                    "FF-indexed item has no matching spend; evicting item={} coin={}",
+                    owner, spend
+                );
                 to_remove.insert(*owner);
             }
         }

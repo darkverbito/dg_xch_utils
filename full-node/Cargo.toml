@@ -26,6 +26,8 @@ path = "src/lib.rs"
 # it). Owns config, main, the RPC block/coin endpoints, and the wallet coin-state subscription server. Blind
 # to consensus internals. Package name `full-node` (not dg_xch_*) so the binary target matches the crate name.
 [dependencies]
+dg_logger = { path = "../logging", version = "3.0.0" }
+log = "0.4"
 dg_xch_core = { path = "../core", version = "3.0.0", default-features = false, features = ["bls"] }
 dg_xch_serialize = { path = "../serialize", version = "3.0.0" }
 dg_xch_stores = { path = "../stores", version = "3.0.0" }
@@ -58,8 +60,6 @@ tikv-jemalloc-ctl = { version = "0.6", features = ["stats"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 tokio = { version = "1.50.0", features = ["rt-multi-thread", "sync", "signal", "macros", "time", "net"] }
-tracing = "0.1.41"
-tracing-subscriber = { version = "0.3.20", features = ["env-filter", "json"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 tikv-jemallocator = { version = "0.6", features = ["background_threads"] }

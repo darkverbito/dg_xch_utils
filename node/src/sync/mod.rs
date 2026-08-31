@@ -17,6 +17,7 @@ use dg_xch_core::blockchain::sized_bytes::Bytes32;
 use dg_xch_core::blockchain::sub_epoch_summary::SubEpochSummary;
 use dg_xch_core::blockchain::weight_proof::WeightProof;
 use dg_xch_stores::{BlockStore, CoinStore};
+use log::{info, warn};
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::error::Error;
@@ -26,7 +27,6 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
-use tracing::Instrument;
 
 // The out-of-order write-through record: which header hash landed at which height, so the organizer can
 // confirm bodies back in height order (the store is the reorder buffer).
@@ -529,7 +529,7 @@ where
         summaries: &[SubEpochSummary],
     ) -> Result<usize, SyncError> {
         // Attach the span to the future — never hold an Entered guard across an `.await`.
-        let span = tracing::info_span!("sync.headers", count = headers.len());
+        log::debug!("sync.headers count={}", headers.len());
         headers::sync_header_chain(
             &self.engine,
             &mut self.header_cache,
@@ -537,7 +537,6 @@ where
             schedule,
             summaries,
         )
-        .instrument(span)
         .await
     }
 
@@ -591,7 +590,7 @@ where
             return Ok(0);
         }
         // Attach the span to the async section — never hold an Entered guard across an `.await`.
-        let span = tracing::info_span!("sync.backfill", low, high = anchor - 1);
+        log::debug!("sync.backfill low={} high={}", low, anchor - 1);
         async move {
             let schedule = self.epoch_schedule(summaries);
 
@@ -633,7 +632,6 @@ where
             .await?;
             Ok(stored)
         }
-        .instrument(span)
         .await
     }
 
@@ -739,7 +737,7 @@ where
     {
         let bodies = self.download_all(sources).await?;
         for (height, hh) in bodies {
-            let span = tracing::info_span!("validate.parallel", height);
+            log::debug!("validate.parallel height={}", height);
             async {
                 let Some(block) = self.engine.store().get_block(&hh).await? else {
                     return Ok::<(), SyncError>(());
@@ -763,7 +761,6 @@ where
                 }
                 Ok::<(), SyncError>(())
             }
-            .instrument(span)
             .await?;
         }
         // This non-reporting path has no consumer for reorg reports; drop them so they can never
@@ -783,8 +780,7 @@ where
         &self,
         wp: &dg_xch_core::blockchain::weight_proof::WeightProof,
     ) -> Result<(Bytes32, u32), SyncError> {
-        let span = tracing::info_span!("sync.fast", recent = wp.recent_chain_data.len());
-        let _e = span.enter();
+        log::debug!("sync.fast recent={}", wp.recent_chain_data.len());
         let (valid, _summaries) =
             dg_xch_weight_proof::validate_weight_proof(wp, self.engine.constants()).map_err(
                 |e| SyncError::Io(std::io::Error::other(format!("weight proof: {e:?}"))),
@@ -845,14 +841,13 @@ where
     where
         S: Clone + Send + Sync + 'static,
     {
-        let span = tracing::info_span!("sync.fast_bulk", recent = wp.recent_chain_data.len());
+        log::debug!("sync.fast_bulk recent={}", wp.recent_chain_data.len());
         async move {
             let schedule = self.epoch_schedule(summaries);
             self.sync_headers(&wp.recent_chain_data, &schedule, summaries)
                 .await?;
             self.sync_range(sources).await
         }
-        .instrument(span)
         .await
     }
 
@@ -870,13 +865,12 @@ where
         to_height: u32,
     ) -> Result<Option<(Bytes32, u32)>, SyncError> {
         // The span covers only the fetch+sort; follow_blocks emits its own window.* spans.
-        let span = tracing::info_span!("sync.short", from = from_height, to = to_height);
+        log::debug!("sync.short from={} to={}", from_height, to_height);
         let blocks = async {
             let mut blocks = source.fetch_range(from_height, to_height).await?;
             blocks.sort_by_key(dg_xch_core::blockchain::full_block::FullBlock::height);
             Ok::<_, SyncError>(blocks)
         }
-        .instrument(span)
         .await?;
         self.follow_blocks(&blocks).await
     }
@@ -908,13 +902,12 @@ where
         to_height: u32,
     ) -> Result<(Option<(Bytes32, u32)>, Vec<ConfirmedDelta>), SyncError> {
         // As in `follow_to`, the span covers only the fetch+sort.
-        let span = tracing::info_span!("sync.short", from = from_height, to = to_height);
+        log::debug!("sync.short from={} to={}", from_height, to_height);
         let blocks = async {
             let mut blocks = source.fetch_range(from_height, to_height).await?;
             blocks.sort_by_key(dg_xch_core::blockchain::full_block::FullBlock::height);
             Ok::<_, SyncError>(blocks)
         }
-        .instrument(span)
         .await?;
         self.follow_blocks_reporting(&blocks).await
     }
@@ -942,7 +935,12 @@ where
         let peak_height = from_height.saturating_sub(1);
         let floor = peak_height.saturating_sub(BACKTRACK_MAX_DEPTH);
         // The span covers only the collection; follow_blocks_reporting emits its own window.* spans.
-        let span = tracing::info_span!("sync.backtrack", peak = peak_height, floor, to = to_height);
+        log::debug!(
+            "sync.backtrack peak={} floor={} to={}",
+            peak_height,
+            floor,
+            to_height
+        );
         let collected = async {
             let mut collected: Vec<FullBlock> = Vec::new();
             let mut found_fork_point = false;
@@ -977,10 +975,10 @@ where
                     floor,
                 });
             }
-            tracing::info!(
-                backtracked = collected.len(),
-                fork_height = collected.last().map_or(0, |b| b.height().saturating_sub(1)),
-                "short-sync backtrack found the fork point"
+            info!(
+                "short-sync backtrack found the fork point backtracked={} fork_height={}",
+                collected.len(),
+                collected.last().map_or(0, |b| b.height().saturating_sub(1))
             );
             // Submit the collected chain lowest-first; we backtracked from below the already-failed
             // forward window, so re-fetch that window and confirm the whole branch in one
@@ -991,7 +989,6 @@ where
             collected.sort_by_key(FullBlock::height);
             Ok::<_, SyncError>(collected)
         }
-        .instrument(span)
         .await?;
         self.follow_blocks_reporting(&collected).await
     }
@@ -1042,7 +1039,12 @@ where
             )));
         };
         let cap = entry_height.saturating_add(LONG_SYNC_REORG_MARGIN);
-        let span = tracing::info_span!("sync.reland", fork_point, entry = entry_height, cap);
+        log::debug!(
+            "sync.reland fork_point={} entry={} cap={}",
+            fork_point,
+            entry_height,
+            cap
+        );
         async move {
             let mut peak = Some((entry_hash, entry_height));
             let mut deltas: Vec<ConfirmedDelta> = Vec::new();
@@ -1074,7 +1076,6 @@ where
                  {LONG_SYNC_REORG_MARGIN} blocks past the stale tip {entry_height}"
             ))))
         }
-        .instrument(span)
         .await
     }
 
@@ -1217,9 +1218,8 @@ where
                 self.metrics.window_body_micros.store(0, Ordering::Relaxed);
                 std::collections::HashMap::new()
             } else {
-                // Synchronous section: `in_scope` so no Entered guard can cross an `.await`.
-                let span = tracing::info_span!("window.body", tx_blocks = jobs.len());
-                span.in_scope(|| {
+                log::debug!("window.body tx_blocks={}", jobs.len());
+                {
                     let body_started = std::time::Instant::now();
                     let primitives = self.engine.primitives();
                     let constants = *self.engine.constants();
@@ -1271,7 +1271,7 @@ where
                         .window_body_micros
                         .store(body_started.elapsed().as_micros() as u64, Ordering::Relaxed);
                     out
-                })
+                }
             }
         };
 
@@ -1340,10 +1340,8 @@ where
         let mut confirm_upto = staged.len();
         let mut vdf_err: Option<SyncError> = None;
         if !queue.is_empty() {
-            // Synchronous section: `in_scope` so no Entered guard can cross an `.await`.
-            let span =
-                tracing::info_span!("window.vdf", proofs = queue.len(), blocks = staged.len());
-            span.in_scope(|| {
+            log::debug!("window.vdf proofs={} blocks={}", queue.len(), staged.len());
+            {
                 let vdf_started = std::time::Instant::now();
                 if !self.engine.verify_vdf_window(queue.clone()) {
                     let mut start = 0usize;
@@ -1374,7 +1372,7 @@ where
                 self.metrics
                     .window_vdf_micros
                     .store(vdf_started.elapsed().as_micros() as u64, Ordering::Relaxed);
-            });
+            }
         }
 
         // Header-signature drain: same two-tier shape as the VDF drain — fast whole-window batch,
@@ -1386,9 +1384,12 @@ where
         // the accept/reject decision and the failing height are always identical.
         let mut sig_err: Option<SyncError> = None;
         if !sig_queue.is_empty() {
-            let span =
-                tracing::info_span!("window.sig", sigs = sig_queue.len(), blocks = staged.len());
-            span.in_scope(|| {
+            log::debug!(
+                "window.sig sigs={} blocks={}",
+                sig_queue.len(),
+                staged.len()
+            );
+            {
                 let sig_started = std::time::Instant::now();
                 if !self.engine.verify_sig_window(&sig_queue) {
                     let mut start = 0usize;
@@ -1428,7 +1429,7 @@ where
                 self.metrics
                     .window_sig_micros
                     .store(sig_started.elapsed().as_micros() as u64, Ordering::Relaxed);
-            });
+            }
         }
 
         // One store batch confirms the whole window; the engine falls back to per-block fork
@@ -1439,12 +1440,11 @@ where
         // A stale reorg report from a non-reporting confirm path must never mis-attach to this
         // window's outcomes: only reports pushed by the batch below are consumed by the expansion.
         self.engine.clear_reorg_reports();
-        let span = tracing::info_span!("window.confirm", blocks = to_confirm.len());
+        log::debug!("window.confirm blocks={}", to_confirm.len());
         let confirm_started = std::time::Instant::now();
         let outcomes = self
             .engine
             .confirm_staged_batch_in(to_confirm, window_batch.take())
-            .instrument(span)
             .await?;
         self.metrics.window_confirm_micros.store(
             confirm_started.elapsed().as_micros() as u64,
@@ -1667,10 +1667,10 @@ where
         };
 
         let (start, end) = (reservation.start(), reservation.end());
-        let span = tracing::info_span!(
-            "reservation",
-            peer = src.peer_id(),
-            window = live,
+        log::debug!(
+            "reservation peer={} window={} start={} end={}",
+            src.peer_id(),
+            live,
             start,
             end
         );
@@ -1717,21 +1717,14 @@ where
             window.lock().await.reclaim(reservation.id);
             metrics.reclaimed.fetch_add(1, Ordering::Relaxed);
             failures += 1;
-            tracing::warn!(
-                peer = src.peer_id(),
-                start,
-                end,
-                failures,
-                reason = %reason,
-                "block-range fetch failed; reservation reclaimed"
-            );
+            warn!("block-range fetch failed; reservation reclaimed peer={} start={} end={} failures={} reason={}", src.peer_id(), start, end, failures, reason);
             if src.is_closed() || failures >= MAX_PEER_FETCH_FAILURES {
                 return Ok(std::ops::ControlFlow::Break(()));
             }
             tokio::time::sleep(FETCH_FAILURE_BACKOFF).await;
             Ok(std::ops::ControlFlow::Continue(()))
         }
-        .instrument(span)
+        
         .await?;
         match flow {
             std::ops::ControlFlow::Continue(()) => continue,

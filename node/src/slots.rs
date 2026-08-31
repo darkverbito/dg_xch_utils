@@ -15,8 +15,8 @@ use dg_xch_core::consensus::difficulty_adjustment::can_finish_sub_and_full_epoch
 use dg_xch_core::consensus::make_sub_epoch_summary::make_sub_epoch_summary;
 use dg_xch_core::consensus::pot_iterations::calculate_sp_interval_iters;
 use dg_xch_vdf::validate_vdf_info;
+use log::debug;
 use std::collections::HashMap;
-use tracing::debug;
 
 // Future-cache bounds. TTL eviction is omitted — the caps alone bound memory, and every cache is
 // dropped wholesale when its key's infusion arrives or the slot list resets.

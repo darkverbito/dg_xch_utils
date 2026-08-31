@@ -101,6 +101,7 @@ use dg_xch_serialize::{ChiaProtocolVersion, ChiaSerialize};
 use dg_xch_servers::rpc::{RpcServer, RpcServerConfig};
 use dg_xch_servers::websocket::{WebsocketServer, WebsocketServerConfig};
 use dg_xch_stores::{BlockStore, CoinStore, SqliteStore};
+use log::{debug, info, warn};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{Error, ErrorKind};
 use std::net::IpAddr;
@@ -109,7 +110,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Notify, RwLock, mpsc, oneshot};
-use tracing::{Instrument, debug, info, info_span, warn};
 
 // One outbound peer's block-range fetch deadline (mirrors SyncConfig default).
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -434,7 +434,10 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
         // Behavior (b) — "It's not reasonable to advertise a transaction with zero
         // cost." A zero-cost announcement is a protocol violation; ban the peer.
         if tx.cost == 0 {
-            warn!(id = %tx.transaction_id, "banning peer: zero-cost transaction announcement");
+            warn!(
+                "banning peer: zero-cost transaction announcement id={}",
+                tx.transaction_id
+            );
             return TransactionAnnounceAction::Ban;
         }
         // Pre-filter: an announcement above the block cost ceiling can never be admitted, so it
@@ -461,10 +464,8 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
             let cost_ok = tx.cost == item_cost || tx.cost == item_cost + tolerated;
             if !cost_ok || tx.fees != item_fee {
                 warn!(
-                    id = %tx.transaction_id,
-                    advertised_cost = tx.cost, validation_cost = item_cost,
-                    advertised_fee = tx.fees, validation_fee = item_fee,
-                    "banning peer: already-seen tx with mismatched cost/fee"
+                    "banning peer: already-seen tx with mismatched cost/fee id={} advertised_cost={} validation_cost={} advertised_fee={} validation_fee={}",
+                    tx.transaction_id, tx.cost, item_cost, tx.fees, item_fee
                 );
                 return TransactionAnnounceAction::Ban;
             }
@@ -523,7 +524,10 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
             return;
         };
         let Some(pending) = self.tx_requested.lock().await.remove(&name) else {
-            debug!(id = %name, %peer, "dropping unsolicited transaction body");
+            debug!(
+                "dropping unsolicited transaction body id={} peer={}",
+                name, peer
+            );
             return;
         };
         // Record the origin (peer id + remote host) BEFORE queueing so the announce drain, which may
@@ -869,12 +873,12 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
         // S1 — a declare arrived AT ALL (distinguishes never-received from received-then-dropped).
         self.producer.declare_received();
         info!(
-            event = "producer.declare.received",
-            %peer,
-            sp_index = declare.signage_point_index,
-            challenge = %declare.challenge_hash,
-            cc_sp = %declare.challenge_chain_sp,
-            "declare_proof_of_space received"
+            "declare_proof_of_space received event={} peer={} sp_index={} challenge={} cc_sp={}",
+            "producer.declare.received",
+            peer,
+            declare.signage_point_index,
+            declare.challenge_hash,
+            declare.challenge_chain_sp
         );
         // `full_node_api.declare_proof_of_space` — declare validation is tip-context; a
         // syncing node has no consistent slot state to check against, so it drops the message.
@@ -883,9 +887,8 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
             // see this wall.
             self.producer.validated("not_synced");
             info!(
-                event = "producer.declare.not_synced",
-                %peer,
-                "declare dropped: node not synced (tip-context validation impossible)"
+                "declare dropped: node not synced (tip-context validation impossible) event={} peer={}",
+                "producer.declare.not_synced", peer
             );
             return None;
         }
@@ -916,10 +919,8 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
                     quality_string,
                 });
                 info!(
-                    event = "producer.declare.accepted",
-                    %peer,
-                    qs = %quality_string,
-                    "accepted proof of space, held as candidate"
+                    "accepted proof of space, held as candidate event={} peer={} qs={}",
+                    "producer.declare.accepted", peer, quality_string
                 );
                 // Assemble the candidate unfinished block (placeholder foliage
                 // signatures + the SP signatures from THIS declare message), store it keyed by the
@@ -940,12 +941,12 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
                 let result = other.result_label();
                 self.producer.validated(result);
                 info!(
-                    event = "producer.declare.rejected",
-                    %peer,
+                    "declare rejected at validate_declared_proof event={} peer={} result={} sp_index={} challenge={}",
+                    "producer.declare.rejected",
+                    peer,
                     result,
-                    sp_index = declare.signage_point_index,
-                    challenge = %declare.challenge_hash,
-                    "declare rejected at validate_declared_proof"
+                    declare.signage_point_index,
+                    declare.challenge_hash
                 );
                 None
             }
@@ -969,9 +970,11 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
             self.producer
                 .candidate_dropped("signed_values_no_candidate");
             warn!(
-                event = "producer.signed.dropped", reason = "signed_values_no_candidate",
-                qs = %signed.quality_string, %peer,
-                "signed_values: no candidate for this quality string (evicted or unknown)"
+                "signed_values: no candidate for this quality string (evicted or unknown) event={} reason={} qs={} peer={}",
+                "producer.signed.dropped",
+                "signed_values_no_candidate",
+                signed.quality_string,
+                peer
             );
             return;
         };
@@ -979,9 +982,10 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
         let plot_pk = candidate.reward_chain_block.proof_of_space.plot_public_key;
         let Ok(fbd_hash) = candidate.foliage.foliage_block_data.hash() else {
             self.producer.candidate_dropped("foliage_hash_fail");
-            warn!(event = "producer.signed.dropped", reason = "foliage_hash_fail",
-                qs = %signed.quality_string,
-                "signed_values: candidate foliage_block_data failed to hash");
+            warn!(
+                "signed_values: candidate foliage_block_data failed to hash event={} reason={} qs={}",
+                "producer.signed.dropped", "foliage_hash_fail", signed.quality_string
+            );
             return;
         };
         if !dg_xch_core::consensus::producer::verify_plot_signature(
@@ -992,9 +996,8 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
             // Stays warn! — an invalid foliage signature is a plot collision, genuinely alarming.
             self.producer.candidate_dropped("sig_verify_fail");
             warn!(
-                event = "producer.signed.dropped", reason = "sig_verify_fail",
-                qs = %signed.quality_string, %peer,
-                "signed_values: foliage_block_data signature invalid (plot collision?); dropping"
+                "signed_values: foliage_block_data signature invalid (plot collision?); dropping event={} reason={} qs={} peer={}",
+                "producer.signed.dropped", "sig_verify_fail", signed.quality_string, peer
             );
             return;
         }
@@ -1013,12 +1016,13 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
         {
             self.producer.candidate_dropped("latency_drop_signed");
             warn!(
-                event = "producer.signed.dropped", reason = "latency_drop_signed",
-                qs = %signed.quality_string,
-                sp_index = candidate.reward_chain_block.signage_point_index,
-                block_total_iters = candidate.reward_chain_block.total_iters,
-                head_total_iters = peak_rec.total_iters,
-                "dropping farmed unfinished block: would infuse before the current head (latency)"
+                "dropping farmed unfinished block: would infuse before the current head (latency) event={} reason={} qs={} sp_index={} block_total_iters={} head_total_iters={}",
+                "producer.signed.dropped",
+                "latency_drop_signed",
+                signed.quality_string,
+                candidate.reward_chain_block.signage_point_index,
+                candidate.reward_chain_block.total_iters,
+                peak_rec.total_iters
             );
             return;
         }
@@ -1039,11 +1043,8 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
             }
         }
         info!(
-            event = "producer.signed.spliced",
-            height,
-            qs = %signed.quality_string,
-            partial = ?partial,
-            "farmed unfinished block: signatures spliced, propagating"
+            "farmed unfinished block: signatures spliced, propagating event={} height={} qs={} partial={:?}",
+            "producer.signed.spliced", height, signed.quality_string, partial
         );
         // Propagate to ourselves: route through the same received-unfinished-block inbox a peer's
         // block takes, so the driver validates it (validate_unfinished_header_block) and — on success
@@ -1059,9 +1060,8 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
             // Was a silent drop on the floor: a spliced, ready-to-infuse block lost with no trace.
             self.producer.candidate_dropped("ub_inbox_full");
             warn!(
-                event = "producer.signed.dropped", reason = "ub_inbox_full",
-                qs = %signed.quality_string,
-                "farmed unfinished block dropped: ub_inbox at cap"
+                "farmed unfinished block dropped: ub_inbox at cap event={} reason={} qs={}",
+                "producer.signed.dropped", "ub_inbox_full", signed.quality_string
             );
         }
     }
@@ -1078,7 +1078,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
         if inbox.len() < IP_INBOX_CAP {
             inbox.push(req);
         } else {
-            warn!(%peer, "dropping infusion-point VDF: ip_inbox at cap");
+            warn!("dropping infusion-point VDF: ip_inbox at cap peer={}", peer);
         }
     }
 
@@ -1187,7 +1187,7 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
             },
             Err(e) => {
                 let (status, err_name) = e.ack();
-                debug!(txid = %txid, error = %e, "send_transaction rejected");
+                debug!("send_transaction rejected txid={} error={}", txid, e);
                 TransactionAck {
                     txid,
                     status,
@@ -1521,8 +1521,8 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
                     .map(|ftb| ftb.removals_root);
                 if removals_root != Some(Bytes32::new(removal_merkle_set.get_root())) {
                     warn!(
-                        height = req.height,
-                        "request_removals: stored removals do not hash to the foliage removals_root"
+                        "request_removals: stored removals do not hash to the foliage removals_root height={}",
+                        req.height
                     );
                     return reject();
                 }
@@ -2177,9 +2177,9 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> StoreApi<S> {
         if max_items == 0 {
             // Truncation posture: log it, answer anyway, signal nothing.
             info!(
-                states = by_id.len(),
-                subscribed = puzzle_hashes.len(),
-                "RegisterForPhUpdates initial state truncated at max_subscribe_response_items"
+                "RegisterForPhUpdates initial state truncated at max_subscribe_response_items states={} subscribed={}",
+                by_id.len(),
+                puzzle_hashes.len()
             );
         }
         by_id.into_values().collect()
@@ -2244,15 +2244,11 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> StoreApi<S> {
         declare: &DeclareProofOfSpace,
         quality_string: Bytes32,
     ) -> Option<RequestSignedValues> {
-        // S3 — one span so every build event/drop inherits the quality-string correlation id across the
-        // many .await store reads, WITHOUT holding an Entered guard across an await (use .instrument()).
-        let span = info_span!(
-            "producer.build",
-            qs = %quality_string,
-            sp_index = declare.signage_point_index
+        debug!(
+            "producer.build start qs={} sp_index={}",
+            quality_string, declare.signage_point_index
         );
         self.try_build_candidate_inner(declare, quality_string)
-            .instrument(span)
             .await
     }
 
@@ -2274,10 +2270,10 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> StoreApi<S> {
             let Some(sp) = slot.get_signage_point(&declare.challenge_chain_sp) else {
                 self.producer.candidate_dropped("sp_not_found_in_slotstate");
                 info!(
-                    event = "producer.build.dropped",
-                    reason = "sp_not_found_in_slotstate",
-                    cc_sp = %declare.challenge_chain_sp,
-                    "candidate: accepted SP no longer resolvable in slot state; dropping"
+                    "candidate: accepted SP no longer resolvable in slot state; dropping event={} reason={} cc_sp={}",
+                    "producer.build.dropped",
+                    "sp_not_found_in_slotstate",
+                    declare.challenge_chain_sp
                 );
                 return None;
             };
@@ -2292,9 +2288,8 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> StoreApi<S> {
                     None => {
                         self.producer.candidate_dropped("sp_cc_vdf_missing");
                         info!(
-                            event = "producer.build.dropped",
-                            reason = "sp_cc_vdf_missing",
-                            "candidate: index>0 SP has no challenge-chain VDF (malformed); dropping"
+                            "candidate: index>0 SP has no challenge-chain VDF (malformed); dropping event={} reason={}",
+                            "producer.build.dropped", "sp_cc_vdf_missing"
                         );
                         return None;
                     }
@@ -2309,10 +2304,8 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> StoreApi<S> {
                 let Some((eos, _, start)) = slot.get_sub_slot(&cc_challenge_hash) else {
                     self.producer.candidate_dropped("pos_sub_slot_not_found");
                     info!(
-                        event = "producer.build.dropped",
-                        reason = "pos_sub_slot_not_found",
-                        %cc_challenge_hash,
-                        "candidate: pos sub-slot absent in slot state; dropping"
+                        "candidate: pos sub-slot absent in slot state; dropping event={} reason={} cc_challenge_hash={}",
+                        "producer.build.dropped", "pos_sub_slot_not_found", cc_challenge_hash
                     );
                     return None;
                 };
@@ -2343,9 +2336,13 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> StoreApi<S> {
         // the resolved cc challenge must equal the farmer's declared challenge.
         if cc_challenge_hash != declare.challenge_hash {
             self.producer.candidate_dropped("cc_challenge_mismatch");
-            warn!(event = "producer.build.dropped", reason = "cc_challenge_mismatch",
-                %cc_challenge_hash, declared = %declare.challenge_hash,
-                "candidate: resolved cc-challenge != declared challenge_hash; dropping");
+            warn!(
+                "candidate: resolved cc-challenge != declared challenge_hash; dropping event={} reason={} cc_challenge_hash={} declared={}",
+                "producer.build.dropped",
+                "cc_challenge_mismatch",
+                cc_challenge_hash,
+                declare.challenge_hash
+            );
             return None;
         }
 
@@ -2360,9 +2357,8 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> StoreApi<S> {
             let Some(rc) = rc_challenge else {
                 self.producer.candidate_dropped("no_rc_challenge");
                 warn!(
-                    event = "producer.build.dropped",
-                    reason = "no_rc_challenge",
-                    "candidate: non-genesis declare with no reward-chain challenge resolved; dropping"
+                    "candidate: non-genesis declare with no reward-chain challenge resolved; dropping event={} reason={}",
+                    "producer.build.dropped", "no_rc_challenge"
                 );
                 return None;
             };
@@ -2371,9 +2367,8 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> StoreApi<S> {
                 None => {
                     self.producer.candidate_dropped("prev_block_not_found");
                     warn!(
-                        event = "producer.build.dropped",
-                        reason = "prev_block_not_found",
-                        "candidate: no previous block with the correct reward chain hash; dropping"
+                        "candidate: no previous block with the correct reward chain hash; dropping event={} reason={}",
+                        "producer.build.dropped", "prev_block_not_found"
                     );
                     return None;
                 }
@@ -2397,9 +2392,8 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> StoreApi<S> {
                     self.producer
                         .candidate_dropped("challenge_in_chain_unresolved");
                     warn!(
-                        event = "producer.build.dropped",
-                        reason = "challenge_in_chain_unresolved",
-                        "candidate: could not resolve challenge_in_chain from prev block; dropping"
+                        "candidate: could not resolve challenge_in_chain from prev block; dropping event={} reason={}",
+                        "producer.build.dropped", "challenge_in_chain_unresolved"
                     );
                     return None;
                 }
@@ -2412,9 +2406,13 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> StoreApi<S> {
         let Some(finished_sub_slots) = finished_sub_slots else {
             self.producer
                 .candidate_dropped("finished_sub_slots_disconnected");
-            warn!(event = "producer.build.dropped", reason = "finished_sub_slots_disconnected",
-                challenge_in_chain = %chain_challenge, %cc_challenge_hash,
-                "candidate: finished sub-slots not connected; dropping");
+            warn!(
+                "candidate: finished sub-slots not connected; dropping event={} reason={} challenge_in_chain={} cc_challenge_hash={}",
+                "producer.build.dropped",
+                "finished_sub_slots_disconnected",
+                chain_challenge,
+                cc_challenge_hash
+            );
             return None;
         };
         // the last finished sub-slot we would farm on must be the pos sub-slot.
@@ -2423,9 +2421,8 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> StoreApi<S> {
         {
             self.producer.candidate_dropped("wrong_sub_slots_to_farm");
             warn!(
-                event = "producer.build.dropped",
-                reason = "wrong_sub_slots_to_farm",
-                "candidate: have different sub-slots than required to farm this block; dropping"
+                "candidate: have different sub-slots than required to farm this block; dropping event={} reason={}",
+                "producer.build.dropped", "wrong_sub_slots_to_farm"
             );
             return None;
         }
@@ -2453,9 +2450,8 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> StoreApi<S> {
                 } else {
                     self.producer.candidate_dropped("missing_pool_target");
                     warn!(
-                        event = "producer.build.dropped",
-                        reason = "missing_pool_target",
-                        "candidate: OG-plot declare missing pool_target; dropping"
+                        "candidate: OG-plot declare missing pool_target; dropping event={} reason={}",
+                        "producer.build.dropped", "missing_pool_target"
                     );
                     return None;
                 };
@@ -2492,10 +2488,10 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> StoreApi<S> {
             self.producer
                 .candidate_dropped("required_iters_out_of_range");
             warn!(
-                event = "producer.build.dropped",
-                reason = "required_iters_out_of_range",
-                sp_index = declare.signage_point_index,
-                "candidate: proof failed the iters filter (required_iters out of range); dropping"
+                "candidate: proof failed the iters filter (required_iters out of range); dropping event={} reason={} sp_index={}",
+                "producer.build.dropped",
+                "required_iters_out_of_range",
+                declare.signage_point_index
             );
             return None;
         };
@@ -2504,11 +2500,14 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> StoreApi<S> {
             && iters.infusion_point_total_iters < peak.total_iters
         {
             self.producer.candidate_dropped("latency_drop_candidate");
-            warn!(event = "producer.build.dropped", reason = "latency_drop_candidate",
-                sp_index = declare.signage_point_index,
-                infusion_point_total_iters = %iters.infusion_point_total_iters,
-                head_total_iters = %peak.total_iters,
-                "candidate: infusion point behind the current head (latency); dropping");
+            warn!(
+                "candidate: infusion point behind the current head (latency); dropping event={} reason={} sp_index={} infusion_point_total_iters={} head_total_iters={}",
+                "producer.build.dropped",
+                "latency_drop_candidate",
+                declare.signage_point_index,
+                iters.infusion_point_total_iters,
+                peak.total_iters
+            );
             return None;
         }
         // Empty-block coercion: if the candidate's signage point
@@ -2553,9 +2552,8 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> StoreApi<S> {
                     None => {
                         self.producer.candidate_dropped("prev_linkage_store_gap");
                         warn!(
-                            event = "producer.build.dropped",
-                            reason = "prev_linkage_store_gap",
-                            "candidate: prev-block linkage/reward-claim walk failed (store gap); dropping"
+                            "candidate: prev-block linkage/reward-claim walk failed (store gap); dropping event={} reason={}",
+                            "producer.build.dropped", "prev_linkage_store_gap"
                         );
                         return None;
                     }
@@ -2587,11 +2585,11 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> StoreApi<S> {
                 mp.create_block_generator(&self.constants, height, BLOCK_CREATION_TIMEOUT)
             } else {
                 debug!(
-                    is_tx = prev.is_transaction_block,
+                    "candidate: no mempool payload (non-tx, coerced, or frame mismatch); empty block is_tx={} coerce_empty={} mempool_peak={:?} prev_tx_height={}",
+                    prev.is_transaction_block,
                     coerce_empty,
-                    mempool_peak = ?mp.peak(),
-                    prev_tx_height = prev.prev_transaction_block_height,
-                    "candidate: no mempool payload (non-tx, coerced, or frame mismatch); empty block"
+                    mp.peak(),
+                    prev.prev_transaction_block_height
                 );
                 None
             }
@@ -2622,9 +2620,8 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> StoreApi<S> {
         ) else {
             self.producer.candidate_dropped("assembly_hash_fail");
             warn!(
-                event = "producer.build.dropped",
-                reason = "assembly_hash_fail",
-                "candidate: assembly failed to hash foliage/reward block; dropping"
+                "candidate: assembly failed to hash foliage/reward block; dropping event={} reason={}",
+                "producer.build.dropped", "assembly_hash_fail"
             );
             return None;
         };
@@ -2639,13 +2636,13 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> StoreApi<S> {
             .insert(quality_string, height, candidate);
         self.producer.candidate_built();
         info!(
-            event = "producer.build.assembled",
+            "assembled candidate unfinished block; requesting farmer signatures event={} height={} sp_index={} qs={} partial={:?} tx_generator={}",
+            "producer.build.assembled",
             height,
-            sp_index = declare.signage_point_index,
-            qs = %quality_string,
-            partial = ?partial,
-            tx_generator = transactions.is_some(),
-            "assembled candidate unfinished block; requesting farmer signatures"
+            declare.signage_point_index,
+            quality_string,
+            partial,
+            transactions.is_some()
         );
         Some(request)
     }
@@ -3230,11 +3227,11 @@ where
         // network. `--rpc-tls cni` is the authenticated network RPC.
         let (rpc_bind, downgraded) = self.config.rpc_tls.resolve_bind(self.config.rpc);
         if downgraded {
-            tracing::warn!(
-                configured = %self.config.rpc,
-                effective = %rpc_bind,
+            log::warn!(
                 "--rpc-tls local is unauthenticated; refusing to bind the RPC to a routable address \
-                 — serving on loopback instead. Use --rpc-tls cni for an authenticated network RPC."
+                 — serving on loopback instead. Use --rpc-tls cni for an authenticated network RPC. configured={} effective={}",
+                self.config.rpc,
+                rpc_bind
             );
         }
         let tls = crate::rpc::build_rpc_tls_context(&self.config.rpc_tls, rpc_bind)?;
@@ -3402,10 +3399,8 @@ where
                     drop(farmed);
                     self.producer.full_block();
                     info!(
-                        event = "producer.full_block.added",
-                        height = d.height,
-                        header = %d.header_hash,
-                        "full block confirmed from OUR farmed unfinished block"
+                        "full block confirmed from OUR farmed unfinished block event={} height={} header={}",
+                        "producer.full_block.added", d.height, d.header_hash
                     );
                 }
             }
@@ -3454,13 +3449,16 @@ where
                     Ok(()) => {
                         shed_latch.store(false, Ordering::Relaxed);
                         info!(
-                            elapsed_ms = started.elapsed().as_millis() as u64,
-                            "deferred secondary indexes built at tip"
+                            "deferred secondary indexes built at tip elapsed_ms={}",
+                            started.elapsed().as_millis() as u64
                         );
                     }
                     Err(e) => {
                         latch.store(false, Ordering::Relaxed);
-                        warn!(error = %e, "deferred index build failed; retrying on the next sync edge");
+                        warn!(
+                            "deferred index build failed; retrying on the next sync edge error={}",
+                            e
+                        );
                     }
                 }
             });
@@ -3493,13 +3491,17 @@ where
                         Ok(()) => {
                             build_latch.store(false, Ordering::Relaxed);
                             info!(
-                                elapsed_ms = started.elapsed().as_millis() as u64,
-                                tip_lag, "secondary indexes shed for deep re-catch-up"
+                                "secondary indexes shed for deep re-catch-up elapsed_ms={} tip_lag={}",
+                                started.elapsed().as_millis() as u64,
+                                tip_lag
                             );
                         }
                         Err(e) => {
                             latch.store(false, Ordering::Relaxed);
-                            warn!(error = %e, "index shed failed; retrying while still deep behind");
+                            warn!(
+                                "index shed failed; retrying while still deep behind error={}",
+                                e
+                            );
                         }
                     }
                 });
@@ -3667,19 +3669,22 @@ where
                 .backfill_epoch_depth(&sources, &validated.summaries, anchor)
                 .await
             {
-                Ok(n) => tracing::info!(records = n, "epoch-depth backfill complete"),
+                Ok(n) => log::info!("epoch-depth backfill complete records={}", n),
                 Err(e) => {
-                    tracing::warn!(error = %e, "epoch-depth backfill incomplete; will stay light near the boundary")
+                    log::warn!(
+                        "epoch-depth backfill incomplete; will stay light near the boundary error={}",
+                        e
+                    )
                 }
             }
             match chaser.warm_engine_cache().await {
                 Ok(n) => {
-                    tracing::info!(records = n, "engine walk cache warmed from store");
+                    log::info!("engine walk cache warmed from store records={}", n);
                     // mm-OOM visibility: a pod that dies seconds after start still leaves its
                     // post-warm memory shape in the log (the OOMed node left zero allocation evidence).
                     crate::metrics::log_startup_memory("fast_sync", n);
                 }
-                Err(e) => tracing::warn!(error = %e, "engine cache warm failed"),
+                Err(e) => log::warn!("engine cache warm failed error={}", e),
             }
             peak
         };
@@ -3753,9 +3758,8 @@ where
             LongSyncPlan::Extend => {}
             LongSyncPlan::Rewind { fork_point } => {
                 info!(
-                    fork_point,
-                    peak_height,
-                    "long sync: WP fork point below the local peak; relanding through the engine reorg"
+                    "long sync: WP fork point below the local peak; relanding through the engine reorg fork_point={} peak_height={}",
+                    fork_point, peak_height
                 );
                 self.long_sync_rewind(&peers, fork_point).await?;
             }
@@ -3768,9 +3772,8 @@ where
         }
         *self.long_sync_anchor.write().await = Some(validated.tip);
         info!(
-            peak_height,
-            tip = %validated.tip,
-            "long-sync landing anchored (weight proof validated, fork point resolved)"
+            "long-sync landing anchored (weight proof validated, fork point resolved) peak_height={} tip={}",
+            peak_height, validated.tip
         );
         Ok(true)
     }
@@ -3843,10 +3846,10 @@ where
         }
         let Some(mut blocks) = fetched else {
             warn!(
+                "sync-from anchor: no peer served the anchor span; retrying start={} end={} peers={}",
                 start,
                 end,
-                peers = peers.len(),
-                "sync-from anchor: no peer served the anchor span; retrying"
+                peers.len()
             );
             return Ok(false);
         };
@@ -3880,17 +3883,20 @@ where
             .backfill_epoch_depth(&sources, &validated.summaries, start)
             .await
         {
-            Ok(n) => info!(records = n, "sync-from epoch-depth backfill complete"),
+            Ok(n) => info!("sync-from epoch-depth backfill complete records={}", n),
             Err(e) => {
-                warn!(error = %e, "sync-from epoch-depth backfill failed; retrying anchor next tick");
+                warn!(
+                    "sync-from epoch-depth backfill failed; retrying anchor next tick error={}",
+                    e
+                );
                 return Ok(false);
             }
         }
         if let Err(e) = chaser.warm_engine_cache().await {
-            warn!(error = %e, "sync-from cache warm failed");
+            warn!("sync-from cache warm failed error={}", e);
         }
         *self.sync_from_anchor.write().await = Some(start);
-        info!(anchor = start, target = h, "sync-from anchor established");
+        info!("sync-from anchor established anchor={} target={}", start, h);
         Ok(true)
     }
 
@@ -3940,7 +3946,7 @@ where
             return Ok(None);
         }
         if let Some(v) = self.validated_tip.read().await.clone() {
-            info!(cached_tip = %v.tip, "reusing validated weight proof");
+            info!("reusing validated weight proof cached_tip={}", v.tip);
             return Ok(Some(v));
         }
         // Race the weight-proof request across EVERY live peer and take the first that answers. A single
@@ -3949,9 +3955,9 @@ where
         // rest are aborted. The serving peer travels with the proof so a proof that fails the claim
         // cross-check or validation can evict exactly that peer (the failed-proof eviction).
         info!(
+            "fast-sync: fetching weight proof (racing all peers) tip_height={} peers={}",
             tip_height,
-            peers = peers.len(),
-            "fast-sync: fetching weight proof (racing all peers)"
+            peers.len()
         );
         let mut fetches = tokio::task::JoinSet::new();
         for peer in peers {
@@ -3972,11 +3978,14 @@ where
                 }
                 Ok((_, Err(e))) => {
                     failures += 1;
-                    warn!(error = %e, "weight-proof fetch from a peer failed, awaiting others");
+                    warn!(
+                        "weight-proof fetch from a peer failed, awaiting others error={}",
+                        e
+                    );
                 }
                 Err(e) => {
                     failures += 1;
-                    warn!(error = %e, "weight-proof fetch task join error");
+                    warn!("weight-proof fetch task join error error={}", e);
                 }
             }
         }
@@ -4026,12 +4035,16 @@ where
                     let path = dir.join(format!("weight_proof_{tip_height}.bin"));
                     match std::fs::write(&path, &bytes) {
                         Ok(()) => {
-                            info!(path = %path.display(), bytes = bytes.len(), "dumped weight-proof fixture")
+                            info!(
+                                "dumped weight-proof fixture path={} bytes={}",
+                                path.display(),
+                                bytes.len()
+                            )
                         }
-                        Err(e) => warn!(error = %e, "failed to write weight-proof dump"),
+                        Err(e) => warn!("failed to write weight-proof dump error={}", e),
                     }
                 }
-                Err(e) => warn!(error = ?e, "failed to serialize weight proof for dump"),
+                Err(e) => warn!("failed to serialize weight proof for dump error={:?}", e),
             }
         }
         let wp = Arc::new(proof);
@@ -4040,8 +4053,8 @@ where
         let constants = self.constants;
         let wp_for_verify = wp.clone();
         info!(
-            tip_height,
-            "fast-sync: validating weight proof (spawn_blocking)"
+            "fast-sync: validating weight proof (spawn_blocking) tip_height={}",
+            tip_height
         );
         let verified = tokio::task::spawn_blocking(move || {
             dg_xch_weight_proof::validate_weight_proof(&wp_for_verify, &constants)
@@ -4109,12 +4122,12 @@ where
             let mut chaser = self.chaser.lock().await;
             match chaser.warm_engine_cache().await {
                 Ok(n) => {
-                    info!(records = n, "engine walk cache warmed (resume)");
+                    info!("engine walk cache warmed (resume) records={}", n);
                     // mm-OOM visibility: the resume path is the one the OOMing node takes on every
                     // restart — this self-report is the allocation evidence its 8-second life lacked.
                     crate::metrics::log_startup_memory("resume", n);
                 }
-                Err(e) => warn!(error = %e, "engine cache warm failed (resume)"),
+                Err(e) => warn!("engine cache warm failed (resume) error={}", e),
             }
         }
         // The deepest record the next possible epoch retarget can read from this peak — the
@@ -4165,15 +4178,18 @@ where
             .backfill_epoch_depth(&sources, &validated.summaries, anchor)
             .await
         {
-            Ok(n) => info!(records = n, anchor, "resume epoch-depth backfill complete"),
+            Ok(n) => info!(
+                "resume epoch-depth backfill complete records={} anchor={}",
+                n, anchor
+            ),
             Err(e) => {
-                warn!(error = %e, "resume backfill incomplete, retrying next tick");
+                warn!("resume backfill incomplete, retrying next tick error={}", e);
                 return Ok(false);
             }
         }
         match chaser.warm_engine_cache().await {
-            Ok(n) => info!(records = n, "engine walk cache re-warmed after backfill"),
-            Err(e) => warn!(error = %e, "engine cache warm failed after backfill"),
+            Ok(n) => info!("engine walk cache re-warmed after backfill records={}", n),
+            Err(e) => warn!("engine cache warm failed after backfill error={}", e),
         }
         Ok(true)
     }
@@ -4238,7 +4254,7 @@ where
                 .new_peak(self.store.as_ref(), tx_height, tx_ts, &[])
                 .await
         {
-            warn!(error = %e, "sync-end mempool revalidation failed");
+            warn!("sync-end mempool revalidation failed error={}", e);
         }
         // NewPeak to full-node peers + slot-state advance + NewPeakTimelord to timelords.
         broadcast_new_peak(self, registry, hash, height).await;
@@ -4261,7 +4277,7 @@ where
             };
             broadcast_new_peak_wallet(&self.net, &wallets, &announce).await;
         }
-        info!(height, "sync-end transition fired");
+        info!("sync-end transition fired height={}", height);
     }
 
     // The transaction block framing a peak: walk from the peak to the nearest record carrying a
@@ -4325,8 +4341,8 @@ where
                 .await
                 .map_err(|e| Error::other(e.to_string()))?;
             info!(
-                height = d.height,
-                dropped, "reorg landing: mempool revalidated on the slow path"
+                "reorg landing: mempool revalidated on the slow path height={} dropped={}",
+                d.height, dropped
             );
         }
         // `mempool_manager.new_peak`: "we're only interested in transaction blocks" — the
@@ -4451,7 +4467,11 @@ where
                 })
                 .collect();
             let seeded = supervisor.seed_addresses(&manual).await;
-            info!(seeded, configured = manual.len(), "seeded manual peers");
+            info!(
+                "seeded manual peers seeded={} configured={}",
+                seeded,
+                manual.len()
+            );
         }
         // The RETRYING introducer session: a one-shot seed dies on boot-time DNS-not-ready and
         // the node stays peer-poor forever. The supervisor
@@ -4522,11 +4542,11 @@ where
         };
         match spawn_metrics_server(addr, sources, self.config.debug_endpoints) {
             Ok(run) => {
-                info!(%addr, "metrics server listening");
+                info!("metrics server listening addr={}", addr);
                 Some(run)
             }
             Err(e) => {
-                warn!(%addr, error = %e, "metrics server failed to start");
+                warn!("metrics server failed to start addr={} error={}", addr, e);
                 None
             }
         }
@@ -4620,7 +4640,10 @@ async fn tip_follower<S: BlockStore + CoinStore + Send + Sync + 'static>(
             Ok(None) => {}
             // A deeper reorg or a peer that cannot serve the tip: defer to the driver's batch/bulk bands.
             Err(e) => {
-                debug!(local, claimed, error = %e, "tip-follow step deferred to the driver");
+                debug!(
+                    "tip-follow step deferred to the driver local={} claimed={} error={}",
+                    local, claimed, e
+                );
             }
         }
     }
@@ -4749,7 +4772,7 @@ async fn fetch_seed_refs<S: BlockStore + CoinStore + Send + Sync + 'static>(
             Some(generator) => generator,
             None => {
                 let Ok(fetched) = source.fetch_range(h, h).await else {
-                    warn!(height = h, "recovery peer failed to serve ref block");
+                    warn!("recovery peer failed to serve ref block height={}", h);
                     continue;
                 };
                 let Some(generator) = fetched
@@ -4758,14 +4781,14 @@ async fn fetch_seed_refs<S: BlockStore + CoinStore + Send + Sync + 'static>(
                     .and_then(|b| b.transactions_generator)
                 else {
                     warn!(
-                        height = h,
-                        "recovery peer served no generator for ref block"
+                        "recovery peer served no generator for ref block height={}",
+                        h
                     );
                     continue;
                 };
                 info!(
-                    height = h,
-                    "fetched out-of-span generator ref for the consumer"
+                    "fetched out-of-span generator ref for the consumer height={}",
+                    h
                 );
                 let mut cache = node.seed_ref_cache.lock().await;
                 cache.push_back((h, generator.clone()));
@@ -4810,30 +4833,33 @@ async fn handle_recovery<S: BlockStore + CoinStore + Send + Sync + 'static>(
         }
         RecoveryRequest::Orphan { from, to, reply } => {
             warn!(
-                from,
-                to, "driver servicing orphan backtrack for the consumer"
+                "driver servicing orphan backtrack for the consumer from={} to={}",
+                from, to
             );
             if let Some(source) = recovery_source(registry, rotation).await {
                 match node.sync_backtrack(&source, from, to).await {
-                    Ok(Some((_, h))) => info!(height = h, "backtrack converged past the fork"),
+                    Ok(Some((_, h))) => info!("backtrack converged past the fork height={}", h),
                     Ok(None) => {}
                     Err(SyncError::DeepFork { base, floor }) => {
                         warn!(
-                            base,
-                            floor, "fork deeper than the backtrack cap; driving long sync"
+                            "fork deeper than the backtrack cap; driving long sync base={} floor={}",
+                            base, floor
                         );
                         match node.bulk_sync(registry).await {
                             Ok(Some((_, h))) => {
-                                info!(height = h, "long sync landed after deep fork")
+                                info!("long sync landed after deep fork height={}", h)
                             }
                             Ok(None) => {}
                             Err(e) => {
-                                warn!(error = %e, "deep-fork long sync failed, retry next window")
+                                warn!("deep-fork long sync failed, retry next window error={}", e)
                             }
                         }
                     }
                     Err(e) => {
-                        warn!(from, to, error = %e, "orphan backtrack failed, retry next window")
+                        warn!(
+                            "orphan backtrack failed, retry next window from={} to={} error={}",
+                            from, to, e
+                        )
                     }
                 }
             }
@@ -4851,7 +4877,10 @@ async fn handle_recovery<S: BlockStore + CoinStore + Send + Sync + 'static>(
                     Ok(true) => break,
                     Ok(false) => tokio::time::sleep(DRIVER_TICK).await,
                     Err(e) => {
-                        warn!(error = %e, "resume repair failed during recovery, retry next window");
+                        warn!(
+                            "resume repair failed during recovery, retry next window error={}",
+                            e
+                        );
                         break;
                     }
                 }
@@ -4994,7 +5023,10 @@ async fn block_processor<S: BlockStore + CoinStore + Send + Sync + 'static>(
                 }
             }
             Err(e) if e.is_orphan() => {
-                warn!(from, to, error = %e, "consumer window orphaned; delegating backtrack to the driver");
+                warn!(
+                    "consumer window orphaned; delegating backtrack to the driver from={} to={} error={}",
+                    from, to, e
+                );
                 if !await_reset(&recovery_tx, |reply| RecoveryRequest::Orphan {
                     from,
                     to,
@@ -5006,7 +5038,10 @@ async fn block_processor<S: BlockStore + CoinStore + Send + Sync + 'static>(
                 }
             }
             Err(e) if e.is_missing_record() => {
-                warn!(from, to, error = %e, "consumer needs records below the floor; delegating repair");
+                warn!(
+                    "consumer needs records below the floor; delegating repair from={} to={} error={}",
+                    from, to, e
+                );
                 if !await_reset(&recovery_tx, |reply| RecoveryRequest::MissingRecord {
                     reply,
                 })
@@ -5016,7 +5051,10 @@ async fn block_processor<S: BlockStore + CoinStore + Send + Sync + 'static>(
                 }
             }
             Err(e) => {
-                warn!(from, to, error = %e, "consumer follow step failed; requesting a queue reset");
+                warn!(
+                    "consumer follow step failed; requesting a queue reset from={} to={} error={}",
+                    from, to, e
+                );
                 if !await_reset(&recovery_tx, |reply| RecoveryRequest::Reset { reply }).await {
                     break;
                 }
@@ -5188,22 +5226,21 @@ async fn fetch_scheduler<S: BlockStore + CoinStore + Send + Sync + 'static>(
                 && (frozen_from_ticks == 3 || frozen_from_ticks.is_multiple_of(16))
             {
                 warn!(
+                    "fetch frontier frozen below the tip while work remains — decoupled prefetch reservation wedge from={} claimed={} frozen_ticks={} low_water={} generation={} resident_windows={} readahead_inflight={}",
                     from,
                     claimed,
-                    frozen_ticks = frozen_from_ticks,
-                    low_water = queue.low_water(),
-                    generation = queue.current_gen(),
-                    resident_windows = queue.len(),
-                    readahead_inflight =
-                        node.sync_metrics.readahead_inflight.load(Ordering::Relaxed),
-                    "fetch frontier frozen below the tip while work remains — decoupled prefetch reservation wedge"
+                    frozen_from_ticks,
+                    queue.low_water(),
+                    queue.current_gen(),
+                    queue.len(),
+                    node.sync_metrics.readahead_inflight.load(Ordering::Relaxed)
                 );
             } else if !frozen_frontier_is_wedge(from, claimed) && frozen_from_ticks == 3 {
                 debug!(
+                    "fetch frontier at the servable tip; validator draining resident backlog from={} claimed={} resident_windows={}",
                     from,
                     claimed,
-                    resident_windows = queue.len(),
-                    "fetch frontier at the servable tip; validator draining resident backlog"
+                    queue.len()
                 );
             }
         } else {
@@ -5263,7 +5300,10 @@ async fn fetch_scheduler<S: BlockStore + CoinStore + Send + Sync + 'static>(
                         Some(blocks)
                     }
                     Err(e) => {
-                        warn!(from, to, error = %e, "producer fetch failed, retrying next tick");
+                        warn!(
+                            "producer fetch failed, retrying next tick from={} to={} error={}",
+                            from, to, e
+                        );
                         None
                     }
                 }
@@ -5385,7 +5425,7 @@ async fn sync_driver<S: BlockStore + CoinStore + Send + Sync + 'static>(
         if !repaired {
             match node.resume_repair(&registry, false).await {
                 Ok(done) => repaired = done,
-                Err(e) => warn!(error = %e, "resume repair failed, retrying next tick"),
+                Err(e) => warn!("resume repair failed, retrying next tick error={}", e),
             }
             if !repaired {
                 continue;
@@ -5412,15 +5452,14 @@ async fn sync_driver<S: BlockStore + CoinStore + Send + Sync + 'static>(
                 confirm_in_flight,
             ) {
                 warn!(
-                    low_water = queue.low_water(),
-                    next_fetch = queue.next_fetch_height(),
-                    peak = local,
-                    generation = queue.current_gen(),
-                    readahead_inflight =
-                        node.sync_metrics.readahead_inflight.load(Ordering::Relaxed),
-                    resident_windows = queue.len(),
-                    claimed,
-                    "decoupled sync pipeline stalled; forced queue rebase (stall reclaim)"
+                    "decoupled sync pipeline stalled; forced queue rebase (stall reclaim) low_water={} next_fetch={} peak={} generation={} readahead_inflight={} resident_windows={} claimed={}",
+                    queue.low_water(),
+                    queue.next_fetch_height(),
+                    local,
+                    queue.current_gen(),
+                    node.sync_metrics.readahead_inflight.load(Ordering::Relaxed),
+                    queue.len(),
+                    claimed
                 );
             }
         }
@@ -5440,7 +5479,7 @@ async fn sync_driver<S: BlockStore + CoinStore + Send + Sync + 'static>(
                 Ok(true) => {}
                 Ok(false) => continue,
                 Err(e) => {
-                    warn!(error = %e, "sync-from anchor failed, retrying next tick");
+                    warn!("sync-from anchor failed, retrying next tick error={}", e);
                     continue;
                 }
             }
@@ -5453,7 +5492,7 @@ async fn sync_driver<S: BlockStore + CoinStore + Send + Sync + 'static>(
                 // Near-empty-store sub-band: the recent-chain jump (unchanged from-zero landing).
                 match node.bulk_sync(&registry).await {
                     Ok(Some((_, h))) => {
-                        info!(height = h, "fast-sync landed at recent-chain peak");
+                        info!("fast-sync landed at recent-chain peak height={}", h);
                         // Band-exit seam: the sync_range confirm path bypassed
                         // the per-block follow side effects, so fire peak-post-processing ONCE now
                         // — mempool revalidation + NewPeak/NewPeakTimelord/NewPeakWallet.
@@ -5461,7 +5500,7 @@ async fn sync_driver<S: BlockStore + CoinStore + Send + Sync + 'static>(
                     }
                     // No tip/peer yet, or the proof/download failed — retry next tick.
                     Ok(None) => {}
-                    Err(e) => warn!(error = %e, "fast-sync failed, retrying next tick"),
+                    Err(e) => warn!("fast-sync failed, retrying next tick error={}", e),
                 }
                 continue;
             }
@@ -5474,7 +5513,7 @@ async fn sync_driver<S: BlockStore + CoinStore + Send + Sync + 'static>(
                 Ok(true) => {}
                 Ok(false) => continue,
                 Err(e) => {
-                    warn!(error = %e, "long-sync anchor failed, retrying next tick");
+                    warn!("long-sync anchor failed, retrying next tick error={}", e);
                     continue;
                 }
             }
@@ -5726,21 +5765,25 @@ async fn update_slot_state_on_peak<S: BlockStore + CoinStore + Send + Sync + 'st
         return;
     };
     let blocks = difficulty_records_map(node, &rec).await;
-    let (next_ssi, next_diff) =
-        match get_next_sub_slot_iters_and_difficulty(&node.constants, true, Some(&rec), &blocks) {
-            Ok(v) => v,
-            Err(e) => {
-                // This computation cannot fail for a connected peak; a failure here means the
-                // record walk broke mid-chain. Skipping this peak's slot-state reset is strictly
-                // safer than a fallback,
-                // which fed difficulty 0 into the slot state and the farmer announcements.
-                warn!(
-                    event = "slot_state.ssi_difficulty_fail", peak = %peak_hash, error = %e,
-                    "slot-state peak update skipped: next SSI/difficulty computation failed"
-                );
-                return;
-            }
-        };
+    let (next_ssi, next_diff) = match get_next_sub_slot_iters_and_difficulty(
+        &node.constants,
+        true,
+        Some(&rec),
+        &blocks,
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            // This computation cannot fail for a connected peak; a failure here means the
+            // record walk broke mid-chain. Skipping this peak's slot-state reset is strictly
+            // safer than a fallback,
+            // which fed difficulty 0 into the slot state and the farmer announcements.
+            warn!(
+                "slot-state peak update skipped: next SSI/difficulty computation failed event={} peak={} error={}",
+                "slot_state.ssi_difficulty_fail", peak_hash, e
+            );
+            return;
+        }
+    };
     let mut state = node.slot_state.lock().await;
     let (new_eos, new_sps) = state.new_peak(
         &rec,
@@ -5800,18 +5843,21 @@ async fn process_sp_inbox<S: BlockStore + CoinStore + Send + Sync + 'static>(nod
     // either — so an Err here means the record walk broke mid-chain: drop the drained batch
     // (SP gossip is redundant across peers and ticks) rather than process it under difficulty 0,
     // a poisoning fallback.
-    let (next_ssi, next_diff) =
-        match get_next_sub_slot_iters_and_difficulty(&node.constants, true, peak.as_ref(), &blocks)
-        {
-            Ok(v) => v,
-            Err(e) => {
-                warn!(
-                    event = "sp.ssi_difficulty_fail", error = %e,
-                    "signage-point batch dropped: next SSI/difficulty computation failed"
-                );
-                return;
-            }
-        };
+    let (next_ssi, next_diff) = match get_next_sub_slot_iters_and_difficulty(
+        &node.constants,
+        true,
+        peak.as_ref(),
+        &blocks,
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!(
+                "signage-point batch dropped: next SSI/difficulty computation failed event={} error={}",
+                "sp.ssi_difficulty_fail", e
+            );
+            return;
+        }
+    };
     let (peak_height, last_tx_height) = farmer_heights(peak.as_ref());
     let mut state = node.slot_state.lock().await;
     let mut announces = node.sp_announce.lock().await;
@@ -5845,7 +5891,10 @@ async fn process_sp_inbox<S: BlockStore + CoinStore + Send + Sync + 'static>(nod
                         sp.challenge_chain_vdf.output.hash(),
                         sp.reward_chain_vdf.output.hash(),
                     ) {
-                        info!(index = sp.index_from_challenge, %cc, %rc, "finished signage point");
+                        info!(
+                            "finished signage point index={} cc={} rc={}",
+                            sp.index_from_challenge, cc, rc
+                        );
                     }
                     if let Some(a) = announce_for_sp(&state, sp.index_from_challenge, &point) {
                         announces.push(a);
@@ -5876,7 +5925,7 @@ async fn process_sp_inbox<S: BlockStore + CoinStore + Send + Sync + 'static>(nod
                 {
                     // The "finished sub slot" INFO line, keyed by the challenge-chain hash.
                     if let Ok(cc) = eos.end_of_slot_bundle.challenge_chain.hash() {
-                        info!(%cc, "finished sub slot");
+                        info!("finished sub slot cc={}", cc);
                     }
                     if let Some(a) = announce_for_eos(&eos.end_of_slot_bundle) {
                         announces.push(a);
@@ -5942,7 +5991,7 @@ fn spawn_tx_validator<S: BlockStore + CoinStore + Send + Sync + 'static>(
                 )
                 .await
                 {
-                    debug!(error = %e, "gossiped transaction rejected");
+                    debug!("gossiped transaction rejected error={}", e);
                 }
             }
         }
@@ -5970,9 +6019,9 @@ fn spawn_wp_worker<S: BlockStore + Send + Sync + 'static>(
                 match server.get_proof_of_weight(req.tip).await {
                     Ok(wp) => respond_weight_proof(&req, &wp, &net).await,
                     Err(e) if e.is_refusal() => {
-                        info!(tip = %req.tip, error = %e, "refusing weight proof request");
+                        info!("refusing weight proof request tip={} error={}", req.tip, e);
                     }
-                    Err(e) => warn!(tip = %req.tip, error = %e, "weight proof build failed"),
+                    Err(e) => warn!("weight proof build failed tip={} error={}", req.tip, e),
                 }
             }
         }
@@ -6118,12 +6167,12 @@ fn spawn_uncompact_scanner<S: BlockStore + Send + Sync + 'static>(
                 inbound_peers.read().await.values().cloned().collect();
             let sent = solicit_uncompact_from_timelords(&reqs, &peers, &net).await;
             info!(
+                "uncompact scan: bulky VDF proofs solicited from bluebox timelords bottom={} top={} solicited={} sent={} ledger={}",
                 bottom,
                 top,
-                solicited = reqs.len(),
+                reqs.len(),
                 sent,
-                ledger = ledger.len(),
-                "uncompact scan: bulky VDF proofs solicited from bluebox timelords"
+                ledger.len()
             );
         }
     });
@@ -6134,7 +6183,10 @@ fn spawn_uncompact_scanner<S: BlockStore + Send + Sync + 'static>(
 // RespondProofOfWeight matches by type + id). A peer that disconnected while we built is dropped.
 async fn respond_weight_proof(req: &WpRequest, wp: &WeightProof, net: &NetCounters) {
     let Some(peer) = req.peers.read().await.get(&req.peer).cloned() else {
-        debug!(peer = %req.peer, "weight proof requester disconnected before response");
+        debug!(
+            "weight proof requester disconnected before response peer={}",
+            req.peer
+        );
         return;
     };
     let version = *peer.protocol_version.read().await;
@@ -6150,7 +6202,7 @@ async fn respond_weight_proof(req: &WpRequest, wp: &WeightProof, net: &NetCounte
     ) {
         Ok(msg) => msg,
         Err(e) => {
-            warn!(error = %e, "failed to serialize RespondProofOfWeight");
+            warn!("failed to serialize RespondProofOfWeight error={}", e);
             return;
         }
     };
@@ -6159,7 +6211,10 @@ async fn respond_weight_proof(req: &WpRequest, wp: &WeightProof, net: &NetCounte
         msg.data.as_slice().len(),
     );
     if let Err(e) = peer.send(msg).await {
-        warn!(peer = %req.peer, error = %e, "failed to send RespondProofOfWeight");
+        warn!(
+            "failed to send RespondProofOfWeight peer={} error={}",
+            req.peer, e
+        );
     }
 }
 
@@ -6179,9 +6234,8 @@ async fn process_ub_inbox<S: BlockStore + CoinStore + Send + Sync + 'static>(nod
             // Was a silent continue: a ready UB dies here with nothing logged.
             node.producer.candidate_dropped("ub_reward_hash_fail");
             warn!(
-                event = "producer.ub.dropped",
-                reason = "ub_reward_hash_fail",
-                "unfinished block dropped: reward_chain_block failed to hash"
+                "unfinished block dropped: reward_chain_block failed to hash event={} reason={}",
+                "producer.ub.dropped", "ub_reward_hash_fail"
             );
             continue;
         };
@@ -6210,9 +6264,8 @@ async fn process_ub_inbox<S: BlockStore + CoinStore + Send + Sync + 'static>(nod
                 // steady-state outcome while syncing (the bulk of this counter).
                 node.producer.candidate_dropped("ub_prev_unknown");
                 info!(
-                    event = "producer.ub.dropped", reason = "ub_prev_unknown",
-                    partial = %partial_hash, prev = %prev_hash,
-                    "unfinished block parked: parent block not in store (we are behind)"
+                    "unfinished block parked: parent block not in store (we are behind) event={} reason={} partial={} prev={}",
+                    "producer.ub.dropped", "ub_prev_unknown", partial_hash, prev_hash
                 );
                 node.unfinished
                     .lock()
@@ -6230,18 +6283,16 @@ async fn process_ub_inbox<S: BlockStore + CoinStore + Send + Sync + 'static>(nod
                     drop(inbox);
                     node.producer.candidate_requeued("ub_prev_store_error");
                     warn!(
-                        event = "producer.ub.requeued", reason = "ub_prev_store_error",
-                        partial = %partial_hash, prev = %prev_hash, error = %e,
-                        "unfinished block re-queued: store error resolving parent (retryable, candidate preserved)"
+                        "unfinished block re-queued: store error resolving parent (retryable, candidate preserved) event={} reason={} partial={} prev={} error={}",
+                        "producer.ub.requeued", "ub_prev_store_error", partial_hash, prev_hash, e
                     );
                 } else {
                     drop(inbox);
                     // Only with the inbox saturated ON TOP of the store error is the candidate lost.
                     node.producer.candidate_dropped("ub_inbox_full");
                     warn!(
-                        event = "producer.ub.dropped", reason = "ub_inbox_full",
-                        partial = %partial_hash, error = %e,
-                        "unfinished block dropped: store error resolving parent AND ub_inbox at cap"
+                        "unfinished block dropped: store error resolving parent AND ub_inbox at cap event={} reason={} partial={} error={}",
+                        "producer.ub.dropped", "ub_inbox_full", partial_hash, e
                     );
                 }
                 continue;
@@ -6259,9 +6310,8 @@ async fn process_ub_inbox<S: BlockStore + CoinStore + Send + Sync + 'static>(nod
                 if node.unfinished.lock().await.seen(ub_hash) {
                     node.producer.candidate_dropped("ub_duplicate");
                     debug!(
-                        event = "producer.ub.dropped", reason = "ub_duplicate",
-                        partial = %partial_hash,
-                        "unfinished block dropped: exact duplicate already processed"
+                        "unfinished block dropped: exact duplicate already processed event={} reason={} partial={}",
+                        "producer.ub.dropped", "ub_duplicate", partial_hash
                     );
                     continue;
                 }
@@ -6269,9 +6319,8 @@ async fn process_ub_inbox<S: BlockStore + CoinStore + Send + Sync + 'static>(nod
             Err(e) => {
                 node.producer.candidate_dropped("ub_hash_fail");
                 warn!(
-                    event = "producer.ub.dropped", reason = "ub_hash_fail",
-                    partial = %partial_hash, error = %e,
-                    "unfinished block dropped: unfinished block failed to hash"
+                    "unfinished block dropped: unfinished block failed to hash event={} reason={} partial={} error={}",
+                    "producer.ub.dropped", "ub_hash_fail", partial_hash, e
                 );
                 continue;
             }
@@ -6286,9 +6335,8 @@ async fn process_ub_inbox<S: BlockStore + CoinStore + Send + Sync + 'static>(nod
                 drop(cache);
                 node.producer.candidate_dropped("ub_already_cached");
                 debug!(
-                    event = "producer.ub.dropped", reason = "ub_already_cached",
-                    partial = %partial_hash,
-                    "unfinished block dropped: already cached (or a better variant is)"
+                    "unfinished block dropped: already cached (or a better variant is) event={} reason={} partial={}",
+                    "producer.ub.dropped", "ub_already_cached", partial_hash
                 );
                 continue;
             }
@@ -6308,9 +6356,8 @@ async fn process_ub_inbox<S: BlockStore + CoinStore + Send + Sync + 'static>(nod
             Err(e) => {
                 node.producer.candidate_dropped("ub_ssi_difficulty_fail");
                 warn!(
-                    event = "producer.ub.dropped", reason = "ub_ssi_difficulty_fail",
-                    partial = %partial_hash, error = %e,
-                    "unfinished block dropped: next SSI/difficulty computation failed"
+                    "unfinished block dropped: next SSI/difficulty computation failed event={} reason={} partial={} error={}",
+                    "producer.ub.dropped", "ub_ssi_difficulty_fail", partial_hash, e
                 );
                 continue;
             }
@@ -6351,9 +6398,8 @@ async fn process_ub_inbox<S: BlockStore + CoinStore + Send + Sync + 'static>(nod
                 {
                     node.producer.candidate_dropped(reason);
                     info!(
-                        event = "producer.ub.dropped", reason,
-                        partial = %partial_hash, error = %e,
-                        "unfinished block dropped: transactions generator/body validation failed"
+                        "unfinished block dropped: transactions generator/body validation failed event={} reason={} partial={} error={}",
+                        "producer.ub.dropped", reason, partial_hash, e
                     );
                     node.unfinished
                         .lock()
@@ -6362,7 +6408,10 @@ async fn process_ub_inbox<S: BlockStore + CoinStore + Send + Sync + 'static>(nod
                     continue;
                 }
                 // The "added unfinished block" INFO line.
-                info!(event = "producer.ub.added", partial = %partial_hash, "added unfinished block");
+                info!(
+                    "added unfinished block event={} partial={}",
+                    "producer.ub.added", partial_hash
+                );
                 // Build the NewUnfinishedBlockTimelord BEFORE the block is moved into the cache.
                 // sub_slot_iters/difficulty are the same context the header validation used; ses
                 // is the summary the NEXT block would include (None on a near-genesis chain);
@@ -6419,9 +6468,8 @@ async fn process_ub_inbox<S: BlockStore + CoinStore + Send + Sync + 'static>(nod
                         node.producer
                             .candidate_dropped("timelord_rc_prev_unresolved");
                         warn!(
-                            event = "producer.ub.dropped", reason = "timelord_rc_prev_unresolved",
-                            partial = %partial_hash,
-                            "timelord broadcast: could not resolve rc_prev; skipping NewUnfinishedBlockTimelord"
+                            "timelord broadcast: could not resolve rc_prev; skipping NewUnfinishedBlockTimelord event={} reason={} partial={}",
+                            "producer.ub.dropped", "timelord_rc_prev_unresolved", partial_hash
                         );
                     }
                 }
@@ -6431,9 +6479,8 @@ async fn process_ub_inbox<S: BlockStore + CoinStore + Send + Sync + 'static>(nod
             Err(e) => {
                 node.producer.candidate_dropped("ub_validation_fail");
                 info!(
-                    event = "producer.ub.dropped", reason = "ub_validation_fail",
-                    partial = %partial_hash, error = %e,
-                    "unfinished block failed pre-validation"
+                    "unfinished block failed pre-validation event={} reason={} partial={} error={}",
+                    "producer.ub.dropped", "ub_validation_fail", partial_hash, e
                 );
                 node.unfinished
                     .lock()
@@ -6540,8 +6587,8 @@ async fn assemble_infusion_block<S: BlockStore + CoinStore + Send + Sync + 'stat
         .cloned();
     let Some(unfinished) = unfinished else {
         warn!(
-            unfinished_reward_hash = %req.unfinished_reward_hash,
-            "infusion point: no cached unfinished reward block, cannot finish"
+            "infusion point: no cached unfinished reward block, cannot finish unfinished_reward_hash={}",
+            req.unfinished_reward_hash
         );
         return None;
     };
@@ -6557,7 +6604,10 @@ async fn assemble_infusion_block<S: BlockStore + CoinStore + Send + Sync + 'stat
         None
     } else {
         let Ok(Some((peak_hash, _))) = node.store.get_peak().await else {
-            debug!(%target_rc_hash, "infusion point: no peak to backtrack prev block from");
+            debug!(
+                "infusion point: no peak to backtrack prev block from target_rc_hash={}",
+                target_rc_hash
+            );
             return None;
         };
         let Ok(Some(peak_rec)) = node.store.get_block_record(&peak_hash).await else {
@@ -6569,9 +6619,8 @@ async fn assemble_infusion_block<S: BlockStore + CoinStore + Send + Sync + 'stat
                 // add_to_future_ip + return: the prev block is not reachable yet. We do
                 // not model the future-ip cache; the timelord re-sends on the next NewPeakTimelord.
                 warn!(
-                    %target_rc_hash,
-                    infusion = %req.reward_chain_ip_vdf.challenge,
-                    "infusion point: previous block not found (parked; timelord will re-send)"
+                    "infusion point: previous block not found (parked; timelord will re-send) target_rc_hash={} infusion={}",
+                    target_rc_hash, req.reward_chain_ip_vdf.challenge
                 );
                 return None;
             }
@@ -6612,7 +6661,10 @@ async fn assemble_infusion_block<S: BlockStore + CoinStore + Send + Sync + 'stat
     ) {
         Ok(v) => v,
         Err(e) => {
-            warn!(error = %e, "infusion point: next SSI/difficulty computation failed");
+            warn!(
+                "infusion point: next SSI/difficulty computation failed error={}",
+                e
+            );
             return None;
         }
     };
@@ -6623,7 +6675,10 @@ async fn assemble_infusion_block<S: BlockStore + CoinStore + Send + Sync + 'stat
         match node.slot_state.lock().await.get_sub_slot(&pos_ss_cc) {
             Some((_, _, start_iters)) => start_iters,
             None => {
-                warn!(%pos_ss_cc, "infusion point: do not have pos sub-slot, cannot finish");
+                warn!(
+                    "infusion point: do not have pos sub-slot, cannot finish pos_ss_cc={}",
+                    pos_ss_cc
+                );
                 return None;
             }
         }
@@ -6635,7 +6690,7 @@ async fn assemble_infusion_block<S: BlockStore + CoinStore + Send + Sync + 'stat
     ) {
         Ok(v) => v,
         Err(e) => {
-            warn!(error = %e, "infusion point: sp_iters computation failed");
+            warn!("infusion point: sp_iters computation failed error={}", e);
             return None;
         }
     };
@@ -6673,7 +6728,10 @@ async fn assemble_infusion_block<S: BlockStore + CoinStore + Send + Sync + 'stat
     ) {
         Ok(b) => b,
         Err(e) => {
-            warn!(error = ?e, "infusion point: FullBlock assembly failed to hash reward block");
+            warn!(
+                "infusion point: FullBlock assembly failed to hash reward block error={:?}",
+                e
+            );
             return None;
         }
     };
@@ -6721,11 +6779,8 @@ async fn process_ip_inbox<S: BlockStore + CoinStore + Send + Sync + 'static>(
         match node.follow_step_blocks(std::slice::from_ref(&block)).await {
             Ok(Some((hash, new_height))) => {
                 info!(
-                    event = "producer.infusion.peak",
-                    height = new_height,
-                    header = %hash,
-                    partial = %partial,
-                    "infused our unfinished block into a FullBlock and set it as the new peak"
+                    "infused our unfinished block into a FullBlock and set it as the new peak event={} height={} header={} partial={}",
+                    "producer.infusion.peak", new_height, hash, partial
                 );
                 // The driver's post-confirm side effects (mirrors the tip-follow peak block).
                 broadcast_new_peak(node, registry, hash, new_height).await;
@@ -6736,16 +6791,17 @@ async fn process_ip_inbox<S: BlockStore + CoinStore + Send + Sync + 'static>(
                 // Validated but did not become the peak (a competing/heavier chain already leads, or we
                 // already hold it); no NewPeak in that case.
                 info!(
-                    height,
-                    partial = %partial,
-                    "infusion point: assembled block confirmed but did not advance the peak"
+                    "infusion point: assembled block confirmed but did not advance the peak height={} partial={}",
+                    height, partial
                 );
             }
             Err(e) => {
                 // Consensus error validating the block; log and move on (the driver's per-tick
                 // NewPeakTimelord broadcast covers the timelord resync).
-                warn!(error = %e, height, partial = %partial,
-                    "infusion point: assembled block failed consensus validation");
+                warn!(
+                    "infusion point: assembled block failed consensus validation error={} height={} partial={}",
+                    e, height, partial
+                );
             }
         }
     }
@@ -6788,9 +6844,9 @@ async fn broadcast_ub_announcements<S: BlockStore + CoinStore + Send + Sync + 's
     let peers = registry.live_peers().await;
     if peers.is_empty() {
         info!(
-            event = "producer.ub.no_full_node_peer",
-            pending = announces.len(),
-            "unfinished block(s) validated but no full-node peer to announce to"
+            "unfinished block(s) validated but no full-node peer to announce to event={} pending={}",
+            "producer.ub.no_full_node_peer",
+            announces.len()
         );
         return;
     }
@@ -6828,11 +6884,11 @@ async fn broadcast_ub_announcements<S: BlockStore + CoinStore + Send + Sync + 's
         // S7 — one broadcast (to all full-node peers) per validated partial.
         node.producer.ub_broadcast("full_node");
         info!(
-            event = "producer.ub.broadcast",
-            partial = %ann.unfinished_reward_hash,
-            peer_type = "full_node",
-            peers = peers.len(),
-            "unfinished block announced to full-node peers"
+            "unfinished block announced to full-node peers event={} partial={} peer_type={} peers={}",
+            "producer.ub.broadcast",
+            ann.unfinished_reward_hash,
+            "full_node",
+            peers.len()
         );
     }
 }
@@ -6872,9 +6928,8 @@ async fn process_compact_vdf_inbox<S: BlockStore + CoinStore + Send + Sync + 'st
             resp.height,
         ) {
             debug!(
-                height = resp.height,
-                field = resp.field_vdf,
-                "rejected compact vdf proof"
+                "rejected compact vdf proof height={} field={}",
+                resp.height, resp.field_vdf
             );
             continue;
         }
@@ -6892,8 +6947,8 @@ async fn process_compact_vdf_inbox<S: BlockStore + CoinStore + Send + Sync + 'st
         // rather than writing content that mis-hashes its key.
         if new_block.header_hash().ok() != Some(resp.header_hash) {
             warn!(
-                height = resp.height,
-                "compact vdf replace changed the header hash — refusing store re-write"
+                "compact vdf replace changed the header hash — refusing store re-write height={}",
+                resp.height
             );
             continue;
         }
@@ -6904,13 +6959,15 @@ async fn process_compact_vdf_inbox<S: BlockStore + CoinStore + Send + Sync + 'st
             node.store.commit(batch).await
         };
         if let Err(e) = rewrite.await {
-            warn!(height = resp.height, error = %e, "compact vdf block re-write failed");
+            warn!(
+                "compact vdf block re-write failed height={} error={}",
+                resp.height, e
+            );
             continue;
         }
         info!(
-            height = resp.height,
-            field = resp.field_vdf,
-            "replaced compact vdf proof"
+            "replaced compact vdf proof height={} field={}",
+            resp.height, resp.field_vdf
         );
         node.compact_vdf_announce.lock().await.push(NewCompactVDF {
             height: resp.height,
@@ -7116,10 +7173,9 @@ async fn broadcast_ub_timelord_announcements<S: BlockStore + CoinStore + Send + 
         {
             let n = STRANDED_SINCE_LOG.swap(0, Ordering::Relaxed);
             info!(
-                event = "producer.ub.no_timelord_peer",
-                stranded_since_last_log = n,
                 "unfinished blocks ready but no timelord peer connected (expected on a \
-                 network-infused node; see fullnode_producer_candidates_dropped_total)"
+                 network-infused node; see fullnode_producer_candidates_dropped_total) event={} stranded_since_last_log={}",
+                "producer.ub.no_timelord_peer", n
             );
         }
         return;
@@ -7144,11 +7200,11 @@ async fn broadcast_ub_timelord_announcements<S: BlockStore + CoinStore + Send + 
         // S7t — one broadcast (to all timelord peers) per ready partial.
         node.producer.ub_broadcast("timelord");
         info!(
-            event = "producer.ub.broadcast",
-            partial = ?ann.reward_chain_block.hash().ok(),
-            peer_type = "timelord",
-            timelords = timelords.len(),
-            "unfinished block announced to timelord peers"
+            "unfinished block announced to timelord peers event={} partial={:?} peer_type={} timelords={}",
+            "producer.ub.broadcast",
+            ann.reward_chain_block.hash().ok(),
+            "timelord",
+            timelords.len()
         );
     }
 }
@@ -7360,10 +7416,10 @@ async fn send_new_peak_timelord<S: BlockStore + CoinStore + Send + Sync + 'stati
         let _ = peer.send(msg).await;
     }
     info!(
-        event = "producer.peak.timelord_broadcast",
-        height = new_peak.reward_chain_block.height,
-        timelords = timelords.len(),
-        "new peak announced to timelord peers"
+        "new peak announced to timelord peers event={} height={} timelords={}",
+        "producer.peak.timelord_broadcast",
+        new_peak.reward_chain_block.height,
+        timelords.len()
     );
 }
 

@@ -19,10 +19,10 @@ use dg_xch_core::utils::hash_256;
 use dg_xch_pos::verify_and_get_quality_string;
 use dg_xch_serialize::{ChiaProtocolVersion, ChiaSerialize};
 use dg_xch_vdf::{default_classgroup_element, validate_vdf_info};
+use log::info;
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
-use tracing::info;
 
 /// Limits validation work for untrusted proofs.
 pub const MAX_SUB_EPOCHS: usize = 300_000;
@@ -114,11 +114,11 @@ where
     let (summaries, total_weight, sub_epoch_weight_list) =
         validate_sub_epoch_summaries(wp, constants)?;
     info!(
-        phase = "2:sub_epoch_summaries",
-        sub_epochs = wp.sub_epochs.len(),
-        summaries = summaries.len(),
-        elapsed_ms = elapsed_ms(t),
-        "weight-proof phase complete"
+        "weight-proof phase complete phase={} sub_epochs={} summaries={} elapsed_ms={}",
+        "2:sub_epoch_summaries",
+        wp.sub_epochs.len(),
+        summaries.len(),
+        elapsed_ms(t)
     );
     progress("phase 2: complete");
 
@@ -126,9 +126,9 @@ where
     let t = Instant::now();
     validate_sub_epoch_sampling(wp, &summaries, &sub_epoch_weight_list, constants)?;
     info!(
-        phase = "1:sampling",
-        elapsed_ms = elapsed_ms(t),
-        "weight-proof phase complete"
+        "weight-proof phase complete phase={} elapsed_ms={}",
+        "1:sampling",
+        elapsed_ms(t)
     );
     progress("phase 1: complete");
 
@@ -136,9 +136,9 @@ where
     let t = Instant::now();
     validate_summaries_weight(wp, &summaries, total_weight, constants)?;
     info!(
-        phase = "3:summaries_weight",
-        elapsed_ms = elapsed_ms(t),
-        "weight-proof phase complete"
+        "weight-proof phase complete phase={} elapsed_ms={}",
+        "3:summaries_weight",
+        elapsed_ms(t)
     );
     progress("phase 3: complete");
 
@@ -146,10 +146,10 @@ where
     let t = Instant::now();
     validate_sub_epoch_segments(wp, &summaries, constants)?;
     info!(
-        phase = "4:sampled_segments",
-        segments = wp.sub_epoch_segments.len(),
-        elapsed_ms = elapsed_ms(t),
-        "weight-proof phase complete"
+        "weight-proof phase complete phase={} segments={} elapsed_ms={}",
+        "4:sampled_segments",
+        wp.sub_epoch_segments.len(),
+        elapsed_ms(t)
     );
     progress("phase 4: complete");
 
@@ -157,10 +157,10 @@ where
     let t = Instant::now();
     validate_recent_blocks(wp, &summaries, constants)?;
     info!(
-        phase = "5:recent_blocks",
-        recent = wp.recent_chain_data.len(),
-        elapsed_ms = elapsed_ms(t),
-        "weight-proof phase complete"
+        "weight-proof phase complete phase={} recent={} elapsed_ms={}",
+        "5:recent_blocks",
+        wp.recent_chain_data.len(),
+        elapsed_ms(t)
     );
     progress("phase 5: complete");
 
@@ -168,20 +168,20 @@ where
     let t = Instant::now();
     validate_total_weight(wp, &summaries, constants)?;
     info!(
-        phase = "6:total_weight",
-        elapsed_ms = elapsed_ms(t),
-        "weight-proof phase complete"
+        "weight-proof phase complete phase={} elapsed_ms={}",
+        "6:total_weight",
+        elapsed_ms(t)
     );
     progress("phase 6: complete");
 
     info!(
-        elapsed_ms = elapsed_ms(started),
-        "weight-proof validation complete"
+        "weight-proof validation complete elapsed_ms={}",
+        elapsed_ms(started)
     );
     Ok((true, summaries))
 }
 
-// Milliseconds since `t`, saturating into u64 for the tracing field (elapsed never realistically overflows).
+// Milliseconds since `t`, saturating into u64 for the log field (elapsed never realistically overflows).
 fn elapsed_ms(t: Instant) -> u64 {
     u64::try_from(t.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
@@ -1520,10 +1520,10 @@ fn validate_sub_epoch_segments(
             }
         })?;
     info!(
-        sampled_sub_epochs = tasks.len(),
-        vdfs = vdf_count.load(Ordering::Relaxed),
-        threads = rayon::current_num_threads(),
-        "weight-proof phase 4: sampled segments verified in parallel"
+        "weight-proof phase 4: sampled segments verified in parallel sampled_sub_epochs={} vdfs={} threads={}",
+        tasks.len(),
+        vdf_count.load(Ordering::Relaxed),
+        rayon::current_num_threads()
     );
     Ok(())
 }

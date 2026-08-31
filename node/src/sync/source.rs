@@ -11,6 +11,7 @@ use dg_xch_core::protocols::full_node::{
 };
 use dg_xch_p2p::OutboundPeer;
 use dg_xch_serialize::{ChiaProtocolVersion, ChiaSerialize};
+use log::{info, warn};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::io::Cursor;
@@ -166,12 +167,20 @@ impl BlockRangeSource for CapturingSource {
             Ok(bytes) => {
                 let path = self.dir.join(format!("blocks_{start}_{end}.bin"));
                 if let Err(e) = std::fs::write(&path, &bytes) {
-                    tracing::warn!(error = %e, "failed to write block-range capture");
+                    warn!("failed to write block-range capture error={}", e);
                 } else {
-                    tracing::info!(path = %path.display(), blocks = blocks.len(), bytes = bytes.len(), "captured block range");
+                    info!(
+                        "captured block range path={} blocks={} bytes={}",
+                        path.display(),
+                        blocks.len(),
+                        bytes.len()
+                    );
                 }
             }
-            Err(e) => tracing::warn!(error = ?e, "failed to serialize RespondBlocks for capture"),
+            Err(e) => warn!(
+                "failed to serialize RespondBlocks for capture error={:?}",
+                e
+            ),
         }
         Ok(blocks)
     }

@@ -22,12 +22,12 @@ use dg_xch_core::consensus::constants::ConsensusConstants;
 use dg_xch_core::consensus::vdf_info_computation::get_signage_point_vdf_info;
 use dg_xch_serialize::{ChiaProtocolVersion, ChiaSerialize};
 use dg_xch_stores::{BlockStore, StoreError};
+use log::{debug, info};
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::io::Cursor;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{debug, info};
 
 // The on-disk encoding version for persisted SubEpochSegments (the store holds the bytes
 // opaquely). Pinned to the
@@ -244,7 +244,10 @@ where
         st: &mut ServeState,
         tip_rec: &BlockRecord,
     ) -> Result<WeightProof, ServeError> {
-        info!(tip = %tip_rec.header_hash, height = tip_rec.height, "create weight proof");
+        info!(
+            "create weight proof tip={} height={}",
+            tip_rec.header_hash, tip_rec.height
+        );
         // The ses index must reach the tip before anything else.
         self.extend_ses_index(st, tip_rec.height).await?;
         let ses_blocks = st.ses_blocks.clone();
@@ -356,7 +359,7 @@ where
             prev_ses_block = ses_block.clone();
         }
 
-        debug!(sub_epochs = sub_epochs.len(), "sub_epochs");
+        debug!("sub_epochs sub_epochs={}", sub_epochs.len());
         Ok(WeightProof {
             sub_epochs,
             sub_epoch_segments,
@@ -406,7 +409,7 @@ where
                 break;
             }
         }
-        debug!(start = min_height, end = tip_height, "recent chain span");
+        debug!("recent chain span start={} end={}", min_height, tip_height);
 
         // Load the span's headers (tx_filter=False) and records. Every
         // height in the span must resolve (the reference asserts each height_to_hash).
@@ -451,15 +454,15 @@ where
         recent_chain.push_front(headers[at(curr_height)].clone());
 
         info!(
-            start = recent_chain
+            "recent chain start={} end={}",
+            recent_chain
                 .front()
                 .map(HeaderBlock::height)
                 .unwrap_or_default(),
-            end = recent_chain
+            recent_chain
                 .back()
                 .map(HeaderBlock::height)
-                .unwrap_or_default(),
-            "recent chain"
+                .unwrap_or_default()
         );
         Ok(recent_chain.into())
     }
@@ -536,9 +539,9 @@ where
                 .is_challenge_block(self.constants.min_blocks_per_challenge_block)
             {
                 debug!(
-                    segment = segments.len(),
-                    height = curr_height,
-                    "challenge segment"
+                    "challenge segment segment={} height={}",
+                    segments.len(),
+                    curr_height
                 );
                 let (seg, end) =
                     self.create_challenge_segment(&cache, &curr_hash, sub_epoch_n, first)?;
@@ -550,7 +553,7 @@ where
             }
             curr_hash = cache.hash_at(height)?;
         }
-        debug!(next_sub_epoch_start = height, "sub epoch segments done");
+        debug!("sub epoch segments done next_sub_epoch_start={}", height);
         Ok(segments)
     }
 
@@ -714,7 +717,7 @@ where
         cache: &ChainCache,
         start_height: u32,
     ) -> Result<(Vec<SubSlotData>, u32), ServeError> {
-        debug!(start_height, "slot end vdf");
+        debug!("slot end vdf start_height={}", start_height);
         let mut curr = cache.header_at(start_height)?;
         let mut curr_header_hash = cache.hash_at(start_height)?;
         let mut sub_slots_data: Vec<SubSlotData> = Vec::new();
@@ -751,9 +754,9 @@ where
             sub_slots_data.append(&mut tmp_sub_slots_data);
         }
         debug!(
-            end_height = curr.height(),
-            slots = sub_slots_data.len(),
-            "slot end vdf done"
+            "slot end vdf done end_height={} slots={}",
+            curr.height(),
+            sub_slots_data.len()
         );
         Ok((sub_slots_data, curr.height()))
     }

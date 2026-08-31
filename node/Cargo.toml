@@ -20,7 +20,7 @@ dg_xch_weight_proof = { path = "../weight-proof", version = "3.0.0" }
 async-trait = "0.1.89"
 rand = "0.10.0"
 tokio = { version = "1.50.0", features = ["rt-multi-thread", "sync", "time", "macros"] }
-tracing = "0.1.41"
+log = "0.4"
 
 [dev-dependencies]
 # mmap: the reorg atomicity suite (tests/reorg.rs) drives the engine over all in-process backends.

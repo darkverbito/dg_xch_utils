@@ -1,7 +1,8 @@
 use clap::Parser;
+use dg_logger::DruidGardenLoggerBuilder;
 use full_node::{Config, Node};
+use log::Level;
 use std::sync::Arc;
-use tracing_subscriber::EnvFilter;
 
 // jemalloc as the global allocator. glibc malloc grows one 64MB arena per contending thread
 // (up to 8x cores) and never returns freed non-main-arena pages to the OS — under the
@@ -106,15 +107,14 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        // Span-close events carry busy/idle durations — per-block (block.apply) and per-window
-        // (sync.short) timings land in the logs with zero extra plumbing.
-        .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
-        .json()
-        .init();
+    let level = std::env::var("RUST_LOG")
+        .ok()
+        .and_then(|v| v.parse::<Level>().ok())
+        .unwrap_or(Level::Info);
+    let _logger = DruidGardenLoggerBuilder::new()
+        .current_level(level)
+        .init()
+        .map_err(|e| format!("failed to initialize logger: {e}"))?;
 
     let cli = Cli::parse();
     let mut config = Config::build(

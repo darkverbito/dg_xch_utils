@@ -39,8 +39,8 @@ use dg_xch_core::traits::SizedBytes;
 use dg_xch_core::utils::hash_256;
 use dg_xch_stores::types::BlockStatus;
 use dg_xch_stores::{BatchHandle, BlockStore, CoinStore};
+use log::debug;
 use std::collections::{HashMap, HashSet};
-use tracing::{Instrument, debug, info_span};
 
 // Out-of-span generator seeds live in a plain `HashMap<u32, SerializedProgram>` on the engine
 // (below), with a PER-WINDOW lifecycle: `Chaser::clear_seed_generators` wipes it at the start of
@@ -480,7 +480,7 @@ where
         // Await-safe instrumentation: an Entered guard (`span.enter()`) held across an `.await`
         // races the sharded registry under work-stealing (clone-after-close panic). Attach the
         // span to the future instead — it is entered on each poll and exited on every yield.
-        let span = info_span!("block.apply", height = block.height());
+        log::debug!("block.apply height={}", block.height());
         async move {
             let Some(delta) = self.prepare_delta(block, None, None).await? else {
                 return Ok((AddBlockOutcome::AlreadyHave, None));
@@ -490,7 +490,6 @@ where
             let outcome = self.confirm(batch, delta).await?;
             Ok((outcome, Some(reported)))
         }
-        .instrument(span)
         .await
     }
 
@@ -525,7 +524,7 @@ where
         // Await-safe instrumentation (see `add_block_with_delta`): NEVER hold an Entered guard
         // across the `.await`s below — that is the sharded-registry clone-after-close panic that
         // silently stalled the node at a `block.stage` boundary. Instrument the future instead.
-        let span = info_span!("block.stage", height = block.height());
+        log::debug!("block.stage height={}", block.height());
         async move {
             let Some(delta) = self.prepare_delta(block, Some(vdf_sink), pre).await? else {
                 return Ok(None);
@@ -534,7 +533,6 @@ where
             self.store.commit(batch).await?;
             Ok(Some(self.finish_stage(block, delta)))
         }
-        .instrument(span)
         .await
     }
 
@@ -562,7 +560,7 @@ where
         batch: &mut Option<BatchHandle>,
     ) -> Result<Option<BlockDelta>, NodeError> {
         // Await-safe instrumentation: see `stage_block_pre`.
-        let span = info_span!("block.stage", height = block.height());
+        log::debug!("block.stage height={}", block.height());
         async move {
             let Some(delta) = self.prepare_delta(block, Some(vdf_sink), pre).await? else {
                 return Ok(None);
@@ -574,7 +572,6 @@ where
             self.persist_archive_in(block, &delta, b).await?;
             Ok(Some(self.finish_stage(block, delta)))
         }
-        .instrument(span)
         .await
     }
 
@@ -1039,9 +1036,9 @@ where
                     return Err(e);
                 }
                 debug!(
+                    "walk cache miss repaired from store; retrying record derivation loaded={} height={}",
                     loaded,
-                    height = block.height(),
-                    "walk cache miss repaired from store; retrying record derivation"
+                    block.height()
                 );
                 if let (Some(sink), Some(cp)) = (vdf_sink, sink_checkpoint) {
                     sink.truncate(cp);
@@ -1148,7 +1145,6 @@ where
                 .set_status_in(&mut *batch, &delta.header_hash, status)
                 .await
         }
-        .instrument(info_span!("store.persist", height = block.height()))
         .await?;
         Ok(())
     }
@@ -1257,10 +1253,10 @@ where
         // produced `additions` — `None` (empty) for a non-transaction / empty block.
         let hints = conds.as_ref().map(hints_for_conditions).unwrap_or_default();
         debug!(
-            coins = additions.len(),
-            removals = removals.len(),
-            hints = hints.len(),
-            "block.derive_delta"
+            "block.derive_delta coins={} removals={} hints={}",
+            additions.len(),
+            removals.len(),
+            hints.len()
         );
         Ok(BlockDelta {
             header_hash,
@@ -1283,8 +1279,7 @@ where
         prev_tx: (u32, Option<u64>),
         pre: Option<PrecomputedBody>,
     ) -> Result<(Option<SpendBundleConditions>, Vec<CoinRecord>, Vec<Bytes32>), NodeError> {
-        let span = info_span!("body.validate", height = block.height());
-        let _e = span.enter();
+        log::debug!("body.validate height={}", block.height());
         let ti = block.transactions_info.as_ref().ok_or_else(|| {
             NodeError::Invalid("transaction block missing transactions_info".into())
         })?;
@@ -1629,7 +1624,10 @@ where
                 if strict {
                     return Err(missing(ftb.prev_transaction_block_hash));
                 }
-                debug!(height, "reward-claim walk below the anchor; rule 5 skipped");
+                debug!(
+                    "reward-claim walk below the anchor; rule 5 skipped height={}",
+                    height
+                );
                 return Ok(());
             };
             let fees = prev_tx_block.fees.unwrap_or(0);
@@ -1662,7 +1660,10 @@ where
                         if strict {
                             return Err(missing(cursor));
                         }
-                        debug!(height, "reward-claim walk below the anchor; rule 5 skipped");
+                        debug!(
+                            "reward-claim walk below the anchor; rule 5 skipped height={}",
+                            height
+                        );
                         return Ok(());
                     };
                     if curr.is_transaction_block() {
@@ -2185,8 +2186,7 @@ where
         header: &HeaderBlock,
         difficulty: u64,
     ) -> Result<u64, NodeError> {
-        let span = info_span!("pospace", height = header.height());
-        let _e = span.enter();
+        log::debug!("pospace height={}", header.height());
         let rcb = &header.reward_chain_block;
         let challenge = rcb.pos_ss_cc_challenge_hash;
         let cc_sp_hash = match &rcb.challenge_chain_sp_vdf {
@@ -2226,8 +2226,7 @@ where
         candidate: Option<&BlockRecord>,
         vdf_sink: Option<&crate::header::HeaderSink>,
     ) -> Result<BlockRecord, NodeError> {
-        let span = info_span!("record.derive", height = header.height());
-        let _e = span.enter();
+        log::debug!("record.derive height={}", header.height());
         let overflow = is_overflow_block(
             &self.constants,
             header.reward_chain_block.signage_point_index,
@@ -2414,11 +2413,6 @@ where
                 .await?;
             self.store.commit(batch).await
         }
-        .instrument(info_span!(
-            "coin_store.apply",
-            height = delta.height,
-            coins = delta.additions.len()
-        ))
         .await?;
         Ok(())
     }
@@ -2460,7 +2454,11 @@ where
             .await?;
         // Await-safe instrumentation: instrument the future rather than holding an Entered guard
         // across the store `.await`s below.
-        let span = info_span!("reorg", fork_depth = branch.len(), fork_height);
+        log::debug!(
+            "reorg fork_depth={} fork_height={}",
+            branch.len(),
+            fork_height
+        );
         async move {
             let mut batch = self.store.begin().await?;
             self.store.rollback_to_in(&mut batch, fork_height).await?;
@@ -2490,7 +2488,6 @@ where
             }
             Ok(AddBlockOutcome::Reorg { fork_height, links })
         }
-        .instrument(span)
         .await
     }
 

@@ -17,7 +17,6 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 use tokio::task::JoinHandle;
-use tracing::Instrument;
 
 /// Initial readahead depth K: windows fetched-or-in-flight ahead of the validator.
 pub const READAHEAD_START_DEPTH: usize = 4;
@@ -282,16 +281,13 @@ impl WindowReadahead {
             self.rotation = (idx + 1) % sources.len();
             let peer_id = src.peer_id();
             let timeout = self.request_timeout;
-            let span = tracing::info_span!("readahead.fetch", peer = peer_id, from, to);
-            let handle = tokio::spawn(
-                async move {
-                    match tokio::time::timeout(timeout, src.fetch_range(from, to)).await {
-                        Ok(r) => r,
-                        Err(_) => Err(SyncError::PeerStalled(peer_id)),
-                    }
+            log::debug!("readahead.fetch peer={} from={} to={}", peer_id, from, to);
+            let handle = tokio::spawn(async move {
+                match tokio::time::timeout(timeout, src.fetch_range(from, to)).await {
+                    Ok(r) => r,
+                    Err(_) => Err(SyncError::PeerStalled(peer_id)),
                 }
-                .instrument(span),
-            );
+            });
             self.inflight.push_back(Inflight {
                 from,
                 to,

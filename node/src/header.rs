@@ -189,8 +189,7 @@ pub(crate) fn verify_vdf_batch<P: ConsensusPrimitives + Sync>(
     if queue.is_empty() {
         return true;
     }
-    let span = tracing::info_span!("vdf.batch", proofs = queue.len());
-    let _e = span.enter();
+    log::debug!("vdf.batch proofs={}", queue.len());
     if queue.len() == 1 {
         let q = &queue[0];
         return primitives.verify_vdf(constants, &q.input, &q.info, &q.proof, q.target.as_ref());
@@ -291,8 +290,7 @@ pub(crate) fn verify_sig_batch(queue: &[QueuedSig]) -> bool {
     if queue.is_empty() {
         return true;
     }
-    let span = tracing::info_span!("sig.batch", sigs = queue.len());
-    let _e = span.enter();
+    log::debug!("sig.batch sigs={}", queue.len());
     if queue.len() == 1 {
         return verify_one_sig(&queue[0]);
     }

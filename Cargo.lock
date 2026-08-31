@@ -28,6 +28,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "aes"
+version = "0.8.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b169f7a6d4742236a0a00c541b845991d0ac43e546831af1249753ab4c3aa3a0"
+dependencies = [
+ "cfg-if",
+ "cipher",
+ "cpufeatures 0.2.17",
+]
+
+[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -641,6 +652,17 @@ dependencies = [
  "cipher",
  "poly1305",
  "zeroize",
+]
+
+[[package]]
+name = "chia-pos2"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1339d81e9d02b42597f314786fea68bd4b5e91b082d5de36eeee5372e6d61b80"
+dependencies = [
+ "cc",
+ "serde",
+ "serde-big-array",
 ]
 
 [[package]]
@@ -1334,11 +1356,13 @@ dependencies = [
  "prometheus 0.14.0",
  "rand 0.10.2",
  "regex",
+ "ring",
  "rsa",
  "rustls",
  "rustls-pemfile",
  "secrecy",
  "serde",
+ "serde_json",
  "sha2",
  "sqlx",
  "time",
@@ -1346,6 +1370,30 @@ dependencies = [
  "tokio-tungstenite 0.28.0",
  "uuid",
  "x509-cert",
+]
+
+[[package]]
+name = "dg_xch_dev_tools"
+version = "3.0.0"
+dependencies = [
+ "async-trait",
+ "clap",
+ "dg_xch_clients",
+ "dg_xch_core",
+ "dg_xch_node",
+ "dg_xch_p2p",
+ "dg_xch_serialize",
+ "dg_xch_stores",
+ "dg_xch_weight_proof",
+ "full-node",
+ "rustls",
+ "tikv-jemalloc-ctl",
+ "tikv-jemallocator",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "zstd",
 ]
 
 [[package]]
@@ -1407,11 +1455,14 @@ dependencies = [
  "dg_xch_stores",
  "dg_xch_vdf",
  "dg_xch_weight_proof",
+ "hex",
  "libc",
  "pprof",
+ "rand 0.10.2",
  "rustls",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
  "tempfile",
  "tokio",
@@ -1441,6 +1492,7 @@ dependencies = [
 name = "dg_xch_pos"
 version = "3.0.0"
 dependencies = [
+ "aes",
  "async-trait",
  "blake3",
  "criterion",
@@ -1534,10 +1586,32 @@ dependencies = [
 name = "dg_xch_simulator"
 version = "3.0.0"
 dependencies = [
+ "async-trait",
+ "blake3",
+ "blst",
+ "chia-pos2",
  "dg_logger",
+ "dg_xch_core",
+ "dg_xch_keys",
+ "dg_xch_node",
+ "dg_xch_pos",
+ "dg_xch_serialize",
+ "dg_xch_stores",
+ "dg_xch_vdf",
+ "full-node",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "log",
+ "num-bigint",
  "portfu",
+ "rand_chacha 0.10.0",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tempfile",
  "tokio",
+ "zstd",
 ]
 
 [[package]]
@@ -5093,6 +5167,15 @@ checksum = "4148590afebada386688f18773da617792bf2ef03ffc1e4cbd2b1d45b023e0ba"
 dependencies = [
  "serde_core",
  "serde_derive",
+]
+
+[[package]]
+name = "serde-big-array"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "11fc7cc2c76d73e0f27ee52abbd64eec84d46f370c88371120433196934e4b7f"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

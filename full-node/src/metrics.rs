@@ -2,6 +2,7 @@ use dg_xch_core::protocols::PeerMap;
 use dg_xch_node::{Mempool, SyncMetrics};
 use dg_xch_p2p::{NetCounters, PeerRegistry};
 use dg_xch_stores::{BlockStore, DURATION_BUCKETS_SECS, HistogramSnapshot};
+use log::{debug, info, warn};
 use std::io::Error;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -9,7 +10,6 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tracing::{debug, info, warn};
 
 // Bounds: how long a scraper may hold a connection, and the request bytes we read before responding. A
 // slow/oversized client is dropped, never allowed to stall the accept loop.
@@ -33,7 +33,7 @@ const HEAP_DUMP_TIMEOUT: Duration = Duration::from_secs(30);
 /// RED-style block-producer pipeline counters. The linear
 /// stage counts are cheap atomics; the drop-reason / validate-result / broadcast-peer-type fans are
 /// labelled `Mutex<HashMap>`s (bounded enums — safe as Prometheus labels, unlike the high-cardinality
-/// quality strings, which stay in the `tracing` events). Held behind an `Arc`, shared by the read-loop
+/// quality strings, which stay in the log events). Held behind an `Arc`, shared by the read-loop
 /// `StoreApi` (declare/build/signed_values) and the driver (`process_ub_inbox` + the two broadcasts);
 /// zero-cost when nobody scrapes.
 #[derive(Default)]
@@ -612,16 +612,16 @@ impl<S: BlockStore + Send + Sync> MetricsSources<S> {
             .telemetry()
             .map_or(0, |t| t.last_commit_unix.load(Ordering::Relaxed));
         warn!(
-            event = "fullnode.stall.dump",
-            peak_height = snap.peak_height,
-            claimed_peak = snap.claimed_peak,
-            tip_lag = snap.claimed_peak.saturating_sub(snap.peak_height),
-            outbound_peers = snap.outbound_peers,
-            last_progress_age_secs = self.health.progress_age(now),
-            last_commit_age_secs = age(last_commit_unix),
-            follow_inflight_age_secs = age(self.follow_inflight_since.load(Ordering::Relaxed)),
-            wal_bytes = self.store.wal_bytes(),
-            "sync stalled — self-report of last activity (one line per stall episode)"
+            "sync stalled — self-report of last activity (one line per stall episode) event={} peak_height={} claimed_peak={} tip_lag={} outbound_peers={} last_progress_age_secs={} last_commit_age_secs={} follow_inflight_age_secs={} wal_bytes={}",
+            "fullnode.stall.dump",
+            snap.peak_height,
+            snap.claimed_peak,
+            snap.claimed_peak.saturating_sub(snap.peak_height),
+            snap.outbound_peers,
+            self.health.progress_age(now),
+            age(last_commit_unix),
+            age(self.follow_inflight_since.load(Ordering::Relaxed)),
+            self.store.wal_bytes()
         );
     }
 }
@@ -1225,15 +1225,15 @@ fn jemalloc_stat_retained() -> u64 {
 /// in the pod log: RSS, jemalloc's four views, and the walk-cache record count that drove them.
 pub fn log_startup_memory(context: &'static str, walk_cache_records: usize) {
     info!(
-        event = "fullnode.startup.memory",
+        "startup memory self-report after engine walk-cache warm event={} context={} walk_cache_records={} rss_bytes={} alloc_allocated_bytes={} alloc_active_bytes={} alloc_resident_bytes={} alloc_retained_bytes={}",
+        "fullnode.startup.memory",
         context,
         walk_cache_records,
-        rss_bytes = process_rss_bytes(),
-        alloc_allocated_bytes = jemalloc_stat_allocated(),
-        alloc_active_bytes = jemalloc_stat_active(),
-        alloc_resident_bytes = jemalloc_stat_resident(),
-        alloc_retained_bytes = jemalloc_stat_retained(),
-        "startup memory self-report after engine walk-cache warm"
+        process_rss_bytes(),
+        jemalloc_stat_allocated(),
+        jemalloc_stat_active(),
+        jemalloc_stat_resident(),
+        jemalloc_stat_retained()
     );
 }
 
@@ -1294,7 +1294,7 @@ async fn serve<S: BlockStore + Send + Sync + 'static>(
         let (mut stream, _peer) = match accepted {
             Ok(pair) => pair,
             Err(e) => {
-                debug!(error = %e, "metrics accept failed");
+                debug!("metrics accept failed error={}", e);
                 continue;
             }
         };
@@ -1330,7 +1330,7 @@ async fn serve<S: BlockStore + Send + Sync + 'static>(
             )
             .await
             {
-                debug!(error = %e, "health response timed out");
+                debug!("health response timed out error={}", e);
             }
             continue;
         }
@@ -1388,7 +1388,7 @@ async fn serve<S: BlockStore + Send + Sync + 'static>(
         let body = render_metrics(&sources.sample().await);
         if let Err(e) = tokio::time::timeout(CONN_TIMEOUT, write_metrics(&mut stream, &body)).await
         {
-            debug!(error = %e, "metrics response timed out");
+            debug!("metrics response timed out error={}", e);
         }
     }
     warn!("metrics server stopped");
@@ -1447,7 +1447,7 @@ mod profiling {
                 let _ = stream.flush().await;
             }
             Ok(Err(e)) => {
-                warn!(error = %e, "flamegraph profiling failed");
+                warn!("flamegraph profiling failed error={}", e);
                 let _ = write_simple(&mut stream, "500 Internal Server Error", &e).await;
             }
             Err(_) => {
@@ -1497,7 +1497,7 @@ mod profiling {
     pub(super) async fn handle_heap(mut stream: TcpStream) {
         match tokio::time::timeout(HEAP_DUMP_TIMEOUT, dump_heap_profile()).await {
             Ok(Ok(prof)) => {
-                info!(bytes = prof.len(), "heap profile dumped");
+                info!("heap profile dumped bytes={}", prof.len());
                 let header = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=\"heap.prof\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                     prof.len()
@@ -1507,7 +1507,7 @@ mod profiling {
                 let _ = stream.flush().await;
             }
             Ok(Err(e)) => {
-                warn!(error = %e, "heap profile dump failed");
+                warn!("heap profile dump failed error={}", e);
                 let _ = write_simple(&mut stream, "500 Internal Server Error", &e).await;
             }
             Err(_) => {
