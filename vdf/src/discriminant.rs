@@ -89,8 +89,9 @@ pub(crate) fn hash_prime(seed: &[u8], size_bits: usize, bitmask: &[usize]) -> Bi
     #[cfg(feature = "hashprime-probe")]
     let mut probe_candidates: u64 = 0;
 
+    let mut blob = Vec::with_capacity(size_bits / 8);
     loop {
-        let mut blob = Vec::with_capacity(size_bits / 8);
+        blob.clear();
         while blob.len() * 8 < size_bits {
             increment_big_endian(&mut sprout);
             let hash = Sha256::digest(&sprout);
@@ -149,27 +150,68 @@ fn is_probable_prime(n: &BigUint) -> bool {
     // reference is not extra safety: a BPSW pseudoprime (none known) the reference accepts but
     // an extra round rejects would make this search continue to a DIFFERENT prime — a consensus
     // fork. Parity means exactly BPSW.
+    // Native screen first: a candidate with a small factor never reaches the conversion or
+    // GMP at all. GMP's own trial division rejects exactly the same composites, so the
+    // accept/reject sequence — and therefore the selected prime — is unchanged; only the cost
+    // of rejecting obvious composites moves (~3 of 4 candidates in the hash_prime search).
+    if let Some(verdict) = small_factor_verdict(n) {
+        return verdict;
+    }
     let g = rug::Integer::from_digits(&n.to_bytes_be(), rug::integer::Order::MsfBe);
     g.is_probably_prime(24) != rug::integer::IsPrime::No
 }
 
-#[allow(dead_code)]
-fn is_probable_prime_native(n: &BigUint) -> bool {
-    if *n < BigUint::from(2u8) {
-        return false;
+const SMALL_PRIMES: [u64; 64] = [
+    2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97,
+    101, 103, 107, 109, 113, 127, 131, 137, 139, 149, 151, 157, 163, 167, 173, 179, 181, 191, 193,
+    197, 199, 211, 223, 227, 229, 233, 239, 241, 251, 257, 263, 269, 271, 277, 281, 283, 293, 307,
+    311,
+];
+
+// The small primes packed into u64 products with each product's normalized reciprocal, all
+// folded at compile time — the screen itself then runs on multiplies alone (`u128 % u64` is a
+// software builtin on aarch64, same as the divide it would replace).
+#[derive(Clone, Copy)]
+struct PrimeChunk {
+    start: usize,
+    end: usize,
+    shift: u32,
+    normalized: u64,
+    recip: u64,
+}
+
+const CHUNK_COUNT: usize = count_prime_chunks();
+
+const fn count_prime_chunks() -> usize {
+    let mut count = 0;
+    let mut i = 0;
+    while i < SMALL_PRIMES.len() {
+        let mut chunk: u64 = 1;
+        while i < SMALL_PRIMES.len() {
+            match chunk.checked_mul(SMALL_PRIMES[i]) {
+                Some(c) => {
+                    chunk = c;
+                    i += 1;
+                }
+                None => break,
+            }
+        }
+        count += 1;
     }
+    count
+}
 
-    const SMALL_PRIMES: [u64; 64] = [
-        2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89,
-        97, 101, 103, 107, 109, 113, 127, 131, 137, 139, 149, 151, 157, 163, 167, 173, 179, 181,
-        191, 193, 197, 199, 211, 223, 227, 229, 233, 239, 241, 251, 257, 263, 269, 271, 277, 281,
-        283, 293, 307, 311,
-    ];
+const PRIME_CHUNKS: [PrimeChunk; CHUNK_COUNT] = build_prime_chunks();
 
-    // Chunked trial division: pack the small primes into u64 products so each candidate pays a
-    // handful of bigint-by-word remainders instead of one bigint division per prime (the prime
-    // search does this for ~90 candidates per hash_prime). Identical accept/reject semantics:
-    // n ≡ 0 (mod p) still returns `n == p`.
+const fn build_prime_chunks() -> [PrimeChunk; CHUNK_COUNT] {
+    let mut out = [PrimeChunk {
+        start: 0,
+        end: 0,
+        shift: 0,
+        normalized: 0,
+        recip: 0,
+    }; CHUNK_COUNT];
+    let mut ci = 0;
     let mut i = 0;
     while i < SMALL_PRIMES.len() {
         let start = i;
@@ -183,16 +225,72 @@ fn is_probable_prime_native(n: &BigUint) -> bool {
                 None => break,
             }
         }
-        let rem = (n % BigUint::from(chunk))
-            .to_u64_digits()
-            .first()
-            .copied()
-            .unwrap_or(0);
-        for &p in &SMALL_PRIMES[start..i] {
+        let shift = chunk.leading_zeros();
+        let normalized = chunk << shift;
+        out[ci] = PrimeChunk {
+            start,
+            end: i,
+            shift,
+            normalized,
+            recip: crate::limbs::recip_2by1(normalized),
+        };
+        ci += 1;
+    }
+    out
+}
+
+// Chunked trial division on the raw limbs: fold the candidate's digits high-to-low through the
+// precomputed reciprocal of each prime product — no bigint arithmetic, no allocation, and no
+// wide division on any target. `Some(v)` is a settled verdict (a small factor was found; `v` is
+// whether n IS that prime); `None` passes the candidate onward. Identical accept/reject
+// semantics to dividing by each prime directly.
+fn small_factor_verdict(n: &BigUint) -> Option<bool> {
+    if *n < BigUint::from(2u8) {
+        return Some(false);
+    }
+    let mut digits = [0u64; 32];
+    let mut len = 0;
+    for (i, d) in n.iter_u64_digits().enumerate() {
+        if i >= digits.len() {
+            // Wider than any consensus candidate; let the reference path judge it.
+            return None;
+        }
+        digits[i] = d;
+        len = i + 1;
+    }
+    for c in &PRIME_CHUNKS {
+        // Folding the s-shifted digits mod the normalized product yields (n mod chunk) << s:
+        // the pre-shift spill seeds the remainder and every step keeps rem < normalized.
+        let s = c.shift;
+        let mut rem: u64 = if s == 0 {
+            0
+        } else {
+            digits[len - 1] >> (64 - s)
+        };
+        for i in (0..len).rev() {
+            let lo = if i == 0 { 0 } else { digits[i - 1] };
+            let cur = if s == 0 {
+                digits[i]
+            } else {
+                (digits[i] << s) | (lo >> (64 - s))
+            };
+            let (_, r) = crate::limbs::div_2by1(rem, cur, c.normalized, c.recip);
+            rem = r;
+        }
+        let rem = rem >> s;
+        for &p in &SMALL_PRIMES[c.start..c.end] {
             if rem.is_multiple_of(p) {
-                return *n == BigUint::from(p);
+                return Some(*n == BigUint::from(p));
             }
         }
+    }
+    None
+}
+
+#[allow(dead_code)]
+fn is_probable_prime_native(n: &BigUint) -> bool {
+    if let Some(verdict) = small_factor_verdict(n) {
+        return verdict;
     }
 
     miller_rabin(
@@ -322,5 +420,53 @@ mod cache_tests {
             create_discriminant_int(&first_seed, 512).expect("derivation succeeds"),
             direct
         );
+    }
+
+    // The screen must be invisible: for every input class — the small primes themselves,
+    // smooth composites, random odds, and hash_prime-shaped 264-bit candidates — the screened
+    // verdict equals GMP's raw verdict, because a different accept/reject sequence would walk
+    // the prime search to a DIFFERENT prime.
+    #[test]
+    fn small_factor_screen_never_changes_the_verdict() {
+        let raw = |n: &BigUint| {
+            let g = rug::Integer::from_digits(&n.to_bytes_be(), rug::integer::Order::MsfBe);
+            g.is_probably_prime(24) != rug::integer::IsPrime::No
+        };
+        let mut cases: Vec<BigUint> = Vec::new();
+        for p in [2u64, 3, 5, 127, 311, 313, 331] {
+            cases.push(BigUint::from(p));
+        }
+        for c in [
+            4u64,
+            9,
+            15,
+            121,
+            311 * 313,
+            97 * 89,
+            2 * 3 * 5 * 7 * 11 * 13,
+        ] {
+            cases.push(BigUint::from(c));
+        }
+        let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+        for _ in 0..300 {
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            let mut bytes = [0u8; 33];
+            for (i, b) in bytes.iter_mut().enumerate() {
+                *b = (x.wrapping_mul(i as u64 + 1) >> 32) as u8;
+            }
+            let mut n = BigUint::from_bytes_be(&bytes);
+            n.set_bit(0, true);
+            n.set_bit(263, true);
+            cases.push(n);
+        }
+        for n in cases {
+            assert_eq!(
+                is_probable_prime(&n),
+                raw(&n),
+                "screen changed the verdict for {n}"
+            );
+        }
     }
 }
