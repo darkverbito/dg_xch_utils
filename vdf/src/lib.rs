@@ -31,3 +31,18 @@ pub fn version() -> String {
 fn test_version() {
     println!("{}", version());
 }
+
+/// Test-surface exports for the BPSW differential gates: the native verdict and the
+/// reference (rug/GMP) verdict, so integration tests can compare them at scale.
+pub mod testing {
+    use num_bigint::BigUint;
+
+    pub fn is_probable_prime_native(n: &BigUint) -> bool {
+        crate::discriminant::is_probable_prime_native(n)
+    }
+
+    pub fn is_probable_prime_reference(n: &BigUint) -> bool {
+        let g = rug::Integer::from_digits(&n.to_bytes_be(), rug::integer::Order::MsfBe);
+        g.is_probably_prime(24) != rug::integer::IsPrime::No
+    }
+}

@@ -287,22 +287,29 @@ fn small_factor_verdict(n: &BigUint) -> Option<bool> {
     None
 }
 
+/// Baillie–PSW exactly as the reference implements it for `reps <= 24`: the small-prime
+/// screen (the shared chunked trial division), a strong Miller–Rabin test to base 2, and a
+/// strong Lucas test with Selfridge's Method A parameters. Deterministic — an independent
+/// implementation must agree with the reference on every input or one of them has a bug,
+/// which is what the differential gates exist to prove.
 #[allow(dead_code)]
-fn is_probable_prime_native(n: &BigUint) -> bool {
+pub(crate) fn is_probable_prime_native(n: &BigUint) -> bool {
     if let Some(verdict) = small_factor_verdict(n) {
         return verdict;
     }
-
-    miller_rabin(
-        n,
-        &[
-            2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83,
-            89, 97, 101, 103, 107, 109, 113, 127,
-        ],
-    )
+    if !miller_rabin_base2(n) {
+        return false;
+    }
+    // A perfect square passes no Lucas parameter search; the reference rejects it here.
+    if is_perfect_square(n) {
+        return false;
+    }
+    strong_lucas_selfridge(n)
 }
 
-fn miller_rabin(n: &BigUint, bases: &[u64]) -> bool {
+/// Strong Miller–Rabin to base 2: n-1 = d·2^s with d odd; 2^d ≡ ±1, or 2^(d·2^r) ≡ -1 for
+/// some r < s.
+fn miller_rabin_base2(n: &BigUint) -> bool {
     let one = BigUint::one();
     let two = BigUint::from(2u8);
     let n_minus_one = n - &one;
@@ -312,25 +319,134 @@ fn miller_rabin(n: &BigUint, bases: &[u64]) -> bool {
         d >>= 1;
         s += 1;
     }
+    let mut x = two.modpow(&d, n);
+    if x == one || x == n_minus_one {
+        return true;
+    }
+    for _ in 1..s {
+        x = x.modpow(&two, n);
+        if x == n_minus_one {
+            return true;
+        }
+    }
+    false
+}
 
-    'bases: for base in bases {
-        let a = BigUint::from(*base);
-        if &a >= n {
-            continue;
-        }
-        let mut x = a.modpow(&d, n);
-        if x == one || x == n_minus_one {
-            continue;
-        }
-        for _ in 1..s {
-            x = x.modpow(&two, n);
-            if x == n_minus_one {
-                continue 'bases;
+fn is_perfect_square(n: &BigUint) -> bool {
+    let root = n.sqrt();
+    &root * &root == *n
+}
+
+/// Selfridge Method A: the first D in 5, -7, 9, -11, ... with Jacobi(D/n) = -1; P = 1,
+/// Q = (1 - D) / 4. The strong test: with n+1 = d·2^s (d odd), U_d ≡ 0 or V_(d·2^r) ≡ 0 for
+/// some r < s.
+fn strong_lucas_selfridge(n: &BigUint) -> bool {
+    use num_bigint::BigInt;
+    let n_int = BigInt::from(n.clone());
+    // Find D.
+    let mut d_abs: u64 = 5;
+    let mut sign_pos = true;
+    let d: BigInt = loop {
+        let candidate = if sign_pos {
+            BigInt::from(d_abs)
+        } else {
+            -BigInt::from(d_abs)
+        };
+        match jacobi(&candidate, &n_int) {
+            0 => {
+                // gcd(D, n) > 1: for D < n that means a factor; composite (n > 11 here,
+                // past the small-prime screen).
+                return false;
+            }
+            -1 => break candidate,
+            _ => {
+                d_abs += 2;
+                sign_pos = !sign_pos;
             }
         }
-        return false;
+    };
+    let p = BigInt::from(1u8);
+    let q: BigInt = (BigInt::from(1u8) - &d) / 4;
+
+    // n + 1 = d_odd · 2^s
+    let n_plus_one: BigInt = &n_int + 1;
+    let mut d_odd = n_plus_one.clone();
+    let mut s = 0usize;
+    while (&d_odd % 2u8) == BigInt::ZERO {
+        d_odd /= 2;
+        s += 1;
     }
-    true
+
+    // Lucas sequences by binary ladder over the bits of d_odd, working mod n.
+    let modn = |x: &BigInt| -> BigInt {
+        let m = x % &n_int;
+        if m < BigInt::ZERO { m + &n_int } else { m }
+    };
+    // Doubling: U_2k = U_k·V_k;  V_2k = V_k² - 2·Q^k
+    // Increment: U_{2k+1} = (P·U_2k + V_2k)/2;  V_{2k+1} = (D·U_2k + P·V_2k)/2  (mod n, halving
+    // via the modular inverse of 2 — n is odd, so (x + n·(x&1)) / 2).
+    let half = |x: &BigInt| -> BigInt {
+        let m = modn(x);
+        if (&m % 2u8) == BigInt::ZERO {
+            m / 2
+        } else {
+            (m + &n_int) / 2
+        }
+    };
+    let mut u = BigInt::from(1u8);
+    let mut v = p.clone();
+    let mut qk = modn(&q);
+    let bits = d_odd.bits();
+    for i in (0..bits - 1).rev() {
+        // double
+        u = modn(&(&u * &v));
+        v = modn(&(&v * &v - 2 * &qk));
+        qk = modn(&(&qk * &qk));
+        if d_odd.bit(i) {
+            let u_new = half(&(&p * &u + &v));
+            let v_new = half(&(&d * &u + &p * &v));
+            u = u_new;
+            v = v_new;
+            qk = modn(&(&qk * &q));
+        }
+    }
+    if u == BigInt::ZERO || v == BigInt::ZERO {
+        return true;
+    }
+    for _ in 1..s {
+        v = modn(&(&v * &v - 2 * &qk));
+        if v == BigInt::ZERO {
+            return true;
+        }
+        qk = modn(&(&qk * &qk));
+    }
+    false
+}
+
+/// Jacobi symbol (a/n) for odd positive n.
+fn jacobi(a: &num_bigint::BigInt, n: &num_bigint::BigInt) -> i32 {
+    use num_bigint::BigInt;
+    let mut a = a % n;
+    if a < BigInt::ZERO {
+        a += n;
+    }
+    let mut n = n.clone();
+    let mut result = 1i32;
+    while a != BigInt::ZERO {
+        while (&a % 2u8) == BigInt::ZERO {
+            a /= 2;
+            let r = (&n % 8u8).try_into().unwrap_or(0u8);
+            if r == 3 || r == 5 {
+                result = -result;
+            }
+        }
+        std::mem::swap(&mut a, &mut n);
+        if (&a % 4u8) == BigInt::from(3u8) && (&n % 4u8) == BigInt::from(3u8) {
+            result = -result;
+        }
+        a %= &n;
+    }
+    if n == BigInt::from(1u8) { result } else { 0 }
 }
 
 pub(crate) fn bigint_from_be(bytes: &[u8]) -> BigInt {
