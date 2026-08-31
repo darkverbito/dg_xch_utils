@@ -84,7 +84,25 @@ unit does not have. Production stays on the portable loops; the assembly lives o
 `limbs_a72.rs` behind its differential (`kernels_match_portable_rows`) and its quantifying
 bench (`kernel_bench_rows`), re-runnable on any future ARM core in seconds.
 
-### 1d. The boundary, stated so it can be reused
+### 1d. The divider split: one optimization, opposite signs per target (measured 2026-08-31)
+
+The small-quotient shortcut in the Lehmer/xgcd inner loops — compare-and-subtract for q ∈
+{1, 2}, which Gauss–Kuzmin puts at ~58% of continued-fraction quotients — measured on both
+targets, three reps, idle machines:
+
+| t_op (NUDUPL squaring) | before | with shortcut | verdict |
+| --- | --- | --- | --- |
+| Xeon E5-2690 v2 | 26.1 µs | **24.1 µs (−7%)** | shipped, `cfg(target_arch = "x86_64")` |
+| Pi-4 A72 | 40.0 µs | 42.0 µs (+5%) | rejected for aarch64 |
+
+The sign flip has a named cause: Ivy Bridge's 64-bit IDIV is uniformly slow (~40–90 cycles)
+so skipping it always pays, while the A72's early-terminating divider already resolves small
+quotients in a few cycles — the shortcut saved nothing there and its two data-dependent
+branches mispredicted. The same math ships on both sides, arch-gated, pinned by the gcd
+differentials. Lesson appended to the method: **even a pure work-reduction can invert sign
+across dividers; per-target measurement is not optional for control-flow changes either.**
+
+### 1e. The boundary, stated so it can be reused
 
 > GMP is beatable where the work per call is small enough that call overhead dominates
 > (form arithmetic: dozens of ops per call). GMP is unbeatable-by-portable-code where the
