@@ -62,7 +62,29 @@ This verdict is final for the powm call shape: **the 22% of Pi-4 cycles spent in
 sync is the floor cost of the consensus primality test, executed by the best implementation
 available on either architecture.**
 
-### 1c. The boundary, stated so it can be reused
+### 1c. The A72 kernel verdict: the compiler was already optimal (measured 2026-08-31)
+
+The third finality verdict of this arc, closing the last software lever. Hand-written aarch64
+kernels (`mul`/`umulh`/`adcs` chains, the loop entirely in asm) for the three limb-row shapes
+under the Lehmer walk — fused addmul_2, fused submul_2, and the schoolbook addmul_1 —
+byte-identical to the portable loops by an in-binary differential, measured on the idle Pi-4:
+
+| addmul_2 row width | kernel / portable |
+| --- | --- |
+| n = 4 | 0.92× |
+| n = 8 | 1.00× |
+| n = 16 | 0.99× |
+| n = 30 | 0.98× |
+
+End-to-end t_op: 40.0 µs/op — unchanged from the 39.3–40.2 portable baseline. **LLVM already
+emits optimal carry chains for these loops on the A72.** The 39-vs-26 µs A72/Xeon gap that
+motivated the lever is therefore silicon, not scheduling: the A72's 64-bit multiplier is not
+fully pipelined against `umulh`, and no instruction ordering recovers throughput the execution
+unit does not have. Production stays on the portable loops; the assembly lives on in
+`limbs_a72.rs` behind its differential (`kernels_match_portable_rows`) and its quantifying
+bench (`kernel_bench_rows`), re-runnable on any future ARM core in seconds.
+
+### 1d. The boundary, stated so it can be reused
 
 > GMP is beatable where the work per call is small enough that call overhead dominates
 > (form arithmetic: dozens of ops per call). GMP is unbeatable-by-portable-code where the
@@ -113,7 +135,7 @@ it stands. Profile source: 151,334-sample perf capture on the live, compute-satu
 | path | Pi-4 share | verdict | evidence |
 | --- | --- | --- | --- |
 | GMP primality (`hash_prime`/`get_b`) | ~22% | **FINAL — at floor** | §1b: verified alternative lost 2.4×/2.6× on both targets |
-| Class-group form arithmetic (`Sw` NUDUPL/Lehmer) | ~43% | final as an *algorithm* (1.02× work floor, era-corpus A/B); **open as code** — portable Rust runs 39.3 µs/op on A72 vs 26.1 on x86 for identical source; A72-targeted kernels are the one remaining software lever, est. +13% node throughput | drain A/B ledger; perf capture |
+| Class-group form arithmetic (`Sw` NUDUPL/Lehmer) | ~43% | **FINAL — at floor.** Algorithm at 1.02× its work floor AND code at the compiler's floor: hand-written A72 kernels measured 0.92–1.00× of the portable loops (§1c); the A72/x86 gap is the silicon | drain A/B ledger; perf capture; kernel bench |
 | VDF drain scheduling | (inside above) | **FINAL** — dedup + LPT work-stealing sits 1–4% above its measured work floor on every shape; "the next levers are work reduction, not scheduling" | era-corpus A/B, three hardware shapes |
 | BLS (blst Montgomery kernels) | ~5% | **FINAL** — already hand-written assembly | vendor asm |
 | sha256 | ~1.5% | **FINAL** — ring/BoringSSL vectorized block fn, chosen over sha2 by measurement | PR53 A/B |
@@ -124,12 +146,16 @@ it stands. Profile source: 151,334-sample perf capture on the live, compute-satu
 
 ### Consequences, in blocks per minute (Pi-4, ~6.0 M era)
 
-- Measured saturated today: **288 blk/min** (208 ms/block wall).
-- With the remaining open levers (A72 kernels + trims): honest ceiling **~330–345**.
-- The previously stated 400 target assumed the primality lever existed. **It does not.**
-  400 on a Pi-4 is out of reach by software; the categorical jump is hardware (Pi 5's A76 at
-  2.5–3× on published bignum benchmarks → ~700–850 blk/min, genesis in 7–9 days, no
-  assembly required).
+- Measured saturated: **288–322 blk/min** (era-dependent; the higher figure arrived with the
+  LAN peer holding the queue full).
+- Both candidate levers to 400 are now measured dead: the primality lever (§1b, GMP already
+  optimal) and the kernel lever (§1c, the compiler already optimal). Remaining trims
+  (memcpy/alloc churn, ~3–5%) do not change the category. **The Pi-4 at ~300 blk/min is at
+  its silicon floor.** The categorical jump is hardware: the Pi 5's A76 at 2.5–3× on
+  published bignum benchmarks → ~700–850 blk/min, genesis in 7–9 days, no assembly required.
+- The finality claims themselves are executable: `finality_bench.rs` re-measures §1b and
+  `kernel_bench_rows` re-measures §1c on whatever machine runs them, both contenders in one
+  binary — a verdict here is falsified the day a probe disagrees on a deployment target.
 
 ---
 

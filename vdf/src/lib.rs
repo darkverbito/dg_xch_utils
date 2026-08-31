@@ -3,6 +3,8 @@ pub mod error;
 pub mod form;
 pub mod gmp_form;
 mod limbs;
+#[cfg(target_arch = "aarch64")]
+mod limbs_a72;
 mod mont;
 pub mod proof;
 pub mod validation;

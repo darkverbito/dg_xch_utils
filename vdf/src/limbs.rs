@@ -269,14 +269,7 @@ impl<const N: usize> Sw<N> {
         }
         assert!(self.len + other.len <= N, "limb overflow in mul");
         for i in 0..self.len {
-            let mut carry: u128 = 0;
-            let a = u128::from(self.d[i]);
-            for j in 0..other.len {
-                let p = a * u128::from(other.d[j]) + u128::from(out.d[i + j]) + carry;
-                out.d[i + j] = p as u64;
-                carry = p >> 64;
-            }
-            out.d[i + other.len] = carry as u64;
+            out.d[i + other.len] = Self::addmul1(&other.d, other.len, self.d[i], &mut out.d[i..]);
         }
         out.len = self.len + other.len;
         out.neg = self.neg != other.neg;
@@ -518,21 +511,7 @@ impl<const N: usize> Sw<N> {
         debug_assert!(n + 2 <= N, "limb overflow in linear2");
         let mut out = Self::zero();
         if s1 == s2 {
-            // Fused addmul_2: out = X·a1 + Y·a2, all unsigned; carry < 2^65 held as (lo, hi).
-            let mut c_lo: u64 = 0;
-            let mut c_hi: u64 = 0;
-            for i in 0..n {
-                let p1 = u128::from(self.d[i]) * u128::from(a1);
-                let p2 = u128::from(other.d[i]) * u128::from(a2);
-                let (s, o1) = (p1 as u64).overflowing_add(p2 as u64);
-                let (s, o2) = s.overflowing_add(c_lo);
-                out.d[i] = s;
-                // Next carry = hi1 + hi2 + c_hi + spill bits; sum < 2^65 needs the (lo, hi) split.
-                let (h, oh1) = ((p1 >> 64) as u64).overflowing_add((p2 >> 64) as u64);
-                let (h, oh2) = h.overflowing_add(c_hi + u64::from(o1) + u64::from(o2));
-                c_lo = h;
-                c_hi = u64::from(oh1) + u64::from(oh2);
-            }
+            let (c_lo, c_hi) = Self::addmul2(&self.d, &other.d, n, a1, a2, &mut out.d);
             out.d[n] = c_lo;
             out.d[n + 1] = c_hi;
             out.neg = s1;
@@ -540,21 +519,8 @@ impl<const N: usize> Sw<N> {
             // Fused submul_2: out = ±(X·a1 − Y·a2) in two's complement — three short chains
             // (P-accumulate, Q-accumulate, borrow), the sbb shape. A set final borrow means the
             // true value is negative: complement to magnitude, sign flips to s2's contribution.
-            let mut cp: u64 = 0; // carry of the P = X·a1 stream
-            let mut cq: u64 = 0; // carry of the Q = Y·a2 stream
-            let mut borrow: u64 = 0;
-            for i in 0..n {
-                let p = u128::from(self.d[i]) * u128::from(a1);
-                let q = u128::from(other.d[i]) * u128::from(a2);
-                let (pl, pc) = (p as u64).overflowing_add(cp);
-                cp = (p >> 64) as u64 + u64::from(pc);
-                let (ql, qc) = (q as u64).overflowing_add(cq);
-                cq = (q >> 64) as u64 + u64::from(qc);
-                let (d, b1) = pl.overflowing_sub(ql);
-                let (d, b2) = d.overflowing_sub(borrow);
-                out.d[i] = d;
-                borrow = u64::from(b1) + u64::from(b2);
-            }
+            let (mut cp, mut cq, mut borrow) =
+                Self::submul2(&self.d, &other.d, n, a1, a2, &mut out.d);
             // Drain the carries: two more digits of P − Q − borrow.
             for i in n..n + 2 {
                 let (d, b1) = cp.overflowing_sub(cq);
@@ -671,6 +637,321 @@ mod tests {
                 r.to_bigint(),
                 &ab % &bb,
                 "remainder diverged for {dl:x?} / {vl:x?}"
+            );
+        }
+    }
+}
+
+impl<const N: usize> Sw<N> {
+    /// Fused `out[..n] = X·a1 + Y·a2` with the 65-bit (lo, hi) carry — kernel on aarch64,
+    /// portable elsewhere. Both stay compiled on aarch64: the portable body is the kernel's
+    /// oracle in the differential and its baseline in the bench.
+    #[inline]
+    fn addmul2(
+        x: &[u64; N],
+        y: &[u64; N],
+        n: usize,
+        a1: u64,
+        a2: u64,
+        out: &mut [u64; N],
+    ) -> (u64, u64) {
+        // The aarch64 kernel measured 0.92-1.00x of this portable loop (the compiler
+        // already emits optimal chains for the A72); production stays portable and the
+        // assembly lives on only through its differential and bench. See
+        // docs/algorithmic-finality.md.
+        Self::addmul2_portable(x, y, n, a1, a2, out)
+    }
+
+    #[allow(dead_code)]
+    fn addmul2_portable(
+        x: &[u64; N],
+        y: &[u64; N],
+        n: usize,
+        a1: u64,
+        a2: u64,
+        out: &mut [u64; N],
+    ) -> (u64, u64) {
+        let mut c_lo: u64 = 0;
+        let mut c_hi: u64 = 0;
+        for i in 0..n {
+            let p1 = u128::from(x[i]) * u128::from(a1);
+            let p2 = u128::from(y[i]) * u128::from(a2);
+            let (s, o1) = (p1 as u64).overflowing_add(p2 as u64);
+            let (s, o2) = s.overflowing_add(c_lo);
+            out[i] = s;
+            let (h, oh1) = ((p1 >> 64) as u64).overflowing_add((p2 >> 64) as u64);
+            let (h, oh2) = h.overflowing_add(c_hi + u64::from(o1) + u64::from(o2));
+            c_lo = h;
+            c_hi = u64::from(oh1) + u64::from(oh2);
+        }
+        (c_lo, c_hi)
+    }
+
+    /// Fused `out[..n] = X·a1 − Y·a2` with separate P/Q carries and a running borrow.
+    #[inline]
+    fn submul2(
+        x: &[u64; N],
+        y: &[u64; N],
+        n: usize,
+        a1: u64,
+        a2: u64,
+        out: &mut [u64; N],
+    ) -> (u64, u64, u64) {
+        Self::submul2_portable(x, y, n, a1, a2, out)
+    }
+
+    #[allow(dead_code)]
+    fn submul2_portable(
+        x: &[u64; N],
+        y: &[u64; N],
+        n: usize,
+        a1: u64,
+        a2: u64,
+        out: &mut [u64; N],
+    ) -> (u64, u64, u64) {
+        let mut cp: u64 = 0;
+        let mut cq: u64 = 0;
+        let mut borrow: u64 = 0;
+        for i in 0..n {
+            let p = u128::from(x[i]) * u128::from(a1);
+            let q = u128::from(y[i]) * u128::from(a2);
+            let (pl, pc) = (p as u64).overflowing_add(cp);
+            cp = (p >> 64) as u64 + u64::from(pc);
+            let (ql, qc) = (q as u64).overflowing_add(cq);
+            cq = (q >> 64) as u64 + u64::from(qc);
+            let (d, b1) = pl.overflowing_sub(ql);
+            let (d, b2) = d.overflowing_sub(borrow);
+            out[i] = d;
+            borrow = u64::from(b1) + u64::from(b2);
+        }
+        (cp, cq, borrow)
+    }
+
+    /// One schoolbook row: `out[..n] += a·y[..n]`, returning the carry limb.
+    #[inline]
+    fn addmul1(y: &[u64; N], n: usize, a: u64, out: &mut [u64]) -> u64 {
+        Self::addmul1_portable(y, n, a, out)
+    }
+
+    #[allow(dead_code)]
+    fn addmul1_portable(y: &[u64; N], n: usize, a: u64, out: &mut [u64]) -> u64 {
+        let mut carry: u128 = 0;
+        let a = u128::from(a);
+        for j in 0..n {
+            let p = a * u128::from(y[j]) + u128::from(out[j]) + carry;
+            out[j] = p as u64;
+            carry = p >> 64;
+        }
+        carry as u64
+    }
+}
+
+#[cfg(test)]
+mod kernel_tests {
+    use super::*;
+    use num_bigint::BigInt;
+
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            self.0 = x;
+            x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    fn addmul2_kernel(
+        x: &[u64; 34],
+        y: &[u64; 34],
+        n: usize,
+        a1: u64,
+        a2: u64,
+        out: &mut [u64; 34],
+    ) -> (u64, u64) {
+        // SAFETY: fixed 34-limb arrays, n <= 30 in every caller here.
+        unsafe {
+            crate::limbs_a72::addmul2_rows(x.as_ptr(), y.as_ptr(), n, a1, a2, out.as_mut_ptr())
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    fn submul2_kernel(
+        x: &[u64; 34],
+        y: &[u64; 34],
+        n: usize,
+        a1: u64,
+        a2: u64,
+        out: &mut [u64; 34],
+    ) -> (u64, u64, u64) {
+        // SAFETY: as above.
+        unsafe {
+            crate::limbs_a72::submul2_rows(x.as_ptr(), y.as_ptr(), n, a1, a2, out.as_mut_ptr())
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    fn addmul1_kernel(y: &[u64; 34], n: usize, a: u64, out: &mut [u64]) -> u64 {
+        // SAFETY: as above.
+        unsafe { crate::limbs_a72::addmul1_row(y.as_ptr(), n, a, out.as_mut_ptr()) }
+    }
+
+    fn sw_from_limbs(limbs: &[u64]) -> Sw<34> {
+        let mut v = BigInt::from(0u8);
+        for l in limbs.iter().rev() {
+            v = (v << 64) + l;
+        }
+        Sw::<34>::from_bigint(&v)
+    }
+
+    // The refactor gate: linear2 and mul against bigint arithmetic, so cutting the row loops
+    // out into dispatchable kernels provably changed nothing on any target — and on aarch64
+    // this same oracle proves the assembly end-to-end.
+    #[test]
+    fn linear2_and_mul_match_bigint() {
+        let mut rng = Rng(0xA5A5_5A5A_DEAD_BEEF);
+        let mut cases = 0u64;
+        for round in 0..6_000u64 {
+            let xl = 1 + (rng.next() as usize) % 12;
+            let yl = 1 + (rng.next() as usize) % 12;
+            let mut xd: Vec<u64> = (0..xl).map(|_| rng.next()).collect();
+            let mut yd: Vec<u64> = (0..yl).map(|_| rng.next()).collect();
+            // Carry-dense shapes every third round.
+            if round % 3 == 0 {
+                for v in &mut xd {
+                    *v |= 0xFFFF_FFFF_FF00_0000;
+                }
+                for v in &mut yd {
+                    *v = v.wrapping_mul(0xFF00_0000_0000_0001) | 1;
+                }
+            }
+            let x = sw_from_limbs(&xd);
+            let y = sw_from_limbs(&yd);
+            let (xb, yb) = (x.to_bigint(), y.to_bigint());
+
+            // linear2 across all four sign quadrants, including max-magnitude coefficients.
+            for (w1, w2) in [
+                (rng.next() as i64 as i128, rng.next() as i64 as i128),
+                (i128::from(i64::MAX), i128::from(i64::MAX)),
+                (i128::from(i64::MAX), -i128::from(i64::MAX)),
+                (-1, 1),
+            ] {
+                let got = x.linear2(w1, &y, w2).to_bigint();
+                let want = &xb * w1 + &yb * w2;
+                assert_eq!(
+                    got, want,
+                    "linear2 diverged: x={xd:x?} y={yd:x?} w1={w1} w2={w2}"
+                );
+                cases += 1;
+            }
+
+            let got = x.mul(&y).to_bigint();
+            assert_eq!(got, &xb * &yb, "mul diverged: x={xd:x?} y={yd:x?}");
+            cases += 1;
+        }
+        eprintln!("  linear2/mul vs bigint: {cases} cases agreed");
+    }
+
+    // Row-level kernel differential: the assembly against the portable loop it replaces, on
+    // the exact accumulator discipline (65-bit add carry; P/Q/borrow chains; addmul_1 carry).
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn kernels_match_portable_rows() {
+        let mut rng = Rng(0x0123_4567_89AB_CDEF);
+        let shapes: Vec<Vec<u64>> = vec![
+            vec![u64::MAX; 12],
+            vec![0; 12],
+            vec![u64::MAX, 0, u64::MAX, 0, u64::MAX, 0, u64::MAX, 0],
+            (0..12).map(|i| 1u64 << (63 - i * 5)).collect(),
+        ];
+        let coeffs = [0u64, 1, 2, u64::MAX, u64::MAX - 1, 1 << 63];
+        let mut cases = 0u64;
+        let mut check = |xd: &[u64], yd: &[u64], a1: u64, a2: u64| {
+            let n = xd.len().min(yd.len()).min(30);
+            let mut x = [0u64; 34];
+            let mut y = [0u64; 34];
+            x[..xd.len().min(34)].copy_from_slice(&xd[..xd.len().min(34)]);
+            y[..yd.len().min(34)].copy_from_slice(&yd[..yd.len().min(34)]);
+            let mut out_k = [0u64; 34];
+            let mut out_p = [0u64; 34];
+            let k = addmul2_kernel(&x, &y, n, a1, a2, &mut out_k);
+            let p = Sw::<34>::addmul2_portable(&x, &y, n, a1, a2, &mut out_p);
+            assert_eq!(
+                (k, out_k),
+                (p, out_p),
+                "addmul2 diverged n={n} a1={a1:x} a2={a2:x}"
+            );
+            let mut out_k = [0u64; 34];
+            let mut out_p = [0u64; 34];
+            let k = submul2_kernel(&x, &y, n, a1, a2, &mut out_k);
+            let p = Sw::<34>::submul2_portable(&x, &y, n, a1, a2, &mut out_p);
+            assert_eq!(
+                (k, out_k),
+                (p, out_p),
+                "submul2 diverged n={n} a1={a1:x} a2={a2:x}"
+            );
+            let mut out_k = [7u64; 34];
+            let mut out_p = [7u64; 34];
+            let k = addmul1_kernel(&y, n, a1, &mut out_k[..]);
+            let p = Sw::<34>::addmul1_portable(&y, n, a1, &mut out_p[..]);
+            assert_eq!((k, out_k), (p, out_p), "addmul1 diverged n={n} a={a1:x}");
+            cases += 3;
+        };
+        for xs in &shapes {
+            for ys in &shapes {
+                for &a1 in &coeffs {
+                    for &a2 in &coeffs {
+                        check(xs, ys, a1, a2);
+                    }
+                }
+            }
+        }
+        for _ in 0..4_000 {
+            let n = 1 + (rng.next() as usize) % 20;
+            let xd: Vec<u64> = (0..n).map(|_| rng.next()).collect();
+            let yd: Vec<u64> = (0..n).map(|_| rng.next()).collect();
+            check(&xd, &yd, rng.next(), rng.next());
+        }
+        eprintln!("  kernel-vs-portable rows: {cases} cases agreed");
+    }
+
+    // The quantifier: portable vs kernel per-row wall time in the same binary. This is how
+    // the kernels prove their worth on-target in seconds — no chain sync involved.
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    #[ignore = "manual kernel quantification"]
+    fn kernel_bench_rows() {
+        use std::time::Instant;
+        let mut rng = Rng(0x5EED_5EED_5EED_5EED);
+        // The Lehmer walk's operand distribution: most rows are 4-16 limbs.
+        for n in [4usize, 8, 16, 30] {
+            let x: [u64; 34] = core::array::from_fn(|_| rng.next());
+            let y: [u64; 34] = core::array::from_fn(|_| rng.next());
+            let (a1, a2) = (rng.next() | 1, rng.next() | 1);
+            let iters = 2_000_000u64 / n as u64;
+            let mut sink = 0u64;
+            let t = Instant::now();
+            for _ in 0..iters {
+                let mut out = [0u64; 34];
+                let (lo, hi) = Sw::<34>::addmul2_portable(&x, &y, n, a1, a2, &mut out);
+                sink = sink.wrapping_add(lo ^ hi ^ out[n / 2]);
+            }
+            let portable = t.elapsed();
+            let t = Instant::now();
+            for _ in 0..iters {
+                let mut out = [0u64; 34];
+                let (lo, hi) = addmul2_kernel(&x, &y, n, a1, a2, &mut out);
+                sink = sink.wrapping_add(lo ^ hi ^ out[n / 2]);
+            }
+            let kernel = t.elapsed();
+            eprintln!(
+                "  addmul2 n={n:>2}: portable {:>6.1?}ns/row, kernel {:>6.1?}ns/row, kernel/portable = {:.2}x  (sink {sink})",
+                portable.as_nanos() as f64 / iters as f64,
+                kernel.as_nanos() as f64 / iters as f64,
+                kernel.as_secs_f64() / portable.as_secs_f64(),
             );
         }
     }
