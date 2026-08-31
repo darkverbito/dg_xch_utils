@@ -592,7 +592,7 @@ impl<S: BlockStore + Send + Sync> MetricsSources<S> {
     // plus the progress observation. Deliberately skips the mempool lock, the RSS read, and the jemalloc
     // epoch-advance that a full `/metrics` scrape does — the kubelet polls this every ~15s and it must
     // stay lock-light (one store peak query + a couple of atomics + one RwLock read for the peer count).
-    async fn sample_liveness(&self) -> MetricsSnapshot {
+    pub(crate) async fn sample_liveness(&self) -> MetricsSnapshot {
         let peak_height = self
             .store
             .get_peak()

@@ -65,6 +65,22 @@ impl ActiveNode {
         with_backend!(self, h => h.sources.health_check().await)
     }
 
+    /// A dashboard-sized status line: the sync numbers plus the health verdict.
+    pub async fn status_json(&self) -> String {
+        with_backend!(self, h => {
+            let snap = h.sources.sample_liveness().await;
+            let (health, _) = h.sources.health_check().await;
+            format!(
+                "{{\"backend\":\"{}\",\"peak\":{},\"claimed\":{},\"tip_lag\":{},\"healthy\":{}}}",
+                self.backend_name(),
+                snap.peak_height,
+                snap.claimed_peak,
+                snap.tip_lag,
+                health.starts_with("200"),
+            )
+        })
+    }
+
     pub fn set_run(&self, value: bool) {
         with_backend!(self, h => h.node.run.store(value, Ordering::Relaxed));
     }

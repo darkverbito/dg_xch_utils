@@ -111,7 +111,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok()
         .and_then(|v| v.parse::<Level>().ok())
         .unwrap_or(Level::Info);
-    let _logger = DruidGardenLoggerBuilder::new()
+    let logger = DruidGardenLoggerBuilder::new()
         .current_level(level)
         .init()
         .map_err(|e| format!("failed to initialize logger: {e}"))?;
@@ -225,6 +225,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .port(port)
         .global_state::<full_node::service::ActiveNode>(active.clone())
         .global_state::<full_node::service::NodeServices>(services.clone())
+        .global_state::<dg_logger::DruidGardenLogger>(logger)
         .build();
     let result = server.run().await;
     // Server exited (signal): the shutdown bridge has flipped the node's run

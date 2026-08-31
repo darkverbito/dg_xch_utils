@@ -1724,7 +1724,7 @@ where
             tokio::time::sleep(FETCH_FAILURE_BACKOFF).await;
             Ok(std::ops::ControlFlow::Continue(()))
         }
-        
+
         .await?;
         match flow {
             std::ops::ControlFlow::Continue(()) => continue,
