@@ -79,7 +79,14 @@ When a throughput collapse is reported, in order:
 4. **Verify the content directly** when in doubt: fetch block records for the suspect range
    from any public RPC and compare `transactions_info.cost` against neighboring ranges. An
    order-of-magnitude jump settles it.
-5. Restart-shaped artifacts: a single all-metrics-to-zero notch with instant recovery and no
+5. **The silent-idle wedge** (the known defect this playbook's content cases must be told apart
+   from): blocks/min at zero, `resident_windows=0`, stall-reclaim warns every 60 s, and — the
+   discriminator — NO `producer fetch failed` or `fetch frontier frozen` lines. That is not a
+   slow era and not contention: the fetch producer is idling in the beyond-tip guard because
+   `fullnode_outbound_tip` (gauge) sits at-or-below the local peak while the claimed tip runs
+   ahead — its outbound peers' announced tips went stale. Restart to refresh greetings; ensure
+   at least one full-history, actively-announcing outbound peer.
+6. Restart-shaped artifacts: a single all-metrics-to-zero notch with instant recovery and no
    container restart is a missed scrape (the exporter can time out during a heavy body); a
    gauge that resets after a rollout is the new process, not data loss.
 
