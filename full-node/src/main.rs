@@ -220,6 +220,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let active = Arc::new(active);
     let services = Arc::new(services);
+    // A second interrupt forces exit. The graceful path can sit inside a long network await
+    // (a weight-proof race carries a 120s deadline, and a stalled sync loops through them), so
+    // the first Ctrl-C starts the drain and a second one means NOW — the standard daemon
+    // contract, without which a wedged sync reads as an unkillable process.
+    tokio::spawn(async {
+        let _ = tokio::signal::ctrl_c().await;
+        let _ = tokio::signal::ctrl_c().await;
+        log::warn!("second interrupt — forcing exit without drain");
+        std::process::exit(130);
+    });
     let server = portfu::prelude::ServerBuilder::new()
         .host(host)
         .port(port)
