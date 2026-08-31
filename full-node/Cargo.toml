@@ -26,7 +26,9 @@ path = "src/lib.rs"
 # it). Owns config, main, the RPC block/coin endpoints, and the wallet coin-state subscription server. Blind
 # to consensus internals. Package name `full-node` (not dg_xch_*) so the binary target matches the crate name.
 [dependencies]
-portfu = { git = "https://github.com/GalactechsLLC/portfu.git", branch = "2.0.0", features = ["websocket"] }
+# default-features off: the oauth feature drags reqwest 0.11's hyper-0.14/rustls-0.21
+# stack, which carries open RustSec advisories the audit gate rejects.
+portfu = { git = "https://github.com/GalactechsLLC/portfu.git", branch = "2.0.0", default-features = false, features = ["endpoint", "tasks", "websocket"] }
 dg_logger = { path = "../logging", version = "3.0.0" }
 log = "0.4"
 dg_xch_core = { path = "../core", version = "3.0.0", default-features = false, features = ["bls"] }
