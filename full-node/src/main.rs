@@ -145,10 +145,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         full_node::RpcTlsMode::parse(&cli.rpc_tls, &cli.ssl_dir).map_err(std::io::Error::other)?;
     config.debug_endpoints = cli.debug_endpoints;
 
-    match config.backend.clone() {
+    // Boot the concrete backend, bring up the protocol servers, and wrap both in
+    // the type-erased handles the portfu constructs dispatch through.
+    macro_rules! activate {
+        ($variant:ident, $node:expr) => {{
+            let node = $node;
+            let services = node.start_services().await?;
+            let sources = Arc::new(node.metrics_sources(&services));
+            (
+                full_node::service::ActiveNode::$variant(full_node::service::BackendHandle {
+                    node,
+                    sources,
+                }),
+                services,
+            )
+        }};
+    }
+    let metrics_bind = config.metrics;
+    let (active, services) = match config.backend.clone() {
         full_node::config::Backend::Sqlite(_) => {
-            let node = Arc::new(Node::boot(config).await?);
-            node.run().await?;
+            activate!(Sqlite, Arc::new(Node::boot(config).await?))
         }
         #[cfg(feature = "postgres")]
         full_node::config::Backend::Postgres(url) => {
@@ -157,8 +173,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .await
                     .map_err(|e| std::io::Error::other(format!("open postgres: {e}")))?,
             );
-            let node = Arc::new(Node::boot_with_store(config, store)?);
-            node.run().await?;
+            activate!(Postgres, Arc::new(Node::boot_with_store(config, store)?))
         }
         #[cfg(not(feature = "postgres"))]
         full_node::config::Backend::Postgres(url) => {
@@ -177,8 +192,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .await
                     .map_err(|e| std::io::Error::other(format!("open mmap store: {e}")))?,
             );
-            let node = Arc::new(Node::boot_with_store(config, store)?);
-            node.run().await?;
+            activate!(Mmap, Arc::new(Node::boot_with_store(config, store)?))
         }
         #[cfg(not(feature = "mmap"))]
         full_node::config::Backend::Mmap(dir) => {
@@ -191,6 +205,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
             .into());
         }
-    }
+    };
+
+    // The portfu server hosts /metrics, /health, and the daemon's tasks and
+    // intervals (annotation-registered). Its bind is the old --metrics address;
+    // `--metrics off` keeps the process surface loopback-only.
+    let (host, port) = match metrics_bind {
+        Some(addr) => (addr.ip().to_string(), addr.port()),
+        None => ("127.0.0.1".to_string(), 0),
+    };
+    log::info!(
+        "portfu server hosting metrics/health/tasks backend={} bind={host}:{port}",
+        active.backend_name()
+    );
+    let active = Arc::new(active);
+    let services = Arc::new(services);
+    let server = portfu::prelude::ServerBuilder::new()
+        .host(host)
+        .port(port)
+        .global_state::<full_node::service::ActiveNode>(active.clone())
+        .global_state::<full_node::service::NodeServices>(services.clone())
+        .build();
+    let result = server.run().await;
+    // Server exited (signal): the shutdown bridge has flipped the node's run
+    // flag; stop the protocol servers and the supervisor.
+    services.drain().await;
+    result.map_err(|e| std::io::Error::other(e.to_string()))?;
     Ok(())
 }

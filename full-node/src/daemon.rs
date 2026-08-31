@@ -1,5 +1,5 @@
 use crate::config::{Backend, Config};
-use crate::metrics::{HealthState, MetricsSources, ProducerMetrics, spawn_metrics_server};
+use crate::metrics::{HealthState, MetricsSources, ProducerMetrics};
 use crate::rpc::{NodeRpc, NodeRpcHandler};
 use crate::trust::TrustPolicy;
 use crate::tx_queue::TxQueue;
@@ -4425,7 +4425,10 @@ where
     ///
     /// # Errors
     /// Returns an I/O error if a server fails to start.
-    pub async fn run(self: Arc<Self>) -> Result<(), Error> {
+    /// Boot the protocol servers and the outbound supervisor, returning the shared
+    /// service state the portfu tasks operate through. The sync driver, tip
+    /// follower, and reaper no longer spawn here — they are portfu tasks.
+    pub async fn start_services(self: &Arc<Self>) -> Result<crate::service::NodeServices, Error> {
         install_crypto_provider();
         let (peer_run, inbound_peers) = self.spawn_peer_server()?;
         let rpc_run = self.spawn_rpc_server()?;
@@ -4482,53 +4485,31 @@ where
         }
         supervisor.start_outbound();
 
-        let registry = supervisor.registry.clone();
-        let metrics_run = self.start_metrics_server(registry.clone(), inbound_peers.clone());
-        let driver_registry: Arc<dyn OutboundPeers> = registry;
-        // The event-driven near-tip follower shares the registry + inbound peers with the batch driver;
-        // it owns the <=SHORT_SYNC_BLOCKS_BEHIND_THRESHOLD band (the short-sync-backtrack rung).
-        let tip = tokio::spawn(tip_follower(
-            self.clone(),
-            driver_registry.clone(),
-            inbound_peers.clone(),
-        ));
-        // Wallet-subscription disconnect hygiene: periodically reconcile the coin-state subscription
-        // registry against the live inbound peer set, dropping subscribers whose socket is gone. This is
-        // the servers-crate-free disconnect hook — dropping a subscriber drops its channel Sender, so its
-        // per-peer CoinStateUpdate forwarder task ends on its own. Bounded work per tick (O(subscribers)).
-        let wallet_sweep = tokio::spawn(subscription_reaper(self.clone(), inbound_peers.clone()));
-        let driver = tokio::spawn(sync_driver(self.clone(), driver_registry, inbound_peers));
-
-        wait_for_shutdown().await;
-        info!("shutdown signal received, draining");
-        self.run.store(false, Ordering::Relaxed);
-        peer_run.store(false, Ordering::Relaxed);
-        rpc_run.store(false, Ordering::Relaxed);
-        if let Some(m) = metrics_run {
-            m.store(false, Ordering::Relaxed);
-        }
-        supervisor.stop().await;
-        driver.abort();
-        tip.abort();
-        wallet_sweep.abort();
-        Ok(())
+        let peer_registry = supervisor.registry.clone();
+        let registry: Arc<dyn OutboundPeers> = peer_registry.clone();
+        Ok(crate::service::NodeServices {
+            registry,
+            peer_registry,
+            inbound_peers,
+            peer_run,
+            rpc_run,
+            supervisor: tokio::sync::Mutex::new(Some(supervisor)),
+        })
     }
 
     /// Start the Prometheus `/metrics` server (`--metrics`, default on): exports the sync-pipeline counters,
     /// the confirmed + claimed peak heights, process RSS, and peer counts in Prometheus text format. Returns
     /// the server's run flag, or `None` when `--metrics off` disabled it. A bind failure is logged, not fatal.
-    fn start_metrics_server(
-        &self,
-        registry: Arc<dg_xch_p2p::PeerRegistry>,
-        inbound_peers: PeerMap,
-    ) -> Option<Arc<AtomicBool>> {
-        let addr = self.config.metrics?;
-        let sources = MetricsSources {
+    /// The `/metrics` + `/health` read handles for this node, wired to the live
+    /// peer registries. Health is boot-anchored here, so the grace window opens
+    /// when the process's servers come up.
+    pub fn metrics_sources(&self, services: &crate::service::NodeServices) -> MetricsSources<S> {
+        MetricsSources {
             store: self.store.clone(),
             metrics: self.sync_metrics.clone(),
             claimed_peak: self.claimed_peak.clone(),
-            registry,
-            inbound_peers,
+            registry: services.peer_registry.clone(),
+            inbound_peers: services.inbound_peers.clone(),
             sync_from: self.config.sync_from,
             net: self.net.clone(),
             mempool: self.mempool.clone(),
@@ -4536,19 +4517,7 @@ where
             signage_points_total: self.signage_points_total.clone(),
             producer: self.producer.clone(),
             follow_inflight_since: self.follow_inflight_since.clone(),
-            // Fresh sync-liveness state for the /health probe; boot-anchored at server start (≈ node
-            // start), so the boot grace window opens here.
             health: HealthState::new(),
-        };
-        match spawn_metrics_server(addr, sources, self.config.debug_endpoints) {
-            Ok(run) => {
-                info!("metrics server listening addr={}", addr);
-                Some(run)
-            }
-            Err(e) => {
-                warn!("metrics server failed to start addr={} error={}", addr, e);
-                None
-            }
         }
     }
 
@@ -4573,21 +4542,18 @@ where
 // CoinStateUpdate forwarder then ends on its own as its channel Sender drops). The servers-crate-free
 // disconnect hook. 30s cadence; a subscription that outlives its peer by up to one tick costs one bounded
 // idle task, never traffic (delivery is non-blocking try_send). Runs until the run flag clears / abort.
-async fn subscription_reaper<S: BlockStore + CoinStore + Send + Sync + 'static>(
-    node: Arc<Node<S>>,
-    inbound_peers: PeerMap,
+pub(crate) async fn reap_wallet_subscriptions_once<
+    S: BlockStore + CoinStore + Send + Sync + 'static,
+>(
+    node: &Arc<Node<S>>,
+    inbound_peers: &PeerMap,
 ) {
-    let mut tick = tokio::time::interval(Duration::from_secs(30));
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    while node.run.load(Ordering::Relaxed) {
-        tick.tick().await;
-        let live: std::collections::HashSet<Bytes32> =
-            inbound_peers.read().await.keys().copied().collect();
-        node.wallet.retain_live(&live).await;
-    }
+    let live: std::collections::HashSet<Bytes32> =
+        inbound_peers.read().await.keys().copied().collect();
+    node.wallet.retain_live(&live).await;
 }
 
-async fn tip_follower<S: BlockStore + CoinStore + Send + Sync + 'static>(
+pub(crate) async fn tip_follower<S: BlockStore + CoinStore + Send + Sync + 'static>(
     node: Arc<Node<S>>,
     registry: Arc<dyn OutboundPeers>,
     inbound_peers: PeerMap,
@@ -5329,7 +5295,7 @@ async fn fetch_scheduler<S: BlockStore + CoinStore + Send + Sync + 'static>(
     readahead.abort_all();
 }
 
-async fn sync_driver<S: BlockStore + CoinStore + Send + Sync + 'static>(
+pub(crate) async fn sync_driver<S: BlockStore + CoinStore + Send + Sync + 'static>(
     node: Arc<Node<S>>,
     registry: Arc<dyn OutboundPeers>,
     inbound_peers: PeerMap,
@@ -7783,34 +7749,6 @@ impl OutboundPeers for dg_xch_p2p::PeerRegistry {
 
 fn install_crypto_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
-}
-
-#[cfg(unix)]
-async fn wait_for_shutdown() {
-    use tokio::signal::unix::{SignalKind, signal};
-    let mut term = match signal(SignalKind::terminate()) {
-        Ok(s) => s,
-        Err(_) => {
-            let _ = tokio::signal::ctrl_c().await;
-            return;
-        }
-    };
-    let mut int = match signal(SignalKind::interrupt()) {
-        Ok(s) => s,
-        Err(_) => {
-            let _ = tokio::signal::ctrl_c().await;
-            return;
-        }
-    };
-    tokio::select! {
-        _ = term.recv() => {},
-        _ = int.recv() => {},
-    }
-}
-
-#[cfg(not(unix))]
-async fn wait_for_shutdown() {
-    let _ = tokio::signal::ctrl_c().await;
 }
 
 #[cfg(test)]

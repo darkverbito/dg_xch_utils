@@ -5,10 +5,13 @@ pub mod peak_book;
 mod record_window;
 mod resume_floor;
 pub mod rpc;
+pub mod service;
+pub mod tasks;
 pub mod trust;
 mod tx_admission;
 pub mod tx_queue;
 pub mod wallet;
+pub mod web;
 
 pub use config::{Backend, Config, RpcTlsMode};
 pub use daemon::{Node, OutboundPeers, open_backend, outbound_on_connect};

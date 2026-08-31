@@ -2,33 +2,24 @@ use dg_xch_core::protocols::PeerMap;
 use dg_xch_node::{Mempool, SyncMetrics};
 use dg_xch_p2p::{NetCounters, PeerRegistry};
 use dg_xch_stores::{BlockStore, DURATION_BUCKETS_SECS, HistogramSnapshot};
-use log::{debug, info, warn};
-use std::io::Error;
-use std::net::SocketAddr;
+use log::{info, warn};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+#[cfg(feature = "profiling")]
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
 
-// Bounds: how long a scraper may hold a connection, and the request bytes we read before responding. A
-// slow/oversized client is dropped, never allowed to stall the accept loop.
-const CONN_TIMEOUT: Duration = Duration::from_secs(5);
-const MAX_REQUEST_BYTES: usize = 2048;
-// Accept-loop wake cadence so the run flag is observed without a dedicated shutdown channel.
-const ACCEPT_TICK: Duration = Duration::from_millis(500);
 // Sampling-profiler window for a /debug/flamegraph request, and the hard cap on the whole profile (sample +
 // symbolize + SVG render) so a wedged profiler can never hold the connection forever.
 #[cfg(feature = "profiling")]
-const FLAMEGRAPH_SECONDS: u64 = 20;
+pub(crate) const FLAMEGRAPH_SECONDS: u64 = 20;
 #[cfg(feature = "profiling")]
 const FLAMEGRAPH_HZ: i32 = 97; // prime-ish sample rate; avoids lockstep with periodic node work
 #[cfg(feature = "profiling")]
-const FLAMEGRAPH_TIMEOUT: Duration = Duration::from_secs(FLAMEGRAPH_SECONDS + 20);
+pub(crate) const FLAMEGRAPH_TIMEOUT: Duration = Duration::from_secs(FLAMEGRAPH_SECONDS + 20);
 // Hard cap on a /debug/heap dump (jemalloc prof.dump writes the file synchronously; a wedged disk
 // must not hold the connection forever).
 #[cfg(feature = "profiling")]
-const HEAP_DUMP_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const HEAP_DUMP_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// RED-style block-producer pipeline counters. The linear
 /// stage counts are cheap atomics; the drop-reason / validate-result / broadcast-peer-type fans are
@@ -460,6 +451,29 @@ pub struct MetricsSnapshot {
 }
 
 impl<S: BlockStore + Send + Sync> MetricsSources<S> {
+    /// The `/metrics` body — same renderer the accept-loop responder uses.
+    pub async fn metrics_text(&self) -> String {
+        render_metrics(&self.sample().await)
+    }
+
+    /// The `/health` verdict as (status line, body), with the stall self-report exactly as the
+    /// accept-loop responder had it: the FIRST 503 of an episode logs one structured dump, a
+    /// healthy verdict re-arms it.
+    pub async fn health_check(&self) -> (&'static str, String) {
+        let now = unix_now();
+        let snap = self.sample_liveness().await;
+        let follow_inflight_since = self.follow_inflight_since.load(Ordering::Relaxed);
+        let health = self.health.verdict(&snap, now, follow_inflight_since);
+        if health.status.starts_with("503") {
+            if self.health.should_dump_stall() {
+                self.log_stall_dump(&snap, now);
+            }
+        } else {
+            self.health.clear_stall();
+        }
+        (health.status, health.body)
+    }
+
     async fn sample(&self) -> MetricsSnapshot {
         let peak_height = self
             .store
@@ -1257,211 +1271,17 @@ fn process_rss_bytes() -> u64 {
 ///
 /// # Errors
 /// Returns an I/O error if the address cannot be bound.
-pub fn spawn_metrics_server<S: BlockStore + Send + Sync + 'static>(
-    addr: SocketAddr,
-    sources: MetricsSources<S>,
-    debug_endpoints: bool,
-) -> Result<Arc<AtomicBool>, Error> {
-    let std_listener = std::net::TcpListener::bind(addr)?;
-    std_listener.set_nonblocking(true)?;
-    let listener = TcpListener::from_std(std_listener)?;
-    let run = Arc::new(AtomicBool::new(true));
-    let run_c = run.clone();
-    tokio::spawn(async move {
-        serve(listener, sources, run_c, debug_endpoints).await;
-    });
-    Ok(run)
-}
-
-// Accept loop: one connection handled at a time (metrics scrapes are tiny + infrequent — no per-connection
-// spawn, so nothing is unbounded). The run flag is observed every ACCEPT_TICK via the accept timeout. The
-// exceptions are the /debug/* profile requests (flamegraph ~20s, heap dump up to 30s): each is handed to a
-// single bounded spawn (guarded by `profiling`, one concurrent profile of EITHER kind) to keep /metrics
-// scrapes answering meanwhile.
-async fn serve<S: BlockStore + Send + Sync + 'static>(
-    listener: TcpListener,
-    sources: MetricsSources<S>,
-    run: Arc<AtomicBool>,
-    #[cfg_attr(not(feature = "profiling"), allow(unused_variables))] debug_endpoints: bool,
-) {
-    #[cfg(feature = "profiling")]
-    let profiling = Arc::new(AtomicBool::new(false));
-    while run.load(Ordering::Relaxed) {
-        let accept = tokio::time::timeout(ACCEPT_TICK, listener.accept()).await;
-        let Ok(accepted) = accept else {
-            continue; // tick elapsed with no connection: re-check the run flag
-        };
-        let (mut stream, _peer) = match accepted {
-            Ok(pair) => pair,
-            Err(e) => {
-                debug!("metrics accept failed error={}", e);
-                continue;
-            }
-        };
-        // Bounded read of the request line so we can route by path (metrics vs. flamegraph).
-        let path = match tokio::time::timeout(CONN_TIMEOUT, read_request_path(&mut stream)).await {
-            Ok(Some(p)) => p,
-            _ => continue, // slow/garbage client: drop it, never stall the loop
-        };
-        if path.starts_with("/health") {
-            // Cheap and lock-light: sample() reads the same atomics /metrics already reads (and records
-            // progress into the health state), then verdict() is a handful of atomic loads. Answered on
-            // the accept loop like /metrics — no spawn — since a kubelet poll every ~15s is tiny.
-            let now = unix_now();
-            let snap = sources.sample_liveness().await;
-            // A confirm actively in flight (set for the whole drain+confirm window by the block
-            // processor, daemon.rs) counts as progress even when the confirmed peak is frozen
-            // mid-commit; otherwise a long coin_record INSERT freezes both progress witnesses and
-            // the 503 kills the node mid-write.
-            let follow_inflight_since = sources.follow_inflight_since.load(Ordering::Relaxed);
-            let health = sources.health.verdict(&snap, now, follow_inflight_since);
-            // Stall self-report: the FIRST 503 of an episode logs one structured dump of what the
-            // node was last doing (see log_stall_dump); a healthy verdict re-arms it.
-            if health.status.starts_with("503") {
-                if sources.health.should_dump_stall() {
-                    sources.log_stall_dump(&snap, now);
-                }
-            } else {
-                sources.health.clear_stall();
-            }
-            if let Err(e) = tokio::time::timeout(
-                CONN_TIMEOUT,
-                write_simple(&mut stream, health.status, &health.body),
-            )
-            .await
-            {
-                debug!("health response timed out error={}", e);
-            }
-            continue;
-        }
-        #[cfg(feature = "profiling")]
-        if path.starts_with("/debug/flamegraph") {
-            // One profile at a time — a second request while one runs is refused, not queued.
-            if profiling.swap(true, Ordering::SeqCst) {
-                let _ = write_simple(
-                    &mut stream,
-                    "503 Service Unavailable",
-                    "flamegraph already running",
-                )
-                .await;
-                continue;
-            }
-            info!("flamegraph profiling started (~{FLAMEGRAPH_SECONDS}s)");
-            let done = profiling.clone();
-            tokio::spawn(async move {
-                profiling::handle_flamegraph(stream).await;
-                done.store(false, Ordering::SeqCst);
-            });
-            continue;
-        }
-        #[cfg(feature = "profiling")]
-        if path.starts_with("/debug/heap") {
-            // The heap dump can leak in-memory data and writes a file to disk, so the metrics
-            // port must not serve it unless the operator opted in.
-            if !debug_endpoints {
-                let _ = write_simple(
-                    &mut stream,
-                    "404 Not Found",
-                    "/debug/heap is disabled; start the node with --debug-endpoints to enable it",
-                )
-                .await;
-                continue;
-            }
-            // Same one-at-a-time guard as the flamegraph: a second profile request is refused, not queued.
-            if profiling.swap(true, Ordering::SeqCst) {
-                let _ = write_simple(
-                    &mut stream,
-                    "503 Service Unavailable",
-                    "a debug profile is already running",
-                )
-                .await;
-                continue;
-            }
-            info!("heap-profile dump requested");
-            let done = profiling.clone();
-            tokio::spawn(async move {
-                profiling::handle_heap(stream).await;
-                done.store(false, Ordering::SeqCst);
-            });
-            continue;
-        }
-        let body = render_metrics(&sources.sample().await);
-        if let Err(e) = tokio::time::timeout(CONN_TIMEOUT, write_metrics(&mut stream, &body)).await
-        {
-            debug!("metrics response timed out error={}", e);
-        }
-    }
-    warn!("metrics server stopped");
-}
-
-// Read the request head (bounded) and return the request-target path from the first line ("GET /path HTTP/..").
-// `None` on a malformed/empty request; the caller drops the connection.
-async fn read_request_path(stream: &mut TcpStream) -> Option<String> {
-    let mut buf = [0u8; MAX_REQUEST_BYTES];
-    let n = stream.read(&mut buf).await.ok()?;
-    let head = std::str::from_utf8(buf.get(..n)?).ok()?;
-    let mut parts = head.lines().next()?.split_whitespace();
-    let _method = parts.next()?;
-    Some(parts.next()?.to_string())
-}
-
-// Write the metrics as a single HTTP/1.1 200 (the request was already read by `read_request_path`).
-async fn write_metrics(stream: &mut TcpStream, body: &str) -> Result<(), Error> {
-    let response = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        body.len(),
-        body
-    );
-    stream.write_all(response.as_bytes()).await?;
-    stream.flush().await?;
-    Ok(())
-}
-
-// Minimal text response for status/errors.
-async fn write_simple(stream: &mut TcpStream, status: &str, body: &str) -> Result<(), Error> {
-    let response = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len(),
-    );
-    stream.write_all(response.as_bytes()).await?;
-    stream.flush().await?;
-    Ok(())
-}
-
 #[cfg(feature = "profiling")]
-mod profiling {
+pub(crate) mod profiling {
     use super::*;
 
     // Sample the process for FLAMEGRAPH_SECONDS and stream back the flamegraph SVG. Runs on its own spawned task
     // (bounded to one concurrent via `profiling`) so /metrics keeps answering during the profile.
-    pub(super) async fn handle_flamegraph(mut stream: TcpStream) {
-        match tokio::time::timeout(FLAMEGRAPH_TIMEOUT, sample_flamegraph(FLAMEGRAPH_SECONDS)).await
-        {
-            Ok(Ok(svg)) => {
-                let header = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: image/svg+xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    svg.len()
-                );
-                let _ = stream.write_all(header.as_bytes()).await;
-                let _ = stream.write_all(&svg).await;
-                let _ = stream.flush().await;
-            }
-            Ok(Err(e)) => {
-                warn!("flamegraph profiling failed error={}", e);
-                let _ = write_simple(&mut stream, "500 Internal Server Error", &e).await;
-            }
-            Err(_) => {
-                warn!("flamegraph profiling timed out");
-                let _ =
-                    write_simple(&mut stream, "504 Gateway Timeout", "flamegraph timed out").await;
-            }
-        }
-    }
 
     // The whole profile — start guard, sample, symbolize, render — runs inside one `spawn_blocking` closure so the
     // `pprof::ProfilerGuard` is created and dropped on a single blocking thread (it never crosses an `.await`, so
     // the spawned future stays `Send`) and the CPU work never steals a runtime worker.
-    async fn sample_flamegraph(seconds: u64) -> Result<Vec<u8>, String> {
+    pub(crate) async fn sample_flamegraph(seconds: u64) -> Result<Vec<u8>, String> {
         tokio::task::spawn_blocking(move || {
             let guard = pprof::ProfilerGuardBuilder::default()
                 .frequency(FLAMEGRAPH_HZ)
@@ -1494,33 +1314,10 @@ mod profiling {
     //   _RJEM_MALLOC_CONF=prof:true,prof_active:true,lg_prof_sample:19
     // `opt.prof` cannot be flipped at runtime — a deploy without the env var (or a prof-less build, e.g.
     // macOS dev) must fail LOUD here, never stream back an empty profile.
-    pub(super) async fn handle_heap(mut stream: TcpStream) {
-        match tokio::time::timeout(HEAP_DUMP_TIMEOUT, dump_heap_profile()).await {
-            Ok(Ok(prof)) => {
-                info!("heap profile dumped bytes={}", prof.len());
-                let header = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=\"heap.prof\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    prof.len()
-                );
-                let _ = stream.write_all(header.as_bytes()).await;
-                let _ = stream.write_all(&prof).await;
-                let _ = stream.flush().await;
-            }
-            Ok(Err(e)) => {
-                warn!("heap profile dump failed error={}", e);
-                let _ = write_simple(&mut stream, "500 Internal Server Error", &e).await;
-            }
-            Err(_) => {
-                warn!("heap profile dump timed out");
-                let _ =
-                    write_simple(&mut stream, "504 Gateway Timeout", "heap dump timed out").await;
-            }
-        }
-    }
 
     // The mallctl work runs on the blocking pool: `prof.dump` writes the profile file synchronously
     // (file I/O inside jemalloc) and must not stall a runtime worker.
-    async fn dump_heap_profile() -> Result<Vec<u8>, String> {
+    pub(crate) async fn dump_heap_profile() -> Result<Vec<u8>, String> {
         tokio::task::spawn_blocking(jemalloc_prof_dump)
             .await
             .map_err(|e| format!("heap dump task join: {e}"))?
