@@ -89,9 +89,8 @@ fn standalone_precompute_matches_the_inline_engine_path() {
                     .expect("ref generator"),
             })
             .collect();
-        let (conds, verified) =
-            run_body_expensive(&NativePrimitives, &MAINNET, block, &refs, true)
-                .expect("inline body computes");
+        let (conds, verified) = run_body_expensive(&NativePrimitives, &MAINNET, block, &refs, true)
+            .expect("inline body computes");
         let got = &pre[&h];
         assert_eq!(got.conds, conds, "conditions diverge at height {h}");
         assert!(got.agg_sig_verified && verified, "sig verdicts at {h}");
@@ -125,8 +124,7 @@ fn out_of_window_refs_are_skipped_not_guessed() {
         // resolvability filter is still exercised by the first test.
         return;
     };
-    let pre =
-        precompute_window_bodies_standalone(&NativePrimitives, &MAINNET, 0, &truncated);
+    let pre = precompute_window_bodies_standalone(&NativePrimitives, &MAINNET, 0, &truncated);
     assert!(
         !pre.contains_key(&victim),
         "a block whose refs leave the window must be skipped for the engine's inline path"

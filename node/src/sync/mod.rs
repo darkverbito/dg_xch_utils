@@ -1826,10 +1826,8 @@ pub fn precompute_window_bodies_standalone<P: crate::primitives::ConsensusPrimit
     assume_valid: u32,
     blocks: &[dg_xch_core::blockchain::full_block::FullBlock],
 ) -> std::collections::HashMap<u32, crate::engine::PrecomputedBody> {
-    let by_height: std::collections::HashMap<
-        u32,
-        &dg_xch_core::blockchain::full_block::FullBlock,
-    > = blocks.iter().map(|b| (b.height(), b)).collect();
+    let by_height: std::collections::HashMap<u32, &dg_xch_core::blockchain::full_block::FullBlock> =
+        blocks.iter().map(|b| (b.height(), b)).collect();
     let mut jobs: Vec<(
         &dg_xch_core::blockchain::full_block::FullBlock,
         Vec<dg_xch_core::consensus::block_generator::GeneratorReference>,
