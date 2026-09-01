@@ -5,7 +5,7 @@
 //   3. a failed head fetch falls back (None) but KEEPS the deeper windows in flight;
 //   4. a plan mismatch aborts everything — the next fill replans from the caller's truth;
 //   5. abort/drop cancels every in-flight task (no leaks, nothing ever written anywhere);
-//   6. the depth adapts: measured take-wait grows K, a long zero-wait streak shrinks it;
+//   6. the depth adapts grow-only: measured take-wait grows K; instant takes hold it;
 //   7. zero state: a fresh readahead reports no signal (class-7 truthfulness).
 
 mod common;
@@ -248,10 +248,13 @@ async fn mismatched_request_aborts_the_plan() {
     assert!(rig.drained().await);
 }
 
-// Property 6 — adaptive depth: a take that measurably waits grows K toward the ceiling; a long
-// streak of instant takes shrinks it back.
+// Property 6 — adaptive depth is grow-only: a take that measurably waits grows K toward the
+// ceiling, and instant takes leave it alone. The old shrink-on-streak policy was a starvation
+// ratchet on fast peers (instant takes are the pipeline WORKING, not over-provisioned; the CNI
+// bake-off measured depth walking 64 → 5 with throughput down ~35%); resident memory stays
+// bounded by the byte budget at dispatch, the only legitimate downward force.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn depth_grows_on_wait_and_shrinks_on_streak() {
+async fn depth_grows_on_wait_and_holds_on_instant_takes() {
     let rig = Rig::new();
     let slow: Vec<_> = (0..8)
         .map(|i| rig.scripted(i, Duration::from_millis(120), false, false))
@@ -269,22 +272,21 @@ async fn depth_grows_on_wait_and_shrinks_on_streak() {
         "a measured wait grows the depth"
     );
     assert!(ra.depth() <= READAHEAD_MAX_DEPTH);
-    // Shrink: many takes that never wait (resolved long before the take).
+    // Hold: many takes that never wait (resolved long before the take) must NOT walk the
+    // depth back down — that decay is the bake-off starvation ratchet.
     let fast: Vec<_> = (0..8).map(|i| rig.peer(8 + i)).collect();
     let mut from = BATCH;
-    let mut shrunk = false;
     for _ in 0..64 {
         ra.fill(&fast, from, 1_000_000, BATCH);
         tokio::time::sleep(Duration::from_millis(15)).await;
         if ra.take(from, from + BATCH - 1).await.is_some() {
             from += BATCH;
         }
-        if ra.depth() < READAHEAD_START_DEPTH + 1 {
-            shrunk = true;
-            break;
-        }
+        assert!(
+            ra.depth() > READAHEAD_START_DEPTH,
+            "instant takes must never shrink the depth"
+        );
     }
-    assert!(shrunk, "a zero-wait streak must shrink the depth back");
     ra.abort_all();
     assert!(rig.drained().await);
 }

@@ -106,8 +106,6 @@ impl PrefetchConfig {
 
 // A take() that had to wait longer than this counts as measurable validator idle → grow K.
 const GROW_WAIT_THRESHOLD: Duration = Duration::from_millis(50);
-// This many consecutive ~zero-wait takes shrink K by one — give unneeded budget back.
-const SHRINK_STREAK: u32 = 32;
 // Per-block wire-size overhead beyond the generator bytes (foliage, proofs, reward chain).
 const BLOCK_OVERHEAD_BYTES: u64 = 4096;
 
@@ -365,25 +363,12 @@ impl WindowReadahead {
         self.publish_gauges();
     }
 
-    // Adaptive-K policy: a take that measurably waited grows the depth; a long streak of instant
-    // takes shrinks it back. The resident-bytes budget is applied at dispatch time.
+    // Adaptive-K policy, extracted pure so the ratchet direction is testable.
     fn adapt_depth(&mut self, wait: Duration) {
-        if wait > GROW_WAIT_THRESHOLD {
-            self.zero_wait_streak = 0;
-            if self.depth < self.cfg.max_depth {
-                self.depth += 1;
-            }
-        } else if wait < Duration::from_millis(1) {
-            self.zero_wait_streak += 1;
-            if self.zero_wait_streak >= SHRINK_STREAK {
-                self.zero_wait_streak = 0;
-                if self.depth > READAHEAD_MIN_DEPTH {
-                    self.depth -= 1;
-                }
-            }
-        } else {
-            self.zero_wait_streak = 0;
-        }
+        let (depth, streak) =
+            next_depth(self.depth, self.zero_wait_streak, wait, self.cfg.max_depth);
+        self.depth = depth;
+        self.zero_wait_streak = streak;
     }
 
     fn publish_gauges(&self) {
@@ -403,6 +388,31 @@ impl WindowReadahead {
     }
 }
 
+/// The adaptive-K depth decision for one `take`, pure for testability.
+///
+/// Grow-only: a take that waited past the grow threshold means the validator
+/// measurably idled on the network, so the depth steps toward the ceiling.
+/// Instant takes deliberately do NOT shrink it — on fast peers every take is
+/// instant precisely because the deep pipeline is doing its job, and the old
+/// shrink-on-streak policy was a starvation ratchet: depth walked down to the
+/// floor (observed live: 64 → 5 over ~90 min against LAN peers, throughput
+/// down ~35% with the validator's CPU going idle) and could only recover by
+/// first paying a >50ms stall. Resident memory is already bounded by the byte
+/// budget at every dispatch (`depth_within_budget`) — the only legitimate
+/// downward force — so nothing else shrinks K.
+fn next_depth(
+    depth: usize,
+    _zero_wait_streak: u32,
+    wait: Duration,
+    max_depth: usize,
+) -> (usize, u32) {
+    if wait > GROW_WAIT_THRESHOLD {
+        ((depth + 1).min(max_depth), 0)
+    } else {
+        (depth, 0)
+    }
+}
+
 impl Drop for WindowReadahead {
     fn drop(&mut self) {
         for w in self.inflight.drain(..) {
@@ -417,6 +427,42 @@ mod tests {
         PrefetchConfig, READAHEAD_ABS_MAX_DEPTH, READAHEAD_BYTE_BUDGET, READAHEAD_MAX_DEPTH,
         READAHEAD_MAX_PER_PEER, READAHEAD_MIN_DEPTH, depth_within_budget,
     };
+    use std::time::Duration;
+
+    #[test]
+    fn instant_takes_never_shrink_the_depth() {
+        // The starvation ratchet the CNI bake-off exposed: on fast (LAN) peers
+        // every take is instant BECAUSE the deep buffer is doing its job, so a
+        // shrink-on-instant-take policy walks depth 64 -> 1 (observed live:
+        // 64 -> 5 over ~90 min, throughput down ~35% with the validator's CPU
+        // going idle) and depth can only recover by first PAYING a >50ms
+        // starvation stall. Memory is already bounded by the byte budget at
+        // dispatch (`depth_within_budget`) — the only legitimate downward
+        // force — so instant takes must leave the depth alone.
+        let mut depth = 64;
+        let mut streak = 0;
+        for _ in 0..10_000 {
+            let (d, s) = super::next_depth(depth, streak, Duration::ZERO, 64);
+            depth = d;
+            streak = s;
+        }
+        assert_eq!(depth, 64, "a healthy full pipeline must keep its depth");
+    }
+
+    #[test]
+    fn a_waiting_take_grows_depth_to_the_ceiling() {
+        let (d, s) = super::next_depth(8, 5, Duration::from_millis(60), 64);
+        assert_eq!((d, s), (9, 0));
+        let (d, _) = super::next_depth(64, 0, Duration::from_millis(60), 64);
+        assert_eq!(d, 64, "growth clamps at max_depth");
+    }
+
+    #[test]
+    fn deadband_wait_holds_depth() {
+        let (d, s) = super::next_depth(8, 31, Duration::from_millis(10), 64);
+        assert_eq!(d, 8);
+        assert_eq!(s, 0, "a measurable-but-small wait resets the streak");
+    }
 
     #[test]
     fn budget_clamps_depth_but_never_below_the_floor() {
