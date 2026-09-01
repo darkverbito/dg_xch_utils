@@ -52,7 +52,6 @@
 mod common;
 
 use std::io::Cursor;
-use std::path::{Path, PathBuf};
 
 use dg_xch_core::blockchain::foliage_block_data::FoliageBlockData;
 use dg_xch_core::blockchain::full_block::FullBlock;
@@ -65,7 +64,6 @@ use dg_xch_core::blockchain::vdf_proof::VdfProof;
 use dg_xch_core::blockchain::weight_proof::RecentChainData;
 use dg_xch_core::consensus::constants::MAINNET;
 use dg_xch_core::protocols::farmer::DeclareProofOfSpace;
-use dg_xch_core::protocols::full_node::RespondBlocks;
 use dg_xch_node::farmer::{
     CandidateIters, CandidatePrev, DeclareVerdict, assemble_candidate, validate_declared_proof,
 };

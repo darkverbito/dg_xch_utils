@@ -236,7 +236,7 @@ fn the_mempool_admission_path_retains_nothing() {
     use dg_xch_core::traits::SizedBytes;
 
     let puzzle = Program::to(1_u8);
-    let conditions = vec![ConditionWithArgs::CreateCoin(
+    let conditions = [ConditionWithArgs::CreateCoin(
         Bytes32::new([9; 32]),
         900,
         vec![],

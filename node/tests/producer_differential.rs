@@ -53,12 +53,9 @@ use dg_xch_core::consensus::producer::{
     BlockTransactions, FarmerSignatures, RewardBlockClaim, create_unfinished_block_with_sigs,
     g2_infinity,
 };
-use dg_xch_core::protocols::full_node::RespondBlocks;
 use dg_xch_core::traits::SizedBytes;
 use dg_xch_core::utils::hash_256;
 use dg_xch_serialize::{ChiaProtocolVersion, ChiaSerialize};
-use std::io::Cursor;
-use std::path::{Path, PathBuf};
 
 // The arbitrary producer seed. Its ONLY visible effect is extension_data = sha256(SEED), which the
 // harness splices over with the real value (see the module divergence note). Nothing else in the
