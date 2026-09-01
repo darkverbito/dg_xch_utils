@@ -3314,9 +3314,19 @@ where
         &self,
         blocks: &[dg_xch_core::blockchain::full_block::FullBlock],
     ) -> Result<Option<(Bytes32, u32)>, SyncError> {
+        self.follow_step_blocks_pre(blocks, None).await
+    }
+
+    // [`Node::follow_step_blocks`] with driver-precomputed window bodies (the cross-window body
+    // pipeline: window N+1's CLVM/BLS precompute ran while window N validated).
+    async fn follow_step_blocks_pre(
+        &self,
+        blocks: &[dg_xch_core::blockchain::full_block::FullBlock],
+        pre: Option<std::collections::HashMap<u32, dg_xch_node::engine::PrecomputedBody>>,
+    ) -> Result<Option<(Bytes32, u32)>, SyncError> {
         let (peak, deltas) = {
             let mut chaser = self.chaser.lock().await;
-            chaser.follow_blocks_reporting(blocks).await?
+            chaser.follow_blocks_reporting_pre(blocks, pre).await?
         };
         self.finish_follow_step(peak, &deltas).await
     }
@@ -4905,6 +4915,21 @@ async fn block_processor<S: BlockStore + CoinStore + Send + Sync + 'static>(
     recovery_tx: mpsc::Sender<RecoveryRequest>,
     peak_tx: mpsc::Sender<ConfirmedPeak>,
 ) {
+    // Cross-window body pipeline: while window N runs its stage/vdf/sig/confirm phases, window
+    // N+1's body precompute (pure CPU over blocks already resident in the queue) runs here in a
+    // blocking task. Keyed by the window's first height so a rebase/reorg between spawn and use
+    // discards it (worst case: wasted compute, never a stale verdict — the engine's flag-key
+    // guard re-verifies every precompute at stage time).
+    let (pipe_constants, pipe_assume_valid) = {
+        let chaser = node.chaser.lock().await;
+        (chaser.constants(), chaser.assume_valid())
+    };
+    let mut pre_task: Option<(
+        u32,
+        tokio::task::JoinHandle<
+            std::collections::HashMap<u32, dg_xch_node::engine::PrecomputedBody>,
+        >,
+    )> = None;
     while node.run.load(Ordering::Relaxed) {
         // Park until the head height is present; the idle tick is only a shutdown backstop.
         tokio::select! {
@@ -4958,7 +4983,37 @@ async fn block_processor<S: BlockStore + CoinStore + Send + Sync + 'static>(
                 }
             }
         }
-        let step = node.follow_step_blocks(&window).await;
+        // Join the precompute spawned while the PREVIOUS window validated; a height mismatch
+        // (rebase, reorg, partial advance) discards it.
+        let pre = match pre_task.take() {
+            Some((h, handle)) if h == from => handle.await.ok(),
+            Some((_, handle)) => {
+                handle.abort();
+                None
+            }
+            None => None,
+        };
+        // Spawn the NEXT window's precompute before validating this one, so the two overlap.
+        let next = queue.peek_ready_window(FOLLOW_BATCH);
+        if let Some(next_from) = next.first().map(FullBlock::height)
+            && next
+                .iter()
+                .any(|b| b.is_transaction_block() && b.transactions_generator.is_some())
+        {
+            let constants = pipe_constants;
+            pre_task = Some((
+                next_from,
+                tokio::task::spawn_blocking(move || {
+                    dg_xch_node::sync::precompute_window_bodies_standalone(
+                        &NativePrimitives,
+                        &constants,
+                        pipe_assume_valid,
+                        &next,
+                    )
+                }),
+            ));
+        }
+        let step = node.follow_step_blocks_pre(&window, pre).await;
         node.follow_inflight_since.store(0, Ordering::Relaxed);
         match step {
             Ok(Some((hash, height))) => {
@@ -5026,6 +5081,9 @@ async fn block_processor<S: BlockStore + CoinStore + Send + Sync + 'static>(
                 }
             }
         }
+    }
+    if let Some((_, handle)) = pre_task.take() {
+        handle.abort();
     }
 }
 

@@ -492,6 +492,19 @@ where
     S: CoinStore + BlockStore + Sync,
     P: ConsensusPrimitives + Sync,
 {
+    /// The engine's assume-valid height — the driver's snapshot for the cross-window body
+    /// precompute (the same signature-verification rule the inline path applies).
+    #[must_use]
+    pub fn assume_valid(&self) -> u32 {
+        self.engine.assume_valid()
+    }
+
+    /// Copy of the consensus constants, for the driver-side precompute.
+    #[must_use]
+    pub fn constants(&self) -> dg_xch_core::consensus::constants::ConsensusConstants {
+        *self.engine.constants()
+    }
+
     #[must_use]
     pub fn new(engine: Engine<S, P>, config: SyncConfig) -> Self {
         Self {
@@ -1141,6 +1154,19 @@ where
         &mut self,
         blocks: &[dg_xch_core::blockchain::full_block::FullBlock],
     ) -> Result<(Option<(Bytes32, u32)>, Vec<ConfirmedDelta>), SyncError> {
+        self.follow_blocks_reporting_pre(blocks, None).await
+    }
+
+    /// [`Self::follow_blocks_reporting`] with window bodies the caller precomputed while the
+    /// PREVIOUS window validated (the cross-window body pipeline). `provided` entries skip the
+    /// inline precompute; tx blocks not covered take the inline path unchanged, and the engine's
+    /// stage-time flag-key check still guards every precompute, so a stale entry degrades to an
+    /// inline recompute, never to a wrong verdict.
+    pub async fn follow_blocks_reporting_pre(
+        &mut self,
+        blocks: &[dg_xch_core::blockchain::full_block::FullBlock],
+        provided: Option<std::collections::HashMap<u32, crate::engine::PrecomputedBody>>,
+    ) -> Result<(Option<(Bytes32, u32)>, Vec<ConfirmedDelta>), SyncError> {
         {
             let (cache, pending, staged) = self.engine.collection_sizes();
             self.metrics
@@ -1165,8 +1191,16 @@ where
                 Vec<dg_xch_core::consensus::block_generator::GeneratorReference>,
                 bool,
             )> = Vec::new();
+            let mut tx_total = 0u64;
             for block in blocks {
                 if !block.is_transaction_block() || block.transactions_generator.is_none() {
+                    continue;
+                }
+                tx_total += 1;
+                if provided
+                    .as_ref()
+                    .is_some_and(|m| m.contains_key(&block.height()))
+                {
                     continue;
                 }
                 // Refs: in-window first, confirmed store second; unresolvable → skip precompute
@@ -1215,7 +1249,7 @@ where
                 .store(blocks.len() as u64, Ordering::Relaxed);
             self.metrics
                 .window_tx_blocks
-                .store(jobs.len() as u64, Ordering::Relaxed);
+                .store(tx_total, Ordering::Relaxed);
             if jobs.is_empty() {
                 self.metrics.window_body_micros.store(0, Ordering::Relaxed);
                 std::collections::HashMap::new()
@@ -1225,50 +1259,7 @@ where
                     let body_started = std::time::Instant::now();
                     let primitives = self.engine.primitives();
                     let constants = *self.engine.constants();
-                    // Core-bounded workers over job chunks: a thread per transaction block would
-                    // oversubscribe the CPUs and multiply peak memory by the window size instead
-                    // of the core count — each generator run holds its own large CLVM heap
-                    // (hundreds of MiB on dense blocks).
-                    let workers = std::thread::available_parallelism()
-                        .map(std::num::NonZeroUsize::get)
-                        .unwrap_or(4)
-                        .min(jobs.len());
-                    let chunk = jobs.len().div_ceil(workers);
-                    let out = std::thread::scope(|s| {
-                        let handles: Vec<_> =
-                            jobs.chunks(chunk)
-                                .map(|part| {
-                                    s.spawn(move || {
-                                        part.iter()
-                                            .filter_map(|(block, refs, verify_sig)| {
-                                                crate::engine::run_body_expensive(
-                                                    primitives,
-                                                    &constants,
-                                                    block,
-                                                    refs,
-                                                    *verify_sig,
-                                                )
-                                                .ok()
-                                                .map(|(conds, verified)| {
-                                                    (
-                                                        block.height(),
-                                                        crate::engine::PrecomputedBody {
-                                                            conds,
-                                                            agg_sig_verified: verified,
-                                                        },
-                                                    )
-                                                })
-                                            })
-                                            .collect::<Vec<_>>()
-                                    })
-                                })
-                                .collect();
-                        handles
-                            .into_iter()
-                            .filter_map(|h| h.join().ok())
-                            .flatten()
-                            .collect()
-                    });
+                    let out = run_precompute_jobs(primitives, &constants, &jobs);
                     self.metrics
                         .window_body_micros
                         .store(body_started.elapsed().as_micros() as u64, Ordering::Relaxed);
@@ -1276,6 +1267,10 @@ where
                 }
             }
         };
+        if let Some(provided) = provided {
+            // Caller-precomputed bodies (window pipelined against the previous validation).
+            pre_bodies.extend(provided);
+        }
 
         let sink = crate::header::HeaderSink::default();
         // Each staged block carries its two window-queue high-water marks: the VDF-proof mark and
@@ -1756,6 +1751,120 @@ pub fn drain_header_sink(
     let vdf = sink.vdf.into_inner().map_err(|_| poisoned())?;
     let sig = sink.sig.into_inner().map_err(|_| poisoned())?;
     Ok((vdf, sig))
+}
+
+/// Core-bounded execution of a window's body-precompute jobs — shared by the inline path in
+/// [`Chaser::follow_blocks_reporting_pre`] and the cross-window standalone precompute below.
+/// Workers are bounded by the core count, not the job count: each generator run holds its own
+/// large CLVM heap, so a thread per transaction block would oversubscribe the CPUs and multiply
+/// peak memory by the window size.
+fn run_precompute_jobs<P: crate::primitives::ConsensusPrimitives + Sync>(
+    primitives: &P,
+    constants: &dg_xch_core::consensus::constants::ConsensusConstants,
+    jobs: &[(
+        &dg_xch_core::blockchain::full_block::FullBlock,
+        Vec<dg_xch_core::consensus::block_generator::GeneratorReference>,
+        bool,
+    )],
+) -> std::collections::HashMap<u32, crate::engine::PrecomputedBody> {
+    if jobs.is_empty() {
+        return std::collections::HashMap::new();
+    }
+    let workers = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(4)
+        .min(jobs.len());
+    let chunk = jobs.len().div_ceil(workers);
+    std::thread::scope(|s| {
+        let handles: Vec<_> = jobs
+            .chunks(chunk)
+            .map(|part| {
+                s.spawn(move || {
+                    part.iter()
+                        .filter_map(|(block, refs, verify_sig)| {
+                            crate::engine::run_body_expensive(
+                                primitives,
+                                constants,
+                                block,
+                                refs,
+                                *verify_sig,
+                            )
+                            .ok()
+                            .map(|(conds, verified)| {
+                                (
+                                    block.height(),
+                                    crate::engine::PrecomputedBody {
+                                        conds,
+                                        agg_sig_verified: verified,
+                                    },
+                                )
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .filter_map(|h| h.join().ok())
+            .flatten()
+            .collect()
+    })
+}
+
+/// The expensive pure half of body validation for a window (CLVM generator run + BLS aggregate
+/// verify), precomputable by the DRIVER while the previous window validates — the cross-window
+/// body pipeline. Generator refs resolve IN-WINDOW ONLY: a block referencing an earlier window
+/// is skipped here and takes the engine's inline path (which may consult staged state and the
+/// store), so this can never observe not-yet-staged state, and the engine's stage-time flag-key
+/// check still guards every entry — a mismatch degrades to an inline recompute, never to a
+/// changed verdict.
+#[must_use]
+pub fn precompute_window_bodies_standalone<P: crate::primitives::ConsensusPrimitives + Sync>(
+    primitives: &P,
+    constants: &dg_xch_core::consensus::constants::ConsensusConstants,
+    assume_valid: u32,
+    blocks: &[dg_xch_core::blockchain::full_block::FullBlock],
+) -> std::collections::HashMap<u32, crate::engine::PrecomputedBody> {
+    let by_height: std::collections::HashMap<
+        u32,
+        &dg_xch_core::blockchain::full_block::FullBlock,
+    > = blocks.iter().map(|b| (b.height(), b)).collect();
+    let mut jobs: Vec<(
+        &dg_xch_core::blockchain::full_block::FullBlock,
+        Vec<dg_xch_core::consensus::block_generator::GeneratorReference>,
+        bool,
+    )> = Vec::new();
+    for block in blocks {
+        if !block.is_transaction_block() || block.transactions_generator.is_none() {
+            continue;
+        }
+        let mut refs = Vec::with_capacity(block.transactions_generator_ref_list.len());
+        let mut ok = true;
+        for (i, r) in block.transactions_generator_ref_list.iter().enumerate() {
+            match by_height
+                .get(r)
+                .and_then(|b| b.transactions_generator.clone())
+            {
+                Some(g) => refs.push(
+                    dg_xch_core::consensus::block_generator::GeneratorReference {
+                        height: *r,
+                        index: u32::try_from(i).unwrap_or(u32::MAX),
+                        generator: g,
+                    },
+                ),
+                None => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if !ok {
+            continue;
+        }
+        jobs.push((block, refs, block.height() >= assume_valid));
+    }
+    run_precompute_jobs(primitives, constants, &jobs)
 }
 
 impl dg_xch_core::errors::ErrorCode for SyncError {

@@ -505,3 +505,66 @@ async fn concurrent_wait_notify_makes_progress_under_load() {
     .expect("wait/notify handoff must not lose a wakeup and wedge the pipeline");
     assert_eq!(q.low_water(), ROUNDS, "every round handed off");
 }
+
+// ---------------------------------------------------------------------------
+// peek_ready_window — the body-precompute pipeline's lookahead view.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn peek_returns_the_ready_run_without_draining() {
+    let b = base();
+    let q = queue(10, u64::MAX);
+    for h in [10u32, 11, 12] {
+        put(&q, block_at(&b, h));
+    }
+    let peeked = q.peek_ready_window(8);
+    assert_eq!(
+        peeked.iter().map(FullBlock::height).collect::<Vec<_>>(),
+        vec![10, 11, 12],
+        "peek surfaces the contiguous head run"
+    );
+    assert_eq!(q.low_water(), 10, "peek never advances the head");
+    let drained = q.drain_ready_window(8);
+    assert_eq!(
+        drained.iter().map(FullBlock::height).collect::<Vec<_>>(),
+        vec![10, 11, 12],
+        "a subsequent drain surfaces exactly what peek showed"
+    );
+}
+
+#[test]
+fn peek_stops_at_a_gap_and_respects_max() {
+    let b = base();
+    let q = queue(0, u64::MAX);
+    for h in [0u32, 1, 3] {
+        put(&q, block_at(&b, h));
+    }
+    assert_eq!(
+        q.peek_ready_window(8)
+            .iter()
+            .map(FullBlock::height)
+            .collect::<Vec<_>>(),
+        vec![0, 1],
+        "the gap at 2 ends the run"
+    );
+    assert_eq!(q.peek_ready_window(1).len(), 1, "max caps the peek");
+}
+
+#[test]
+fn peek_after_drain_shows_the_next_window() {
+    let b = base();
+    let q = queue(0, u64::MAX);
+    for h in 0u32..6 {
+        put(&q, block_at(&b, h));
+    }
+    let first = q.drain_ready_window(3);
+    assert_eq!(first.len(), 3);
+    assert_eq!(
+        q.peek_ready_window(3)
+            .iter()
+            .map(FullBlock::height)
+            .collect::<Vec<_>>(),
+        vec![3, 4, 5],
+        "after draining window N, peek shows window N+1"
+    );
+}

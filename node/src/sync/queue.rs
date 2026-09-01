@@ -246,6 +246,25 @@ impl BlockQueue {
         out
     }
 
+    /// Clone the contiguous ready run at the head WITHOUT draining it — the body-precompute
+    /// pipeline's view of the NEXT window while the current one validates. Returns the same
+    /// blocks a subsequent [`BlockQueue::drain_ready_window`] would surface (provided no rebase
+    /// or reclaim intervenes), never advances `low_water`, and never uncharges bytes.
+    #[must_use]
+    pub fn peek_ready_window(&self, max: u32) -> Vec<FullBlock> {
+        let inner = self.lock();
+        let mut out = Vec::new();
+        let mut head = inner.low_water;
+        while (out.len() as u32) < max {
+            let Some(Slot::Present { block, .. }) = inner.slots.get(&head) else {
+                break;
+            };
+            out.push((**block).clone());
+            head = head.saturating_add(1);
+        }
+        out
+    }
+
     /// Reset the consumer's head to `new_low_water` and invalidate every outstanding fetch. The
     /// driver calls this in lockstep with an engine peak change (reorg or forward jump) to restore
     /// `low_water == confirmed_peak + 1`. Every queued slot is dropped, the byte charge is zeroed,
