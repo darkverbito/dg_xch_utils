@@ -205,6 +205,63 @@ impl SqliteStore {
 /// connection, bounded by `busy_timeout`, retried next tick on SQLITE_BUSY) waits the readers out,
 /// resets the log, and shrinks the file to zero — never on the writer's connection, so a busy
 /// writer degrades the escalation to "try again next second", not to a confirm stall.
+/// Throttle for the size-triggered TRUNCATE escalation.
+///
+/// TRUNCATE takes the exclusive WAL locks, so every attempt contends with the confirm writer's
+/// COMMITs — and while a pooled reader pins the read mark the attempt cannot reset the log at
+/// all. Retrying that every tick turns a pinned, over-trigger WAL into a hot loop: one 1–3 s
+/// writer-stalling TRUNCATE per second for as long as the reader holds on (observed live during
+/// the 9.1M+ era crossing as 1–1.5 s confirm INSERTs interleaved with back-to-back slow
+/// checkpoint pragmas). This throttle keeps the FIRST attempt immediate and spaces the retries
+/// exponentially (2, 4, … up to 64 ticks) while attempts keep failing to bring the file under
+/// the trigger; a successful drain — or the WAL dropping under the trigger on its own — resets
+/// it to immediate. PASSIVE draining is not throttled: it stays on its every-tick cadence,
+/// so frames keep leaving the WAL between attempts.
+struct EscalationBackoff {
+    /// Ticks remaining before the next attempt (0 = attempt now).
+    delay_ticks: u32,
+    /// Width of the current backoff window, doubled per failed attempt.
+    current: u32,
+}
+
+impl EscalationBackoff {
+    const MAX_TICKS: u32 = 64;
+
+    fn new() -> Self {
+        Self {
+            delay_ticks: 0,
+            current: 0,
+        }
+    }
+
+    /// Whether to run a TRUNCATE this tick. Call once per over-trigger tick; a `false`
+    /// consumes one tick of the pending delay.
+    fn should_attempt(&mut self) -> bool {
+        if self.delay_ticks == 0 {
+            true
+        } else {
+            self.delay_ticks -= 1;
+            false
+        }
+    }
+
+    /// Record an attempt's outcome: `drained` (the file came back under the trigger) resets to
+    /// immediate; a failure schedules the next attempt exponentially later.
+    fn record(&mut self, drained: bool) {
+        if drained {
+            *self = Self::new();
+        } else {
+            self.current = self.current.max(1).saturating_mul(2).min(Self::MAX_TICKS);
+            self.delay_ticks = self.current;
+        }
+    }
+
+    /// The WAL is under the trigger: nothing to escalate, clear any accumulated backoff.
+    fn reset(&mut self) {
+        *self = Self::new();
+    }
+}
+
 fn spawn_checkpointer(
     mut conn: SqliteConnection,
     near_tip: Arc<AtomicBool>,
@@ -227,6 +284,7 @@ fn spawn_checkpointer(
         // failsafe and its blocking copy-to-DB.
         const BULK_CHECKPOINT_TICKS: u32 = 20;
         let mut bulk_tick: u32 = 0;
+        let mut escalation = EscalationBackoff::new();
         loop {
             tick.tick().await;
             // Read-pool census every tick: a high idle count while `wal_frames` refuses to fall
@@ -257,11 +315,19 @@ fn spawn_checkpointer(
             checkpoint_pass(&mut conn, &telemetry, &mut prev_checkpointed, "PASSIVE").await;
             // PASSIVE neither resets a reader-pinned log nor shrinks the file, so if it is still
             // past the trigger afterwards, escalate to TRUNCATE. Bounded by the connection's
-            // busy_timeout; SQLITE_BUSY lands in telemetry and the next tick retries.
-            if over_trigger
-                && std::fs::metadata(&wal_path).map_or(0, |m| m.len()) > wal_drain_trigger_bytes
+            // busy_timeout; SQLITE_BUSY lands in telemetry. Retries are BACKED OFF, not
+            // every-tick: TRUNCATE contends with the confirm writer, and while a pooled reader
+            // pins the read mark a per-tick retry is a hot loop of writer-stalling attempts
+            // (see `EscalationBackoff`). PASSIVE draining above is unaffected.
+            if !over_trigger {
+                escalation.reset();
+            } else if std::fs::metadata(&wal_path).map_or(0, |m| m.len()) > wal_drain_trigger_bytes
+                && escalation.should_attempt()
             {
                 checkpoint_pass(&mut conn, &telemetry, &mut prev_checkpointed, "TRUNCATE").await;
+                let drained =
+                    std::fs::metadata(&wal_path).map_or(0, |m| m.len()) <= wal_drain_trigger_bytes;
+                escalation.record(drained);
             }
         }
     })
@@ -370,4 +436,77 @@ fn row_to_coin_record(row: &sqlx::sqlite::SqliteRow) -> Result<CoinRecord, Store
         timestamp: timestamp as u64,
         spent: spent_index != 0,
     })
+}
+
+#[cfg(test)]
+mod escalation_backoff_tests {
+    use super::EscalationBackoff;
+
+    /// Drive one over-trigger tick; returns whether an attempt ran, feeding `drained` back
+    /// when it did.
+    fn tick(b: &mut EscalationBackoff, drained: bool) -> bool {
+        if b.should_attempt() {
+            b.record(drained);
+            true
+        } else {
+            false
+        }
+    }
+
+    #[test]
+    fn first_attempt_is_immediate() {
+        let mut b = EscalationBackoff::new();
+        assert!(b.should_attempt());
+    }
+
+    #[test]
+    fn failures_space_attempts_exponentially_to_the_cap() {
+        let mut b = EscalationBackoff::new();
+        // Simulate a pinned reader: every attempt fails to drain. Collect the gap (in
+        // skipped ticks) before each of the next attempts.
+        assert!(tick(&mut b, false), "first attempt must be immediate");
+        let mut gaps = Vec::new();
+        let mut skipped = 0u32;
+        while gaps.len() < 8 {
+            if tick(&mut b, false) {
+                gaps.push(skipped);
+                skipped = 0;
+            } else {
+                skipped += 1;
+            }
+        }
+        assert_eq!(
+            gaps,
+            vec![2, 4, 8, 16, 32, 64, 64, 64],
+            "retries must double up to the cap and then hold it"
+        );
+    }
+
+    #[test]
+    fn a_successful_drain_resets_to_immediate() {
+        let mut b = EscalationBackoff::new();
+        for _ in 0..40 {
+            tick(&mut b, false);
+        }
+        // A drain that works clears the accumulated width entirely.
+        loop {
+            if tick(&mut b, true) {
+                break;
+            }
+        }
+        assert!(b.should_attempt(), "post-success attempt must be immediate");
+    }
+
+    #[test]
+    fn dropping_under_the_trigger_resets() {
+        let mut b = EscalationBackoff::new();
+        for _ in 0..40 {
+            tick(&mut b, false);
+        }
+        b.reset();
+        assert!(
+            b.should_attempt(),
+            "under-trigger reset must clear the backoff"
+        );
+    }
 }
