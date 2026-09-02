@@ -1248,7 +1248,11 @@ where
             let constants = *self.engine.constants();
             drain_staged_window(primitives, &constants, input)
         };
-        self.confirm_window_pre(window, verdict).await
+        let confirmed = self.confirm_window_pre(window, verdict).await?;
+        if let Some(e) = confirmed.rejection {
+            return Err(e);
+        }
+        Ok((confirmed.peak, confirmed.deltas))
     }
 
     /// Stage a whole window into the engine's overlay WITHOUT touching the writer or running the
@@ -1456,7 +1460,7 @@ where
         &mut self,
         window: StagedWindow,
         verdict: WindowVerdict,
-    ) -> Result<(Option<(Bytes32, u32)>, Vec<ConfirmedDelta>), SyncError> {
+    ) -> Result<ConfirmedWindow, SyncError> {
         self.metrics
             .window_vdf_micros
             .store(verdict.vdf_micros, Ordering::Relaxed);
@@ -1543,13 +1547,17 @@ where
             || self.engine.pop_reorg_report(),
             &mut deltas,
         );
-        if let Some(e) = vdf_err.or(stage_err) {
+        let rejection = vdf_err.or(stage_err);
+        if rejection.is_some() {
             // Unconfirmed staged blocks retry next tick and re-stage; their overlay entries
-            // must not linger meanwhile.
+            // must not linger meanwhile. The confirmed prefix's deltas still return.
             self.engine.clear_staged_overlay();
-            return Err(e);
         }
-        Ok((self.engine.store().get_peak().await?, deltas))
+        Ok(ConfirmedWindow {
+            peak: self.engine.store().get_peak().await?,
+            deltas,
+            rejection,
+        })
     }
 }
 
@@ -1899,6 +1907,17 @@ impl WindowVerdict {
     }
 }
 
+/// A confirmed window: the durable peak, the confirmed prefix's reported deltas, and — when
+/// the drain or staging rejected part of the window — the rejection the caller surfaces AFTER
+/// consuming the prefix's side effects (wallet coin-state, mempool revalidation). Losing those
+/// deltas with the error would skip the side effects for blocks that DID commit.
+#[derive(Debug)]
+pub struct ConfirmedWindow {
+    pub peak: Option<(Bytes32, u32)>,
+    pub deltas: Vec<ConfirmedDelta>,
+    pub rejection: Option<SyncError>,
+}
+
 /// Drain a staged window's deferred VDF and header-signature queues — pure CPU against the
 /// primitives, no engine or store access, so the daemon runs it on a blocking thread while the
 /// next window stages. Two-tier per queue: the whole-window batch first, then on a failure a
@@ -2159,10 +2178,9 @@ mod tests {
         use dg_xch_stores::{BlockStore, SqliteStore};
         use std::sync::Arc;
 
-        let base: FullBlock = serde_json::from_str(include_str!(
-            "../../tests/fixtures/full_block_5000000.json"
-        ))
-        .expect("fixture");
+        let base: FullBlock =
+            serde_json::from_str(include_str!("../../tests/fixtures/full_block_5000000.json"))
+                .expect("fixture");
         let mut prev = Bytes32::from([0xB6; 32]);
         let mut chain = Vec::new();
         for h in 100u32..108 {
@@ -2208,10 +2226,17 @@ mod tests {
             vdf_micros: 0,
             sig_micros: 0,
         };
-        chaser
+        let confirmed = chaser
             .confirm_window_pre(staged, verdict)
             .await
-            .expect_err("the rejection surfaces");
+            .expect("the store path succeeds; the rejection rides the outcome");
+        assert!(confirmed.rejection.is_some(), "the rejection surfaces");
+        assert_eq!(
+            confirmed.deltas.len(),
+            4,
+            "the confirmed prefix's deltas are delivered with the rejection — losing them \
+             skips the wallet and mempool side effects for blocks that committed"
+        );
         assert!(
             chaser
                 .engine()

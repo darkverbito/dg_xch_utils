@@ -3216,17 +3216,25 @@ where
     }
 
     // Confirm half: the drain's verdict lands the window (archive + coins + peak, one
-    // transaction) and the per-peak side effects fire exactly as in the serial step.
+    // transaction) and the per-peak side effects fire exactly as in the serial step — for the
+    // confirmed prefix even when the tail was rejected; the rejection surfaces after, driving
+    // the same queue reset as before.
     async fn confirm_step_window(
         &self,
         window: dg_xch_node::sync::StagedWindow,
         verdict: dg_xch_node::sync::WindowVerdict,
     ) -> Result<Option<(Bytes32, u32)>, SyncError> {
-        let (peak, deltas) = {
+        let confirmed = {
             let mut chaser = self.chaser.lock().await;
             chaser.confirm_window_pre(window, verdict).await?
         };
-        self.finish_follow_step(peak, &deltas).await
+        let peak = self
+            .finish_follow_step(confirmed.peak, &confirmed.deltas)
+            .await?;
+        match confirmed.rejection {
+            Some(e) => Err(e),
+            None => Ok(peak),
+        }
     }
 
     /// The mirrored `short_sync_backtrack` step, driven when a follow
@@ -8010,8 +8018,10 @@ mod tests {
             calls: std::sync::atomic::AtomicUsize::new(0),
             id: 2,
         });
-        let sources: Vec<Arc<dyn BlockRangeSource>> =
-            vec![first.clone() as Arc<dyn BlockRangeSource>, second.clone() as _];
+        let sources: Vec<Arc<dyn BlockRangeSource>> = vec![
+            first.clone() as Arc<dyn BlockRangeSource>,
+            second.clone() as _,
+        ];
         let validated = ValidatedTip {
             tip: Bytes32::default(),
             wp: Arc::new(WeightProof {

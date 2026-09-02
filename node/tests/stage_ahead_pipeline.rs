@@ -77,9 +77,17 @@ async fn staging_the_next_window_before_the_confirm_matches_the_serial_path() {
         .expect("w2 stages against w1's uncommitted overlay");
     let constants = MAINNET;
     let v1 = drain_staged_window(&NativePrimitives, &constants, s1.take_drain_input());
-    let (p1, _) = piped.confirm_window_pre(s1, v1).await.expect("w1 confirms");
+    let p1 = piped
+        .confirm_window_pre(s1, v1)
+        .await
+        .expect("w1 confirms")
+        .peak;
     let v2 = drain_staged_window(&NativePrimitives, &constants, s2.take_drain_input());
-    let (p2, _) = piped.confirm_window_pre(s2, v2).await.expect("w2 confirms");
+    let p2 = piped
+        .confirm_window_pre(s2, v2)
+        .await
+        .expect("w2 confirms")
+        .peak;
 
     assert_eq!(p1, serial_p1, "window 1's confirmed peak diverges");
     assert_eq!(p2, serial_p2, "window 2's confirmed peak diverges");
@@ -240,4 +248,3 @@ async fn a_confirm_store_failure_retracts_the_staged_overlay() {
         "a confirm that failed in the store left {overlay} staged overlay entries resident"
     );
 }
-
