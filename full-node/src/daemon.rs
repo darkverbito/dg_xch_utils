@@ -3759,6 +3759,10 @@ where
             .sync_headers(&headers, &schedule, &validated.summaries)
             .await
             .map_err(|e| Error::other(e.to_string()))?;
+        // The proof's summary chain outlives the anchor span: the first included-SES block ABOVE
+        // the span has neither local ancestry nor a headers-first candidate to serve its summary
+        // — the engine falls back to this chain, hash-gated as ever.
+        chaser.seed_summary_chain(validated.summaries.to_vec());
         // The anchor span alone cannot serve the FIRST epoch retarget the follow hits: its
         // `get_second_to_last_transaction_block_in_previous_epoch` walk reads records back past
         // the previous epoch surpass — up to a full epoch below the span (the 4,575,744-boundary
