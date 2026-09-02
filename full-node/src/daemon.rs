@@ -4920,9 +4920,13 @@ async fn block_processor<S: BlockStore + CoinStore + Send + Sync + 'static>(
     // blocking task. Keyed by the window's first height so a rebase/reorg between spawn and use
     // discards it (worst case: wasted compute, never a stale verdict — the engine's flag-key
     // guard re-verifies every precompute at stage time).
-    let (pipe_constants, pipe_assume_valid) = {
+    let (pipe_constants, pipe_assume_valid, pipe_metrics) = {
         let chaser = node.chaser.lock().await;
-        (chaser.constants(), chaser.assume_valid())
+        (
+            chaser.constants(),
+            chaser.assume_valid(),
+            chaser.metrics().clone(),
+        )
     };
     let mut pre_task: Option<(
         u32,
@@ -4985,8 +4989,18 @@ async fn block_processor<S: BlockStore + CoinStore + Send + Sync + 'static>(
         }
         // Join the precompute spawned while the PREVIOUS window validated; a height mismatch
         // (rebase, reorg, partial advance) discards it.
+        pipe_metrics
+            .window_pre_wait_micros
+            .store(0, Ordering::Relaxed);
         let pre = match pre_task.take() {
-            Some((h, handle)) if h == from => handle.await.ok(),
+            Some((h, handle)) if h == from => {
+                let join_started = std::time::Instant::now();
+                let joined = handle.await.ok();
+                pipe_metrics
+                    .window_pre_wait_micros
+                    .store(join_started.elapsed().as_micros() as u64, Ordering::Relaxed);
+                joined
+            }
             Some((_, handle)) => {
                 handle.abort();
                 None
@@ -4994,12 +5008,18 @@ async fn block_processor<S: BlockStore + CoinStore + Send + Sync + 'static>(
             None => None,
         };
         // Spawn the NEXT window's precompute before validating this one, so the two overlap.
+        // Out-of-window compression refs resolve from the confirmed store up front (final in a
+        // forward sync); the ones the store cannot serve yet fall to the engine's inline path.
         let next = queue.peek_ready_window(FOLLOW_BATCH);
         if let Some(next_from) = next.first().map(FullBlock::height)
             && next
                 .iter()
                 .any(|b| b.is_transaction_block() && b.transactions_generator.is_some())
         {
+            let extra = {
+                let chaser = node.chaser.lock().await;
+                chaser.confirmed_ref_generators(&next).await
+            };
             let constants = pipe_constants;
             pre_task = Some((
                 next_from,
@@ -5009,6 +5029,7 @@ async fn block_processor<S: BlockStore + CoinStore + Send + Sync + 'static>(
                         &constants,
                         pipe_assume_valid,
                         &next,
+                        &extra,
                     )
                 }),
             ));

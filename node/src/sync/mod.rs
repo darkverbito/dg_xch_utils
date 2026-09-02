@@ -322,6 +322,11 @@ pub struct SyncMetrics {
     // (window.body runs only the generator blocks).
     pub window_blocks: AtomicU64,
     pub window_tx_blocks: AtomicU64,
+    // How many of the last window's bodies arrived precomputed from the driver's cross-window
+    // pipeline (the rest ran inline in window.body), and how long the driver waited joining that
+    // precompute before it could start the window.
+    pub window_body_provided: AtomicU64,
+    pub window_pre_wait_micros: AtomicU64,
     // Depth of the most recent reorg (peak height minus fork height; 0 = none yet).
     pub last_reorg_depth: AtomicU64,
     // Engine collection sizes sampled each follow window.
@@ -1128,6 +1133,33 @@ where
         missing.into_iter().collect()
     }
 
+    /// Confirmed-store generators for `blocks`' out-of-span back-refs — the window pipeline
+    /// resolves compression refs below the validating window from the confirmed chain (final in
+    /// a forward sync). Refs the store cannot serve yet (e.g. into the window currently
+    /// validating) are omitted; those blocks take the engine's inline path.
+    pub async fn confirmed_ref_generators(
+        &self,
+        blocks: &[dg_xch_core::blockchain::full_block::FullBlock],
+    ) -> std::collections::HashMap<u32, dg_xch_core::clvm::program::SerializedProgram> {
+        let in_span: std::collections::HashSet<u32> = blocks
+            .iter()
+            .filter(|b| b.transactions_generator.is_some())
+            .map(FullBlock::height)
+            .collect();
+        let mut out = std::collections::HashMap::new();
+        for block in blocks {
+            for r in &block.transactions_generator_ref_list {
+                if in_span.contains(r) || out.contains_key(r) {
+                    continue;
+                }
+                if let Ok(Some(g)) = self.engine.store().get_generator_at_height(*r).await {
+                    out.insert(*r, g);
+                }
+            }
+        }
+        out
+    }
+
     /// Seed an out-of-span generator ref into the engine's staged overlay — see
     /// [`Self::missing_ref_heights`].
     pub fn seed_ref_generator(
@@ -1250,6 +1282,10 @@ where
             self.metrics
                 .window_tx_blocks
                 .store(tx_total, Ordering::Relaxed);
+            self.metrics.window_body_provided.store(
+                provided.as_ref().map_or(0, std::collections::HashMap::len) as u64,
+                Ordering::Relaxed,
+            );
             if jobs.is_empty() {
                 self.metrics.window_body_micros.store(0, Ordering::Relaxed);
                 std::collections::HashMap::new()
@@ -1814,17 +1850,18 @@ fn run_precompute_jobs<P: crate::primitives::ConsensusPrimitives + Sync>(
 
 /// The expensive pure half of body validation for a window (CLVM generator run + BLS aggregate
 /// verify), precomputable by the DRIVER while the previous window validates — the cross-window
-/// body pipeline. Generator refs resolve IN-WINDOW ONLY: a block referencing an earlier window
-/// is skipped here and takes the engine's inline path (which may consult staged state and the
-/// store), so this can never observe not-yet-staged state, and the engine's stage-time flag-key
-/// check still guards every entry — a mismatch degrades to an inline recompute, never to a
-/// changed verdict.
+/// body pipeline. Generator refs resolve from the window itself or from `extra` (the driver's
+/// confirmed-store snapshot, [`Chaser::confirmed_ref_generators`]); a block with a ref neither
+/// can serve is skipped here and takes the engine's inline path, and the engine's stage-time
+/// flag-key check still guards every entry — a mismatch degrades to an inline recompute, never
+/// to a changed verdict.
 #[must_use]
 pub fn precompute_window_bodies_standalone<P: crate::primitives::ConsensusPrimitives + Sync>(
     primitives: &P,
     constants: &dg_xch_core::consensus::constants::ConsensusConstants,
     assume_valid: u32,
     blocks: &[dg_xch_core::blockchain::full_block::FullBlock],
+    extra: &std::collections::HashMap<u32, dg_xch_core::clvm::program::SerializedProgram>,
 ) -> std::collections::HashMap<u32, crate::engine::PrecomputedBody> {
     let by_height: std::collections::HashMap<u32, &dg_xch_core::blockchain::full_block::FullBlock> =
         blocks.iter().map(|b| (b.height(), b)).collect();
@@ -1843,6 +1880,7 @@ pub fn precompute_window_bodies_standalone<P: crate::primitives::ConsensusPrimit
             match by_height
                 .get(r)
                 .and_then(|b| b.transactions_generator.clone())
+                .or_else(|| extra.get(r).cloned())
             {
                 Some(g) => refs.push(
                     dg_xch_core::consensus::block_generator::GeneratorReference {
