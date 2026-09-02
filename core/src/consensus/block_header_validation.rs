@@ -1,12 +1,11 @@
 // Header-block validation: unfinished and finished header checks.
-// Ports chia/consensus/block_header_validation.py (no chia_rs port exists).
 // VDF (dg_xch_vdf) and proof-of-space (dg_xch_pos) verification is injected via HeaderValidationVerifier
 // to avoid a dependency cycle (both crates depend on dg_xch_core).
 
 use crate::blockchain::block_record::BlockRecord;
 use crate::blockchain::class_group_element::ClassgroupElement;
 use crate::blockchain::header_block::HeaderBlock;
-use crate::blockchain::proof_of_space::ProofOfSpace;
+use crate::blockchain::proof_of_space::{ProofOfSpace, is_v1_phased_out};
 use crate::blockchain::sized_bytes::{Bytes32, Bytes48, Bytes96};
 use crate::blockchain::vdf_info::VdfInfo;
 use crate::blockchain::vdf_proof::VdfProof;
@@ -17,7 +16,7 @@ use crate::consensus::difficulty_adjustment::can_finish_sub_and_full_epoch;
 use crate::consensus::get_block_challenge::{get_block_challenge, pre_sp_tx_block_height};
 use crate::consensus::make_sub_epoch_summary::make_sub_epoch_summary;
 use crate::consensus::pot_iterations::{
-    calculate_ip_iters, calculate_iterations_quality, calculate_sp_interval_iters,
+    calculate_ip_iters, calculate_iterations_quality_for_proof, calculate_sp_interval_iters,
     calculate_sp_iters, is_overflow_block,
 };
 use crate::consensus::vdf_info_computation::get_signage_point_vdf_info;
@@ -28,8 +27,34 @@ use std::collections::HashMap;
 use std::io::Error;
 
 // Verifier seam so dg_xch_core need not depend on dg_xch_vdf / dg_xch_pos.
+// Which of the five finished-header BLS signature gates a `verify_bls_sig` call is, so the window
+// pipeline's deferred drain can reproduce the exact rejection string for the failing block
+// instead of a generic "bad sig" (the VDF drain loses its sub-error; this one does not).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum HeaderSigTag {
+    RewardChainSp,
+    ChallengeChainSp,
+    FoliageBlockData,
+    FoliageTransactionBlock,
+    Pool,
+}
+
+impl HeaderSigTag {
+    // The byte-identical rejection string the inline site would have produced.
+    #[must_use]
+    pub fn rejection(self) -> &'static str {
+        match self {
+            Self::RewardChainSp => "INVALID_RC_SIGNATURE",
+            Self::ChallengeChainSp => "INVALID_CC_SIGNATURE",
+            Self::FoliageBlockData => "INVALID_PLOT_SIGNATURE (block data)",
+            Self::FoliageTransactionBlock => "INVALID_PLOT_SIGNATURE (ftb)",
+            Self::Pool => "INVALID_POOL_SIGNATURE",
+        }
+    }
+}
+
 pub trait HeaderValidationVerifier {
-    // chia validate_vdf (basic, non normalization-aware form).
+    // VDF validation (basic, non normalization-aware form).
     fn validate_vdf(
         &self,
         constants: &ConsensusConstants,
@@ -39,7 +64,7 @@ pub trait HeaderValidationVerifier {
         target: Option<&VdfInfo>,
     ) -> bool;
 
-    // chia verify_and_get_quality_string.
+    // Proof-of-space quality-string verification.
     fn pospace_quality_string(
         &self,
         constants: &ConsensusConstants,
@@ -48,6 +73,10 @@ pub trait HeaderValidationVerifier {
         cc_sp_hash: Bytes32,
         height: u32,
     ) -> Option<Bytes32>;
+
+    fn verify_bls_sig(&self, pk: &Bytes48, msg: &[u8], sig: &Bytes96, _tag: HeaderSigTag) -> bool {
+        bls_verify(pk, msg, sig)
+    }
 }
 
 impl<T: HeaderValidationVerifier + ?Sized> HeaderValidationVerifier for &T {
@@ -72,24 +101,28 @@ impl<T: HeaderValidationVerifier + ?Sized> HeaderValidationVerifier for &T {
     ) -> Option<Bytes32> {
         (*self).pospace_quality_string(constants, proof_of_space, challenge, cc_sp_hash, height)
     }
+
+    fn verify_bls_sig(&self, pk: &Bytes48, msg: &[u8], sig: &Bytes96, tag: HeaderSigTag) -> bool {
+        (*self).verify_bls_sig(pk, msg, sig, tag)
+    }
 }
 
-// chia ValidationState; prev_ses_block omitted (general-node path is always prev_ses_block=None).
+// Validation state; prev_ses_block omitted (general-node path is always prev_ses_block=None).
 #[derive(Clone, Copy)]
 pub struct ValidationState {
     pub ssi: u64,
     pub difficulty: u64,
 }
 
-// AugScheme BLS verify over sized-bytes, fail-closed on malformed sig/key (no panic).
-fn bls_verify(pk: &Bytes48, msg: &[u8], sig: &Bytes96) -> bool {
+#[must_use]
+pub fn bls_verify(pk: &Bytes48, msg: &[u8], sig: &Bytes96) -> bool {
     match Signature::try_from(sig) {
         Ok(s) => verify_signature(&PublicKey::from(pk), msg, &s),
         Err(_) => false,
     }
 }
 
-// chia validate_pospace_and_get_required_iters. Ok(None) on invalid proof of space.
+// Validate the proof of space and derive required iters. Ok(None) on invalid proof of space.
 #[allow(clippy::unnecessary_wraps, clippy::too_many_arguments)]
 pub fn validate_pospace_and_get_required_iters(
     verifier: &impl HeaderValidationVerifier,
@@ -99,30 +132,92 @@ pub fn validate_pospace_and_get_required_iters(
     cc_sp_hash: Bytes32,
     height: u32,
     difficulty: u64,
-    _prev_transaction_block_height: u32,
+    prev_transaction_block_height: u32,
 ) -> Result<Option<u64>, Error> {
+    // A v1 proof past the phase-out window is no longer a valid proof of space.
+    if proof_of_space.version == 0
+        && is_v1_phased_out(
+            proof_of_space.proof.as_ref(),
+            prev_transaction_block_height,
+            constants,
+        )
+    {
+        return Ok(None);
+    }
     let Some(q_str) =
         verifier.pospace_quality_string(constants, proof_of_space, challenge, cc_sp_hash, height)
     else {
         return Ok(None);
     };
-    Ok(Some(calculate_iterations_quality(
-        constants.difficulty_constant_factor,
+    Ok(Some(calculate_iterations_quality_for_proof(
+        constants,
+        proof_of_space,
         q_str,
-        proof_of_space.size,
         difficulty,
         cc_sp_hash,
     )))
 }
 
-// chia validate_unfinished_header_block, recent-chain specialization
-// (skip_overflow_last_ss_validation=false, skip_vdf_is_valid=false). Fail-closed: any violation is Err.
-#[allow(clippy::too_many_lines)]
+// The pre-infusion half of a block — every field an UnfinishedBlock already carries. Both the
+// finished and unfinished validators run the same checks over this view, so the two paths can
+// never drift.
+pub struct UnfinishedParts<'a> {
+    pub finished_sub_slots: &'a [crate::blockchain::subslot_bundle::SubSlotBundle],
+    pub reward_chain_block:
+        &'a crate::blockchain::reward_chain_block_unfinished::RewardChainBlockUnfinished,
+    pub challenge_chain_sp_proof: &'a Option<VdfProof>,
+    pub reward_chain_sp_proof: &'a Option<VdfProof>,
+    pub foliage: &'a crate::blockchain::foliage::Foliage,
+    pub foliage_transaction_block:
+        &'a Option<crate::blockchain::foliage_transaction_block::FoliageTransactionBlock>,
+}
+
+impl UnfinishedParts<'_> {
+    fn prev_header_hash(&self) -> Bytes32 {
+        self.foliage.prev_block_hash
+    }
+}
+
+/// Validate an unfinished header block — everything EXCEPT the infusion-point VDFs:
+/// finished sub-slots, signage-point VDFs, proof of space,
+/// foliage signatures/bindings, and the pre-infusion difficulty context. The
+/// pre-infusion pipeline validates gossiped unfinished blocks through this before caching.
+///
+/// # Errors
+/// Fail-closed: any violation is `Err` with the rejection name.
 pub fn validate_unfinished_header_block(
     constants: &ConsensusConstants,
     verifier: &impl HeaderValidationVerifier,
     blocks: &HashMap<Bytes32, BlockRecord>,
-    block: &HeaderBlock,
+    block: &crate::blockchain::unfinished_header_block::UnfinishedHeaderBlock,
+    vs: ValidationState,
+    check_sub_epoch_summary: bool,
+) -> Result<u64, Error> {
+    validate_unfinished_parts(
+        constants,
+        verifier,
+        blocks,
+        &UnfinishedParts {
+            finished_sub_slots: &block.finished_sub_slots,
+            reward_chain_block: &block.reward_chain_block,
+            challenge_chain_sp_proof: &block.challenge_chain_sp_proof,
+            reward_chain_sp_proof: &block.reward_chain_sp_proof,
+            foliage: &block.foliage,
+            foliage_transaction_block: &block.foliage_transaction_block,
+        },
+        vs,
+        check_sub_epoch_summary,
+    )
+}
+
+// Recent-chain specialization (skip_overflow_last_ss_validation=false,
+// skip_vdf_is_valid=false). Fail-closed: any violation is Err.
+#[allow(clippy::too_many_lines)]
+pub fn validate_unfinished_parts(
+    constants: &ConsensusConstants,
+    verifier: &impl HeaderValidationVerifier,
+    blocks: &HashMap<Bytes32, BlockRecord>,
+    block: &UnfinishedParts<'_>,
     vs: ValidationState,
     check_sub_epoch_summary: bool,
 ) -> Result<u64, Error> {
@@ -236,12 +331,7 @@ pub fn validate_unfinished_header_block(
                         if pb.is_challenge_block(c.min_blocks_per_challenge_block) {
                             icc_vdf_input = Some(ClassgroupElement::get_default_element());
                         } else {
-                            icc_vdf_input = pb
-                                .infused_challenge_vdf_output
-                                .as_ref()
-                                .map(ClassgroupElement::try_from)
-                                .transpose()
-                                .map_err(|_| e("invalid infused challenge VDF output"))?;
+                            icc_vdf_input = pb.infused_challenge_vdf_output;
                         }
                     } else if block.finished_sub_slots[n - 1].reward_chain.deficit
                         < c.min_blocks_per_challenge_block
@@ -369,8 +459,7 @@ pub fn validate_unfinished_header_block(
                     rc_eos_vdf_challenge = pb.reward_infusion_new_challenge;
                     eos_vdf_iters =
                         pb.sub_slot_iters - pb.ip_iters(c).map_err(|_| e("ip_iters"))?;
-                    cc_start_element = ClassgroupElement::try_from(&pb.challenge_vdf_output)
-                        .map_err(|_| e("invalid challenge VDF output"))?;
+                    cc_start_element = pb.challenge_vdf_output;
                 } else {
                     rc_eos_vdf_challenge = block.finished_sub_slots[n - 1].reward_chain.hash()?;
                 }
@@ -494,7 +583,15 @@ pub fn validate_unfinished_header_block(
     }
 
     // 5a. proof of space challenge
-    let challenge = get_block_challenge(c, block, blocks, genesis_block, overflow, false)?;
+    let challenge = get_block_challenge(
+        c,
+        block.finished_sub_slots,
+        block.prev_header_hash(),
+        blocks,
+        genesis_block,
+        overflow,
+        false,
+    )?;
     if challenge != rcb.pos_ss_cc_challenge_hash {
         return Err(e("INVALID_CC_CHALLENGE"));
     }
@@ -576,7 +673,7 @@ pub fn validate_unfinished_header_block(
         rc_vdf_iters,
     ) = get_signage_point_vdf_info(
         c,
-        &block.finished_sub_slots,
+        block.finished_sub_slots,
         overflow,
         prev_b,
         blocks,
@@ -622,10 +719,11 @@ pub fn validate_unfinished_header_block(
         }
     }
     // 12. reward chain sp signature
-    if !bls_verify(
+    if !verifier.verify_bls_sig(
         &rcb.proof_of_space.plot_public_key,
         rc_sp_hash.as_ref(),
         &rcb.reward_chain_sp_signature,
+        HeaderSigTag::RewardChainSp,
     ) {
         return Err(e("INVALID_RC_SIGNATURE"));
     }
@@ -663,10 +761,11 @@ pub fn validate_unfinished_header_block(
         return Err(e("INVALID_CC_SP_VDF (sp0)"));
     }
     // 14. cc sp sig
-    if !bls_verify(
+    if !verifier.verify_bls_sig(
         &rcb.proof_of_space.plot_public_key,
         cc_sp_hash.as_ref(),
         &rcb.challenge_chain_sp_signature,
+        HeaderSigTag::ChallengeChainSp,
     ) {
         return Err(e("INVALID_CC_SIGNATURE"));
     }
@@ -695,10 +794,11 @@ pub fn validate_unfinished_header_block(
         }
     }
     // 16. foliage block data signature by plot key
-    if !bls_verify(
+    if !verifier.verify_bls_sig(
         &rcb.proof_of_space.plot_public_key,
         foliage.foliage_block_data.hash()?.as_ref(),
         &foliage.foliage_block_data_signature,
+        HeaderSigTag::FoliageBlockData,
     ) {
         return Err(e("INVALID_PLOT_SIGNATURE (block data)"));
     }
@@ -708,12 +808,17 @@ pub fn validate_unfinished_header_block(
             .foliage_transaction_block_signature
             .as_ref()
             .ok_or(e("no ftb sig"))?;
-        if !bls_verify(&rcb.proof_of_space.plot_public_key, ftb_hash.as_ref(), sig) {
+        if !verifier.verify_bls_sig(
+            &rcb.proof_of_space.plot_public_key,
+            ftb_hash.as_ref(),
+            sig,
+            HeaderSigTag::FoliageTransactionBlock,
+        ) {
             return Err(e("INVALID_PLOT_SIGNATURE (ftb)"));
         }
     }
     // 18. unfinished reward chain block hash
-    if rcb.get_unfinished().hash()? != foliage.foliage_block_data.unfinished_reward_block_hash {
+    if rcb.hash()? != foliage.foliage_block_data.unfinished_reward_block_hash {
         return Err(e("INVALID_URSB_HASH"));
     }
     // 19. pool target max height
@@ -743,7 +848,7 @@ pub fn validate_unfinished_header_block(
         let pt_bytes = pt
             .to_bytes(ChiaProtocolVersion::default())
             .map_err(|_| e("pool_target serialization"))?;
-        if !bls_verify(&pool_pk, &pt_bytes, pool_sig) {
+        if !verifier.verify_bls_sig(&pool_pk, &pt_bytes, pool_sig, HeaderSigTag::Pool) {
             return Err(e("INVALID_POOL_SIGNATURE"));
         }
     } else {
@@ -786,9 +891,9 @@ pub fn validate_unfinished_header_block(
             }
         }
         // 25/26 (filter hash, timestamps): filter check requires check_filter (False here); the
-        // future-timestamp check is wall-clock and non-deterministic, so it is not part of recent-chain
-        // header validation (chia's recent-block path runs the same header validator, but these two checks
-        // do not affect the proof's structural validity for a light client).
+        // future-timestamp check is wall-clock and non-deterministic, so it is not part of
+        // recent-chain header validation — neither affects the proof's structural validity
+        // for a light client.
         if !genesis_block {
             let prev_tx = blocks
                 .get(&ftb.prev_transaction_block_hash)
@@ -803,7 +908,7 @@ pub fn validate_unfinished_header_block(
     Ok(required_iters)
 }
 
-// chia validate_finished_header_block. Infusion-point checks on top of the unfinished ones.
+// Infusion-point checks on top of the unfinished ones.
 #[allow(clippy::too_many_lines)]
 pub fn validate_finished_header_block(
     constants: &ConsensusConstants,
@@ -816,8 +921,22 @@ pub fn validate_finished_header_block(
     let c = constants;
     let e = rejected;
     let rcb = &block.reward_chain_block;
-    let required_iters =
-        validate_unfinished_header_block(c, verifier, blocks, block, vs, check_sub_epoch_summary)?;
+    let unfinished_rcb = block.reward_chain_block.get_unfinished();
+    let required_iters = validate_unfinished_parts(
+        c,
+        verifier,
+        blocks,
+        &UnfinishedParts {
+            finished_sub_slots: &block.finished_sub_slots,
+            reward_chain_block: &unfinished_rcb,
+            challenge_chain_sp_proof: &block.challenge_chain_sp_proof,
+            reward_chain_sp_proof: &block.reward_chain_sp_proof,
+            foliage: &block.foliage,
+            foliage_transaction_block: &block.foliage_transaction_block,
+        },
+        vs,
+        check_sub_epoch_summary,
+    )?;
 
     let genesis_block = block.height() == 0;
     let prev_b = if genesis_block {
@@ -875,8 +994,7 @@ pub fn validate_finished_header_block(
             rc_vdf_challenge = pb.reward_infusion_new_challenge;
             ip_vdf_iters =
                 u64::try_from(rcb.total_iters - pb.total_iters).map_err(|_| e("ip_vdf_iters"))?;
-            cc_vdf_output = ClassgroupElement::try_from(&pb.challenge_vdf_output)
-                .map_err(|_| e("invalid challenge VDF output"))?;
+            cc_vdf_output = pb.challenge_vdf_output;
         }
     }
 
@@ -974,10 +1092,6 @@ pub fn validate_finished_header_block(
                         Some(ClassgroupElement::get_default_element())
                     } else {
                         pb.infused_challenge_vdf_output
-                            .as_ref()
-                            .map(ClassgroupElement::try_from)
-                            .transpose()
-                            .map_err(|_| e("invalid infused challenge VDF output"))?
                     };
                     let mut curr = pb;
                     while curr.finished_infused_challenge_slot_hashes.is_none()

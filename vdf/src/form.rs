@@ -67,28 +67,203 @@ impl Form {
         &self.b * &self.b - BigInt::from(4u8) * &self.a * &self.c == *discriminant
     }
 
-    /// Squaring is composition of the form with itself, routed through the general composition
-    /// [`Form::compose`] rather than a direct doubling formula.
-    ///
-    /// The classic direct-square formula solves `b·u ≡ c (mod a)`, which has NO solution for a primitive
-    /// form with `gcd(a,b) = g > 1` (there `g ∤ c`, since `g | gcd(a,b,c) = 1` would force `g = 1`). The old
-    /// code computed `u = ((c / g) · x) mod a` with a TRUNCATING `c / g`, silently producing a wrong `u`
-    /// (and then a non-exact `(b·u − c) / a`) → a degenerate output form → `get_b` mismatch → spurious VDF
-    /// rejection. It only worked for `gcd(a,b) = 1` (the common case), which is why most forms verified but
-    /// occasional ones failed. The general composition absorbs `gcd(a,b)` into the 3-way gcd `w`, so it is
-    /// correct for every form; the unique reduced representative makes the result identical to the reference.
+    /// Squaring via NUDUPL (FLINT `qfb_nudupl`): the doubling specialization of NUCOMP, with the same
+    /// partial-GCD bound keeping intermediates near `|D|^(1/4)`. Handles the degenerate `gcd(a,b) > 1`
+    /// case natively through its `s` branch (the historic direct-formula pitfall — see `vdf_square_fix`).
     pub fn square(&self) -> Result<Self> {
-        self.compose(self)
+        let discriminant = &self.b * &self.b - ((&self.a * &self.c) << 2usize);
+        let l = nucomp_bound(&discriminant);
+        self.square_with(&discriminant, &l)
+    }
+
+    pub fn square_with(&self, discriminant: &BigInt, l: &BigInt) -> Result<Self> {
+        use crate::limbs::SwGcd as G;
+        use crate::limbs::SwWide as W;
+        #[cfg(feature = "phase-profile")]
+        let mut _pp = phase_profile::Stamp::new();
+        let ga = G::from_bigint(&self.a);
+        let mut gb = G::from_bigint(&self.b);
+        let (s, v2) = if gb.cmp_mag(&ga) == core::cmp::Ordering::Equal {
+            (ga, G::zero())
+        } else if gb.is_negative() {
+            // gcdinv on |b|, then negate the cofactor.
+            gb.negate();
+            let (g, mut v) = lehmer_gcdinv_sw(&gb, &ga);
+            gb.negate();
+            v.negate();
+            (g, v)
+        } else {
+            lehmer_gcdinv_sw(&gb, &ga)
+        };
+        #[cfg(feature = "phase-profile")]
+        _pp.lap(0); // gcdinv
+
+        let wb = gb.resize::<34>();
+        let mut wa1 = ga.resize::<34>();
+        let mut wc1 = W::from_bigint(&self.c);
+        let mut wk = v2.resize::<34>().mul(&wc1);
+        wk.negate();
+        if !s.is_one() {
+            let ws = s.resize::<34>();
+            wa1 = wa1.div_exact(&ws);
+            wc1 = wc1.mul(&ws);
+        }
+        let (_, k_mod) = wk.div_mod_floor(&wa1);
+        let wk = k_mod;
+        #[cfg(feature = "phase-profile")]
+        _pp.lap(1); // k prep (mul + div_exact + div_mod_floor)
+
+        let wl = W::from_bigint(l);
+        let (mut ca, cb, mut cc);
+        if wa1.cmp_mag(&wl) == core::cmp::Ordering::Less {
+            // Small a1: direct doubling, no partial reduction needed.
+            let t = wa1.mul(&wk);
+            ca = wa1.mul(&wa1);
+            cb = t.shl1().add(&wb);
+            cc = wb.add(&t).mul(&wk).add(&wc1).div_exact(&wa1);
+        } else {
+            // Partial reduction: shrink (a1, k) to ~|D|^(1/4), then assemble (all limb-native).
+            let mut gr2 = wa1.resize::<20>();
+            let mut gr1 = wk.resize::<20>();
+            let (gco2, gco1) = xgcd_partial_sw(&mut gr2, &mut gr1, &G::from_bigint(l));
+            #[cfg(feature = "phase-profile")]
+            _pp.lap(2); // xgcd_partial
+            let wr1 = gr1.resize::<34>();
+            let wco1 = gco1.resize::<34>();
+            let wco2 = gco2.resize::<34>();
+            let t = wa1.mul(&wr1);
+            let m2 = wb.mul(&wr1).sub(&wc1.mul(&wco1)).div_exact(&wa1);
+            let r1r1 = wr1.mul(&wr1);
+            let co1m2 = wco1.mul(&m2);
+            ca = if wco1.is_negative() {
+                r1r1.sub(&co1m2)
+            } else {
+                co1m2.sub(&r1r1)
+            };
+            let b = t.sub(&ca.mul(&wco2)).shl1().div_exact(&wco1).sub(&wb);
+            let (_, cbr) = b.div_mod_floor(&ca.shl1());
+            cb = cbr;
+            let wd = W::from_bigint(discriminant);
+            let four = {
+                let mut f = W::one();
+                f = f.shl1().shl1();
+                f
+            };
+            let (q4, _) = cb.mul(&cb).sub(&wd).div_exact(&ca).div_mod_floor(&four);
+            cc = q4;
+            if ca.is_negative() {
+                ca.negate();
+                cc.negate();
+            }
+        }
+        #[cfg(feature = "phase-profile")]
+        _pp.lap(3); // composition assembly
+        let mut result = Self {
+            a: ca.to_bigint(),
+            b: cb.to_bigint(),
+            c: cc.to_bigint(),
+        };
+        result.reduce();
+        #[cfg(feature = "phase-profile")]
+        _pp.lap(4); // to_bigint + reduce
+        Ok(result)
     }
 
     pub fn multiply(&self, rhs: &Self) -> Result<Self> {
         self.compose(rhs)
     }
 
-    /// NUCOMP-style composition of two forms of the same discriminant, matching the reference class-group
-    /// algorithm (Chia's `inkfish`/`chiavdf`). Correct for the general `gcd(a,b) > 1` case via
-    /// `w = gcd(gcd(a₁,a₂), (b₁+b₂)/2)`, which divides out the common factor before solving.
     fn compose(&self, rhs: &Self) -> Result<Self> {
+        // D = b² − 4ac (identical for both operands); L = |D|^(1/4), NUCOMP's partial-reduction bound.
+        let discriminant = &self.b * &self.b - ((&self.a * &self.c) << 2usize);
+        let l = nucomp_bound(&discriminant);
+        self.multiply_with(rhs, &discriminant, &l)
+    }
+
+    /// [`Form::multiply`] with the discriminant and NUCOMP bound precomputed by the caller — the
+    /// hot-loop variant (exponentiation, proof verification) that skips recomputing them per op.
+    pub fn multiply_with(&self, rhs: &Self, discriminant: &BigInt, l: &BigInt) -> Result<Self> {
+        let mut result = Self::nucomp(self, rhs, discriminant, l)?;
+        result.reduce();
+        Ok(result)
+    }
+
+    fn nucomp(f: &Self, g: &Self, discriminant: &BigInt, l: &BigInt) -> Result<Self> {
+        if f.a > g.a {
+            return Self::nucomp(g, f, discriminant, l);
+        }
+        let two = BigInt::from(2u8);
+        let mut a1 = f.a.clone();
+        let mut a2 = g.a.clone();
+        let mut c2 = g.c.clone();
+        let ss = (&f.b + &g.b).div_floor(&two);
+        let m = (&f.b - &g.b).div_floor(&two);
+
+        let t = a2.mod_floor(&a1);
+        let (sp, v1) = if t.is_zero() {
+            (a1.clone(), BigInt::zero())
+        } else {
+            // fmpz_gcdinv: sp = gcd(t, a1), v1·t ≡ sp (mod a1) with 0 ≤ v1 < a1.
+            lehmer_gcdinv(&t, &a1)
+        };
+        let mut k = (&m * &v1).mod_floor(&a1);
+        if !sp.is_one() {
+            // s = gcd(ss, sp) = v2·ss + u2·sp.
+            let e = ss.extended_gcd(&sp);
+            let (s, v2, u2) = (e.gcd, e.x, e.y);
+            k = &k * &u2 - &v2 * &c2;
+            if !s.is_one() {
+                a1 /= &s;
+                a2 /= &s;
+                c2 *= &s;
+            }
+            k = k.mod_floor(&a1);
+        }
+
+        if &a1 < l {
+            // Small a1: direct composition, no partial reduction needed.
+            let t = &a2 * &k;
+            let ca = &a2 * &a1;
+            let cb = (&t << 1usize) + &g.b;
+            let cc = ((&g.b + &t) * &k + &c2) / &a1;
+            return Ok(Self {
+                a: ca,
+                b: cb,
+                c: cc,
+            });
+        }
+        // Partial reduction: shrink (a1, k) to ~|D|^(1/4) with the Lehmer partial GCD, then assemble.
+        let mut r2 = a1.clone();
+        let mut r1 = k.clone();
+        let (co2, co1) = xgcd_partial(&mut r2, &mut r1, l);
+        let t = &a2 * &r1;
+        let m1 = (&m * &co1 + &t) / &a1;
+        let m2 = (&ss * &r1 - &c2 * &co1) / &a1;
+        let r1m1 = &r1 * &m1;
+        let co1m2 = &co1 * &m2;
+        let mut ca = if co1.is_negative() {
+            r1m1 - co1m2
+        } else {
+            co1m2 - r1m1
+        };
+        let mut b = (&t - &ca * &co2) << 1usize;
+        b = &b / &co1;
+        b -= &g.b;
+        let cb = b.mod_floor(&(&ca << 1usize));
+        let mut cc = ((&cb * &cb - discriminant) / &ca).div_floor(&BigInt::from(4u8));
+        if ca.is_negative() {
+            ca = -ca;
+            cc = -cc;
+        }
+        Ok(Self {
+            a: ca,
+            b: cb,
+            c: cc,
+        })
+    }
+
+    #[cfg(test)]
+    fn compose_reference(&self, rhs: &Self) -> Result<Self> {
         let two = BigInt::from(2u8);
         let g = (&rhs.b + &self.b) / &two;
         let h = (&rhs.b - &self.b) / &two;
@@ -136,18 +311,420 @@ impl Form {
     }
 }
 
+/// A form on wide stack limbs.
+#[derive(Clone, Copy)]
+struct WForm {
+    a: crate::limbs::SwWide,
+    b: crate::limbs::SwWide,
+    c: crate::limbs::SwWide,
+}
+
+impl WForm {
+    fn from_form(f: &Form) -> Self {
+        use crate::limbs::SwWide as W;
+        Self {
+            a: W::from_bigint(&f.a),
+            b: W::from_bigint(&f.b),
+            c: W::from_bigint(&f.c),
+        }
+    }
+
+    fn to_form(self) -> Form {
+        Form {
+            a: self.a.to_bigint(),
+            b: self.b.to_bigint(),
+            c: self.c.to_bigint(),
+        }
+    }
+}
+
+fn wnormalize(
+    a: &mut crate::limbs::SwWide,
+    b: &mut crate::limbs::SwWide,
+    c: &mut crate::limbs::SwWide,
+) {
+    use core::cmp::Ordering;
+    let ord = b.cmp_mag(a);
+    if ord != Ordering::Greater && (!b.is_negative() || ord != Ordering::Equal) {
+        return;
+    }
+    let (r, _) = a.sub(b).div_mod_floor(&a.shl1());
+    let ar = a.mul(&r);
+    *c = c.add(&ar.add(b).mul(&r));
+    *b = b.add(&ar.shl1());
+}
+
+fn wreduce_step(
+    a: &mut crate::limbs::SwWide,
+    b: &mut crate::limbs::SwWide,
+    c: &mut crate::limbs::SwWide,
+) {
+    use core::cmp::Ordering;
+    if b.cmp_mag(c) == Ordering::Less {
+        core::mem::swap(a, c);
+        b.negate();
+        return;
+    }
+    let c2 = c.shl1();
+    let c3 = c2.add(c);
+    if !b.is_negative() {
+        if b.cmp_mag(&c3) == Ordering::Less {
+            // s = 1
+            let new_b = c2.sub(b);
+            let new_c = c.sub(b).add(a);
+            *a = *c;
+            *b = new_b;
+            *c = new_c;
+            return;
+        }
+    } else if b.cmp_mag(c) == Ordering::Greater && b.cmp_mag(&c3) == Ordering::Less {
+        // s = −1
+        let mut new_b = c2.add(b);
+        new_b.negate();
+        let new_c = c.add(b).add(a);
+        *a = *c;
+        *b = new_b;
+        *c = new_c;
+        return;
+    }
+    let (s, _) = c.add(b).div_mod_floor(&c2);
+    let cs = c.mul(&s);
+    let new_b = cs.shl1().sub(b);
+    let new_c = cs.sub(b).mul(&s).add(a);
+    *a = *c;
+    *b = new_b;
+    *c = new_c;
+}
+
+/// Limb-native `reduce` (identical semantics to [`Form::reduce`]).
+fn wreduce(f: &mut WForm) {
+    use core::cmp::Ordering;
+    wnormalize(&mut f.a, &mut f.b, &mut f.c);
+    loop {
+        let ord = f.a.cmp_mag(&f.c);
+        if ord == Ordering::Greater || (ord == Ordering::Equal && f.b.is_negative()) {
+            wreduce_step(&mut f.a, &mut f.b, &mut f.c);
+        } else {
+            break;
+        }
+    }
+    wnormalize(&mut f.a, &mut f.b, &mut f.c);
+}
+
+/// Limb-domain NUDUPL squaring: [`Form::square_with`]'s body with zero `BigInt` involvement.
+fn wsquare(f: &WForm, wd: &crate::limbs::SwWide, gl: &crate::limbs::SwGcd) -> WForm {
+    use crate::limbs::SwGcd as G;
+    use crate::limbs::SwWide as W;
+    let ga = f.a.resize::<20>();
+    let mut gb = f.b.resize::<20>();
+    let (s, v2) = if gb.cmp_mag(&ga) == core::cmp::Ordering::Equal {
+        (ga, G::zero())
+    } else if gb.is_negative() {
+        gb.negate();
+        let (g, mut v) = lehmer_gcdinv_sw(&gb, &ga);
+        gb.negate();
+        v.negate();
+        (g, v)
+    } else {
+        lehmer_gcdinv_sw(&gb, &ga)
+    };
+
+    let wb = f.b;
+    let mut wa1 = f.a;
+    let mut wc1 = f.c;
+    let mut wk = v2.resize::<34>().mul(&wc1);
+    wk.negate();
+    if !s.is_one() {
+        let ws = s.resize::<34>();
+        wa1 = wa1.div_exact(&ws);
+        wc1 = wc1.mul(&ws);
+    }
+    let (_, wk) = wk.div_mod_floor(&wa1);
+
+    let wl = gl.resize::<34>();
+    let (mut ca, cb, mut cc);
+    if wa1.cmp_mag(&wl) == core::cmp::Ordering::Less {
+        let t = wa1.mul(&wk);
+        ca = wa1.mul(&wa1);
+        cb = t.shl1().add(&wb);
+        cc = wb.add(&t).mul(&wk).add(&wc1).div_exact(&wa1);
+    } else {
+        let mut gr2 = wa1.resize::<20>();
+        let mut gr1 = wk.resize::<20>();
+        let (gco2, gco1) = xgcd_partial_sw(&mut gr2, &mut gr1, gl);
+        let wr1 = gr1.resize::<34>();
+        let wco1 = gco1.resize::<34>();
+        let wco2 = gco2.resize::<34>();
+        let t = wa1.mul(&wr1);
+        let m2 = wb.mul(&wr1).sub(&wc1.mul(&wco1)).div_exact(&wa1);
+        let r1r1 = wr1.mul(&wr1);
+        let co1m2 = wco1.mul(&m2);
+        ca = if wco1.is_negative() {
+            r1r1.sub(&co1m2)
+        } else {
+            co1m2.sub(&r1r1)
+        };
+        let b = t.sub(&ca.mul(&wco2)).shl1().div_exact(&wco1).sub(&wb);
+        let (_, cbr) = b.div_mod_floor(&ca.shl1());
+        cb = cbr;
+        let four = W::one().shl1().shl1();
+        let (q4, _) = cb.mul(&cb).sub(wd).div_exact(&ca).div_mod_floor(&four);
+        cc = q4;
+        if ca.is_negative() {
+            ca.negate();
+            cc.negate();
+        }
+    }
+    let mut out = WForm {
+        a: ca,
+        b: cb,
+        c: cc,
+    };
+    wreduce(&mut out);
+    out
+}
+
+/// Limb-domain NUCOMP composition: [`Form::nucomp`]'s body with `BigInt` only in the rare
+/// `sp != 1` double-cofactor branch.
+fn wmultiply(f: &WForm, g: &WForm, wd: &crate::limbs::SwWide, gl: &crate::limbs::SwGcd) -> WForm {
+    use crate::limbs::SwGcd as G;
+    use crate::limbs::SwWide as W;
+    if f.a.cmp_mag(&g.a) == core::cmp::Ordering::Greater {
+        return wmultiply(g, f, wd, gl);
+    }
+    let mut a1 = f.a;
+    let mut a2 = g.a;
+    let mut c2 = g.c;
+    let ss = f.b.add(&g.b).shr1_exact();
+    let m = f.b.sub(&g.b).shr1_exact();
+
+    let (_, t) = a2.div_mod_floor(&a1);
+    let (sp, v1) = if t.is_zero() {
+        (a1.resize::<20>(), G::zero())
+    } else {
+        lehmer_gcdinv_sw(&t.resize::<20>(), &a1.resize::<20>())
+    };
+    let (_, mut k) = m.mul(&v1.resize::<34>()).div_mod_floor(&a1);
+    if !sp.is_one() {
+        // Rare double-cofactor branch: s = gcd(ss, sp) = v2·ss + u2·sp (BigInt fallback).
+        let e = ss.to_bigint().extended_gcd(&sp.to_bigint());
+        let (s, v2, u2) = (
+            W::from_bigint(&e.gcd),
+            W::from_bigint(&e.x),
+            W::from_bigint(&e.y),
+        );
+        k = k.mul(&u2).sub(&v2.mul(&c2));
+        if !s.is_one() {
+            a1 = a1.div_exact(&s);
+            a2 = a2.div_exact(&s);
+            c2 = c2.mul(&s);
+        }
+        let (_, km) = k.div_mod_floor(&a1);
+        k = km;
+    }
+
+    let wl = gl.resize::<34>();
+    let (mut ca, cb, mut cc);
+    if a1.cmp_mag(&wl) == core::cmp::Ordering::Less {
+        // Small a1: direct composition.
+        let t = a2.mul(&k);
+        ca = a2.mul(&a1);
+        cb = t.shl1().add(&g.b);
+        cc = g.b.add(&t).mul(&k).add(&c2).div_exact(&a1);
+    } else {
+        // Partial reduction, then assemble.
+        let mut gr2 = a1.resize::<20>();
+        let mut gr1 = k.resize::<20>();
+        let (gco2, gco1) = xgcd_partial_sw(&mut gr2, &mut gr1, gl);
+        let wr1 = gr1.resize::<34>();
+        let wco1 = gco1.resize::<34>();
+        let wco2 = gco2.resize::<34>();
+        let t = a2.mul(&wr1);
+        let m1 = m.mul(&wco1).add(&t).div_exact(&a1);
+        let m2 = ss.mul(&wr1).sub(&c2.mul(&wco1)).div_exact(&a1);
+        let r1m1 = wr1.mul(&m1);
+        let co1m2 = wco1.mul(&m2);
+        ca = if wco1.is_negative() {
+            r1m1.sub(&co1m2)
+        } else {
+            co1m2.sub(&r1m1)
+        };
+        let b = t.sub(&ca.mul(&wco2)).shl1().div_exact(&wco1).sub(&g.b);
+        let (_, cbr) = b.div_mod_floor(&ca.shl1());
+        cb = cbr;
+        let four = W::one().shl1().shl1();
+        let (q4, _) = cb.mul(&cb).sub(wd).div_exact(&ca).div_mod_floor(&four);
+        cc = q4;
+        if ca.is_negative() {
+            ca.negate();
+            cc.negate();
+        }
+    }
+    let mut out = WForm {
+        a: ca,
+        b: cb,
+        c: cc,
+    };
+    wreduce(&mut out);
+    out
+}
+
+/// NUCOMP's partial-reduction bound `L = |D|^(1/4)` — compute once per discriminant and pass to
+/// [`Form::multiply_with`] in hot loops.
+pub fn nucomp_bound(discriminant: &BigInt) -> BigInt {
+    sqrt_bigint(&sqrt_bigint(&(-discriminant)))
+}
+
 pub fn fast_pow_form(base: &Form, discriminant: &BigInt, exponent: &BigInt) -> Result<Form> {
+    fast_pow_form_with(base, discriminant, &nucomp_bound(discriminant), exponent)
+}
+
+pub fn fast_pow_form_with(
+    base: &Form,
+    discriminant: &BigInt,
+    l: &BigInt,
+    exponent: &BigInt,
+) -> Result<Form> {
     if exponent.is_zero() {
         return Form::identity(discriminant);
     }
 
-    let mut result = base.clone();
-    for bit in (0..bit_len(exponent).saturating_sub(1)).rev() {
-        result = result.square()?;
-        if exponent.bit(bit.try_into().expect("bit index fits u64")) {
-            result = result.multiply(base)?;
+    let nbits = bit_len(exponent);
+    // Small exponents: plain square-and-multiply — the 14-multiply window table only pays for
+    // itself above ~64 bits (VDF exponents are ~264-bit).
+    if nbits <= 64 {
+        let mut result = base.clone();
+        for bit in (0..nbits.saturating_sub(1)).rev() {
+            result = result.square_with(discriminant, l)?;
+            if exponent.bit(bit as u64) {
+                result = result.multiply_with(base, discriminant, l)?;
+            }
+        }
+        result.reduce();
+        return Ok(result);
+    }
+
+    // 4-bit fixed-window exponentiation: precompute base^2..base^15, then per window do 4 squarings
+    // and at most one table multiply — ~40% fewer multiplies than bit-at-a-time for the ~264-bit
+    // exponents VDF verification uses. Group-identical result; the final reduce yields the same
+    // unique reduced representative. The ENTIRE loop (table build, squarings, multiplies) runs in
+    // the limb domain — Form conversion happens exactly twice: base in, result out.
+    let gl = crate::limbs::SwGcd::from_bigint(l);
+    let wd = crate::limbs::SwWide::from_bigint(discriminant);
+    let table = pow_window_table(base, &wd, &gl);
+    let nwin = nbits.div_ceil(POW_WINDOW);
+    let mut result: Option<WForm> = None;
+    for w in (0..nwin).rev() {
+        if let Some(r) = result.as_mut() {
+            for _ in 0..POW_WINDOW {
+                *r = wsquare(r, &wd, &gl);
+            }
+        }
+        let v = pow_window_digit(exponent, nbits, w);
+        if v != 0 {
+            result = Some(match result.take() {
+                Some(r) => wmultiply(&r, &table[v - 1], &wd, &gl),
+                None => table[v - 1],
+            });
         }
     }
+    // exponent != 0 guarantees at least one nonzero window.
+    let mut result = result.ok_or(Error::InvalidForm)?.to_form();
+    result.reduce();
+    Ok(result)
+}
+
+const POW_WINDOW: usize = 4;
+
+/// The 4-bit-window multiples table: `table[i] = base^(i+1)`, i in 0..15.
+fn pow_window_table(
+    base: &Form,
+    wd: &crate::limbs::SwWide,
+    gl: &crate::limbs::SwGcd,
+) -> Vec<WForm> {
+    let wbase = WForm::from_form(base);
+    let mut table: Vec<WForm> = Vec::with_capacity(1 << POW_WINDOW);
+    table.push(wbase);
+    for i in 1..(1 << POW_WINDOW) - 1 {
+        let next = wmultiply(&table[i - 1], &wbase, wd, gl);
+        table.push(next);
+    }
+    table
+}
+
+/// Window `w`'s 4-bit digit of `exponent` (bits above `nbits` read as zero).
+fn pow_window_digit(exponent: &BigInt, nbits: usize, w: usize) -> usize {
+    let mut v = 0usize;
+    for j in (0..POW_WINDOW).rev() {
+        let bit_index = w * POW_WINDOW + j;
+        if bit_index < nbits && exponent.bit(bit_index as u64) {
+            v |= 1 << j;
+        }
+    }
+    v
+}
+
+/// Simultaneous double exponentiation (Straus/Shamir interleaving; Knuth Vol. 2 §4.6.3): computes
+/// the product `x^xe · y^ye` in ONE 4-bit-window chain with the squaring run SHARED between the
+/// two exponents. The Wesolowski check needs exactly this product (`witness^b · x^r`) and never
+/// the individual powers; evaluated separately the two ~264-bit exponentiations cost two full
+/// squaring chains (~673 group ops serially), interleaved they cost one (~411 group ops: 2×14
+/// table multiplies + ~260 shared squarings + ≤2 table multiplies per window). Group-identical result:
+/// squarings/compositions land on the same group element, and the final reduce yields the unique
+/// reduced representative, exactly the argument the single-exponent windowed loop already relies
+/// on. Used by the SERIAL verify path (saturated window drains, where throughput ≡ work); the
+/// latency-bound parallel path keeps the two-thread split whose critical path (~336 ops) is
+/// shorter than the fused chain.
+pub fn fast_pow_form_pair_with(
+    x: &Form,
+    xe: &BigInt,
+    y: &Form,
+    ye: &BigInt,
+    discriminant: &BigInt,
+    l: &BigInt,
+) -> Result<Form> {
+    // Degenerate exponents: a zero exponent contributes the identity; a ≤64-bit exponent (tiny
+    // segment iteration counts make r = 2^iters small) belongs on the plain square-and-multiply
+    // route where a 14-multiply window table would not pay for itself. Both fall back to the
+    // single-exponent paths and an explicit composition.
+    if xe.is_zero() {
+        return fast_pow_form_with(y, discriminant, l, ye);
+    }
+    if ye.is_zero() {
+        return fast_pow_form_with(x, discriminant, l, xe);
+    }
+    let xbits = bit_len(xe);
+    let ybits = bit_len(ye);
+    if xbits <= 64 || ybits <= 64 {
+        let fx = fast_pow_form_with(x, discriminant, l, xe)?;
+        let fy = fast_pow_form_with(y, discriminant, l, ye)?;
+        return fx.multiply_with(&fy, discriminant, l);
+    }
+
+    let gl = crate::limbs::SwGcd::from_bigint(l);
+    let wd = crate::limbs::SwWide::from_bigint(discriminant);
+    let table_x = pow_window_table(x, &wd, &gl);
+    let table_y = pow_window_table(y, &wd, &gl);
+    let nwin = xbits.max(ybits).div_ceil(POW_WINDOW);
+    let mut result: Option<WForm> = None;
+    for w in (0..nwin).rev() {
+        if let Some(r) = result.as_mut() {
+            for _ in 0..POW_WINDOW {
+                *r = wsquare(r, &wd, &gl);
+            }
+        }
+        for (table, exponent, ebits) in [(&table_x, xe, xbits), (&table_y, ye, ybits)] {
+            let v = pow_window_digit(exponent, ebits, w);
+            if v != 0 {
+                result = Some(match result.take() {
+                    Some(r) => wmultiply(&r, &table[v - 1], &wd, &gl),
+                    None => table[v - 1],
+                });
+            }
+        }
+    }
+    // Both exponents are nonzero, so at least one window multiplied in.
+    let mut result = result.ok_or(Error::InvalidForm)?.to_form();
     result.reduce();
     Ok(result)
 }
@@ -160,25 +737,52 @@ pub fn get_b(discriminant: &BigInt, x: &Form, y: &Form) -> Result<BigInt> {
 }
 
 fn normalize(a: &mut BigInt, b: &mut BigInt, c: &mut BigInt) {
-    let r = div_floor(&(a.clone() - b.clone()), &(a.clone() << 1usize));
-    let next_a = a.clone();
-    let next_b = b.clone() + ((a.clone() * &r) << 1usize);
-    let next_c = a.clone() * &r * &r + b.clone() * &r + c.clone();
-    *a = next_a;
-    *b = next_b;
-    *c = next_c;
+    // Already normalized (`-a < b <= a`) — the common case after a reduce step; skip the division.
+    if b.magnitude() <= a.magnitude() && (!b.is_negative() || b.magnitude() != a.magnitude()) {
+        return;
+    }
+    // r = floor((a - b) / 2a); then b += 2·a·r and c += r·(a·r + b_old) — `a` is unchanged.
+    let r = (&*a - &*b).div_floor(&(&*a << 1usize));
+    let ar = &*a * &r;
+    *c += (&ar + &*b) * &r;
+    *b += ar << 1usize;
 }
 
 fn reduce_impl(a: &mut BigInt, b: &mut BigInt, c: &mut BigInt) {
-    let s = div_floor(&(c.clone() + b.clone()), &(c.clone() << 1usize));
-    let next_a = c.clone();
-    let next_b = ((c.clone() * &s) << 1usize) - b.clone();
-    let next_c = c.clone() * &s * &s - b.clone() * &s + a.clone();
-    *a = next_a;
-    *b = next_b;
-    *c = next_c;
+    if b.magnitude() < c.magnitude() {
+        // −c < b < c  ⟹  s = 0:  (a, b, c) ← (c, −b, a) — a swap and a negation, no arithmetic.
+        std::mem::swap(a, c);
+        *b = -std::mem::take(b);
+        return;
+    }
+    let c2 = &*c << 1usize;
+    let c3 = &c2 + &*c;
+    if !b.is_negative() {
+        if *b < c3 {
+            // c ≤ b < 3c  ⟹  s = 1.
+            let new_b = &c2 - &*b;
+            let new_c = (&*c - &*b) + &*a;
+            *a = std::mem::replace(c, new_c);
+            *b = new_b;
+            return;
+        }
+    } else if b.magnitude() > c.magnitude() && b.magnitude() < c3.magnitude() {
+        // −3c < b < −c  ⟹  s = −1.
+        let new_b = -(&c2 + &*b);
+        let new_c = (&*c + &*b) + &*a;
+        *a = std::mem::replace(c, new_c);
+        *b = new_b;
+        return;
+    }
+    let s = (&*c + &*b).div_floor(&c2);
+    let cs = &*c * &s;
+    let new_b = (&cs << 1usize) - &*b;
+    let new_c = (cs - &*b) * &s + &*a;
+    *a = std::mem::replace(c, new_c);
+    *b = new_b;
 }
 
+#[cfg(test)]
 fn solve_linear_congruence(a: &BigInt, b: &BigInt, m: &BigInt) -> Result<(BigInt, BigInt)> {
     let egcd = a.extended_gcd(m);
     if !b.is_multiple_of(&egcd.gcd) {
@@ -186,10 +790,6 @@ fn solve_linear_congruence(a: &BigInt, b: &BigInt, m: &BigInt) -> Result<(BigInt
     }
     let q = b / &egcd.gcd;
     Ok((positive_mod(&(q * egcd.x), m), m / egcd.gcd))
-}
-
-fn div_floor(a: &BigInt, b: &BigInt) -> BigInt {
-    a.div_floor(b)
 }
 
 fn positive_mod(a: &BigInt, modulus: &BigInt) -> BigInt {
@@ -380,7 +980,7 @@ fn serialize_compressed(
     }
 
     let g_size = bit_len(&form.g).div_ceil(8).saturating_sub(1);
-    if g_size > u8::MAX.into() {
+    if g_size > usize::from(u8::MAX) {
         return Err(Error::InvalidCompressedForm);
     }
     out[1] = g_size as u8;
@@ -413,15 +1013,11 @@ fn rounded_discriminant_bits(discriminant: &BigInt) -> Result<usize> {
     Ok((d_bits + 31) & !31usize)
 }
 
-/// The bit length of a non-negative value, matching chiavdf's `mpz_sizeinbase(x, 2)` (returns 1 for 0).
 fn xgcd_bitlen(x: &BigInt) -> i64 {
     let b = bit_len(x);
     if b == 0 { 1 } else { b as i64 }
 }
 
-/// The low 64-bit word of `(x >> shift)`, interpreted as signed — chiavdf's
-/// `chiavdf_mpz_extract_uword_from_shift_nonneg`. `x` is non-negative here; the shift is chosen so the
-/// extracted word is ~63 bits, hence non-negative.
 fn xgcd_extract_word(x: &BigInt, shift: i64) -> i128 {
     let w = if shift > 0 {
         u64_low_word(&(x >> (shift as usize)))
@@ -431,12 +1027,6 @@ fn xgcd_extract_word(x: &BigInt, shift: i64) -> i128 {
     i64::from_ne_bytes(w.to_ne_bytes()) as i128
 }
 
-/// A faithful port of chiavdf's `mpz_xgcd_partial` (Lehmer partial extended GCD, `xgcd_partial.c`). The
-/// returned cofactor `co1` is the canonical value chiavdf's `bqfc_compress` uses for `t`; a pure-slow
-/// Euclidean version diverges (it stops one step short of chiavdf's word-batched fast path), which is
-/// exactly the bqfc serialization mismatch that broke `serialize_form` round-trips and `get_b` hashes.
-/// The Lehmer word arithmetic uses `i128` (panic-safe); chiavdf's `i64` never overflows on valid inputs,
-/// so the results are identical there.
 fn xgcd_partial_co1(r2: &mut BigInt, r1: &mut BigInt, limit: &BigInt) -> BigInt {
     let mut co2 = BigInt::zero();
     let mut co1 = -BigInt::one();
@@ -471,7 +1061,6 @@ fn xgcd_partial_co1(r2: &mut BigInt, r1: &mut BigInt, limit: &BigInt) -> BigInt 
         }
 
         if i == 0 {
-            // Single exact big-integer Euclidean step (chiavdf's slow branch).
             let q = &*r2 / &*r1;
             let rem = &*r2 - &q * &*r1;
             *r2 = r1.clone();
@@ -506,25 +1095,130 @@ fn xgcd_partial_co1(r2: &mut BigInt, r1: &mut BigInt, limit: &BigInt) -> BigInt 
     co1
 }
 
+fn xgcd_partial(r2: &mut BigInt, r1: &mut BigInt, limit: &BigInt) -> (BigInt, BigInt) {
+    use crate::limbs::SwGcd;
+    let mut sr2 = SwGcd::from_bigint(r2);
+    let mut sr1 = SwGcd::from_bigint(r1);
+    let (c2, c1) = xgcd_partial_sw(&mut sr2, &mut sr1, &SwGcd::from_bigint(limit));
+    *r2 = sr2.to_bigint();
+    *r1 = sr1.to_bigint();
+    (c2.to_bigint(), c1.to_bigint())
+}
+
+/// Limb-native FLINT `fmpz_xgcd_partial` core (both cofactors), reducing `(r2, r1)` until
+/// `r1 <= limit`.
+fn xgcd_partial_sw(
+    r2io: &mut crate::limbs::SwGcd,
+    r1io: &mut crate::limbs::SwGcd,
+    slimit: &crate::limbs::SwGcd,
+) -> (crate::limbs::SwGcd, crate::limbs::SwGcd) {
+    use crate::limbs::SwGcd as Sw;
+    let mut sr2 = *r2io;
+    let mut sr1 = *r1io;
+    let mut co2 = Sw::zero();
+    let mut co1 = Sw::one();
+    co1.negate();
+
+    while !sr1.is_zero() && sr1.cmp_mag(slimit) == core::cmp::Ordering::Greater {
+        // Extract one bit narrower than a word so the values fit i64: the inner Euclidean
+        // division then runs on the 64-bit divide unit instead of the __divti3 i128 libcall
+        // (~30 cycles each, ~35 divides per outer iteration — the loop's former hot half).
+        let bits = (sr2.bit_len().max(1).max(sr1.bit_len().max(1)) - 63 + 1).max(0);
+        let mut rr2 = sr2.extract_word(bits);
+        let mut rr1 = sr1.extract_word(bits);
+        let bb = slimit.extract_word(bits);
+
+        let (mut aa2, mut aa1, mut bb2, mut bb1): (i128, i128, i128, i128) = (0, 1, 1, 0);
+        let mut i: i64 = 0;
+        while rr1 != 0 && rr1 > bb {
+            // Gauss–Kuzmin: ~41.5% of continued-fraction quotients are 1 and ~17% are 2, so
+            // compare-and-subtract covers most iterations without the divide. Measured both
+            // ways per target: x86-64's uniformly slow IDIV makes this worth −6% t_op
+            // (26.1 → 24.5 µs), while the A72's early-terminating divider already handles
+            // small quotients cheaply and the added data-dependent branches mispredict —
+            // +5% t_op there (40.0 → 42.0 µs). Arch-gated accordingly; identical math on
+            // both sides, pinned by the gcd differentials.
+            #[cfg(target_arch = "x86_64")]
+            let (qq, t1) = if rr2 - rr1 < rr1 {
+                (1i128, rr2 - rr1)
+            } else if rr2 - 2 * rr1 < rr1 {
+                (2i128, rr2 - 2 * rr1)
+            } else {
+                let qq = i128::from((rr2 as i64) / (rr1 as i64));
+                (qq, rr2 - qq * rr1)
+            };
+            #[cfg(not(target_arch = "x86_64"))]
+            let (qq, t1) = {
+                let qq = i128::from((rr2 as i64) / (rr1 as i64));
+                (qq, rr2 - qq * rr1)
+            };
+            let t2 = aa2 - qq * aa1;
+            let t3 = bb2 - qq * bb1;
+            if i & 1 != 0 {
+                if t1 < -t3 || rr1 - t1 < t2 - aa1 {
+                    break;
+                }
+            } else if t1 < -t2 || rr1 - t1 < t3 - bb1 {
+                break;
+            }
+            rr2 = rr1;
+            rr1 = t1;
+            aa2 = aa1;
+            aa1 = t2;
+            bb2 = bb1;
+            bb1 = t3;
+            i += 1;
+        }
+
+        if i == 0 {
+            // Single exact floor-division Euclidean step (rare); done in BigInt.
+            let (mut br2, mut br1) = (sr2.to_bigint(), sr1.to_bigint());
+            let (mut bc2, mut bc1) = (co2.to_bigint(), co1.to_bigint());
+            let (q, rem) = br2.div_mod_floor(&br1);
+            br2 = std::mem::replace(&mut br1, rem);
+            let next = &bc2 - &q * &bc1;
+            bc2 = std::mem::replace(&mut bc1, next);
+            sr2 = Sw::from_bigint(&br2);
+            sr1 = Sw::from_bigint(&br1);
+            co2 = Sw::from_bigint(&bc2);
+            co1 = Sw::from_bigint(&bc1);
+        } else {
+            let new_r2 = sr2.linear2(bb2, &sr1, aa2);
+            let new_r1 = sr1.linear2(aa1, &sr2, bb1);
+            sr2 = new_r2;
+            sr1 = new_r1;
+            let new_co2 = co2.linear2(bb2, &co1, aa2);
+            let new_co1 = co1.linear2(aa1, &co2, bb1);
+            co2 = new_co2;
+            co1 = new_co1;
+            if sr1.is_negative() {
+                co1.negate();
+                sr1.negate();
+            }
+            if sr2.is_negative() {
+                co2.negate();
+                sr2.negate();
+            }
+        }
+    }
+
+    if sr2.is_negative() {
+        co2.negate();
+        co1.negate();
+        sr2.negate();
+    }
+    *r2io = sr2;
+    *r1io = sr1;
+    (co2, co1)
+}
+
+// Floor square root via `num_integer::Roots` (Newton's method) — the previous bit-by-bit binary
+// search cost hundreds of full-width multiplies per call, which dominated NUCOMP's `|D|^(1/4)` bound.
 fn sqrt_bigint(value: &BigInt) -> BigInt {
     if value <= &BigInt::zero() {
         return BigInt::zero();
     }
-
-    let n = value.to_biguint().expect("positive value");
-    let mut low = BigInt::one();
-    let mut high = BigInt::one() << bit_len(value).div_ceil(2);
-    let one = BigInt::one();
-    while low <= high {
-        let mid = (&low + &high) >> 1usize;
-        let squared = &mid * &mid;
-        if squared <= BigInt::from_biguint(num_bigint::Sign::Plus, n.clone()) {
-            low = &mid + &one;
-        } else {
-            high = mid - &one;
-        }
-    }
-    high
+    value.sqrt()
 }
 
 pub(crate) fn fast_pow_u64_mod(base: u64, exponent: u64, modulus: &BigInt) -> Result<BigInt> {
@@ -548,4 +1242,275 @@ pub(crate) fn get_block(i: u64, k: u64, t: u64, b: &BigInt) -> Result<u64> {
     res <<= k as usize;
     res /= b;
     Ok(u64_low_word(&res))
+}
+/// Lehmer-accelerated `gcdinv`: returns `(g, v)` with `g = gcd(b, a)` and `v·b ≡ g (mod a)`,
+/// `0 ≤ v < a`, for `0 ≤ b < a`. Replaces the schoolbook `extended_gcd` (hundreds of full-width
+/// divisions) in the NUDUPL/NUCOMP hot path with the same word-level cofactor-matrix acceleration as
+/// `xgcd_partial`. The tracked pair `(u2, u1)` maintains the congruence invariant `u·b ≡ r (mod a)`
+/// through every step (the linear transforms preserve it exactly; sign fixups negate `u` with `r`).
+fn lehmer_gcdinv(b: &BigInt, a: &BigInt) -> (BigInt, BigInt) {
+    use crate::limbs::SwGcd;
+    let (g, v) = lehmer_gcdinv_sw(&SwGcd::from_bigint(b), &SwGcd::from_bigint(a));
+    (g.to_bigint(), v.to_bigint())
+}
+
+/// Limb-native `gcdinv` core: `(g, v)` with `g = gcd(b, a)`, `v·b ≡ g (mod a)`, `0 ≤ v < a`.
+fn lehmer_gcdinv_sw(
+    b: &crate::limbs::SwGcd,
+    a: &crate::limbs::SwGcd,
+) -> (crate::limbs::SwGcd, crate::limbs::SwGcd) {
+    use crate::limbs::SwGcd as Sw;
+    let mut r2 = *a;
+    let mut r1 = *b;
+    // u2·b ≡ r2 (mod a) with u2 = 0 (r2 = a ≡ 0); u1·b ≡ r1 with u1 = 1.
+    let mut u2 = Sw::zero();
+    let mut u1 = Sw::one();
+
+    while !r1.is_zero() {
+        // i64-fitting extraction — hardware 64-bit division in the inner loop (see
+        // xgcd_partial_sw; identical technique).
+        let bits = (r2.bit_len().max(1).max(r1.bit_len().max(1)) - 63 + 1).max(0);
+        let mut rr2 = r2.extract_word(bits);
+        let mut rr1 = r1.extract_word(bits);
+
+        let (mut aa2, mut aa1, mut bb2, mut bb1): (i128, i128, i128, i128) = (0, 1, 1, 0);
+        let mut i: i64 = 0;
+        while rr1 != 0 {
+            // Gauss–Kuzmin: ~41.5% of continued-fraction quotients are 1 and ~17% are 2, so
+            // compare-and-subtract covers most iterations without the divide. Measured both
+            // ways per target: x86-64's uniformly slow IDIV makes this worth −6% t_op
+            // (26.1 → 24.5 µs), while the A72's early-terminating divider already handles
+            // small quotients cheaply and the added data-dependent branches mispredict —
+            // +5% t_op there (40.0 → 42.0 µs). Arch-gated accordingly; identical math on
+            // both sides, pinned by the gcd differentials.
+            #[cfg(target_arch = "x86_64")]
+            let (qq, t1) = if rr2 - rr1 < rr1 {
+                (1i128, rr2 - rr1)
+            } else if rr2 - 2 * rr1 < rr1 {
+                (2i128, rr2 - 2 * rr1)
+            } else {
+                let qq = i128::from((rr2 as i64) / (rr1 as i64));
+                (qq, rr2 - qq * rr1)
+            };
+            #[cfg(not(target_arch = "x86_64"))]
+            let (qq, t1) = {
+                let qq = i128::from((rr2 as i64) / (rr1 as i64));
+                (qq, rr2 - qq * rr1)
+            };
+            let t2 = aa2 - qq * aa1;
+            let t3 = bb2 - qq * bb1;
+            if i & 1 != 0 {
+                if t1 < -t3 || rr1 - t1 < t2 - aa1 {
+                    break;
+                }
+            } else if t1 < -t2 || rr1 - t1 < t3 - bb1 {
+                break;
+            }
+            rr2 = rr1;
+            rr1 = t1;
+            aa2 = aa1;
+            aa1 = t2;
+            bb2 = bb1;
+            bb1 = t3;
+            i += 1;
+        }
+
+        if i == 0 {
+            // Single exact floor-division Euclidean step (rare); done in BigInt.
+            let (mut br2, mut br1) = (r2.to_bigint(), r1.to_bigint());
+            let (mut bu2, mut bu1) = (u2.to_bigint(), u1.to_bigint());
+            let (q, rem) = br2.div_mod_floor(&br1);
+            br2 = std::mem::replace(&mut br1, rem);
+            let next = &bu2 - &q * &bu1;
+            bu2 = std::mem::replace(&mut bu1, next);
+            r2 = Sw::from_bigint(&br2);
+            r1 = Sw::from_bigint(&br1);
+            u2 = Sw::from_bigint(&bu2);
+            u1 = Sw::from_bigint(&bu1);
+        } else {
+            let new_r2 = r2.linear2(bb2, &r1, aa2);
+            let new_r1 = r1.linear2(aa1, &r2, bb1);
+            r2 = new_r2;
+            r1 = new_r1;
+            let new_u2 = u2.linear2(bb2, &u1, aa2);
+            let new_u1 = u1.linear2(aa1, &u2, bb1);
+            u2 = new_u2;
+            u1 = new_u1;
+            if r1.is_negative() {
+                u1.negate();
+                r1.negate();
+            }
+            if r2.is_negative() {
+                u2.negate();
+                r2.negate();
+            }
+        }
+    }
+
+    let (_, v) = u2.div_mod_floor(a);
+    (r2, v)
+}
+
+#[cfg(test)]
+mod nucomp_tests {
+    use super::*;
+    use crate::discriminant::create_discriminant_int;
+
+    // lehmer_gcdinv must agree with the schoolbook extended GCD: g = gcd(b, a) and v·b ≡ g (mod a),
+    // 0 ≤ v < a, across a walk of real-size operands.
+    #[test]
+    fn lehmer_gcdinv_matches_extended_gcd() {
+        let d = create_discriminant_int(b"lehmer-gcdinv-seed", 1024).expect("discriminant");
+        let g = Form::generator(&d).expect("generator");
+        let mut x = g.clone();
+        for _ in 0..60 {
+            x = x.square().expect("square");
+            let a = x.a.clone();
+            let b = x.b.mod_floor(&a);
+            if b.is_zero() {
+                continue;
+            }
+            let (got_g, got_v) = lehmer_gcdinv(&b, &a);
+            let e = b.extended_gcd(&a);
+            assert_eq!(got_g, e.gcd, "gcd mismatch");
+            assert!(
+                (&got_v * &b - &got_g).mod_floor(&a).is_zero(),
+                "cofactor congruence v*b ≡ g (mod a) violated"
+            );
+            assert!(!got_v.is_negative() && got_v < a, "cofactor out of range");
+        }
+    }
+
+    #[test]
+    fn nucomp_matches_reference_composition_walk() {
+        let d = create_discriminant_int(b"nucomp-differential-seed", 1024).expect("discriminant");
+        let g = Form::generator(&d).expect("generator");
+        let mut x = g.clone();
+        let mut y = g.square().expect("square");
+        for step in 0..200 {
+            let via_nucomp = x.multiply(&y).expect("nucomp multiply");
+            let mut via_reference = x.compose_reference(&y).expect("reference multiply");
+            via_reference.reduce();
+            assert_eq!(
+                (&via_nucomp.a, &via_nucomp.b, &via_nucomp.c),
+                (&via_reference.a, &via_reference.b, &via_reference.c),
+                "NUCOMP diverged from the reference composition at step {step}"
+            );
+            x = y;
+            y = if step % 3 == 0 {
+                via_nucomp.square().expect("square")
+            } else {
+                via_nucomp
+            };
+        }
+    }
+
+    // The fused Straus/Shamir pair exponentiation must agree with the two single-exponent
+    // windowed chains composed — byte-for-byte on the serialized reduced form — across the
+    // exponent-size ladder: the zero/identity degenerations, the ≤64-bit plain
+    // square-and-multiply fallback (both sides and mixed), the 64/65-bit route boundary, and
+    // full 264-bit Wesolowski-shaped pairs (top bit set, as hash_prime forces). Bases walk off
+    // the generator so operands look like mid-verification forms.
+    #[test]
+    fn fused_pair_pow_matches_composed_single_pows() {
+        use num_traits::One;
+        let d =
+            create_discriminant_int(b"straus-pair-differential-seed", 1024).expect("discriminant");
+        let l = nucomp_bound(&d);
+        let g = Form::generator(&d).expect("generator");
+        let mut x = g.clone();
+        for _ in 0..40 {
+            x = x.square().expect("square");
+        }
+        let mut y = x.square().expect("square").multiply(&g).expect("multiply");
+
+        // Deterministic exponent ladder: bit sizes across every route boundary.
+        let sizes = [1usize, 2, 17, 63, 64, 65, 100, 200, 263, 264];
+        let mut exps: Vec<BigInt> = vec![BigInt::zero(), BigInt::one()];
+        for (i, bits) in sizes.iter().enumerate() {
+            // Top bit set (hash_prime forces bit 263 on real b), pseudo-random lower bits.
+            let mut e = BigInt::one() << (bits - 1);
+            let mut seed = 0x9E37_79B9_7F4A_7C15u64.wrapping_mul(i as u64 + 1);
+            for bit in 0..bits - 1 {
+                seed = seed
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                if seed >> 63 == 1 {
+                    e |= BigInt::one() << bit;
+                }
+            }
+            exps.push(e);
+        }
+
+        let d_bits = bit_len(&d);
+        for (i, xe) in exps.iter().enumerate() {
+            for (j, ye) in exps.iter().enumerate() {
+                let fused = fast_pow_form_pair_with(&x, xe, &y, ye, &d, &l)
+                    .expect("fused pair exponentiation");
+                let fx = fast_pow_form_with(&x, &d, &l, xe).expect("single pow x");
+                let fy = fast_pow_form_with(&y, &d, &l, ye).expect("single pow y");
+                let composed = fx.multiply_with(&fy, &d, &l).expect("compose");
+                assert_eq!(
+                    fused.serialize(d_bits).expect("serialize fused"),
+                    composed.serialize(d_bits).expect("serialize composed"),
+                    "fused pair diverged at exponent pair ({i}, {j})"
+                );
+                assert_eq!(
+                    (&fused.a, &fused.b, &fused.c),
+                    (&composed.a, &composed.b, &composed.c),
+                    "reduced representatives diverged at exponent pair ({i}, {j})"
+                );
+            }
+            // Walk the bases so successive rows exercise fresh operands.
+            x = x.multiply(&y).expect("walk x");
+            y = y.square().expect("walk y");
+        }
+    }
+}
+
+/// Per-phase wall-time accumulators for `square_with` (feature `phase-profile` only) — the
+/// measurement that decides where the fixed-limb assembly effort goes. Thread-local so
+/// bench runs need no synchronization; `take()` reads-and-resets.
+#[cfg(feature = "phase-profile")]
+pub mod phase_profile {
+    use std::cell::RefCell;
+    use std::time::Instant;
+
+    pub const PHASES: [&str; 5] = [
+        "gcdinv",
+        "k-prep(mul+div)",
+        "xgcd_partial",
+        "composition(mul/div)",
+        "to_bigint+reduce",
+    ];
+
+    thread_local! {
+        static ACC: RefCell<[u64; 5]> = const { RefCell::new([0; 5]) };
+    }
+
+    pub struct Stamp(Instant);
+
+    impl Stamp {
+        #[must_use]
+        pub fn new() -> Self {
+            Self(Instant::now())
+        }
+        pub fn lap(&mut self, phase: usize) {
+            let now = Instant::now();
+            let ns = now.duration_since(self.0).as_nanos() as u64;
+            ACC.with(|a| a.borrow_mut()[phase] += ns);
+            self.0 = now;
+        }
+    }
+
+    impl Default for Stamp {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    /// Read and reset this thread's accumulators (nanoseconds per phase).
+    pub fn take() -> [u64; 5] {
+        ACC.with(|a| std::mem::replace(&mut *a.borrow_mut(), [0; 5]))
+    }
 }

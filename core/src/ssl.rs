@@ -82,6 +82,9 @@ impl ClientCertVerifier for AllowAny {
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
         vec![
+            SignatureScheme::RSA_PSS_SHA256,
+            SignatureScheme::RSA_PSS_SHA384,
+            SignatureScheme::RSA_PSS_SHA512,
             SignatureScheme::RSA_PKCS1_SHA256,
             SignatureScheme::RSA_PKCS1_SHA384,
             SignatureScheme::RSA_PKCS1_SHA512,
@@ -275,7 +278,7 @@ pub fn make_ca_cert(cert_path: &Path, key_path: &Path) -> Result<(Vec<u8>, Vec<u
     Ok((cert_data, key_data))
 }
 
-fn make_ca_cert_data() -> Result<(Vec<u8>, Vec<u8>), Error> {
+pub fn make_ca_cert_data() -> Result<(Vec<u8>, Vec<u8>), Error> {
     use rsa::rand_core::RngCore;
     let mut rng = rsa::rand_core::OsRng;
     let root_key = rsa::RsaPrivateKey::new(&mut rng, 2048).expect("failed to generate a key");

@@ -6,16 +6,24 @@ use crate::blockchain::pool_target::PoolTarget;
 use crate::blockchain::proof_of_space::ProofOfSpace;
 use crate::blockchain::reward_chain_block_unfinished::RewardChainBlockUnfinished;
 use crate::blockchain::reward_chain_subslot::RewardChainSubSlot;
-use crate::blockchain::sized_bytes::{Bytes32, Bytes48, Bytes96};
+#[cfg(feature = "bls")]
+use crate::blockchain::sized_bytes::Bytes48;
+use crate::blockchain::sized_bytes::{Bytes32, Bytes96};
 use crate::config::PoolWalletConfig;
+#[cfg(feature = "bls")]
 use crate::protocols::PeerMap;
+#[cfg(feature = "bls")]
 use crate::protocols::error::RecentErrors;
+#[cfg(feature = "bls")]
 use blst::min_pk::SecretKey;
 use dg_xch_macros::ChiaSerial;
 use dg_xch_serialize::ChiaProtocolVersion;
 
+#[cfg(feature = "bls")]
 use crate::blockchain::blockchain_state::BlockchainState;
+#[cfg(feature = "bls")]
 use crate::protocols::shared::Handshake;
+#[cfg(feature = "bls")]
 use portfu::pfcore::cache::CircularCache;
 #[cfg(feature = "metrics")]
 use prometheus::core::{
@@ -24,10 +32,14 @@ use prometheus::core::{
 #[cfg(feature = "metrics")]
 use prometheus::{Histogram, HistogramOpts, Opts, Registry};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+#[cfg(feature = "bls")]
+use std::collections::HashSet;
 use std::io::Error;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(feature = "bls")]
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::time::Instant;
 use time::OffsetDateTime;
 use tokio::sync::RwLock;
@@ -579,6 +591,9 @@ impl Default for FarmerStats {
     }
 }
 
+// Farmer runtime state carries live BLS secret keys; it only exists with the `bls` feature.
+// The farmer *wire* messages above stay available in `bls`-less builds.
+#[cfg(feature = "bls")]
 #[derive(Clone)]
 pub struct FarmerSharedState<T> {
     pub signage_points: Arc<RwLock<HashMap<Bytes32, Vec<NewSignagePoint>>>>,
@@ -611,6 +626,7 @@ pub struct FarmerSharedState<T> {
     pub metrics: Arc<RwLock<Option<FarmerMetrics>>>,
     pub recent_stats: Arc<RwLock<HashMap<(Bytes32, Bytes32), FarmerStats>>>,
 }
+#[cfg(feature = "bls")]
 impl<T: Default> Default for FarmerSharedState<T> {
     fn default() -> Self {
         Self {

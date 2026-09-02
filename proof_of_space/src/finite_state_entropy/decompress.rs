@@ -232,6 +232,7 @@ pub fn fse_decompress_using_dtable_generic(
         index += 1;
         if bit_d.reload().eq(BitDstreamStatus::Overflow) {
             dst[index] = symbol_fn.decode_symbol(&mut state2, &mut bit_d);
+            index += 1;
             break;
         }
         if index > dst_size - 2 {
@@ -241,6 +242,7 @@ pub fn fse_decompress_using_dtable_generic(
         index += 1;
         if bit_d.reload().eq(BitDstreamStatus::Overflow) {
             dst[index] = symbol_fn.decode_symbol(&mut state1, &mut bit_d);
+            index += 1;
             break;
         }
     }

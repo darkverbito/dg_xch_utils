@@ -10,6 +10,11 @@ pub enum Capability {
     BlockHeaders = 2,
     RateLimitsV2 = 3,
     NoneResponse = 4,
+    // The mempool-update push surface — deliberately NOT advertised.
+    MempoolUpdates = 5,
+    // Signals Hard Fork 2 support — pre-activation on mainnet (HF2 standing bucket).
+    HardFork2 = 6,
+    RateLimitsV3 = 7,
 }
 
 pub type Capabilities = Vec<(u16, String)>;
@@ -23,6 +28,26 @@ pub struct Handshake {
     pub server_port: u16,           //Min Version 0.0.34
     pub node_type: u8,              //Min Version 0.0.34
     pub capabilities: Capabilities, //Min Version 0.0.34
+}
+
+/// The `error` protocol message body (message-type code 255). Peers at protocol 0.0.35 and
+/// above send it in place of a typed reject when a handler errors, and tolerate receiving it: an
+/// inbound `error` is decoded and logged, then the link carries on — no ban, no disconnect. Named
+/// `ErrorMessage` rather than `Error` to keep `std::io::Error` unambiguous at use sites. `data`
+/// streams as a u32 length prefix plus raw bytes — `Vec<u8>`'s exact wire shape.
+#[derive(ChiaSerial, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ErrorMessage {
+    pub code: i16,
+    pub message: String,
+    pub data: Option<Vec<u8>>,
+}
+
+/// The rate-limits-v3 handshake follow-up (message-type code 111): the sender's window sizes per
+/// message type — `(message_type_code, window_size)` with 0 meaning unlimited. See
+/// `crate::protocols::rate_limits_v3`.
+#[derive(ChiaSerial, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ConfigureWindowSizes {
+    pub settings: Vec<(u8, u16)>,
 }
 
 pub const CAPABILITIES: [(u16, &str); 3] = [

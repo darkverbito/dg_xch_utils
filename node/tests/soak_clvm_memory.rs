@@ -1,0 +1,95 @@
+mod common;
+
+use dg_xch_core::consensus::block_generator::{
+    BlockGeneratorFlags, BlockGeneratorInput, execute_block_generator_result,
+};
+use dg_xch_core::consensus::constants::MAINNET;
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+// Live bytes = sum(alloc sizes) - sum(dealloc sizes). Exact and deterministic — a single
+// retained allocation per run shows up, with none of jemalloc's fragmentation/holdback jitter.
+struct Counting;
+static LIVE: AtomicUsize = AtomicUsize::new(0);
+
+unsafe impl GlobalAlloc for Counting {
+    unsafe fn alloc(&self, l: Layout) -> *mut u8 {
+        let p = unsafe { System.alloc(l) };
+        if !p.is_null() {
+            LIVE.fetch_add(l.size(), Ordering::Relaxed);
+        }
+        p
+    }
+    unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
+        unsafe { System.dealloc(p, l) };
+        LIVE.fetch_sub(l.size(), Ordering::Relaxed);
+    }
+    unsafe fn alloc_zeroed(&self, l: Layout) -> *mut u8 {
+        let p = unsafe { System.alloc_zeroed(l) };
+        if !p.is_null() {
+            LIVE.fetch_add(l.size(), Ordering::Relaxed);
+        }
+        p
+    }
+    unsafe fn realloc(&self, ptr: *mut u8, l: Layout, new_size: usize) -> *mut u8 {
+        let p = unsafe { System.realloc(ptr, l, new_size) };
+        if !p.is_null() {
+            // net change in tracked live bytes for the resized allocation
+            LIVE.fetch_add(new_size, Ordering::Relaxed);
+            LIVE.fetch_sub(l.size(), Ordering::Relaxed);
+        }
+        p
+    }
+}
+
+#[global_allocator]
+static ALLOC: Counting = Counting;
+
+// The CLVM body-validation path must retain no memory across runs. This is the exact path a prior bug
+// leaked (the c/cons operator built the generator's output list from Owned pairs, which the bumpalo
+// arena stored without ever dropping their Arcs). Replaying one real block's validation thousands of
+// times must leave live memory flat.
+#[test]
+fn clvm_body_validation_is_steady_state() {
+    let block = common::load_full_block(5_000_000);
+    let generator = block
+        .transactions_generator
+        .clone()
+        .expect("a tx block carries a generator");
+    let height = block.height();
+    let input = BlockGeneratorInput {
+        transactions_generator: generator,
+        // Ref-less: the CLVM operators (and thus the arena's Owned-pair allocations — the leak site)
+        // execute regardless of whether refs resolve; the result value is irrelevant to retention.
+        generator_refs: Vec::new(),
+        constants: MAINNET,
+        height,
+        flags: BlockGeneratorFlags::for_height(&MAINNET, height),
+    };
+
+    // Warm-up settles one-time lazy allocations (dialect tables, thread-locals) before baselining.
+    for _ in 0..50 {
+        let _ = execute_block_generator_result(&input);
+    }
+    let base = LIVE.load(Ordering::Relaxed);
+
+    const ITERS: usize = 200;
+    for _ in 0..ITERS {
+        // Drop each result immediately; a correct arena releases everything on runtime drop.
+        let _ = execute_block_generator_result(&input);
+    }
+
+    let retained = LIVE.load(Ordering::Relaxed).saturating_sub(base);
+    let per_run = retained / ITERS;
+
+    // The allocator is exact and a correct VM releases everything on runtime drop, so the true
+    // value is zero; 64 B absorbs incidental one-time growth without admitting a real per-run
+    // leak. 1 KB/run would be gigabytes across a mainnet sync — the scale at which this class of
+    // bug OOM-cycled the node before.
+    assert!(
+        per_run <= 64,
+        "CLVM body validation retained {per_run} B/run ({retained} B over {ITERS} runs) — a memory \
+         leak. The arena-Owned-pair bug was 156,320 B/run; anything growing per run means a \
+         collection or arena is keeping per-block data. Do NOT relax this threshold to make it pass."
+    );
+}

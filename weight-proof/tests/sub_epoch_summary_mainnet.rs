@@ -6,18 +6,15 @@ use std::collections::HashMap;
 
 use common::load_fixture;
 use dg_xch_core::blockchain::block_record::BlockRecord;
+use dg_xch_core::blockchain::class_group_element::ClassgroupElement;
 use dg_xch_core::blockchain::sized_bytes::Bytes32;
 use dg_xch_core::blockchain::sub_epoch_summary::SubEpochSummary;
-use dg_xch_core::blockchain::unsized_bytes::UnsizedBytes;
-use dg_xch_core::blockchain::vdf_output::VdfOutput;
 use dg_xch_core::blockchain::weight_proof::WeightProof;
 use dg_xch_core::consensus::constants::MAINNET;
 use dg_xch_core::consensus::make_sub_epoch_summary::make_sub_epoch_summary;
 
-fn empty_vdf() -> VdfOutput {
-    VdfOutput {
-        data: UnsizedBytes::new(vec![]),
-    }
+fn empty_vdf() -> ClassgroupElement {
+    ClassgroupElement::get_default_element()
 }
 
 fn ses_block(
@@ -54,7 +51,6 @@ fn ses_block(
     }
 }
 
-// Genesis-anchored reconstruction of the on-chain SES sequence from wp.sub_epochs (chia _map_sub_epoch_summaries).
 fn real_sub_epoch_summaries(wp: &WeightProof) -> Vec<SubEpochSummary> {
     let mut prev = MAINNET.genesis_challenge;
     let mut out = Vec::with_capacity(wp.sub_epochs.len());

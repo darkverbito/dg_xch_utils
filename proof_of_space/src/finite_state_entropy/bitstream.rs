@@ -241,3 +241,44 @@ pub const fn get_middle_bits(bit_container: usize, start: u32, nb_bits: u32) -> 
     let reg_mask = usize::BITS - 1;
     (bit_container >> (start & reg_mask)) & BIT_MASK[nb_bits as usize] as usize
 }
+
+#[derive(Default)]
+pub struct BitCStream {
+    bit_container: usize,
+    bit_pos: u32,
+    out: Vec<u8>,
+}
+
+impl BitCStream {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn add_bits(&mut self, value: usize, nb_bits: u32) {
+        self.bit_container |= (value & BIT_MASK[nb_bits as usize] as usize) << self.bit_pos;
+        self.bit_pos += nb_bits;
+    }
+
+    /// Move whole bytes out of the register. The caller is responsible for flushing often enough
+    /// that the register never has to hold more than `usize::BITS` bits.
+    pub fn flush_bits(&mut self) {
+        let nb_bytes = (self.bit_pos >> 3) as usize;
+        let bytes = self.bit_container.to_le_bytes();
+        self.out.extend_from_slice(&bytes[..nb_bytes]);
+        self.bit_pos &= 7;
+        self.bit_container >>= nb_bytes * 8;
+    }
+
+    /// Append the end mark and return the stream. The highest set bit of the last byte is the mark
+    /// `BitDstream::new` looks for to find where the payload stops, so the final byte is never zero.
+    #[must_use]
+    pub fn close(mut self) -> Vec<u8> {
+        self.add_bits(1, 1);
+        self.flush_bits();
+        if self.bit_pos > 0 {
+            self.out.push(self.bit_container as u8);
+        }
+        self.out
+    }
+}

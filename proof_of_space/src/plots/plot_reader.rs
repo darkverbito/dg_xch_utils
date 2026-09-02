@@ -899,7 +899,7 @@ impl<
         let mut encoded_deltas_buf: [u8; 2] = [0u8; 2];
         file_lock.read_exact(&mut encoded_deltas_buf).await?;
         let mut encoded_deltas_size = u16::from_le_bytes(encoded_deltas_buf);
-        if !(encoded_deltas_size & 0x8000) > 0 && u32::from(encoded_deltas_size) > max_deltas_size {
+        if (encoded_deltas_size & 0x8000) == 0 && u32::from(encoded_deltas_size) > max_deltas_size {
             return Err(Error::new(
                 ErrorKind::InvalidInput,
                 format!("Invalid size for deltas: {encoded_deltas_size}"),

@@ -45,7 +45,6 @@ pub mod unfinished_header_block;
 pub mod unsized_bytes;
 pub mod utils;
 pub mod vdf_info;
-pub mod vdf_output;
 pub mod vdf_proof;
 pub mod wallet_balance;
 pub mod wallet_info;

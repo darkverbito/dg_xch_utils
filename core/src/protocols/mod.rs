@@ -1,9 +1,13 @@
+pub mod ban;
 pub mod error;
 pub mod farmer;
 pub mod full_node;
 pub mod harvester;
 pub mod introducer;
+pub mod outbound_limiter;
 pub mod pool;
+pub mod rate_limits;
+pub mod rate_limits_v3;
 pub mod shared;
 pub mod timelord;
 pub mod wallet;
@@ -38,7 +42,7 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use uuid::Uuid;
 
 #[repr(u8)]
-#[derive(ChiaSerial, Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(ChiaSerial, Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ProtocolMessageTypes {
     Unknown = 0,
     //Shared protocol (all services)
@@ -172,6 +176,17 @@ pub enum ProtocolMessageTypes {
     MempoolItemsRemoved = 105,
     RequestCostInfo = 106,
     RespondCostInfo = 107,
+
+    //New farmer protocol messages (solution_response = 108)
+    SolutionResponse = 108,
+    //Solver protocol (solve = 109)
+    Solve = 109,
+    //Harvester partial proofs (partial_proofs = 110)
+    PartialProofs = 110,
+    //Rate-limits-v3 handshake follow-up (configure_window_sizes = 111)
+    ConfigureWindowSizes = 111,
+    //The error protocol message (error = 255) — see shared::ErrorMessage
+    Error = 255,
 }
 impl From<u8> for ProtocolMessageTypes {
     #[allow(clippy::too_many_lines)]
@@ -484,6 +499,17 @@ impl From<u8> for ProtocolMessageTypes {
             i if i == ProtocolMessageTypes::RespondCostInfo as u8 => {
                 ProtocolMessageTypes::RespondCostInfo
             }
+            i if i == ProtocolMessageTypes::SolutionResponse as u8 => {
+                ProtocolMessageTypes::SolutionResponse
+            }
+            i if i == ProtocolMessageTypes::Solve as u8 => ProtocolMessageTypes::Solve,
+            i if i == ProtocolMessageTypes::PartialProofs as u8 => {
+                ProtocolMessageTypes::PartialProofs
+            }
+            i if i == ProtocolMessageTypes::ConfigureWindowSizes as u8 => {
+                ProtocolMessageTypes::ConfigureWindowSizes
+            }
+            i if i == ProtocolMessageTypes::Error as u8 => ProtocolMessageTypes::Error,
             _ => ProtocolMessageTypes::Unknown,
         }
     }
@@ -605,12 +631,136 @@ impl ChiaMessageHandler {
     }
 }
 
+/// Connection-scoped request/reply correlation table: an O(1) pending-request map routed by
+/// the read loop.
+///
+/// The table owns id allocation *on the connection* (monotone, never reset, skipping any id
+/// currently
+/// in flight) and routes each reply to the single waiter that owns its id. Unsolicited gossip (no id)
+/// and inbound requests to answer (an id that is not one of ours) fall through to the handler scan.
+#[derive(Default)]
+pub struct PendingRequests {
+    inner: std::sync::Mutex<PendingInner>,
+}
+
+#[derive(Default)]
+struct PendingInner {
+    /// Last id handed out; the next allocation is `wrapping_add(1)`, skipping `0` and any live id.
+    last_id: u16,
+    waiters: HashMap<u16, tokio::sync::oneshot::Sender<Arc<ChiaMessage>>>,
+}
+
+impl PendingRequests {
+    /// Reserve a connection-unique, non-zero correlation id and the one-shot receiver for its reply.
+    /// The id skips any id currently in flight, so reuse can never alias a live waiter.
+    #[must_use]
+    pub fn register(&self) -> (u16, tokio::sync::oneshot::Receiver<Arc<ChiaMessage>>) {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let mut guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let id = loop {
+            let cand = guard.last_id.wrapping_add(1);
+            guard.last_id = cand;
+            if cand != 0 && !guard.waiters.contains_key(&cand) {
+                break cand;
+            }
+        };
+        guard.waiters.insert(id, tx);
+        (id, rx)
+    }
+
+    /// Drop a waiter without delivery (its request timed out or the send failed) so the table never
+    /// leaks an entry for a request no reply will ever satisfy.
+    pub fn cancel(&self, id: u16) {
+        let _ = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .waiters
+            .remove(&id);
+    }
+
+    /// Route `msg` to the single waiter that owns `id`. Returns `true` when a waiter was found (the
+    /// read loop then skips the handler scan for this frame); `false` when `id` is not one of ours —
+    /// an inbound request we must answer, or a stale/duplicate reply after the waiter already left.
+    #[must_use]
+    pub fn deliver(&self, id: u16, msg: Arc<ChiaMessage>) -> bool {
+        let waiter = {
+            let mut guard = self
+                .inner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard.waiters.remove(&id)
+        };
+        if let Some(tx) = waiter {
+            // The receiver may already be gone (its own timeout won the race); dropping the send is
+            // then correct — the caller has moved on.
+            let _ = tx.send(msg);
+            true
+        } else {
+            false
+        }
+    }
+}
+
 pub type PeerMap = Arc<RwLock<HashMap<Bytes32, Arc<SocketPeer>>>>;
 
 pub struct SocketPeer {
     pub node_type: Arc<RwLock<NodeType>>,
     pub protocol_version: Arc<RwLock<ChiaProtocolVersion>>,
+    /// The capabilities the peer advertised in its handshake — the input to the per-connection rate
+    /// limiter's v1/v2 selection. Empty until the handshake is
+    /// processed; a message seen before then is charged under the stricter v1 numbers, which is safe.
+    pub capabilities: Arc<RwLock<shared::Capabilities>>,
     pub websocket: Arc<RwLock<WebsocketConnection>>,
+    /// The peer's REMOTE host (IP), captured at accept/dial time. This is the ban key (the host,
+    /// not the cert-hash peer id used as the map key) — so the close path can
+    /// enter this peer's IP into [`bans`](Self::bans). `None` when the remote addr was unavailable
+    /// (e.g. an outbound dial to a hostname that was not resolved to an `IpAddr`), which simply means
+    /// this peer cannot be host-banned — a fail-open we accept over guessing an IP.
+    pub host: Option<std::net::IpAddr>,
+    /// The shared, server-wide timed ban list. `Some` on inbound
+    /// server links (the full-node listener injects its registry so a rate-limit/consensus close both
+    /// evicts the peer AND enters its host into the list the accept path consults); `None` on
+    /// outbound client links, which do not maintain a ban list of their own.
+    pub bans: Option<Arc<ban::BanRegistry>>,
+    /// Optional per-connection OUTBOUND self-throttle. When present
+    /// (full-node links), a frequency-capped message is paced against the PEER's budget before it is
+    /// written, so a re-gossip burst cannot get US banned. `None` on non-full-node links, and on
+    /// `None` [`SocketPeer::send`] writes directly — identical to the pre-throttle behaviour.
+    pub outbound_limiter: Option<Arc<outbound_limiter::OutboundLimiter>>,
+    /// Per-connection RATE_LIMITS_V3 state — the same instance the link's
+    /// [`WebsocketConnection`] and [`ReadStream`] hold, so the handshake arm (negotiation), the
+    /// read loop (receive windows), and the request senders (outbound windows) all see one
+    /// truth. Inert (`!is_active()`) unless the capability was negotiated.
+    pub v3: Arc<rate_limits_v3::V3Link>,
+}
+impl SocketPeer {
+    /// Send `msg` to this peer, self-throttling first when an outbound limiter is installed. The
+    /// throttle wait runs in THIS task holding NO connection lock; only once the message is
+    /// admitted do we take the
+    /// write lock and write it. An `Unlimited` serve type (RespondBlocks, …) is admitted instantly, so
+    /// our sync/serve path is never delayed. A dropped message (exempt over budget, or the bounded
+    /// attempt cap reached) is logged and swallowed.
+    pub async fn send(&self, msg: ChiaMessage) -> Result<(), Error> {
+        if let Some(limiter) = &self.outbound_limiter {
+            let caps = self.capabilities.read().await.clone();
+            let size = msg.data.as_slice().len();
+            match limiter.admit(msg.msg_type, size, &caps).await {
+                outbound_limiter::ThrottleOutcome::Admit => {}
+                outbound_limiter::ThrottleOutcome::Drop(reason) => {
+                    warn!(
+                        "Self-rate-limiting outbound {:?} to peer: {reason:?}",
+                        msg.msg_type
+                    );
+                    return Ok(());
+                }
+            }
+        }
+        self.websocket.write().await.send(msg.into()).await
+    }
 }
 
 pub enum WebsocketMsgStream {
@@ -665,29 +815,87 @@ impl Sink<Message> for WebsocketMsgStream {
 pub struct WebsocketConnection {
     write: SplitSink<WebsocketMsgStream, Message>,
     message_handlers: Arc<RwLock<HashMap<Uuid, Arc<ChiaMessageHandler>>>>,
+    /// Correlation table for request/reply on this connection; shared with the [`ReadStream`] that
+    /// routes replies back to their waiters (see [`PendingRequests`]).
+    pending: Arc<PendingRequests>,
+    /// Per-connection RATE_LIMITS_V3 state, shared with the [`ReadStream`] (and the
+    /// [`SocketPeer`] callers wire up). See [`rate_limits_v3::V3Link`].
+    v3: Arc<rate_limits_v3::V3Link>,
 }
+/// Upper bound on a single websocket write. A peer that stops draining (full TCP receive window
+/// → Sink backpressure) must never wedge the sender: the caller holds the connection write lock
+/// across `send`, so an unbounded write there stalls every other sender on that peer. 30s
+/// matches the request timeout: past it the peer is dead and the caller should fail over.
+pub const SEND_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Write `msg` into `sink`, bounding the write with `timeout` so a non-draining peer cannot block it
+/// forever. Returns an error (not a hang) when the bound trips.
+async fn timeout_send<S>(sink: &mut S, msg: Message, timeout: Duration) -> Result<(), Error>
+where
+    S: Sink<Message> + Unpin,
+    S::Error: std::fmt::Debug,
+{
+    match tokio::time::timeout(timeout, sink.send(msg)).await {
+        Err(_) => Err(Error::other("websocket send timed out")),
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(Error::other(format!("{e:?}"))),
+    }
+}
+
 impl WebsocketConnection {
     pub fn new(
         websocket: WebsocketMsgStream,
         message_handlers: Arc<RwLock<HashMap<Uuid, Arc<ChiaMessageHandler>>>>,
         peer_id: Arc<Bytes32>,
         peers: PeerMap,
+        limiter: Option<Arc<rate_limits::RateLimiter>>,
     ) -> (Self, ReadStream) {
         let (write, read) = websocket.split();
+        let pending = Arc::new(PendingRequests::default());
+        let v3 = Arc::new(rate_limits_v3::V3Link::default());
         let websocket = WebsocketConnection {
             write,
             message_handlers: message_handlers.clone(),
+            pending: pending.clone(),
+            v3: v3.clone(),
         };
         let stream = ReadStream {
             read,
             message_handlers,
             peer_id,
             peers,
+            pending,
+            limiter,
+            v3,
         };
         (websocket, stream)
     }
+
+    /// This link's shared RATE_LIMITS_V3 state — callers thread it onto the [`SocketPeer`], and
+    /// the request senders consult it for outbound windows.
+    #[must_use]
+    pub fn v3(&self) -> Arc<rate_limits_v3::V3Link> {
+        self.v3.clone()
+    }
     pub async fn send(&mut self, msg: Message) -> Result<(), Error> {
-        self.write.send(msg).await.map_err(Error::other)
+        timeout_send(&mut self.write, msg, SEND_TIMEOUT).await
+    }
+
+    /// Reserve a connection-unique correlation id and the receiver its reply will be routed to. The
+    /// caller stamps the id onto the outgoing [`ChiaMessage`] and awaits the receiver; the read loop
+    /// delivers the matching reply to exactly this waiter. Takes `&self` (only the pending table is
+    /// touched), so it composes under a read lock without contending the write half.
+    #[must_use]
+    pub fn register_request(&self) -> (u16, tokio::sync::oneshot::Receiver<Arc<ChiaMessage>>) {
+        self.pending.register()
+    }
+
+    /// Release a reserved correlation id whose reply never arrived (timeout / send failure).
+    /// Frees any RATE_LIMITS_V3 outbound-window slot the request occupied; without this a
+    /// timed-out request leaks its window slot forever.
+    pub fn cancel_request(&self, id: u16) {
+        self.pending.cancel(id);
+        self.v3.out_release(id);
     }
 
     pub async fn subscribe(&self, uuid: Uuid, handle: Arc<ChiaMessageHandler>) {
@@ -719,6 +927,20 @@ pub struct ReadStream {
     message_handlers: Arc<RwLock<HashMap<Uuid, Arc<ChiaMessageHandler>>>>,
     peer_id: Arc<Bytes32>,
     peers: PeerMap,
+    /// Shared with the owning [`WebsocketConnection`]; a reply whose id is registered here is routed
+    /// to its single waiter and does not fan out to the handler scan (see [`PendingRequests`]).
+    pending: Arc<PendingRequests>,
+    /// Optional per-connection inbound rate limiter. When present,
+    /// EVERY inbound message is charged against the composed limits BEFORE the correlation fast-path
+    /// or the handler scan runs — so solicited replies (RespondBlocks bursts) count too.
+    /// A violation closes the connection
+    /// and evicts the peer. `None` on non-full-node links
+    /// (harvester/farmer/wallet clients), which are left unpoliced.
+    limiter: Option<Arc<rate_limits::RateLimiter>>,
+    /// Per-connection RATE_LIMITS_V3 state (shared with the [`WebsocketConnection`]): when the
+    /// capability was negotiated, v3-tabled types bypass the time-based limiter and bounded
+    /// request types are admitted through in-flight receive windows instead.
+    v3: Arc<rate_limits_v3::V3Link>,
 }
 impl ReadStream {
     pub async fn run(&mut self, run: Arc<AtomicBool>) {
@@ -728,6 +950,17 @@ impl ReadStream {
                 *peer.protocol_version.read().await
             } else {
                 ChiaProtocolVersion::default()
+            };
+            // Snapshot the peer's negotiated capabilities for the rate limiter's v1/v2 selection.
+            // Only paid for when a limiter is installed (full-node links).
+            let peer_caps: shared::Capabilities = if self.limiter.is_some() {
+                if let Some(peer) = peer_self.as_ref() {
+                    peer.capabilities.read().await.clone()
+                } else {
+                    Vec::new()
+                }
+            } else {
+                Vec::new()
             };
             select! {
                 msg = self.read.next() => {
@@ -739,6 +972,172 @@ impl ReadStream {
                                     match ChiaMessage::from_bytes(&mut cursor, protocol_version) {
                                         Ok(chia_msg) => {
                                             let msg_arc: Arc<ChiaMessage> = Arc::new(chia_msg);
+                                            // An undefined message type disconnects the peer with
+                                            // the short INTERNAL_PROTOCOL_ERROR ban and a
+                                            // PROTOCOL_ERROR (1002) close, BEFORE the rate limiter
+                                            // or any dispatch sees it. The recognized-code set is
+                                            // pinned by core/tests/protocol_message_codes.rs, so
+                                            // this never fires on a conforming peer. Links without
+                                            // a ban registry or resolved host still close, they
+                                            // just cannot host-ban.
+                                            if msg_arc.msg_type == ProtocolMessageTypes::Unknown {
+                                                error!(
+                                                    "Disconnecting peer {} for unknown message type",
+                                                    self.peer_id
+                                                );
+                                                if let Some(peer) = self
+                                                    .peers
+                                                    .write()
+                                                    .await
+                                                    .remove(self.peer_id.as_ref())
+                                                {
+                                                    if let (Some(bans), Some(host)) =
+                                                        (peer.bans.as_ref(), peer.host)
+                                                    {
+                                                        bans.ban(
+                                                            host,
+                                                            ban::BanCause::InternalProtocolError,
+                                                        );
+                                                    }
+                                                    let close_frame = Message::Close(Some(
+                                                        tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                                                            code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Protocol,
+                                                            reason: "INVALID_PROTOCOL_MESSAGE".into(),
+                                                        },
+                                                    ));
+                                                    let _ = peer
+                                                        .websocket
+                                                        .write()
+                                                        .await
+                                                        .close(Some(close_frame))
+                                                        .await;
+                                                }
+                                                return;
+                                            }
+                                            // Once RATE_LIMITS_V3 is negotiated, v3-tabled types
+                                            // are NOT subject to the time-based limiter; bounded
+                                            // request types are admitted through an in-flight
+                                            // receive window instead, and over-window closes with
+                                            // the RATE_LIMITER ban like a v2 violation. Localhost
+                                            // and exempt peers bypass window enforcement but still
+                                            // bypass v2 for v3 types.
+                                            let v3_typed = self.v3.is_active()
+                                                && rate_limits_v3::v3_setting(msg_arc.msg_type)
+                                                    .is_some();
+                                            let mut recv_guard: Option<
+                                                Arc<rate_limits_v3::RecvGuard>,
+                                            > = None;
+                                            if v3_typed {
+                                                let is_local = peer_self
+                                                    .as_ref()
+                                                    .and_then(|p| p.host)
+                                                    .is_some_and(|h| h.is_loopback());
+                                                if !is_local {
+                                                    match self.v3.recv_acquire(msg_arc.msg_type) {
+                                                        Ok(true) => {
+                                                            recv_guard = Some(Arc::new(
+                                                                rate_limits_v3::RecvGuard::new(
+                                                                    self.v3.clone(),
+                                                                    msg_arc.msg_type,
+                                                                ),
+                                                            ));
+                                                        }
+                                                        Ok(false) => {}
+                                                        Err(()) => {
+                                                            warn!(
+                                                                "Peer {} exceeded the v3 receive window for {:?}; closing connection",
+                                                                self.peer_id, msg_arc.msg_type
+                                                            );
+                                                            if let Some(peer) = self
+                                                                .peers
+                                                                .write()
+                                                                .await
+                                                                .remove(self.peer_id.as_ref())
+                                                            {
+                                                                if let (Some(bans), Some(host)) =
+                                                                    (peer.bans.as_ref(), peer.host)
+                                                                {
+                                                                    bans.ban(
+                                                                        host,
+                                                                        ban::BanCause::RateLimit,
+                                                                    );
+                                                                }
+                                                                let _ = peer
+                                                                    .websocket
+                                                                    .write()
+                                                                    .await
+                                                                    .close(None)
+                                                                    .await;
+                                                            }
+                                                            return;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            // Inbound rate limit: charge EVERY message against
+                                            // the composed per-connection limits BEFORE the
+                                            // correlation fast-path or the handler scan, so
+                                            // solicited replies count too. A violation closes the
+                                            // connection, evicts the peer, and applies the timed
+                                            // rate-limiter ban below.
+                                            if let Some(limiter) = &self.limiter
+                                                && !v3_typed
+                                            {
+                                                let size = msg_arc.data.as_slice().len();
+                                                if let Some(reason) = limiter.process_and_check(
+                                                    msg_arc.msg_type,
+                                                    size,
+                                                    &peer_caps,
+                                                ) {
+                                                    warn!(
+                                                        "Rate limit exceeded by peer {}: {reason}; closing connection",
+                                                        self.peer_id
+                                                    );
+                                                    if let Some(peer) = self
+                                                        .peers
+                                                        .write()
+                                                        .await
+                                                        .remove(self.peer_id.as_ref())
+                                                    {
+                                                        // Enter this peer's REMOTE host into the
+                                                        // timed ban list so a reconnect within the
+                                                        // window is refused at the accept path — not
+                                                        // just this connection closed. No-op on links
+                                                        // without a registry (outbound client) or an
+                                                        // unknown host.
+                                                        if let (Some(bans), Some(host)) =
+                                                            (peer.bans.as_ref(), peer.host)
+                                                        {
+                                                            bans.ban(host, ban::BanCause::RateLimit);
+                                                        }
+                                                        let _ = peer
+                                                            .websocket
+                                                            .write()
+                                                            .await
+                                                            .close(None)
+                                                            .await;
+                                                    }
+                                                    return;
+                                                }
+                                            }
+                                            // Correlation-id fast path: a reply carrying an id we have
+                                            // a pending waiter for is routed to that ONE waiter and
+                                            // consumed here — it must never also fan out to the handler
+                                            // scan (the ambiguity that produced the 27 s stall). An id
+                                            // that is not ours (an inbound request to answer) falls
+                                            // through to the handler path below unchanged.
+                                            if let Some(id) = msg_arc.id
+                                                && self.pending.deliver(id, msg_arc.clone())
+                                            {
+                                                // A solicited reply frees any v3 outbound-window
+                                                // slot its request occupied.
+                                                self.v3.out_release(id);
+                                                debug!(
+                                                    "Routed reply id={id}: {:?}",
+                                                    msg_arc.msg_type
+                                                );
+                                                continue;
+                                            }
                                             let mut matched = false;
                                             for v in self.message_handlers.read().await.values()
                                                 .cloned().collect::<Vec<Arc<ChiaMessageHandler>>>() {
@@ -747,7 +1146,12 @@ impl ReadStream {
                                                     let peer_id = self.peer_id.clone();
                                                     let peers = self.peers.clone();
                                                     let v_arc_c = v.handle.clone();
+                                                    // The v3 receive-window slot stays occupied
+                                                    // until every handler task for this message
+                                                    // finishes (the guard's last clone drops).
+                                                    let guard = recv_guard.clone();
                                                     tokio::spawn(async move {
+                                                        let _guard = guard;
                                                         if let Err(e) = v_arc_c.handle(msg_arc_c.clone(), peer_id, peers).await {
                                                             error!("Error Handling Message({:#?}): {e:?}", msg_arc_c.msg_type);
                                                         }
@@ -779,6 +1183,32 @@ impl ReadStream {
                                 tokio_tungstenite::tungstenite::Error::Protocol(ProtocolError::ResetWithoutClosingHandshake) => {
                                     warn!("Server Stream Closed without Handshake");
                                 },
+                                tokio_tungstenite::tungstenite::Error::Io(e) => {
+                                    warn!("Server Stream Closed: {e}");
+                                },
+                                // Same class at the TLS layer: a peer dropping the socket
+                                // without sending close_notify is routine on a public
+                                // listener. Debounced to one WARN per window (DEBUG carries
+                                // every instance) so a real TLS fault still leaves a trace
+                                // without an ERROR line per abandoned handshake.
+                                tokio_tungstenite::tungstenite::Error::Tls(e) => {
+                                    use std::sync::atomic::AtomicU64;
+                                    static LAST_TLS_WARN_UNIX: AtomicU64 = AtomicU64::new(0);
+                                    const TLS_WARN_DEBOUNCE_SECS: u64 = 600;
+                                    let now = std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .map_or(0, |d| d.as_secs());
+                                    let last = LAST_TLS_WARN_UNIX.load(Ordering::Relaxed);
+                                    if now.saturating_sub(last) >= TLS_WARN_DEBOUNCE_SECS
+                                        && LAST_TLS_WARN_UNIX
+                                            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+                                            .is_ok()
+                                    {
+                                        warn!("Server Stream TLS close without close_notify (debounced; routine peer behavior): {e}");
+                                    } else {
+                                        debug!("Server Stream TLS close without close_notify: {e}");
+                                    }
+                                },
                                 others => {
                                     error!("Server Stream Error: {others:?}");
                                 }
@@ -807,5 +1237,161 @@ impl ReadStream {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod send_timeout_tests {
+    use super::{SEND_TIMEOUT, timeout_send};
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+    use std::time::Duration;
+    use tokio_tungstenite::tungstenite::Message;
+
+    // A ready sink (a peer draining normally): the write completes and round-trips Ok.
+    #[tokio::test]
+    async fn send_round_trips_on_a_ready_sink() {
+        let mut sink = futures_util::sink::drain::<Message>();
+        let msg = Message::Binary(vec![1, 2, 3].into());
+        let out = timeout_send(&mut sink, msg, SEND_TIMEOUT).await;
+        assert!(out.is_ok(), "a draining sink must accept the write");
+    }
+
+    // A never-ready sink models a peer whose TCP receive window is full — the exact backpressure that
+    // used to wedge the sender under the connection write lock. The bounded write must resolve to a
+    // timeout error, never hang.
+    #[tokio::test]
+    async fn send_times_out_on_a_stalled_sink() {
+        struct StalledSink;
+        impl futures_util::Sink<Message> for StalledSink {
+            type Error = std::io::Error;
+            fn poll_ready(
+                self: Pin<&mut Self>,
+                _: &mut Context<'_>,
+            ) -> Poll<Result<(), Self::Error>> {
+                Poll::Pending
+            }
+            fn start_send(self: Pin<&mut Self>, _: Message) -> Result<(), Self::Error> {
+                Ok(())
+            }
+            fn poll_flush(
+                self: Pin<&mut Self>,
+                _: &mut Context<'_>,
+            ) -> Poll<Result<(), Self::Error>> {
+                Poll::Pending
+            }
+            fn poll_close(
+                self: Pin<&mut Self>,
+                _: &mut Context<'_>,
+            ) -> Poll<Result<(), Self::Error>> {
+                Poll::Pending
+            }
+        }
+        let mut sink = StalledSink;
+        let msg = Message::Binary(vec![].into());
+        let out = timeout_send(&mut sink, msg, Duration::from_millis(50)).await;
+        assert!(
+            out.is_err(),
+            "a stalled sink must time out, not hang the sender"
+        );
+    }
+}
+
+#[cfg(test)]
+mod pending_request_tests {
+    use super::{ChiaMessage, PendingRequests, ProtocolMessageTypes};
+    use crate::blockchain::unsized_bytes::UnsizedBytes;
+    use std::collections::HashSet;
+    use std::sync::Arc;
+
+    fn msg(id: Option<u16>, t: ProtocolMessageTypes) -> Arc<ChiaMessage> {
+        Arc::new(ChiaMessage {
+            msg_type: t,
+            id,
+            data: UnsizedBytes::new(vec![]),
+        })
+    }
+
+    // Allocation is connection-unique and non-zero: a run of registrations (all still in flight)
+    // hands out strictly distinct, non-zero ids. This is the property whose *absence* — the per-source
+    // counter reset to 1 — let two concurrent requests share id 1 and produced the 27 s stall.
+    #[tokio::test]
+    async fn register_hands_out_distinct_nonzero_ids() {
+        let pending = PendingRequests::default();
+        let mut ids = HashSet::new();
+        let mut _keep = Vec::new();
+        for _ in 0..1000 {
+            let (id, rx) = pending.register();
+            assert_ne!(id, 0, "id 0 is reserved (id-less gossip / handshake)");
+            assert!(
+                ids.insert(id),
+                "id {id} was handed out twice while still in flight"
+            );
+            _keep.push(rx); // hold the receivers so their ids stay live and cannot be reused
+        }
+    }
+
+    // A live id is never re-handed even as the u16 counter advances: with two waiters outstanding, a
+    // third allocation differs from both.
+    #[tokio::test]
+    async fn register_skips_live_ids() {
+        let pending = PendingRequests::default();
+        let (a, _ra) = pending.register();
+        let (b, _rb) = pending.register();
+        let (c, _rc) = pending.register();
+        assert!(a != b && b != c && a != c, "live ids {a},{b},{c} collided");
+    }
+
+    // A reply is routed to the ONE waiter that owns its id, and only that waiter — the other waiter's
+    // receiver is untouched. This is the demux invariant: no fan-out to every matching handler.
+    #[tokio::test]
+    async fn deliver_routes_to_exactly_the_owning_waiter() {
+        let pending = PendingRequests::default();
+        let (id_a, rx_a) = pending.register();
+        let (id_b, rx_b) = pending.register();
+
+        // Deliver B first, then A — out-of-order, as concurrent replies arrive.
+        assert!(pending.deliver(id_b, msg(Some(id_b), ProtocolMessageTypes::RespondBlocks)));
+        assert!(pending.deliver(id_a, msg(Some(id_a), ProtocolMessageTypes::RejectBlocks)));
+
+        let got_a = rx_a.await.expect("waiter A received its reply");
+        let got_b = rx_b.await.expect("waiter B received its reply");
+        assert_eq!(got_a.id, Some(id_a), "waiter A got another request's reply");
+        assert_eq!(got_a.msg_type, ProtocolMessageTypes::RejectBlocks);
+        assert_eq!(got_b.id, Some(id_b), "waiter B got another request's reply");
+        assert_eq!(got_b.msg_type, ProtocolMessageTypes::RespondBlocks);
+    }
+
+    // An id nobody is waiting on (an inbound request to answer, or a stale/late reply) reports
+    // `false`, so the read loop falls through to the gossip/handler scan instead of dropping it.
+    #[tokio::test]
+    async fn deliver_unknown_id_is_not_consumed() {
+        let pending = PendingRequests::default();
+        assert!(!pending.deliver(4242, msg(Some(4242), ProtocolMessageTypes::NewPeak)));
+    }
+
+    // Delivery consumes the waiter: a duplicate/late second reply for the same id is dropped (returns
+    // `false`), never routed into an already-satisfied — and now closed — channel. That closed-channel
+    // re-delivery was precisely how the true reply got lost under id aliasing.
+    #[tokio::test]
+    async fn deliver_is_idempotent_after_the_first() {
+        let pending = PendingRequests::default();
+        let (id, rx) = pending.register();
+        assert!(pending.deliver(id, msg(Some(id), ProtocolMessageTypes::RespondBlocks)));
+        assert!(
+            !pending.deliver(id, msg(Some(id), ProtocolMessageTypes::RespondBlocks)),
+            "a second reply for a consumed id must not be re-delivered"
+        );
+        assert!(rx.await.is_ok(), "the one delivery reached the waiter");
+    }
+
+    // Cancel (timeout / send failure) frees the slot so the table never leaks, and a reply that then
+    // shows up is treated as unowned.
+    #[tokio::test]
+    async fn cancel_frees_the_slot() {
+        let pending = PendingRequests::default();
+        let (id, _rx) = pending.register();
+        pending.cancel(id);
+        assert!(!pending.deliver(id, msg(Some(id), ProtocolMessageTypes::RespondBlocks)));
     }
 }

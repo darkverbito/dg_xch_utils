@@ -1,5 +1,4 @@
 target/
-/Cargo.lock
 /.idea/
 *.iml
 publish.sh
@@ -7,8 +6,17 @@ config.yaml
 node_modules
 gui/src-tauri/gen/schemas
 *.sqlite
+__pycache__/
+*.py[cod]
+temp/
 flamegraph.svg
 perf.data
 perf.data.old
 # macOS Finder metadata
 .DS_Store
+
+# Coverage artifacts (do not commit — regenerate locally)
+tarpaulin-report.html
+cobertura.xml
+tarpaulin/
+*.profraw

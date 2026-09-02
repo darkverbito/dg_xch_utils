@@ -16,14 +16,6 @@ pub struct ChallengeChainSubSlot {
 }
 
 impl ChallengeChainSubSlot {
-    /// chia `std_hash(bytes(cc_sub_slot))`. The consensus hash of this challenge-chain sub-slot: sha256
-    /// over its streamable encoding. This is the value committed as the reward-chain sub-slot's
-    /// `challenge_chain_sub_slot_hash` and, at a sub-slot boundary, in a block record's
-    /// `finished_challenge_slot_hashes`. As a blockchain (not network) type its encoding — hence this hash
-    /// — is independent of the negotiated protocol version.
-    ///
-    /// # Errors
-    /// Returns an error if the streamable encoding of the sub-slot fails.
     pub fn hash(&self) -> Result<Bytes32, Error> {
         Ok(Bytes32::from(hash_256(
             self.to_bytes(ChiaProtocolVersion::default())?,

@@ -2,7 +2,7 @@ use core::num::{
     NonZeroI8, NonZeroI16, NonZeroI32, NonZeroI64, NonZeroI128, NonZeroIsize, NonZeroU8,
     NonZeroU16, NonZeroU32, NonZeroU64, NonZeroU128, NonZeroUsize,
 };
-use log::warn;
+use log::{trace, warn};
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::fmt::{Display, Formatter};
@@ -67,6 +67,22 @@ pub trait ChiaSerialize {
     fn from_bytes(bytes: &mut Cursor<&[u8]>, version: ChiaProtocolVersion) -> Result<Self, Error>
     where
         Self: Sized;
+    /// Decodes a value, requiring the entire buffer to be consumed.
+    fn from_bytes_exact(bytes: &[u8], version: ChiaProtocolVersion) -> Result<Self, Error>
+    where
+        Self: Sized,
+    {
+        let mut cursor = Cursor::new(bytes);
+        let value = Self::from_bytes(&mut cursor, version)?;
+        let consumed = cursor.position();
+        if consumed != bytes.len() as u64 {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                format!("{} bytes not consumed", bytes.len() as u64 - consumed),
+            ));
+        }
+        Ok(value)
+    }
 }
 impl ChiaSerialize for OffsetDateTime {
     fn to_bytes(&self, version: ChiaProtocolVersion) -> Result<Vec<u8>, Error>
@@ -104,7 +120,19 @@ impl ChiaSerialize for String {
         bytes.read_exact(&mut u32_len_ary)?;
         let vec_len = u32::from_be_bytes(u32_len_ary) as usize;
         if vec_len > 2048 {
-            warn!("Serializing Large Vec: {vec_len}");
+            warn!("decoding large vec (len={vec_len})");
+        }
+        // Check the declared length against remaining bytes before allocating.
+        let remaining = bytes
+            .get_ref()
+            .as_ref()
+            .len()
+            .saturating_sub(bytes.position() as usize);
+        if remaining < vec_len {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                format!("String length {vec_len} exceeds {remaining} remaining bytes"),
+            ));
         }
         let mut buf = vec![0u8; vec_len];
         bytes.read_exact(&mut buf[0..vec_len])?;
@@ -167,10 +195,13 @@ where
     {
         let mut bool_buf: [u8; 1] = [0; 1];
         bytes.read_exact(&mut bool_buf)?;
-        if bool_buf[0] > 0 {
-            Ok(Some(T::from_bytes(bytes, version)?))
-        } else {
-            Ok(None)
+        match bool_buf[0] {
+            0 => Ok(None),
+            1 => Ok(Some(T::from_bytes(bytes, version)?)),
+            other => Err(Error::new(
+                ErrorKind::InvalidInput,
+                format!("Optional must be 0 or 1, found: {other}"),
+            )),
         }
     }
 }
@@ -251,13 +282,63 @@ where
         let buf: Vec<T> = Vec::new();
         let vec_len = u32::from_be_bytes(u32_buf);
         if vec_len > 2048 {
-            warn!("Serializing Large Vec: {vec_len}");
+            trace!("decoding large vec (len={vec_len})");
         }
         (0..vec_len).try_fold(buf, |mut vec, _| {
             vec.push(T::from_bytes(bytes, version)?);
             Ok(vec)
         })
     }
+}
+
+/// Decode a length-prefixed list, parsing at most `max_items` elements and skipping the rest.
+/// A request whose list claims far more items than the handler will ever use (a
+/// `RequestCoinState` claiming 1.2M coin_ids costs seconds of parse CPU on a small node) is
+/// truncated DURING decode:
+///   - the first `min(count, max_items)` elements are parsed normally (head kept, order kept);
+///   - when `element_fixed_size` is `Some(n)` the remaining `count - max_items` elements are
+///     skipped in O(1) by advancing the cursor `remaining * n` bytes — never allocated, never
+///     parsed;
+///   - a variable-size element type still parses the tail element-by-element, since the O(1)
+///     skip is only sound for fixed-size elements.
+///
+/// A skip past the buffer end is tolerated: the outer full-consumption check then reads an empty
+/// remainder, so a message whose CLAIMED count overstates the bytes actually present is accepted
+/// with the truncated head once the claim is past the limit. The cursor is clamped to the buffer
+/// end so [`ChiaSerialize::from_bytes_exact`]'s consumed check cannot underflow; trailing garbage
+/// after a skip that lands INSIDE the buffer is still rejected there.
+///
+/// The memory half of the same bound: this decoder, like `Vec<T>::from_bytes`, never
+/// pre-allocates from the untrusted count — it starts empty and grows per parsed element.
+pub fn parse_vec_limited<T: ChiaSerialize>(
+    bytes: &mut Cursor<&[u8]>,
+    version: ChiaProtocolVersion,
+    max_items: u32,
+    element_fixed_size: Option<u64>,
+) -> Result<Vec<T>, Error> {
+    let mut u32_buf: [u8; 4] = [0; 4];
+    bytes.read_exact(&mut u32_buf)?;
+    let claimed = u32::from_be_bytes(u32_buf);
+    let to_parse = claimed.min(max_items);
+    let mut out: Vec<T> = Vec::new();
+    for _ in 0..to_parse {
+        out.push(T::from_bytes(bytes, version)?);
+    }
+    let remaining = u64::from(claimed - to_parse);
+    if remaining > 0 {
+        if let Some(size) = element_fixed_size {
+            let end = bytes.get_ref().as_ref().len() as u64;
+            let target = bytes
+                .position()
+                .saturating_add(remaining.saturating_mul(size));
+            bytes.set_position(target.min(end));
+        } else {
+            for _ in 0..remaining {
+                let _ = T::from_bytes(bytes, version)?;
+            }
+        }
+    }
+    Ok(out)
 }
 
 macro_rules! impl_primitives {
@@ -467,7 +548,8 @@ impl<K: ChiaSerialize + Eq + Hash, V: ChiaSerialize> ChiaSerialize for HashMap<K
         if map_len > 2048 {
             warn!("Serializing Large Map: {map_len}");
         }
-        let buf: HashMap<K, V> = HashMap::with_capacity(map_len as usize);
+        // Never pre-allocate from an untrusted length prefix.
+        let buf: HashMap<K, V> = HashMap::new();
         (0..map_len).try_fold(buf, |mut map, _| {
             let key = K::from_bytes(bytes, version)?;
             let value = V::from_bytes(bytes, version)?;

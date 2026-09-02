@@ -7,6 +7,7 @@ use std::cmp::Ordering;
 use std::fmt::Display;
 use std::ops::{Add, AddAssign, Div, Mul, MulAssign, Rem, Sub, SubAssign};
 
+#[derive(Clone)]
 pub enum SExpNumber {
     I128(i128),
     BigInt(BigInt),
@@ -58,16 +59,13 @@ impl SExpNumber {
 }
 impl<'a> From<&AtomBuf<'a>> for SExpNumber {
     fn from(buf: &AtomBuf) -> Self {
+        // Small atoms are sign-extended into i128; larger atoms use BigInt.
         let buf = buf.as_ref();
         match buf.len() {
             0 => Self::I128(0),
-            1 => Self::I128(buf[0] as i128),
-            2 => Self::I128(u16::from_be_bytes(buf[0..2].try_into().unwrap()) as i128),
-            4 => Self::I128(u32::from_be_bytes(buf[0..4].try_into().unwrap()) as i128),
-            8 => Self::I128(u64::from_be_bytes(buf[0..8].try_into().unwrap()) as i128),
-            16 => Self::I128(u128::from_be_bytes(buf[0..16].try_into().unwrap()) as i128),
             x if x <= 16 => {
-                let mut int_buf = [0u8; 16];
+                let fill = if buf[0] & 0x80 != 0 { 0xff } else { 0x00 };
+                let mut int_buf = [fill; 16];
                 int_buf[(16 - x)..].copy_from_slice(buf);
                 Self::I128(i128::from_be_bytes(int_buf))
             }

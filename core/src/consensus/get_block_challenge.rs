@@ -1,8 +1,6 @@
-// Block challenge-chain challenge and the pre-signage-point transaction-block walk.
-// Ports chia/consensus/get_block_challenge.py (no chia_rs port exists).
+// Challenge-chain lookup and pre-signage-point transaction-block traversal.
 
 use crate::blockchain::block_record::BlockRecord;
-use crate::blockchain::header_block::HeaderBlock;
 use crate::blockchain::sized_bytes::Bytes32;
 use crate::consensus::constants::ConsensusConstants;
 use crate::consensus::missing;
@@ -10,16 +8,16 @@ use crate::consensus::pot_iterations::is_overflow_block;
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind};
 
-// chia get_block_challenge.
 pub fn get_block_challenge(
     constants: &ConsensusConstants,
-    header_block: &HeaderBlock,
+    finished_sub_slots: &[crate::blockchain::subslot_bundle::SubSlotBundle],
+    prev_block_hash: Bytes32,
     blocks: &HashMap<Bytes32, BlockRecord>,
     genesis_block: bool,
     overflow: bool,
     skip_overflow_last_ss_validation: bool,
 ) -> Result<Bytes32, Error> {
-    let fss = &header_block.finished_sub_slots;
+    let fss = finished_sub_slots;
     if !fss.is_empty() {
         let last = &fss[fss.len() - 1];
         let challenge = if overflow {
@@ -45,8 +43,8 @@ pub fn get_block_challenge(
     };
     let mut reversed_challenge_hashes: Vec<Bytes32> = Vec::new();
     let mut curr = blocks
-        .get(&header_block.foliage.prev_block_hash)
-        .ok_or_else(|| missing(header_block.foliage.prev_block_hash))?;
+        .get(&prev_block_hash)
+        .ok_or_else(|| missing(prev_block_hash))?;
     while reversed_challenge_hashes.len() < challenges_to_look_for {
         if curr.first_in_sub_slot() {
             let hashes = curr
@@ -93,7 +91,7 @@ pub fn get_block_challenge(
         })
 }
 
-// chia pre_sp_tx_block. None when prev_b_hash is the genesis challenge.
+/// Return the transaction block preceding the signage point.
 pub fn pre_sp_tx_block<'a>(
     constants: &ConsensusConstants,
     blocks: &'a HashMap<Bytes32, BlockRecord>,
@@ -128,7 +126,6 @@ pub fn pre_sp_tx_block<'a>(
     Ok(Some(curr))
 }
 
-// chia pre_sp_tx_block_height. 0 when there is no such block.
 pub fn pre_sp_tx_block_height(
     constants: &ConsensusConstants,
     blocks: &HashMap<Bytes32, BlockRecord>,

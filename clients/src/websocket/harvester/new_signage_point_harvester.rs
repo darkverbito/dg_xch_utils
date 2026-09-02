@@ -158,6 +158,10 @@ impl<T: PlotManagerAsync + Send + Sync> MessageHandler for NewSignagePointHarves
                                             responses.push((
                                                 quality,
                                                 ProofOfSpace {
+                                                    version: 0,
+                                                    plot_index: 0,
+                                                    meta_group: 0,
+                                                    strength: 0,
                                                     challenge: sp_challenge_hash,
                                                     pool_contract_puzzle_hash: plot_info
                                                         .pool_contract_puzzle_hash,

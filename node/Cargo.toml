@@ -1,0 +1,54 @@
+[package]
+name = "dg_xch_node"
+description = "Full-node engine and consensus primitive interfaces"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[dependencies]
+dg_xch_core = { path = "../core", version = "3.0.0", default-features = false, features = ["bls"] }
+dg_xch_serialize = { path = "../serialize", version = "3.0.0" }
+dg_xch_stores = { path = "../stores", version = "3.0.0" }
+dg_xch_vdf = { path = "../vdf", version = "3.0.0" }
+dg_xch_pos = { path = "../proof_of_space", version = "3.0.0" }
+dg_xch_clients = { path = "../clients", version = "3.0.0" }
+dg_xch_p2p = { path = "../p2p", version = "3.0.0" }
+dg_xch_weight_proof = { path = "../weight-proof", version = "3.0.0" }
+async-trait = "0.1.89"
+rand = "0.10.0"
+tokio = { version = "1.50.0", features = ["rt-multi-thread", "sync", "time", "macros"] }
+log = "0.4"
+
+[dev-dependencies]
+# mmap: the reorg atomicity suite (tests/reorg.rs) drives the engine over all in-process backends.
+# coin-index: the t060 fast-forward suite needs the store's unspent-lineage lookup live.
+dg_xch_stores = { path = "../stores", version = "3.0.0", features = ["mmap", "coin-index"] }
+# t060 dedup/fast-forward fixtures: real singleton_top_layer_v1_1 spends built from the puzzle set.
+dg_xch_puzzles = { path = "../puzzles", version = "3.0.0" }
+dg_xch_servers = { path = "../servers", version = "3.0.0" }
+tempfile = "3"
+sha2 = "0.10.9"
+hex = "0.4.3"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+rustls = { version = "0.23.37", features = ["ring"] }
+uuid = { version = "1.24.0", features = ["v4"] }
+libc = "0.2.189"
+sqlx = { version = "=0.8.6", features = ["runtime-tokio", "sqlite"] }
+tokio = { version = "1.50.0", features = ["rt-multi-thread", "sync", "time", "macros", "test-util"] }
+# t080 block assembly: real AGG_SIG_UNSAFE test keys/signatures (AugScheme, portable — matching
+# core's blst). Test-only; production code reaches blst through dg_xch_core's bls bindings.
+blst = { version = "0.3.16", features = ["portable"] }
+pprof = { version = "0.14", features = ["flamegraph"] }
+
+[features]
+# Per-batch measurement probe for the window VDF drain: DGXCH_DRAIN_PROBE=wall|serial.
+drain-probe = []
+# Hint (puzzle-hash) index tier: forwards to the store so the reorg mock CoinStore surface matches
+# the hint-gated trait method whenever a hint-enabled backend is unified into the build graph.
+hint = ["dg_xch_stores/hint"]
+# Enables the Postgres storage backend in the dependency graph.
+postgres = ["dg_xch_stores/postgres"]

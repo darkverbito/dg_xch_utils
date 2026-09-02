@@ -3,7 +3,6 @@ use crate::blockchain::sized_bytes::{
 };
 use crate::clvm::assemble::assemble_text;
 use crate::clvm::curry_utils::curry;
-use crate::clvm::dialect::NO_UNKNOWN_OPS;
 use crate::clvm::parser::{sexp_from_bytes, sexp_from_bytes_backrefs, sexp_to_bytes};
 use crate::clvm::runtime::ClvmRuntime;
 use crate::clvm::sexp::AtomBuf;
@@ -24,7 +23,7 @@ use std::fmt;
 use std::fmt::{Debug, Display, Formatter};
 use std::hash::Hash;
 use std::hash::Hasher;
-use std::io::{Cursor, Error};
+use std::io::{Cursor, Error, ErrorKind};
 use std::path::Path;
 
 pub struct Program<'a> {
@@ -136,38 +135,55 @@ impl<'a> Program<'a> {
         curry(self, args)
     }
 
+    /// Split a curried program into its module and its curried arguments.
+    ///
+    /// A program that is not in curried apply/quote form `(2 (1 . <mod>) <args>)`
+    /// is not an error; the non-curried case is `Ok((self, nil))`.
     pub fn uncurry(&'a self) -> Result<(Program<'a>, Program<'a>), ClvmError> {
-        fn inner_match(o: &SExp, expected: &[u8]) -> Result<(), ClvmError> {
-            if o.atom()? == *expected {
-                Ok(())
-            } else {
-                Err(ClvmError::InvalidInput(format!(
-                    "expected: {}",
-                    encode(expected)
-                )))
+        fn is_atom(o: &SExp, expected: &[u8]) -> bool {
+            matches!(o, SExp::Atom(a) if a.as_ref() == expected)
+        }
+        // a proper list of exactly three elements; anything else is "not curried"
+        fn three<'x>(node: &'x SExp<'x>) -> Option<(&'x SExp<'x>, &'x SExp<'x>, &'x SExp<'x>)> {
+            let p0 = node.maybe_pair()?;
+            let p1 = p0.rest().maybe_pair()?;
+            let p2 = p1.rest().maybe_pair()?;
+            if p2.rest().maybe_pair().is_some() {
+                return None; // 4+ elements: too many values to unpack
             }
+            Some((p0.first(), p1.first(), p2.first()))
         }
-        //(2 (1 . <mod>) <args>)
-        let as_list = self.sexp().ref_list();
-        inner_match(as_list[0] /*ev*/, b"\x02")?;
-        let q_pair = as_list[1].pair()?;
-        inner_match(q_pair.first(), b"\x01")?;
-        let mut args = vec![];
-        let mut args_list = as_list[2];
-        while let SExp::Pair(_) = args_list {
-            //(4(1. < arg >) < rest >)
-            let as_list = args_list.ref_list();
-            inner_match(as_list[0], b"\x04")?;
-            let q_pair = as_list[1].pair()?;
-            inner_match(q_pair.first(), b"\x01")?;
-            args.push(q_pair.rest());
-            args_list = as_list[2];
-        }
-        inner_match(args_list, b"\x01")?;
-        Ok((
-            Program::new_ref(q_pair.rest()),
-            Program::to(args.as_slice()),
-        ))
+        let matched = (|| -> Option<(Program<'a>, Program<'a>)> {
+            // (2 (1 . <mod>) <args_list>)
+            let (ev, quoted_inner, mut args_list) = three(self.sexp())?;
+            if !is_atom(ev, b"\x02") {
+                return None;
+            }
+            let quoted_inner = quoted_inner.maybe_pair()?;
+            if !is_atom(quoted_inner.first(), b"\x01") {
+                return None;
+            }
+            let module = quoted_inner.rest();
+            let mut args = vec![];
+            while let SExp::Pair(_) = args_list {
+                // (4 (1 . <arg>) <rest>)
+                let (cons, quoted_arg, rest) = three(args_list)?;
+                if !is_atom(cons, b"\x04") {
+                    return None;
+                }
+                let quoted_arg = quoted_arg.maybe_pair()?;
+                if !is_atom(quoted_arg.first(), b"\x01") {
+                    return None;
+                }
+                args.push(quoted_arg.rest());
+                args_list = rest;
+            }
+            if !is_atom(args_list, b"\x01") {
+                return None;
+            }
+            Some((Program::new_ref(module), Program::to(args.as_slice())))
+        })();
+        Ok(matched.unwrap_or_else(|| (Program::new_ref(self.sexp()), Program::to(0))))
     }
 
     #[must_use]
@@ -263,7 +279,10 @@ impl<'a> Program<'a> {
         flags: u32,
         args: &'_ Program,
     ) -> Result<(u64, Program<'static>), ClvmError> {
-        let mut runtime = ClvmRuntime::new(max_cost, flags | NO_UNKNOWN_OPS);
+        // Strictness is the caller's choice: consensus execution runs unknown operators as
+        // no-ops with their well-defined cost; only mempool / explicitly-strict paths pass
+        // NO_UNKNOWN_OPS.
+        let mut runtime = ClvmRuntime::new(max_cost, flags);
         let (cost, result) = runtime.run(self.sexp(), args.sexp())?;
         Ok((cost, Program::new(result.to_owned())))
     }
@@ -396,7 +415,7 @@ macro_rules! impl_ints {
                 type Error = ClvmError;
 
                 fn try_into(self) -> Result<$name, Self::Error> {
-                    let as_atom = self.as_vec().ok_or(ClvmError::InvalidInput("Invalid program for $name".to_string()))?;
+                    let as_atom = self.as_vec().ok_or_else(|| ClvmError::InvalidInput("Invalid program for $name".to_string()))?;
                     if as_atom.len() > $size {
                         return Err(ClvmError::InvalidInput("Invalid program for $name".to_string()));
                     }
@@ -547,18 +566,35 @@ impl ChiaSerialize for SerializedProgram {
     where
         Self: Sized,
     {
-        let mut stream: Cursor<&[u8]> = (&self.buffer).into();
-        let claim_sexp = sexp_from_bytes(&mut stream)?;
-        let as_bytes = sexp_to_bytes(&claim_sexp)?;
-        Ok(as_bytes.as_ref().to_vec())
+        // A `SerializedProgram` is opaque, already-serialized CLVM: emit its raw bytes verbatim.
+        // Re-serializing would drop CLVM back-references (0xfe) and change the block's identity hash.
+        Ok(self.as_ref().to_vec())
     }
 
     fn from_bytes(bytes: &mut Cursor<&[u8]>, _version: ChiaProtocolVersion) -> Result<Self, Error>
     where
         Self: Sized,
     {
-        let claim_sexp = sexp_from_bytes(bytes)?;
-        sexp_to_bytes(&claim_sexp)
+        // Consume exactly one CLVM program from the stream to find its byte length, then keep
+        // the raw on-wire bytes so they round-trip identically. The back-reference-aware
+        // parser is required: transaction generators use CLVM back-references (0xfe).
+        let start = usize::try_from(bytes.position())
+            .map_err(|_| Error::new(ErrorKind::InvalidInput, "cursor position overflow"))?;
+        sexp_from_bytes_backrefs(bytes)
+            .map_err(|e| Error::new(ErrorKind::InvalidInput, format!("SerializedProgram: {e}")))?;
+        let end = usize::try_from(bytes.position())
+            .map_err(|_| Error::new(ErrorKind::InvalidInput, "cursor position overflow"))?;
+        let raw = bytes
+            .get_ref()
+            .get(start..end)
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorKind::InvalidInput,
+                    "SerializedProgram slice out of range",
+                )
+            })?
+            .to_vec();
+        Ok(raw.into())
     }
 }
 impl Display for SerializedProgram {
@@ -714,5 +750,145 @@ impl<'a> Serialize for Program<'a> {
                 .to_string()
                 .as_str(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::clvm::assemble::assemble_text;
+    use crate::clvm::program::Program;
+    use crate::clvm::sexp::SExp;
+    use num_bigint::BigInt;
+
+    fn nested_list() -> Program<'static> {
+        // Program.to([10, 20, 30, [15, 17], 40, 50])
+        Program::new(SExp::from(vec![
+            SExp::from(10),
+            SExp::from(20),
+            SExp::from(30),
+            SExp::from(vec![SExp::from(15), SExp::from(17)]),
+            SExp::from(40),
+            SExp::from(50),
+        ]))
+    }
+
+    #[test]
+    fn at_navigates_by_first_rest_path() {
+        let p = nested_list();
+        assert_eq!(p.at("f").unwrap().as_int().unwrap(), BigInt::from(10));
+        assert_eq!(p.at("rrrfrf").unwrap().as_int().unwrap(), BigInt::from(17));
+        // "q" is not a legal path character
+        assert!(p.at("q").is_err());
+        // "ff" walks into the first atom, which has no first()
+        assert!(p.at("ff").is_err());
+    }
+
+    #[test]
+    fn run_div_positive_result() {
+        let div = assemble_text("(/ 2 5)").unwrap();
+        let (_c, out) = div
+            .run(
+                100_000,
+                0,
+                &Program::new(SExp::from(vec![SExp::from(10), SExp::from(5)])),
+            )
+            .unwrap();
+        assert_eq!(out.as_vec(), Some(vec![0x02]));
+    }
+
+    // (/ 2 5) on [10, -5] returns 0xfe (-2) at cost 1107; requires signed
+    // two's-complement atom decode.
+    #[test]
+    fn run_div_negative_operand_result_and_cost() {
+        let div = assemble_text("(/ 2 5)").unwrap();
+        let (cost, out) = div
+            .run(
+                100_000,
+                0,
+                &Program::new(SExp::from(vec![SExp::from(10), SExp::from(-5)])),
+            )
+            .unwrap();
+        assert_eq!(out.as_vec(), Some(vec![0xFE])); // -2 in two's complement
+        assert_eq!(cost, 1107);
+    }
+
+    #[test]
+    fn uncurry_positive_case() {
+        // (2 (q . (+ 2 5)) (c (q . 1) 1))
+        let plus = assemble_text("(a (q 16 2 5) (c (q . 1) 1))").unwrap();
+        let (f, args) = plus.uncurry().unwrap();
+        assert_eq!(f, assemble_text("(+ 2 5)").unwrap());
+        assert_eq!(args, Program::new(SExp::from(vec![SExp::from(1)])));
+    }
+
+    // curry then uncurry is idempotent
+    #[test]
+    fn curry_then_uncurry_round_trips() {
+        let f = assemble_text("(+ 2 5)").unwrap();
+        let curried = f.curry(&[Program::to(200), Program::to(30)]);
+        let (f0, args0) = curried.uncurry().unwrap();
+        assert_eq!(f0, f);
+        assert_eq!(
+            args0,
+            Program::new(SExp::from(vec![SExp::from(200), SExp::from(30)]))
+        );
+    }
+
+    // a program that was never curried uncurries to (self, nil) rather than erring
+    #[test]
+    fn uncurry_not_curried_returns_program_and_nil() {
+        let plus = assemble_text("(+ 2 5)").unwrap();
+        let (f, args) = plus.uncurry().unwrap();
+        assert_eq!(f, plus);
+        assert!(args.sexp().nullp());
+    }
+
+    // garbage at the end of the top-level list ⇒ (self, nil), never a partial uncurry
+    #[test]
+    fn uncurry_top_level_garbage_returns_program_and_nil() {
+        let p = assemble_text("(2 (q . 1) (c (q . 1) (q . 1)) (q . 0x1337))").unwrap();
+        let (f, args) = p.uncurry().unwrap();
+        assert_eq!(f, p);
+        assert!(args.sexp().nullp());
+    }
+
+    // the quoted-module slot is an atom, not a `(1 . <mod>)` pair ⇒ (self, nil)
+    #[test]
+    fn uncurry_not_pair_returns_program_and_nil() {
+        let p = assemble_text("(2 1 (c (q . 1) (q . 1)))").unwrap();
+        let (f, args) = p.uncurry().unwrap();
+        assert_eq!(f, p);
+        assert!(args.sexp().nullp());
+    }
+
+    // garbage at the end of an args cons ⇒ (self, nil)
+    #[test]
+    fn uncurry_args_garbage_returns_program_and_nil() {
+        let p = assemble_text("(2 (q . 1) (c (q . 1) (q . 1) (q . 0x1337)))").unwrap();
+        let (f, args) = p.uncurry().unwrap();
+        assert_eq!(f, p);
+        assert!(args.sexp().nullp());
+    }
+
+    // A plain atom and a plain (non-curry) pair both return (self, nil) rather
+    // than panicking on a short/absent top-level list.
+    #[test]
+    fn uncurry_plain_atom_and_plain_pair_return_program_and_nil() {
+        let atom = Program::to(5);
+        let (f, args) = atom.uncurry().unwrap();
+        assert_eq!(f, atom);
+        assert!(args.sexp().nullp());
+
+        let nil = Program::to(0);
+        let (f, args) = nil.uncurry().unwrap();
+        assert_eq!(f, nil);
+        assert!(args.sexp().nullp());
+
+        // (16 2 5) is a proper 3-list whose head is not `\x02`: it superficially
+        // resembles the apply shape but is not a curry ⇒ (self, nil).
+        let plain = assemble_text("(16 2 5)").unwrap();
+        let (f, args) = plain.uncurry().unwrap();
+        assert_eq!(f, plain);
+        assert!(args.sexp().nullp());
     }
 }

@@ -20,6 +20,7 @@ use dg_xch_serialize::{ChiaProtocolVersion, ChiaSerialize};
 use hex::encode;
 use num_bigint::{BigInt, Sign};
 use num_traits::Zero;
+use once_cell::sync::Lazy;
 use serde::de::{SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashMap;
@@ -318,7 +319,10 @@ impl<'a> SExp<'a> {
                 "substr invalid bounds: {start} is > {end}"
             )));
         }
-        let sub = SExp::Atom(AtomBuf::Owned(atom[start..end].to_vec().into()));
+        // substr charges base cost only, with no malloc cost, so it must be O(1): a copying
+        // substr is unmetered allocation and lets a program copy the whole source atom per
+        // unit of cost. The returned atom borrows from `self`, which outlives the run.
+        let sub = SExp::Atom(AtomBuf::Borrowed(&atom[start..end]));
         Ok(sub)
     }
 
@@ -628,6 +632,48 @@ impl<'a> PairBuf<'a> {
         match self {
             PairBuf::Owned((_, rest)) => rest.as_ref(),
             PairBuf::Borrowed((_, rest)) => rest,
+        }
+    }
+}
+
+/// Shared `()` sentinel used to empty an owned `PairBuf` link during iterative teardown.
+/// Cloning is a refcount bump, so unwinding a spine allocates no per-node placeholder.
+#[inline]
+fn nil_arc() -> Arc<SExp<'static>> {
+    static NIL_ARC: Lazy<Arc<SExp<'static>>> = Lazy::new(|| Arc::new(NULL_SEXP));
+    (*NIL_ARC).clone()
+}
+
+/// Stack-safe teardown of an owned cons spine.
+///
+/// Default drop glue walks an owned `SExp` tree recursively, one native stack frame per level,
+/// so a deeply right-nested structure (a 500k-deep condition list) overflows the stack when
+/// freed. This unwinds the spine with an explicit heap worklist instead.
+///
+/// Must stay on `PairBuf`, not on `SExp`: an explicit `Drop` on `SExp` makes it
+/// non-const-promotable and breaks `NULL_SEXP` / `ONE_SEXP`, the `&'static` promotions in
+/// `SExp::from_bool` and `SExpIter`, and `Program::new_const` / `NULL_PROGRAM`.
+impl<'a> Drop for PairBuf<'a> {
+    fn drop(&mut self) {
+        // Borrowed pairs own nothing; only Owned spines need unwinding.
+        let PairBuf::Owned((first, rest)) = self else {
+            return;
+        };
+        // Fields cannot be moved out of a `Drop` type, so swap in the nil sentinel to take
+        // ownership of the children onto the worklist.
+        let mut stack: Vec<Arc<SExp<'static>>> = Vec::new();
+        stack.push(replace(first, nil_arc()));
+        stack.push(replace(rest, nil_arc()));
+        while let Some(link) = stack.pop() {
+            // Only dismantle solely-owned links; a shared link is just released, leaving the
+            // shared subtree intact.
+            let Ok(mut node) = Arc::try_unwrap(link) else {
+                continue;
+            };
+            if let SExp::Pair(PairBuf::Owned((first, rest))) = &mut node {
+                stack.push(replace(first, nil_arc()));
+                stack.push(replace(rest, nil_arc()));
+            }
         }
     }
 }
@@ -1325,3 +1371,78 @@ impl_nz_ints!(
     NonZeroI64,
     NonZeroI128,
 );
+
+#[cfg(test)]
+mod tests {
+    //! SExp construction, environment traversal and tree-hash tests.
+    //! The canonical CLVM `()` tree hash is sha256 of `0x01`.
+    use super::*;
+
+    #[test]
+    fn nil_tree_hash_is_canonical() {
+        assert_eq!(
+            hex::encode(SExp::default().tree_hash().bytes()),
+            "4bf5122f344554c53bde2ebb8cd2b7e3d1600ad631c385a5d7cce23c7785459a"
+        );
+    }
+
+    #[test]
+    fn tree_hash_is_deterministic_and_shape_sensitive() {
+        let a = SExp::from(vec![SExp::from(1), SExp::from(2), SExp::from(3)]);
+        let b = SExp::from(vec![SExp::from(1), SExp::from(2), SExp::from(3)]);
+        assert_eq!(a.tree_hash(), b.tree_hash());
+        let c = SExp::from(vec![SExp::from(1), SExp::from(2)]);
+        assert_ne!(a.tree_hash(), c.tree_hash());
+    }
+
+    #[test]
+    fn first_rest_split_and_nullp() {
+        let list = SExp::from(vec![SExp::from(10), SExp::from(20)]);
+        assert_eq!(list.first().unwrap().atom().unwrap().as_int(), 10.into());
+        assert_eq!(*list.rest().unwrap(), SExp::from(vec![SExp::from(20)]));
+        assert!(SExp::default().nullp());
+        assert!(!list.nullp());
+    }
+
+    #[test]
+    fn as_atom_list_flattens_atoms() {
+        let list = SExp::from(vec![SExp::from(1), SExp::from(2), SExp::from(3)]);
+        assert_eq!(list.as_atom_list(), vec![vec![1u8], vec![2u8], vec![3u8]]);
+    }
+
+    #[test]
+    fn arg_count_and_arg_count_is() {
+        let list = SExp::from(vec![SExp::from(1), SExp::from(2), SExp::from(3)]);
+        assert_eq!(list.arg_count(10), 3);
+        assert!(list.arg_count_is(3));
+        assert!(!list.arg_count_is(2));
+    }
+
+    #[test]
+    fn int_round_trips_through_sexp() {
+        for v in [
+            0_i64,
+            1,
+            -1,
+            127,
+            128,
+            -128,
+            255,
+            256,
+            1000,
+            -1000,
+            i64::MAX,
+        ] {
+            let sexp = SExp::from(v);
+            assert_eq!(sexp.atom().unwrap().as_int(), v.into());
+        }
+    }
+
+    #[test]
+    fn small_ints_serialize_without_leading_zeros() {
+        // 0 -> nil ; positive high-bit values keep a leading 0x00 sign byte.
+        assert!(SExp::from(0_u8).nullp());
+        assert_eq!(SExp::from(128_u32).atom().unwrap().as_ref(), &[0x00, 0x80]);
+        assert_eq!(SExp::from(127_u32).atom().unwrap().as_ref(), &[0x7f]);
+    }
+}

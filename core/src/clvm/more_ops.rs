@@ -1,30 +1,42 @@
 use crate::blockchain::coin::Coin;
 use crate::blockchain::sized_bytes::Bytes32;
+use crate::clvm::arena::{Arena, ArgCursor, NodeKind, NodePtr};
 use crate::clvm::debug_ops::op_print;
 use crate::clvm::dialect::Dialect;
-use crate::clvm::parser::sexp_to_bytes;
-use crate::clvm::sexp::{AtomBuf, SExp};
+use crate::clvm::pure_ops::OpOut;
 use crate::clvm::sexp_ext::SExpNumber;
-use crate::clvm::utils::{atom, check_arg_count, check_cost, i32_atom, int_atom, two_ints};
-use crate::constants::{NULL_SEXP, ONE_SEXP};
+use crate::clvm::utils::{
+    CANONICAL_INTS, DISABLE_OP, LIMITS, NEW_COST_MODEL, atom, check_arg_count, check_cost,
+    i32_atom, int_atom, number_with_len, split, two_ints,
+};
 use crate::errors::ClvmError;
 use crate::formatting::{number_from_slice, u32_from_slice, u64_from_bigint};
 use crate::traits::SizedBytes;
-use bls12_381::{G1Affine, G1Projective, Scalar};
 use num_bigint::{BigInt, BigUint, Sign};
+#[cfg(feature = "bls")]
 use num_integer::Integer;
 use num_traits::{Signed, Zero};
+#[cfg(feature = "bls")]
 use once_cell::sync::Lazy;
-use sha2::Digest;
-use sha2::Sha256;
-use std::convert::TryFrom;
 use std::ops::BitAndAssign;
 use std::ops::BitOrAssign;
 use std::ops::BitXorAssign;
 
-const MALLOC_COST_PER_BYTE: u64 = 10;
+pub(crate) const MALLOC_COST_PER_BYTE: u64 = 10;
 
 const ARITH_BASE_COST: u64 = 99;
+// Hard-fork operator costs: `modpow` (60) and `mod` (61), active on mainnet since the hard
+// fork at 5,496,000. The NEW_* constants are the NEW_COST_MODEL variants; the two models are
+// selected at dispatch by the NEW_COST_MODEL flag.
+const MODPOW_BASE_COST: u64 = 17000;
+const MODPOW_COST_PER_BYTE_BASE_VALUE: u64 = 38;
+const MODPOW_COST_PER_BYTE_EXPONENT: u64 = 3;
+const MODPOW_COST_PER_BYTE_MOD: u64 = 21;
+const NEW_MODPOW_PER_ITERATION_COST: u64 = 4000;
+const NEW_MODPOW_EXPONENT_MULTIPLIER: u64 = 8;
+const NEW_DIV_BASE_COST: u64 = 1000;
+const NEW_DIV_LINEAR_COST_PER_BYTE: u64 = 50;
+const NEW_DIV_SQUARE_COST_PER_BYTE_DIVIDER: u64 = 10;
 const ARITH_COST_PER_ARG: u64 = 320;
 const ARITH_COST_PER_BYTE: u64 = 3;
 
@@ -76,16 +88,20 @@ const BOOL_COST_PER_ARG: u64 = 300;
 // in the point_add benchmark
 
 // increased from 31592 to better model Raspberry PI
+#[cfg(feature = "bls")]
 const POINT_ADD_BASE_COST: u64 = 101_094;
 // increased from 419994 to better model Raspberry PI
+#[cfg(feature = "bls")]
 const POINT_ADD_COST_PER_ARG: u64 = 1_343_980;
 
 // Raspberry PI 4 is about 2.833543 / 0.447859 = 6.32686 times slower
 // in the pubkey benchmark
 
 // increased from 419535 to better model Raspberry PI
+#[cfg(feature = "bls")]
 const PUBKEY_BASE_COST: u64 = 1_325_730;
 // increased from 12 to closer model Raspberry PI
+#[cfg(feature = "bls")]
 const PUBKEY_COST_PER_BYTE: u64 = 38;
 
 const COIN_ID_COST: u64 =
@@ -98,50 +114,61 @@ fn limbs_for_int(v: &BigInt) -> u64 {
 fn limbs_for_num(v: &SExpNumber) -> u64 {
     match v {
         SExpNumber::BigInt(int) => int.bits().div_ceil(8),
-        SExpNumber::I128(_) => i128::BITS.div_ceil(8) as u64,
+        SExpNumber::I128(i) => u64::from(128 - i.unsigned_abs().leading_zeros()).div_ceil(8),
     }
 }
 
-fn new_atom_and_cost(cost: u64, buf: &[u8]) -> (u64, SExp<'static>) {
+pub(crate) fn new_atom_and_cost(cost: u64, buf: &[u8]) -> Result<(u64, OpOut), ClvmError> {
     let c = buf.len() as u64 * MALLOC_COST_PER_BYTE;
-    (cost + c, SExp::Atom(buf.to_vec().into()))
+    Ok((cost + c, OpOut::small(buf)))
 }
 
-fn malloc_cost(cost: u64, ptr: SExp) -> Result<(u64, SExp), ClvmError> {
-    let c = ptr.atom()?.as_ref().len() as u64 * MALLOC_COST_PER_BYTE;
-    Ok((cost + c, ptr))
+fn malloc_number(cost: u64, n: &SExpNumber) -> Result<(u64, OpOut), ClvmError> {
+    // The malloc surcharge depends on the encoded length, which only exists once the arena has
+    // written it — the materialization site adds it.
+    Ok((cost, OpOut::Number(n.clone())))
 }
 
-pub fn op_unknown<'a, D: Dialect>(
-    o: &'a SExp<'a>,
-    args: &'a SExp<'a>,
+fn malloc_bigint(cost: u64, n: &BigInt) -> Result<(u64, OpOut), ClvmError> {
+    Ok((cost, OpOut::Number(SExpNumber::BigInt(n.clone()))))
+}
+
+pub fn op_unknown<D: Dialect>(
+    arena: &Arena,
+    o: NodePtr,
+    args: NodePtr,
     max_cost: u64,
-    _dialect: &'_ D,
-) -> Result<(u64, SExp<'static>), ClvmError> {
-    let op = o.atom()?.as_ref();
-    if op.is_empty() || (op.len() >= 2 && op[0] == 0xff && op[1] == 0xff) {
-        return Err(ClvmError::ReservedOperator(format!(
-            "Reserved Operator: {:?}",
-            op
-        )));
-    }
-    let cost_function = (op[op.len() - 1] & 0b1100_0000) >> 6;
-    let cost_multiplier: u64 = match u32_from_slice(&op[0..op.len() - 1]) {
-        Some(v) => u64::from(v),
-        None => {
-            return Err(ClvmError::InvalidOperator(format!(
-                "Invalid Operator: {:?}",
-                op
+    _dialect: &D,
+) -> Result<(u64, OpOut), ClvmError> {
+    let (cost_function, cost_multiplier) = {
+        let op_atom = arena
+            .atom(o)
+            .ok_or_else(|| ClvmError::ExpectedAtomGotPair(arena.display(o)))?;
+        let op = op_atom.as_ref();
+        if op.is_empty() || (op.len() >= 2 && op[0] == 0xff && op[1] == 0xff) {
+            return Err(ClvmError::ReservedOperator(format!(
+                "Reserved Operator: {op:?}"
             )));
         }
+        let cost_function = (op[op.len() - 1] & 0b1100_0000) >> 6;
+        let cost_multiplier: u64 = match u32_from_slice(&op[0..op.len() - 1]) {
+            Some(v) => u64::from(v),
+            None => {
+                return Err(ClvmError::InvalidOperator(format!(
+                    "Invalid Operator: {op:?}"
+                )));
+            }
+        };
+        (cost_function, cost_multiplier)
     };
     let mut cost = match cost_function {
         1 => {
             let mut cost = ARITH_BASE_COST;
             let mut byte_count: u64 = 0;
-            for arg in args {
+            let mut cursor = ArgCursor::new(args);
+            while let Some(arg) = cursor.next(arena) {
                 cost += ARITH_COST_PER_ARG;
-                let blob = int_atom(arg, "unknown op")?;
+                let blob = int_atom(arena, arg, "unknown op")?;
                 byte_count += blob.len() as u64;
                 check_cost(cost + (byte_count * ARITH_COST_PER_BYTE), max_cost)?;
             }
@@ -151,8 +178,9 @@ pub fn op_unknown<'a, D: Dialect>(
             let mut cost = MUL_BASE_COST;
             let mut first_iter: bool = true;
             let mut l0: u64 = 0;
-            for arg in args {
-                let blob = int_atom(arg, "unknown op")?;
+            let mut cursor = ArgCursor::new(args);
+            while let Some(arg) = cursor.next(arena) {
+                let blob = int_atom(arena, arg, "unknown op")?;
                 if first_iter {
                     l0 = blob.len() as u64;
                     first_iter = false;
@@ -170,9 +198,10 @@ pub fn op_unknown<'a, D: Dialect>(
         3 => {
             let mut cost = CONCAT_BASE_COST;
             let mut total_size: u64 = 0;
-            for arg in args {
+            let mut cursor = ArgCursor::new(args);
+            while let Some(arg) = cursor.next(arena) {
                 cost += CONCAT_COST_PER_ARG;
-                let blob = atom(arg, "unknown op")?;
+                let blob = atom(arena, arg, "unknown op")?;
                 total_size += blob.len() as u64;
                 check_cost(cost + total_size * CONCAT_COST_PER_BYTE, max_cost)?;
             }
@@ -183,65 +212,102 @@ pub fn op_unknown<'a, D: Dialect>(
     check_cost(cost, max_cost)?;
     cost *= cost_multiplier + 1;
     if cost > u64::from(u32::MAX) {
-        Err(ClvmError::Unsupported(format!("Invalid Operator: {o:?}")))
+        Err(ClvmError::Unsupported(format!(
+            "Invalid Operator: {}",
+            arena.debug_fmt(o)
+        )))
     } else {
-        Ok((cost, NULL_SEXP))
+        Ok((cost, OpOut::Same(NodePtr::NIL)))
     }
 }
 
-pub fn op_sha256<'a, D: Dialect>(
-    args: &'a SExp<'a>,
+pub fn op_sha256<D: Dialect>(
+    arena: &Arena,
+    args: NodePtr,
     max_cost: u64,
-    _dialect: &'_ D,
-) -> Result<(u64, SExp<'a>), ClvmError> {
+    _dialect: &D,
+) -> Result<(u64, OpOut), ClvmError> {
     let mut cost = SHA256_BASE_COST;
     let mut byte_count: usize = 0;
-    let mut hasher = Sha256::new();
-    for arg in args {
+    // ring's SHA-256 (BoringSSL's vectorized block function) sustains ~1.5x the sha2 crate's
+    // software throughput on x86 without SHA-NI and edges it on aarch64 NEON — and cost-maxed
+    // mainnet blocks exist that hash ~5 GiB through this one operator (2 cost/byte), where that
+    // ratio is the whole body-validation wall clock.
+    let mut hasher = ring::digest::Context::new(&ring::digest::SHA256);
+    let mut cursor = ArgCursor::new(args);
+    while let Some(arg) = cursor.next(arena) {
         cost += SHA256_COST_PER_ARG;
         check_cost(cost + byte_count as u64 * SHA256_COST_PER_BYTE, max_cost)?;
-        let blob = atom(arg, "sha256")?;
+        let blob = atom(arena, arg, "sha256")?;
         byte_count += blob.len();
-        hasher.update(blob);
+        hasher.update(blob.as_ref());
     }
     cost += byte_count as u64 * SHA256_COST_PER_BYTE;
-    Ok(new_atom_and_cost(cost, &hasher.finalize()))
+    let digest = hasher.finish();
+    // DGXCH_TRACE_SHA256=1 logs every sha256 call's args + digest. Checked once per
+    // process; a per-call env read would serialize across replay workers.
+    static TRACE_SHA256: std::sync::LazyLock<bool> =
+        std::sync::LazyLock::new(|| std::env::var_os("DGXCH_TRACE_SHA256").is_some());
+    if *TRACE_SHA256 {
+        let mut dump = String::new();
+        let mut cursor = ArgCursor::new(args);
+        while let Some(arg) = cursor.next(arena) {
+            if let Some(blob) = arena.atom(arg) {
+                dump.push(' ');
+                for b in blob.as_ref() {
+                    dump.push_str(&format!("{b:02x}"));
+                }
+            }
+        }
+        eprintln!(
+            "sha256_trace:{} ->{}",
+            dump,
+            digest
+                .as_ref()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        );
+    }
+    new_atom_and_cost(cost, digest.as_ref())
 }
 
-pub fn op_add<'a, D: Dialect>(
-    args: &'a SExp<'a>,
+pub fn op_add<D: Dialect>(
+    arena: &Arena,
+    args: NodePtr,
     max_cost: u64,
-    _dialect: &'_ D,
-) -> Result<(u64, SExp<'a>), ClvmError> {
+    _dialect: &D,
+) -> Result<(u64, OpOut), ClvmError> {
     let mut cost = ARITH_BASE_COST;
     let mut byte_count: usize = 0;
     let mut total = SExpNumber::I128(0);
-    let mut num_with_len: (SExpNumber, usize);
-    for blob in args {
+    let mut cursor = ArgCursor::new(args);
+    while let Some(blob) = cursor.next(arena) {
         cost += ARITH_COST_PER_ARG;
         check_cost(cost + (byte_count as u64 * ARITH_COST_PER_BYTE), max_cost)?;
-        num_with_len = <(SExpNumber, usize)>::try_from(blob)?;
+        let num_with_len = number_with_len(arena, blob)?;
         total += num_with_len.0;
         byte_count += num_with_len.1;
     }
     cost += byte_count as u64 * ARITH_COST_PER_BYTE;
-    malloc_cost(cost, SExp::from(total))
+    malloc_number(cost, &total)
 }
 
-pub fn op_subtract<'a, D: Dialect>(
-    args: &'a SExp<'a>,
+pub fn op_subtract<D: Dialect>(
+    arena: &Arena,
+    args: NodePtr,
     max_cost: u64,
-    _dialect: &'_ D,
-) -> Result<(u64, SExp<'a>), ClvmError> {
+    _dialect: &D,
+) -> Result<(u64, OpOut), ClvmError> {
     let mut cost = ARITH_BASE_COST;
     let mut byte_count: usize = 0;
     let mut first = true;
     let mut total = SExpNumber::I128(0);
-    let mut num_with_len: (SExpNumber, usize);
-    for blob in args {
+    let mut cursor = ArgCursor::new(args);
+    while let Some(blob) = cursor.next(arena) {
         cost += ARITH_COST_PER_ARG;
         check_cost(cost + (byte_count as u64 * ARITH_COST_PER_BYTE), max_cost)?;
-        num_with_len = <(SExpNumber, usize)>::try_from(blob)?;
+        let num_with_len = number_with_len(arena, blob)?;
         byte_count += num_with_len.1;
         if first {
             first = false;
@@ -251,22 +317,23 @@ pub fn op_subtract<'a, D: Dialect>(
         }
     }
     cost += byte_count as u64 * ARITH_COST_PER_BYTE;
-    malloc_cost(cost, SExp::from(total))
+    malloc_number(cost, &total)
 }
 
-pub fn op_multiply<'a, D: Dialect>(
-    args: &'a SExp<'a>,
+pub fn op_multiply<D: Dialect>(
+    arena: &Arena,
+    args: NodePtr,
     max_cost: u64,
-    _dialect: &'_ D,
-) -> Result<(u64, SExp<'a>), ClvmError> {
+    _dialect: &D,
+) -> Result<(u64, OpOut), ClvmError> {
     let mut first: bool = true;
     let mut cost: u64 = MUL_BASE_COST;
     let mut total = SExpNumber::I128(1);
-    let mut num_with_len: (SExpNumber, usize);
     let mut l0 = 0u64;
-    for blob in args {
+    let mut cursor = ArgCursor::new(args);
+    while let Some(blob) = cursor.next(arena) {
         check_cost(cost, max_cost)?;
-        num_with_len = <(SExpNumber, usize)>::try_from(blob)?;
+        let num_with_len = number_with_len(arena, blob)?;
         if first {
             l0 = num_with_len.1 as u64;
             total = num_with_len.0;
@@ -280,21 +347,50 @@ pub fn op_multiply<'a, D: Dialect>(
         cost += (l0 * l1) / MUL_SQUARE_COST_PER_BYTE_DIVIDER;
         l0 = limbs_for_num(&total);
     }
-    malloc_cost(cost, SExp::from(total))
+    trace_arith(arena, "mul", args, &total);
+    malloc_number(cost, &total)
 }
 
-pub fn op_div_impl<'a>(args: &'a SExp<'a>, mempool: bool) -> Result<(u64, SExp<'a>), ClvmError> {
-    let ((a0, l0), (a1, l1)) = two_ints(args, "/")?;
+// DGXCH_TRACE_ARITH=1 logs each arithmetic op's raw operand atoms and result.
+// Checked once per process, as with the sha256 tap.
+fn trace_arith(arena: &Arena, op: &str, args: NodePtr, result: &SExpNumber) {
+    static TRACE_ARITH: std::sync::LazyLock<bool> =
+        std::sync::LazyLock::new(|| std::env::var_os("DGXCH_TRACE_ARITH").is_some());
+    if !*TRACE_ARITH {
+        return;
+    }
+    let mut dump = String::new();
+    let mut cursor = ArgCursor::new(args);
+    while let Some(arg) = cursor.next(arena) {
+        dump.push(' ');
+        match arena.atom(arg) {
+            Some(a) => {
+                for b in a.as_ref() {
+                    dump.push_str(&format!("{b:02x}"));
+                }
+            }
+            None => dump.push_str("<pair>"),
+        }
+    }
+    match result {
+        SExpNumber::I128(i) => eprintln!("arith_trace:{op}{dump} ->{i}"),
+        SExpNumber::BigInt(b) => eprintln!("arith_trace:{op}{dump} ->{b}"),
+    }
+}
+
+pub fn op_div_impl(arena: &Arena, args: NodePtr, mempool: bool) -> Result<(u64, OpOut), ClvmError> {
+    let ((a0, l0), (a1, l1)) = two_ints(arena, args, "/")?;
     let cost = DIV_BASE_COST + ((l0 + l1) as u64) * DIV_COST_PER_BYTE;
     if a1.sign() == Sign::NoSign {
         Err(ClvmError::Unsupported(format!(
-            "div with 0 : {:?}",
-            args.first()?
+            "div with 0 : {}",
+            arena.debug_fmt(split(arena, args)?.0)
         )))?
     } else {
         if mempool && (a0.sign() == Sign::Minus || a1.sign() == Sign::Minus) {
             Err(ClvmError::Unsupported(format!(
-                "div operator with negative operands is deprecated: {args:?}"
+                "div operator with negative operands is deprecated: {}",
+                arena.debug_fmt(args)
             )))?
         }
         let (mut q, r) = a0.div_mod_floor(&a1);
@@ -302,161 +398,289 @@ pub fn op_div_impl<'a>(args: &'a SExp<'a>, mempool: bool) -> Result<(u64, SExp<'
         if q == SExpNumber::I128(-1) && !r.is_zero() {
             q += SExpNumber::I128(1);
         }
-        let q1 = SExp::from(q);
-        malloc_cost(cost, q1)
+        trace_arith(arena, "div", args, &q);
+        malloc_number(cost, &q)
     }
 }
 
-pub fn op_div<'a, D: Dialect>(
-    args: &'a SExp<'a>,
+pub fn op_div<D: Dialect>(
+    arena: &Arena,
+    args: NodePtr,
     _max_cost: u64,
-    _dialect: &'_ D,
-) -> Result<(u64, SExp<'a>), ClvmError> {
-    op_div_impl(args, false)
+    _dialect: &D,
+) -> Result<(u64, OpOut), ClvmError> {
+    op_div_impl(arena, args, false)
 }
 
-pub fn op_div_deprecated<'a, D: Dialect>(
-    args: &'a SExp<'a>,
-    _max_cost: u64,
-    _dialect: &'_ D,
-) -> Result<(u64, SExp<'a>), ClvmError> {
-    op_div_impl(args, true)
+// NEW_COST_MODEL div cost: linear + quadratic-by-product terms.
+fn compute_new_div_cost(l0: usize, l1: usize) -> Result<u64, ClvmError> {
+    let mut cost = NEW_DIV_BASE_COST;
+    cost += (l0 as u64 + l1 as u64) * NEW_DIV_LINEAR_COST_PER_BYTE;
+    let square = (l0 as u64)
+        .checked_mul(l1 as u64)
+        .ok_or_else(|| ClvmError::Overflow("new div cost".to_string()))?;
+    Ok(cost + square / NEW_DIV_SQUARE_COST_PER_BYTE_DIVIDER)
 }
 
-pub fn op_divmod<'a, D: Dialect>(
-    args: &'a SExp<'a>,
+// modpow cost, both models.
+fn compute_modpow_cost(
+    bsize: usize,
+    esize: usize,
+    msize: usize,
+    new_cost_model: bool,
+) -> Result<u64, ClvmError> {
+    let mut cost = MODPOW_BASE_COST;
+    if new_cost_model {
+        let m = msize as u64;
+        let inner = m
+            .checked_mul(m)
+            .and_then(|mm| mm.checked_add(NEW_MODPOW_PER_ITERATION_COST))
+            .ok_or_else(|| ClvmError::Overflow("modpow cost".to_string()))?;
+        let exp_term = (esize as u64)
+            .checked_mul(NEW_MODPOW_EXPONENT_MULTIPLIER)
+            .and_then(|e| e.checked_mul(inner))
+            .ok_or_else(|| ClvmError::Overflow("modpow cost".to_string()))?;
+        cost = cost
+            .checked_add(exp_term)
+            .and_then(|c| c.checked_add((bsize as u64).checked_mul(m)?))
+            .ok_or_else(|| ClvmError::Overflow("modpow cost".to_string()))?;
+    } else {
+        cost += bsize as u64 * MODPOW_COST_PER_BYTE_BASE_VALUE;
+        cost += (esize as u64 * esize as u64) * MODPOW_COST_PER_BYTE_EXPONENT;
+        cost += (msize as u64 * msize as u64) * MODPOW_COST_PER_BYTE_MOD;
+    }
+    Ok(cost)
+}
+
+fn number_to_bigint(n: SExpNumber) -> BigInt {
+    match n {
+        SExpNumber::I128(i) => BigInt::from(i),
+        SExpNumber::BigInt(b) => b,
+    }
+}
+
+// `mod` (operator 61): floor modulus, division-by-zero rejected, malloc-costed result.
+// DISABLE_OP caps the dividend at 2048 bytes and LIMITS caps operands at 256/1024
+// (both only until NEW_COST_MODEL bounds the cost instead).
+pub fn op_mod<D: Dialect>(
+    arena: &Arena,
+    args: NodePtr,
     _max_cost: u64,
-    _dialect: &'_ D,
-) -> Result<(u64, SExp<'a>), ClvmError> {
-    let ((a0, l0), (a1, l1)) = two_ints(args, "/")?;
+    dialect: &D,
+) -> Result<(u64, OpOut), ClvmError> {
+    let flags = dialect.flags();
+    let new_cost_model = (flags & NEW_COST_MODEL) != 0;
+    let ((a0, l0), (a1, l1)) = two_ints(arena, args, "mod")?;
+    if (flags & DISABLE_OP) != 0 && !new_cost_model && l0 > 2048 {
+        Err(ClvmError::Unsupported("mod operand too large".to_string()))?;
+    }
+    if (flags & LIMITS) != 0 && !new_cost_model && (l0 > 256 || l1 > 1024) {
+        Err(ClvmError::Unsupported("mod operand too large".to_string()))?;
+    }
+    let cost = if new_cost_model {
+        compute_new_div_cost(l0, l1)?
+    } else {
+        DIV_BASE_COST + ((l0 + l1) as u64) * DIV_COST_PER_BYTE
+    };
+    if a1.sign() == Sign::NoSign {
+        Err(ClvmError::Unsupported(format!(
+            "mod with 0 : {}",
+            arena.debug_fmt(split(arena, args)?.0)
+        )))?;
+    }
+    let (_, r) = a0.div_mod_floor(&a1);
+    malloc_number(cost, &r)
+}
+
+// `modpow` (operator 60): base^exponent mod modulus; negative exponent and zero
+// modulus rejected; LIMITS caps every operand at 256 bytes until NEW_COST_MODEL; malloc-costed
+// result. Dispatch rejects the operator entirely under DISABLE_OP (soft fork 8).
+pub fn op_modpow<D: Dialect>(
+    arena: &Arena,
+    args: NodePtr,
+    max_cost: u64,
+    dialect: &D,
+) -> Result<(u64, OpOut), ClvmError> {
+    let flags = dialect.flags();
+    let new_cost_model = (flags & NEW_COST_MODEL) != 0;
+    check_arg_count(arena, args, 3, "modpow")?;
+    let (first, rest) = split(arena, args)?;
+    let (base, bsize) = number_with_len(arena, first)?;
+    let (second, rest) = split(arena, rest)?;
+    let (exponent, esize) = number_with_len(arena, second)?;
+    let third = split(arena, rest)?.0;
+    let (modulus, msize) = number_with_len(arena, third)?;
+
+    let cost = compute_modpow_cost(bsize, esize, msize, new_cost_model)?;
+    check_cost(cost, max_cost)?;
+
+    if (flags & LIMITS) != 0 && !new_cost_model && (bsize > 256 || esize > 256 || msize > 256) {
+        Err(ClvmError::Unsupported(
+            "modpow operand too large".to_string(),
+        ))?;
+    }
+    if exponent.sign() == Sign::Minus {
+        Err(ClvmError::Unsupported(
+            "ModPow with Negative Exponent".to_string(),
+        ))?;
+    }
+    if modulus.sign() == Sign::NoSign {
+        Err(ClvmError::Unsupported("modpow with 0 modulus".to_string()))?;
+    }
+    let ret =
+        number_to_bigint(base).modpow(&number_to_bigint(exponent), &number_to_bigint(modulus));
+    malloc_bigint(cost, &ret)
+}
+
+pub fn op_div_deprecated<D: Dialect>(
+    arena: &Arena,
+    args: NodePtr,
+    _max_cost: u64,
+    _dialect: &D,
+) -> Result<(u64, OpOut), ClvmError> {
+    op_div_impl(arena, args, true)
+}
+
+pub fn op_divmod<D: Dialect>(
+    arena: &Arena,
+    args: NodePtr,
+    _max_cost: u64,
+    _dialect: &D,
+) -> Result<(u64, OpOut), ClvmError> {
+    let ((a0, l0), (a1, l1)) = two_ints(arena, args, "/")?;
     let cost = DIV_MOD_BASE_COST + ((l0 + l1) as u64) * DIV_MOD_COST_PER_BYTE;
     if a1.sign() == Sign::NoSign {
         Err(ClvmError::Unsupported(format!(
-            "div with 0 : {:?}",
-            args.first()?
+            "div with 0 : {}",
+            arena.debug_fmt(split(arena, args)?.0)
         )))
     } else {
         let (q, r) = a0.div_mod_floor(&a1);
-        let q1 = SExp::from(q);
-        let r1 = SExp::from(r);
-
-        let c =
-            (q1.atom()?.as_ref().len() + r1.atom()?.as_ref().len()) as u64 * MALLOC_COST_PER_BYTE;
-        let r: SExp = q1.cons(r1);
-        Ok((cost + c, r))
+        Ok((cost, OpOut::NumberPair(Box::new((q, r)))))
     }
 }
 
-pub fn op_gr<'a, D: Dialect>(
-    args: &'a SExp<'a>,
+pub fn op_gr<D: Dialect>(
+    arena: &Arena,
+    args: NodePtr,
     _max_cost: u64,
-    _dialect: &'_ D,
-) -> Result<(u64, SExp<'a>), ClvmError> {
-    check_arg_count(args, 2, ">")?;
-    let a0 = args.first()?;
-    let a1 = args.rest()?.first()?;
-    let v0 = int_atom(a0, ">")?;
-    let v1 = int_atom(a1, ">")?;
+    _dialect: &D,
+) -> Result<(u64, OpOut), ClvmError> {
+    check_arg_count(arena, args, 2, ">")?;
+    let (a0, rest) = split(arena, args)?;
+    let a1 = split(arena, rest)?.0;
+    let v0 = int_atom(arena, a0, ">")?;
+    let v1 = int_atom(arena, a1, ">")?;
     let cost = GR_BASE_COST + (v0.len() + v1.len()) as u64 * GR_COST_PER_BYTE;
     Ok((
         cost,
-        if number_from_slice(v0) > number_from_slice(v1) {
-            ONE_SEXP
-        } else {
-            NULL_SEXP
-        },
+        OpOut::Same(
+            if number_from_slice(v0.as_ref()) > number_from_slice(v1.as_ref()) {
+                NodePtr::ONE
+            } else {
+                NodePtr::NIL
+            },
+        ),
     ))
 }
 
-pub fn op_gr_bytes<'a, D: Dialect>(
-    args: &'a SExp<'a>,
+pub fn op_gr_bytes<D: Dialect>(
+    arena: &Arena,
+    args: NodePtr,
     _max_cost: u64,
-    _dialect: &'_ D,
-) -> Result<(u64, SExp<'a>), ClvmError> {
-    check_arg_count(args, 2, ">s")?;
-    let a0 = args.first()?;
-    let a1 = args.rest()?.first()?;
-    let v0 = atom(a0, ">s")?;
-    let v1 = atom(a1, ">s")?;
+    _dialect: &D,
+) -> Result<(u64, OpOut), ClvmError> {
+    check_arg_count(arena, args, 2, ">s")?;
+    let (a0, rest) = split(arena, args)?;
+    let a1 = split(arena, rest)?.0;
+    let v0 = atom(arena, a0, ">s")?;
+    let v1 = atom(arena, a1, ">s")?;
     let cost = GRS_BASE_COST + (v0.len() + v1.len()) as u64 * GRS_COST_PER_BYTE;
     Ok((
         cost,
-        if v0 > v1 {
-            ONE_SEXP.clone()
+        OpOut::Same(if v0.as_ref() > v1.as_ref() {
+            NodePtr::ONE
         } else {
-            NULL_SEXP.clone()
-        },
+            NodePtr::NIL
+        }),
     ))
 }
 
-pub fn op_strlen<'a, D: Dialect>(
-    args: &'a SExp<'a>,
+pub fn op_strlen<D: Dialect>(
+    arena: &Arena,
+    args: NodePtr,
     _max_cost: u64,
-    _dialect: &'_ D,
-) -> Result<(u64, SExp<'a>), ClvmError> {
-    check_arg_count(args, 1, "strlen")?;
-    let a0 = args.first()?;
-    let v0 = atom(a0, "strlen")?;
-    let size = v0.len();
-    let size_num: BigInt = size.into();
-    let size_node = SExp::from(&size_num);
+    _dialect: &D,
+) -> Result<(u64, OpOut), ClvmError> {
+    check_arg_count(arena, args, 1, "strlen")?;
+    let a0 = split(arena, args)?.0;
+    let size = atom(arena, a0, "strlen")?.len();
     let cost = STRLEN_BASE_COST + size as u64 * STRLEN_COST_PER_BYTE;
-    malloc_cost(cost, size_node)
+    #[allow(clippy::cast_possible_wrap)]
+    malloc_number(cost, &SExpNumber::I128(size as i128))
 }
 
 #[allow(clippy::cast_possible_truncation)]
 #[allow(clippy::cast_sign_loss)]
 #[allow(clippy::cast_possible_wrap)]
-pub fn op_substr<'a, D: Dialect>(
-    args: &'a SExp<'a>,
+pub fn op_substr<D: Dialect>(
+    arena: &Arena,
+    args: NodePtr,
     _max_cost: u64,
-    _dialect: &'_ D,
-) -> Result<(u64, SExp<'a>), ClvmError> {
-    let ac = args.arg_count(3);
+    _dialect: &D,
+) -> Result<(u64, OpOut), ClvmError> {
+    let ac = arena.arg_count(args, 3);
     if !(2..=3).contains(&ac) {
         Err(ClvmError::Unsupported(format!(
-            "substr takes exactly 2 or 3 arguments: {args:?}"
+            "substr takes exactly 2 or 3 arguments: {}",
+            arena.debug_fmt(args)
         )))?;
     }
-    let a0 = args.first()?;
-    let s0 = atom(a0, "substr")?;
-    let size = s0.len();
-    let rest = args.rest()?;
-    let i1 = i32_atom(rest.first()?, "substr")?;
-    let rest = rest.rest()?;
-
+    let (a0, rest) = split(arena, args)?;
+    let size = atom(arena, a0, "substr")?.len();
+    let (i1_node, rest) = split(arena, rest)?;
+    let i1 = i32_atom(arena, i1_node, "substr")?;
     let i2 = if ac == 3 {
-        i32_atom(rest.first()?, "substr")?
+        let i2_node = split(arena, rest)?.0;
+        i32_atom(arena, i2_node, "substr")?
     } else {
         size as i32
     };
     if i2 < 0 || i1 < 0 || i2 as usize > size || i2 < i1 {
         Err(ClvmError::Unsupported(format!(
-            "invalid indices for substr: {args:?}"
+            "invalid indices for substr: {}",
+            arena.debug_fmt(args)
         )))
     } else {
-        let r = a0.substr(i1 as usize, i2 as usize)?;
+        // Zero-copy view into the source atom: the op charges base cost 1 with no malloc
+        // cost, so a copying substr would be unmetered allocation.
+        let r = OpOut::Substr(a0, i1 as u32, i2 as u32);
         let cost: u64 = 1;
         Ok((cost, r))
     }
 }
 
-pub fn op_concat<'a, D: Dialect>(
-    args: &'a SExp<'a>,
+pub fn op_concat<D: Dialect>(
+    arena: &Arena,
+    args: NodePtr,
     max_cost: u64,
-    _dialect: &'_ D,
-) -> Result<(u64, SExp<'a>), ClvmError> {
+    _dialect: &D,
+) -> Result<(u64, OpOut), ClvmError> {
     let mut cost = CONCAT_BASE_COST;
     let mut total_size: usize = 0;
-    let mut terms = Vec::<&SExp>::new();
-    for arg in args {
+    let mut terms = Vec::<NodePtr>::new();
+    let mut cursor = ArgCursor::new(args);
+    while let Some(arg) = cursor.next(arena) {
         cost += CONCAT_COST_PER_ARG;
         check_cost(cost + total_size as u64 * CONCAT_COST_PER_BYTE, max_cost)?;
-        match arg {
-            SExp::Pair(_) => {
-                return Err(ClvmError::Unsupported(format!("concat on list: {arg:?}")));
+        match arena.atom_len(arg) {
+            None => {
+                return Err(ClvmError::Unsupported(format!(
+                    "concat on list: {}",
+                    arena.debug_fmt(arg)
+                )));
             }
-            SExp::Atom(b) => total_size += b.as_ref().len(),
+            Some(len) => total_size += len,
         };
         terms.push(arg);
     }
@@ -464,210 +688,258 @@ pub fn op_concat<'a, D: Dialect>(
     cost += total_size as u64 * CONCAT_COST_PER_BYTE;
     cost += total_size as u64 * MALLOC_COST_PER_BYTE;
     check_cost(cost, max_cost)?;
-    let new_atom = SExp::concat(&terms)?;
-    Ok((cost, new_atom))
+    Ok((cost, OpOut::Concat(terms, total_size)))
 }
 
-pub fn op_ash<'a, D: Dialect>(
-    args: &'a SExp<'a>,
+pub fn op_ash<D: Dialect>(
+    arena: &Arena,
+    args: NodePtr,
     _max_cost: u64,
-    _dialect: &'_ D,
-) -> Result<(u64, SExp<'a>), ClvmError> {
-    check_arg_count(args, 2, "ash")?;
-    let a0 = args.first()?;
-    let b0 = int_atom(a0, "ash")?;
-    let i0 = number_from_slice(b0);
-    let l0 = b0.len() as u64;
-    let rest = args.rest()?;
-    let a1 = i32_atom(rest.first()?, "ash")?;
+    _dialect: &D,
+) -> Result<(u64, OpOut), ClvmError> {
+    check_arg_count(arena, args, 2, "ash")?;
+    let (a0, rest) = split(arena, args)?;
+    let (i0, l0) = {
+        let b0 = int_atom(arena, a0, "ash")?;
+        (number_from_slice(b0.as_ref()), b0.len() as u64)
+    };
+    let a1_node = split(arena, rest)?.0;
+    let a1 = i32_atom(arena, a1_node, "ash")?;
     if !(-65535..=65535).contains(&a1) {
         return Err(ClvmError::Unsupported(format!(
-            "shift too large: {:?}",
-            args.rest()?.first()?
+            "shift too large: {}",
+            arena.debug_fmt(a1_node)
         )));
     }
 
     let v: BigInt = if a1 > 0 { i0 << a1 } else { i0 >> -a1 };
     let l1 = limbs_for_int(&v);
-    let r = SExp::from(&v);
     let cost = A_SHIFT_BASE_COST + (l0 + l1) * A_SHIFT_COST_PER_BYTE;
-    malloc_cost(cost, r)
+    malloc_bigint(cost, &v)
 }
 
-pub fn op_lsh<'a, D: Dialect>(
-    args: &'a SExp<'a>,
+pub fn op_lsh<D: Dialect>(
+    arena: &Arena,
+    args: NodePtr,
     _max_cost: u64,
-    _dialect: &'_ D,
-) -> Result<(u64, SExp<'a>), ClvmError> {
-    check_arg_count(args, 2, "lsh")?;
-    let a0 = args.first()?;
-    let b0 = int_atom(a0, "lsh")?;
-    let i0 = BigUint::from_bytes_be(b0);
-    let l0 = b0.len() as u64;
-    let rest = args.rest()?;
-    let a1 = i32_atom(rest.first()?, "lsh")?;
+    _dialect: &D,
+) -> Result<(u64, OpOut), ClvmError> {
+    check_arg_count(arena, args, 2, "lsh")?;
+    let (a0, rest) = split(arena, args)?;
+    let (i0, l0) = {
+        let b0 = int_atom(arena, a0, "lsh")?;
+        (BigUint::from_bytes_be(b0.as_ref()), b0.len() as u64)
+    };
+    let a1_node = split(arena, rest)?.0;
+    let a1 = i32_atom(arena, a1_node, "lsh")?;
     if !(-65535..=65535).contains(&a1) {
         return Err(ClvmError::Unsupported(format!(
-            "shift too large: {:?}",
-            args.rest()?.first()?
+            "shift too large: {}",
+            arena.debug_fmt(a1_node)
         )));
     }
     let i0: BigInt = i0.into();
     let v: BigInt = if a1 > 0 { i0 << a1 } else { i0 >> -a1 };
     let l1 = limbs_for_int(&v);
-    let r = SExp::from(&v);
     let cost = LSHIFT_BASE_COST + (l0 + l1) * LSHIFT_COST_PER_BYTE;
-    malloc_cost(cost, r)
+    malloc_bigint(cost, &v)
 }
 
-fn binop_reduction<'a>(
+fn binop_reduction(
     op_name: &'static str,
     initial_value: BigInt,
-    input: &'a SExp<'a>,
+    arena: &Arena,
+    input: NodePtr,
     max_cost: u64,
     op_f: fn(&mut BigInt, &BigInt) -> (),
-) -> Result<(u64, SExp<'a>), ClvmError> {
+) -> Result<(u64, OpOut), ClvmError> {
     let mut total = initial_value;
     let mut arg_size: usize = 0;
     let mut cost = LOG_BASE_COST;
-    for arg in input.iter() {
-        let blob = int_atom(arg, op_name)?;
-        let n0 = number_from_slice(blob);
+    let mut cursor = ArgCursor::new(input);
+    while let Some(arg) = cursor.next(arena) {
+        let (n0, blob_len) = {
+            let blob = int_atom(arena, arg, op_name)?;
+            (number_from_slice(blob.as_ref()), blob.len())
+        };
         op_f(&mut total, &n0);
-        arg_size += blob.len();
+        arg_size += blob_len;
         cost += LOG_COST_PER_ARG;
         check_cost(cost + (arg_size as u64 * LOG_COST_PER_BYTE), max_cost)?;
     }
     cost += arg_size as u64 * LOG_COST_PER_BYTE;
-    let total = SExp::from(&total);
-    malloc_cost(cost, total)
+    malloc_bigint(cost, &total)
 }
 
 fn logand_op(a: &mut BigInt, b: &BigInt) {
     a.bitand_assign(b);
 }
 
-pub fn op_logand<'a, D: Dialect>(
-    args: &'a SExp<'a>,
+pub fn op_logand<D: Dialect>(
+    arena: &Arena,
+    args: NodePtr,
     max_cost: u64,
-    _dialect: &'_ D,
-) -> Result<(u64, SExp<'a>), ClvmError> {
+    _dialect: &D,
+) -> Result<(u64, OpOut), ClvmError> {
     let v: BigInt = (-1).into();
-    binop_reduction("logand", v, args, max_cost, logand_op)
+    binop_reduction("logand", v, arena, args, max_cost, logand_op)
 }
 
 fn logior_op(a: &mut BigInt, b: &BigInt) {
     a.bitor_assign(b);
 }
 
-pub fn op_logior<'a, D: Dialect>(
-    args: &'a SExp<'a>,
+pub fn op_logior<D: Dialect>(
+    arena: &Arena,
+    args: NodePtr,
     max_cost: u64,
-    _dialect: &'_ D,
-) -> Result<(u64, SExp<'a>), ClvmError> {
+    _dialect: &D,
+) -> Result<(u64, OpOut), ClvmError> {
     let v: BigInt = 0.into();
-    binop_reduction("logior", v, args, max_cost, logior_op)
+    binop_reduction("logior", v, arena, args, max_cost, logior_op)
 }
 
 fn logxor_op(a: &mut BigInt, b: &BigInt) {
     a.bitxor_assign(b);
 }
 
-pub fn op_logxor<'a, D: Dialect>(
-    args: &'a SExp<'a>,
+pub fn op_logxor<D: Dialect>(
+    arena: &Arena,
+    args: NodePtr,
     max_cost: u64,
-    _dialect: &'_ D,
-) -> Result<(u64, SExp<'a>), ClvmError> {
+    _dialect: &D,
+) -> Result<(u64, OpOut), ClvmError> {
     let v: BigInt = (0).into();
-    binop_reduction("logxor", v, args, max_cost, logxor_op)
+    binop_reduction("logxor", v, arena, args, max_cost, logxor_op)
 }
 
-pub fn op_lognot<'a, D: Dialect>(
-    args: &'a SExp<'a>,
+pub fn op_lognot<D: Dialect>(
+    arena: &Arena,
+    args: NodePtr,
     _max_cost: u64,
-    _dialect: &'_ D,
-) -> Result<(u64, SExp<'a>), ClvmError> {
-    check_arg_count(args, 1, "lognot")?;
-    let a0 = args.first()?;
-    let v0 = int_atom(a0, "lognot")?;
-    let mut n: BigInt = number_from_slice(v0);
+    _dialect: &D,
+) -> Result<(u64, OpOut), ClvmError> {
+    check_arg_count(arena, args, 1, "lognot")?;
+    let a0 = split(arena, args)?.0;
+    let (mut n, v0_len) = {
+        let v0 = int_atom(arena, a0, "lognot")?;
+        (number_from_slice(v0.as_ref()), v0.len())
+    };
     n = !n;
-    let cost = LOG_NOT_BASE_COST + ((v0.len() as u64) * LOG_NOT_COST_PER_BYTE);
-    let r = SExp::from(&n);
-    malloc_cost(cost, r)
+    let cost = LOG_NOT_BASE_COST + ((v0_len as u64) * LOG_NOT_COST_PER_BYTE);
+    malloc_bigint(cost, &n)
 }
 
-pub fn op_not<'a, D: Dialect>(
-    args: &'a SExp<'a>,
+pub fn op_not<D: Dialect>(
+    arena: &Arena,
+    args: NodePtr,
     _max_cost: u64,
-    _dialect: &'_ D,
-) -> Result<(u64, SExp<'a>), ClvmError> {
-    check_arg_count(args, 1, "not")?;
-    let r: SExp = SExp::from_bool(!args.first()?.as_bool()).clone();
+    _dialect: &D,
+) -> Result<(u64, OpOut), ClvmError> {
+    check_arg_count(arena, args, 1, "not")?;
+    let a0 = split(arena, args)?.0;
+    let r = if arena.non_nil(a0) {
+        NodePtr::NIL
+    } else {
+        NodePtr::ONE
+    };
     let cost = BOOL_BASE_COST;
-    Ok((cost, r))
+    Ok((cost, OpOut::Same(r)))
 }
 
-pub fn op_any<'a, D: Dialect>(
-    args: &'a SExp<'a>,
+pub fn op_any<D: Dialect>(
+    arena: &Arena,
+    args: NodePtr,
     max_cost: u64,
-    _dialect: &'_ D,
-) -> Result<(u64, SExp<'a>), ClvmError> {
+    _dialect: &D,
+) -> Result<(u64, OpOut), ClvmError> {
     let mut cost = BOOL_BASE_COST;
     let mut is_any = false;
-    for arg in args.iter() {
+    let mut cursor = ArgCursor::new(args);
+    while let Some(arg) = cursor.next(arena) {
         cost += BOOL_COST_PER_ARG;
         check_cost(cost, max_cost)?;
-        is_any = is_any || arg.as_bool();
+        is_any = is_any || arena.non_nil(arg);
     }
-    let total = SExp::from_bool(is_any).clone();
-    Ok((cost, total))
+    Ok((
+        cost,
+        OpOut::Same(if is_any { NodePtr::ONE } else { NodePtr::NIL }),
+    ))
 }
 
-pub fn op_all<'a, D: Dialect>(
-    args: &'a SExp<'a>,
+pub fn op_all<D: Dialect>(
+    arena: &Arena,
+    args: NodePtr,
     max_cost: u64,
-    dialect: &'_ D,
-) -> Result<(u64, SExp<'a>), ClvmError> {
+    dialect: &D,
+) -> Result<(u64, OpOut), ClvmError> {
     let mut cost = BOOL_BASE_COST;
     let mut is_all = true;
-    match args.first() {
-        Ok(arg) => {
-            //Check for Special Print Case
-            if arg.atom().map(|d| d.as_ref()).unwrap_or(&[]) == dialect.print_kw() {
-                let mut out = NULL_SEXP.clone();
-                for arg in args.iter().skip(1) {
-                    out = arg.clone().cons(out);
+    match arena.node_kind(args) {
+        NodeKind::Pair(first, _) => {
+            // Check for Special Print Case
+            let is_print = arena
+                .atom(first)
+                .is_some_and(|a| a.as_ref() == dialect.print_kw());
+            if is_print {
+                let mut print_args = Vec::new();
+                let mut cursor = ArgCursor::new(args);
+                let mut skipped = false;
+                while let Some(arg) = cursor.next(arena) {
+                    if skipped {
+                        print_args.push(arg);
+                    } else {
+                        skipped = true;
+                    }
                 }
-                let _ = op_print(&out, max_cost, dialect);
+                let _ = op_print(arena, &print_args, max_cost, dialect);
                 cost += BOOL_COST_PER_ARG * 3;
-                Ok((cost, SExp::from_bool(is_all).clone()))
+                Ok((
+                    cost,
+                    OpOut::Same(if is_all { NodePtr::ONE } else { NodePtr::NIL }),
+                ))
             } else {
-                //Normal Case
-                for arg in args.iter() {
+                // Normal Case
+                let mut cursor = ArgCursor::new(args);
+                while let Some(arg) = cursor.next(arena) {
                     cost += BOOL_COST_PER_ARG;
                     check_cost(cost, max_cost)?;
-                    is_all = is_all && arg.as_bool();
+                    is_all = is_all && arena.non_nil(arg);
                 }
-                let total = SExp::from_bool(is_all).clone();
-                Ok((cost, total))
+                Ok((
+                    cost,
+                    OpOut::Same(if is_all { NodePtr::ONE } else { NodePtr::NIL }),
+                ))
             }
         }
-        Err(_) => {
-            let total = SExp::from_bool(is_all).clone();
-            Ok((cost, total))
-        }
+        NodeKind::Atom => Ok((
+            cost,
+            OpOut::Same(if is_all { NodePtr::ONE } else { NodePtr::NIL }),
+        )),
     }
 }
 
-pub fn op_softfork<'a, D: Dialect>(
-    args: &'a SExp<'a>,
+pub fn op_softfork<D: Dialect>(
+    arena: &Arena,
+    args: NodePtr,
     max_cost: u64,
-    _dialect: &'_ D,
-) -> Result<(u64, SExp<'a>), ClvmError> {
-    match args.pair() {
-        Ok(pair) => {
-            let n: BigInt = number_from_slice(int_atom(pair.first(), "softfork")?);
+    dialect: &D,
+) -> Result<(u64, OpOut), ClvmError> {
+    match arena.next(args) {
+        Some((first, _rest)) => {
+            let cost_bytes = int_atom(arena, first, "softfork")?;
+            // Soft fork 9 (CANONICAL_INTS): the cost argument must be canonically encoded —
+            // at most one leading 0x00, and only when the next byte's high bit is set. Below
+            // `soft_fork9_height` the flag is unset and any leading zeros are accepted.
+            if (dialect.flags() & CANONICAL_INTS) != 0 {
+                let buf = cost_bytes.as_ref();
+                if !buf.is_empty() && buf[0] == 0 && (buf.len() < 2 || (buf[1] & 0x80) == 0) {
+                    return Err(ClvmError::Unsupported(
+                        "softfork requires cost with no leading zeros".to_string(),
+                    ));
+                }
+            }
+            let n: BigInt = number_from_slice(cost_bytes.as_ref());
             if n.sign() == Sign::Plus {
                 if n > BigInt::from(max_cost) {
                     return Err(ClvmError::Unsupported(format!(
@@ -677,19 +949,20 @@ pub fn op_softfork<'a, D: Dialect>(
                 let cost: u64 = TryFrom::try_from(&n).map_err(|e| {
                     ClvmError::Unsupported(format!("Failed to convert Atom to Int: {e:?}"))
                 })?;
-                Ok((cost, NULL_SEXP.clone()))
+                Ok((cost, OpOut::Same(NodePtr::NIL)))
             } else {
                 Err(ClvmError::Unsupported(format!(
                     "Cost must be > 0, found {n}"
                 )))
             }
         }
-        _ => Err(ClvmError::Unsupported(
+        None => Err(ClvmError::Unsupported(
             "Softfork takes at least 1 argument".to_string(),
         )),
     }
 }
 
+#[cfg(feature = "bls")]
 static GROUP_ORDER: Lazy<BigInt> = Lazy::new(|| {
     let order_as_bytes = &[
         0x73, 0xed, 0xa7, 0x53, 0x29, 0x9d, 0x7d, 0x48, 0x33, 0x39, 0xd8, 0x08, 0x09, 0xa1, 0xd8,
@@ -700,7 +973,8 @@ static GROUP_ORDER: Lazy<BigInt> = Lazy::new(|| {
     n.into()
 });
 
-fn mod_group_order(n: &BigInt) -> BigInt {
+#[cfg(feature = "bls")]
+pub(crate) fn mod_group_order(n: &BigInt) -> BigInt {
     let order = GROUP_ORDER.clone();
     let mut remainder = n.mod_floor(&order);
     if remainder.sign() == Sign::Minus {
@@ -709,73 +983,209 @@ fn mod_group_order(n: &BigInt) -> BigInt {
     remainder
 }
 
-fn number_to_scalar(n: &BigInt) -> Scalar {
-    let (sign, as_u8): (Sign, Vec<u8>) = n.to_bytes_le();
-    let mut scalar_array: [u8; 32] = [0; 32];
-    scalar_array[..as_u8.len()].clone_from_slice(&as_u8[..]);
-    let exp: Scalar = Scalar::from_bytes(&scalar_array).unwrap();
-    if sign == Sign::Minus { exp.neg() } else { exp }
-}
+/// G1 primitives for the two CLVM BLS operators, over raw `blst` FFI.
+///
+/// `parse_g1_compressed` accepts only canonical compressed encodings:
+/// compressed-flag/infinity/sort-bit canonicality, x < p, on-curve, and the G1 subgroup
+/// check, with `0xc0 || 0^47` as the only infinity encoding.
+#[cfg(feature = "bls")]
+pub(crate) mod bls_g1 {
+    use blst::{
+        BLST_ERROR, blst_p1, blst_p1_add_or_double_affine, blst_p1_affine, blst_p1_affine_in_g1,
+        blst_p1_compress, blst_p1_generator, blst_p1_mult, blst_p1_uncompress, blst_scalar,
+        blst_scalar_from_be_bytes,
+    };
+    use std::mem::MaybeUninit;
 
-pub fn op_pubkey_for_exp<'a, D: Dialect>(
-    args: &'a SExp<'a>,
-    _max_cost: u64,
-    _dialect: &'_ D,
-) -> Result<(u64, SExp<'a>), ClvmError> {
-    check_arg_count(args, 1, "pubkey_for_exp")?;
-    let a0 = args.first()?;
-    let v0 = int_atom(a0, "pubkey_for_exp")?;
-    let exp: BigInt = mod_group_order(&number_from_slice(v0));
-    let cost = PUBKEY_BASE_COST + (v0.len() as u64) * PUBKEY_COST_PER_BYTE;
-    let exp: Scalar = number_to_scalar(&exp);
-    let point: G1Projective = G1Affine::generator() * exp;
-    let point: G1Affine = point.into();
-    Ok(new_atom_and_cost(cost, &point.to_compressed()))
-}
+    /// The point at infinity: `blst` represents it as the all-zero point (Z = 0).
+    pub(crate) fn identity() -> blst_p1 {
+        blst_p1::default()
+    }
 
-pub fn op_point_add<'a, D: Dialect>(
-    args: &'a SExp<'a>,
-    max_cost: u64,
-    _dialect: &'_ D,
-) -> Result<(u64, SExp<'a>), ClvmError> {
-    let mut cost = POINT_ADD_BASE_COST;
-    let mut total: G1Projective = G1Projective::identity();
-    for arg in args {
-        let blob = atom(arg, "point_add")?;
-        let mut is_ok: bool = blob.len() == 48;
-        if is_ok {
-            let mut as_array: [u8; 48] = [0; 48];
-            as_array.clone_from_slice(&blob[0..48]);
-            let v = G1Affine::from_compressed(&as_array);
-            is_ok = v.is_some().into();
-            if is_ok {
-                let point = v.unwrap();
-                cost += POINT_ADD_COST_PER_ARG;
-                check_cost(cost, max_cost)?;
-                total += &point;
-            }
-        } else {
-            let blob: String = hex::encode(sexp_to_bytes(arg)?);
-            let msg = format!(
-                "point_add expects blob, got {blob}: Length of bytes object not equal to G1Element::SIZE"
+    /// `generator * n` for a big-endian, group-order-reduced, non-negative integer.
+    /// `n_be` must be non-empty (a reduced zero is `[0]`).
+    pub(crate) fn generator_mul_be(n_be: &[u8]) -> blst_p1 {
+        debug_assert!(!n_be.is_empty() && n_be.len() <= 32);
+        // SAFETY: `blst_scalar_from_be_bytes` fully initializes `scalar` for 1..=32 input
+        // bytes; `blst_p1_mult` reads 256 scalar bits (the full blst_scalar width) and
+        // fully initializes `point`. All pointers are valid locals.
+        unsafe {
+            let mut scalar = MaybeUninit::<blst_scalar>::uninit();
+            blst_scalar_from_be_bytes(scalar.as_mut_ptr(), n_be.as_ptr(), n_be.len());
+            let mut point = MaybeUninit::<blst_p1>::uninit();
+            blst_p1_mult(
+                point.as_mut_ptr(),
+                blst_p1_generator(),
+                scalar.as_ptr().cast::<u8>(),
+                256,
             );
-            Err(ClvmError::Unsupported(format!("{msg} {args:?}")))?;
+            point.assume_init()
         }
     }
-    let total: G1Affine = total.into();
-    Ok(new_atom_and_cost(cost, &total.to_compressed()))
+
+    /// Parse a 48-byte compressed G1 element: canonical-infinity guards,
+    /// `blst_p1_uncompress`, then `is_inf || in_g1`; `None` for every invalid class.
+    pub(crate) fn parse_g1_compressed(bytes: &[u8; 48]) -> Option<blst_p1_affine> {
+        let zeros_only = bytes[1..].iter().all(|b| *b == 0);
+        if (bytes[0] & 0xc0) == 0xc0 {
+            // The only canonical infinity encoding is 0xc0 followed by 47 zero bytes.
+            if bytes[0] != 0xc0 || !zeros_only {
+                return None;
+            }
+            // Affine infinity: the all-zero affine point (x = y = 0).
+            return Some(blst_p1_affine::default());
+        }
+        if (bytes[0] & 0xc0) != 0x80 {
+            // Compressed flag clear, or infinity flag without the compressed flag.
+            return None;
+        }
+        if zeros_only && (bytes[0] & 0x3f) == 0 {
+            // x = 0 without the infinity flag is non-canonical
+            return None;
+        }
+        // SAFETY: `bytes` is a valid 48-byte buffer; on BLST_SUCCESS `affine` is initialized.
+        let affine = unsafe {
+            let mut affine = MaybeUninit::<blst_p1_affine>::uninit();
+            if blst_p1_uncompress(affine.as_mut_ptr(), bytes.as_ptr()) != BLST_ERROR::BLST_SUCCESS {
+                return None;
+            }
+            affine.assume_init()
+        };
+        // Subgroup check; infinity was handled above.
+        // SAFETY: `affine` is initialized and on the curve.
+        if unsafe { blst_p1_affine_in_g1(&raw const affine) } {
+            Some(affine)
+        } else {
+            None
+        }
+    }
+
+    /// `acc += p` on the affine addend (complete formula, handles doubling and either
+    /// operand at infinity).
+    pub(crate) fn add_assign(acc: &mut blst_p1, p: &blst_p1_affine) {
+        // SAFETY: both operands are valid initialized points.
+        unsafe {
+            blst_p1_add_or_double_affine(&raw mut *acc, &raw const *acc, &raw const *p);
+        }
+    }
+
+    /// Compressed encoding via `blst_p1_compress`; infinity encodes as `0xc0 || 0^47`.
+    pub(crate) fn to_compressed(p: &blst_p1) -> [u8; 48] {
+        // SAFETY: `p` is a valid initialized point; `blst_p1_compress` writes all 48 bytes.
+        unsafe {
+            let mut bytes = MaybeUninit::<[u8; 48]>::uninit();
+            blst_p1_compress(bytes.as_mut_ptr().cast::<u8>(), &raw const *p);
+            bytes.assume_init()
+        }
+    }
 }
 
-pub fn op_coinid<'a, D: Dialect>(
-    args: &'a SExp<'a>,
+#[cfg(feature = "bls")]
+pub fn op_pubkey_for_exp<D: Dialect>(
+    arena: &Arena,
+    args: NodePtr,
+    max_cost: u64,
+    _dialect: &D,
+) -> Result<(u64, OpOut), ClvmError> {
+    check_arg_count(arena, args, 1, "pubkey_for_exp")?;
+    let a0 = split(arena, args)?.0;
+    let (exp, v0_len) = {
+        let v0 = int_atom(arena, a0, "pubkey_for_exp")?;
+        (mod_group_order(&number_from_slice(v0.as_ref())), v0.len())
+    };
+    let cost = PUBKEY_BASE_COST + (v0_len as u64) * PUBKEY_COST_PER_BYTE;
+    // The exponent-priced cost is checked against `max_cost` BEFORE the scalar
+    // multiplication; the 48-byte malloc surcharge is added to the returned cost but is
+    // not part of the in-operator check.
+    check_cost(cost, max_cost)?;
+    // `exp` is reduced mod the group order, so it is non-negative and its big-endian
+    // magnitude (`[0]` for zero) is at most 32 bytes.
+    let point = bls_g1::generator_mul_be(&exp.to_bytes_be().1);
+    new_atom_and_cost(cost, &bls_g1::to_compressed(&point))
+}
+
+#[cfg(not(feature = "bls"))]
+pub fn op_pubkey_for_exp<D: Dialect>(
+    _arena: &Arena,
+    _args: NodePtr,
     _max_cost: u64,
-    _dialect: &'_ D,
-) -> Result<(u64, SExp<'a>), ClvmError> {
-    let mut args_list = args.as_atom_list();
+    _dialect: &D,
+) -> Result<(u64, OpOut), ClvmError> {
+    Err(ClvmError::Unsupported(
+        "pubkey_for_exp requires dg_xch_core to be built with the `bls` feature".to_string(),
+    ))
+}
+
+#[cfg(feature = "bls")]
+pub fn op_point_add<D: Dialect>(
+    arena: &Arena,
+    args: NodePtr,
+    max_cost: u64,
+    _dialect: &D,
+) -> Result<(u64, OpOut), ClvmError> {
+    let mut cost = POINT_ADD_BASE_COST;
+    let mut total = bls_g1::identity();
+    let mut cursor = ArgCursor::new(args);
+    while let Some(arg) = cursor.next(arena) {
+        // POINT_ADD_COST_PER_ARG is charged and checked against `max_cost` for EVERY
+        // argument, before parsing it — a cost-exhausted budget errors even when the
+        // pending argument is garbage.
+        cost += POINT_ADD_COST_PER_ARG;
+        check_cost(cost, max_cost)?;
+        let blob = atom(arena, arg, "point_add")?;
+        let blob_bytes = blob.as_ref();
+        if blob_bytes.len() == 48 {
+            let mut as_array: [u8; 48] = [0; 48];
+            as_array.clone_from_slice(&blob_bytes[0..48]);
+            // any invalid 48-byte encoding (non-canonical infinity, x = 0 without the
+            // infinity flag, x >= p, off-curve, wrong subgroup) errors the whole
+            // operator — no silent skip
+            if let Some(point) = bls_g1::parse_g1_compressed(&as_array) {
+                bls_g1::add_assign(&mut total, &point);
+            } else {
+                let blob_hex: String = hex::encode(blob_bytes);
+                Err(ClvmError::InvalidInput(format!(
+                    "point_add atom is not a G1 point: {blob_hex}"
+                )))?;
+            }
+        } else {
+            let blob_hex: String = hex::encode(blob_bytes);
+            let msg = format!(
+                "point_add expects blob, got {blob_hex}: Length of bytes object not equal to G1Element::SIZE"
+            );
+            Err(ClvmError::Unsupported(format!(
+                "{msg} {}",
+                arena.debug_fmt(args)
+            )))?;
+        }
+    }
+    new_atom_and_cost(cost, &bls_g1::to_compressed(&total))
+}
+
+#[cfg(not(feature = "bls"))]
+pub fn op_point_add<D: Dialect>(
+    _arena: &Arena,
+    _args: NodePtr,
+    _max_cost: u64,
+    _dialect: &D,
+) -> Result<(u64, OpOut), ClvmError> {
+    Err(ClvmError::Unsupported(
+        "point_add requires dg_xch_core to be built with the `bls` feature".to_string(),
+    ))
+}
+
+pub fn op_coinid<D: Dialect>(
+    arena: &Arena,
+    args: NodePtr,
+    _max_cost: u64,
+    _dialect: &D,
+) -> Result<(u64, OpOut), ClvmError> {
+    let mut args_list = arena.as_atom_list(args);
     if args_list.len() != 3 {
         Err(ClvmError::InvalidArgCount(format!(
-            "coinid expects 3 args, got {} {args:?}",
-            args_list.len()
+            "coinid expects 3 args, got {} {}",
+            args_list.len(),
+            arena.debug_fmt(args)
         )))?;
     }
     let amount = args_list.pop().expect("Length Already Checked");
@@ -815,8 +1225,277 @@ pub fn op_coinid<'a, D: Dialect>(
         puzzle_hash: Bytes32::parse(&puzzle_hash)?,
         amount: u64_from_bigint(&as_int)?,
     };
-    Ok((
-        COIN_ID_COST,
-        SExp::Atom(AtomBuf::new(coin.coin_id().into())),
-    ))
+    // The 32-byte coin id is a freshly allocated atom, so — like every other hashing op —
+    // it carries `len * MALLOC_COST_PER_BYTE` (32 * 10 = 320) on top of the base COIN_ID_COST.
+    let coin_id = coin.coin_id();
+    new_atom_and_cost(COIN_ID_COST, coin_id.as_ref())
+}
+#[cfg(test)]
+mod tests {
+    //! Behavioral tests for the arithmetic / hashing / bitwise / string
+    //! operators. Operands are quoted; results follow canonical CLVM operator semantics.
+    use crate::clvm::program::Program;
+    use crate::clvm::sexp::SExp;
+    use crate::clvm::utils::INFINITE_COST;
+    use crate::errors::ClvmError;
+    use num_bigint::BigInt;
+
+    #[test]
+    fn op_sha256_matches_the_reference_digest() {
+        use sha2::Digest;
+        let mut arena = crate::clvm::arena::Arena::new();
+        for blobs in [
+            vec![b"".to_vec()],
+            vec![b"chia".to_vec()],
+            vec![vec![0xAB; 31], vec![0xCD; 64]],
+            vec![vec![0x01; 1_000_000]],
+        ] {
+            let mut reference = sha2::Sha256::new();
+            for b in &blobs {
+                reference.update(b);
+            }
+            let mut args = arena.new_atom(&[]).expect("nil");
+            for b in blobs.iter().rev() {
+                let item = arena.new_atom(b).expect("atom");
+                args = arena.new_pair(item, args).expect("pair");
+            }
+            let (cost, out) = super::op_sha256(
+                &arena,
+                args,
+                u64::MAX,
+                &crate::clvm::dialect::ChiaDialect::new(0),
+            )
+            .expect("op runs");
+            let (_, node) = out.materialize(&mut arena, cost).expect("materialize");
+            let got = arena.atom(node).expect("digest atom");
+            assert_eq!(got.as_ref(), reference.finalize().as_slice());
+        }
+    }
+
+    fn run_op(op: u8, args: &[SExp<'static>]) -> Result<SExp<'static>, ClvmError> {
+        let mut items = vec![SExp::from(op)];
+        for a in args {
+            items.push(SExp::from((1_u8, a.clone())));
+        }
+        let program = Program::new(SExp::from(items));
+        program
+            .run(INFINITE_COST, 0, &Program::default())
+            .map(|(_c, out)| out.sexp().to_owned())
+    }
+
+    fn int(sexp: &SExp) -> BigInt {
+        sexp.atom().unwrap().as_int()
+    }
+    fn bytes(sexp: &SExp) -> Vec<u8> {
+        sexp.atom().unwrap().as_ref().to_vec()
+    }
+
+    #[test]
+    fn arithmetic_add_sub_mul() {
+        assert_eq!(
+            int(&run_op(16, &[SExp::from(5), SExp::from(7)]).unwrap()),
+            BigInt::from(12)
+        );
+        assert_eq!(
+            int(&run_op(17, &[SExp::from(10), SExp::from(3)]).unwrap()),
+            BigInt::from(7)
+        );
+        assert_eq!(
+            int(&run_op(18, &[SExp::from(6), SExp::from(7)]).unwrap()),
+            BigInt::from(42)
+        );
+    }
+
+    #[test]
+    fn div_floors_and_divmod_returns_pair() {
+        // (/ 13 4) -> 3
+        assert_eq!(
+            int(&run_op(19, &[SExp::from(13), SExp::from(4)]).unwrap()),
+            BigInt::from(3)
+        );
+        // (divmod 13 4) -> (3 . 1)
+        let dm = run_op(20, &[SExp::from(13), SExp::from(4)]).unwrap();
+        assert_eq!(int(dm.first().unwrap()), BigInt::from(3));
+        assert_eq!(int(dm.rest().unwrap()), BigInt::from(1));
+    }
+
+    // Signed two's-complement atom decode.
+    #[test]
+    fn div_negative_divisor_floors_to_minus_two() {
+        // (/ 10 -5) -> -2. An unsigned decode would read -5 (0xfb) as 251 -> 10/251 == 0.
+        assert_eq!(
+            int(&run_op(19, &[SExp::from(10), SExp::from(-5)]).unwrap()),
+            BigInt::from(-2)
+        );
+    }
+
+    // Signed two's-complement atom decode.
+    #[test]
+    fn add_with_negative_operand_is_signed() {
+        // (+ -1 1) -> 0. An unsigned decode would read -1 (0xff) as 255 -> 256.
+        assert_eq!(
+            int(&run_op(16, &[SExp::from(-1), SExp::from(1)]).unwrap()),
+            BigInt::from(0)
+        );
+    }
+
+    // Signed-boundary coverage. Every case decodes a high-bit atom through the
+    // arithmetic path; big-endian signed two's-complement decode, minimal signed encode.
+    #[test]
+    fn signed_boundary_decode_and_roundtrip() {
+        // 0x80 == -128, 0x0080 == +128 ⇒ sum 0 (empty atom).
+        let s = run_op(16, &[SExp::from(-128), SExp::from(128)]).unwrap();
+        assert_eq!(int(&s), BigInt::from(0));
+        assert!(s.nullp());
+        // 0xff00 == -256, 0x0100 == +256 ⇒ sum 0 (multi-byte negative decode).
+        assert_eq!(
+            int(&run_op(16, &[SExp::from(-256), SExp::from(256)]).unwrap()),
+            BigInt::from(0)
+        );
+        // (- 0 1) == -1, whose minimal signed encoding is the atom 0xff.
+        let neg_one = run_op(17, &[SExp::from(0), SExp::from(1)]).unwrap();
+        assert_eq!(int(&neg_one), BigInt::from(-1));
+        assert_eq!(bytes(&neg_one), vec![0xff]);
+        // (+ -1 0) round-trips -1 back to atom 0xff.
+        assert_eq!(
+            bytes(&run_op(16, &[SExp::from(-1), SExp::from(0)]).unwrap()),
+            vec![0xff]
+        );
+        // 0 encodes as the empty atom.
+        assert!(run_op(17, &[SExp::from(5), SExp::from(5)]).unwrap().nullp());
+        // (* -1 -1) == 1: two high-bit atoms multiply to a positive.
+        assert_eq!(
+            int(&run_op(18, &[SExp::from(-1), SExp::from(-1)]).unwrap()),
+            BigInt::from(1)
+        );
+    }
+
+    #[test]
+    fn div_negative_dividend_floors_toward_neg_infinity() {
+        // (/ -7 2) == -4 (floors toward -inf), atom 0xfc.
+        let q = run_op(19, &[SExp::from(-7), SExp::from(2)]).unwrap();
+        assert_eq!(int(&q), BigInt::from(-4));
+        assert_eq!(bytes(&q), vec![0xfc]);
+    }
+
+    #[test]
+    fn greater_than_with_negative_operand_is_signed() {
+        // (> -1 1) -> () : -1 (0xff) must decode as negative, not 255.
+        assert!(
+            run_op(21, &[SExp::from(-1), SExp::from(1)])
+                .unwrap()
+                .nullp()
+        );
+        // (> 1 -1) -> 1.
+        assert_eq!(
+            int(&run_op(21, &[SExp::from(1), SExp::from(-1)]).unwrap()),
+            BigInt::from(1)
+        );
+    }
+
+    #[test]
+    fn div_by_zero_errors() {
+        let err = run_op(19, &[SExp::from(5), SExp::from(0)]).unwrap_err();
+        assert!(matches!(err, ClvmError::Unsupported(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn greater_than_numeric_and_bytewise() {
+        // (> 5 3) -> 1 ; (> 3 5) -> ()
+        assert_eq!(
+            int(&run_op(21, &[SExp::from(5), SExp::from(3)]).unwrap()),
+            BigInt::from(1)
+        );
+        assert!(run_op(21, &[SExp::from(3), SExp::from(5)]).unwrap().nullp());
+        // (>s 0x02 0x01) -> 1
+        assert_eq!(
+            int(&run_op(10, &[SExp::from(2), SExp::from(1)]).unwrap()),
+            BigInt::from(1)
+        );
+    }
+
+    #[test]
+    fn sha256_of_abc_matches_known_vector() {
+        let out = run_op(11, &[SExp::from("abc")]).unwrap();
+        assert_eq!(
+            hex::encode(bytes(&out)),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn strlen_substr_concat() {
+        assert_eq!(
+            int(&run_op(13, &[SExp::from("hello")]).unwrap()),
+            BigInt::from(5)
+        );
+        // (substr "hello" 1 3) -> "el"
+        let sub = run_op(12, &[SExp::from("hello"), SExp::from(1), SExp::from(3)]).unwrap();
+        assert_eq!(bytes(&sub), b"el");
+        // (concat "foo" "bar") -> "foobar"
+        let cat = run_op(14, &[SExp::from("foo"), SExp::from("bar")]).unwrap();
+        assert_eq!(bytes(&cat), b"foobar");
+    }
+
+    #[test]
+    fn shifts_ash_and_lsh() {
+        // (ash 1 4) -> 16
+        assert_eq!(
+            int(&run_op(22, &[SExp::from(1), SExp::from(4)]).unwrap()),
+            BigInt::from(16)
+        );
+        // (lsh 1 4) -> 16
+        assert_eq!(
+            int(&run_op(23, &[SExp::from(1), SExp::from(4)]).unwrap()),
+            BigInt::from(16)
+        );
+    }
+
+    #[test]
+    fn bitwise_and_or_xor_not() {
+        assert_eq!(
+            int(&run_op(24, &[SExp::from(15), SExp::from(51)]).unwrap()),
+            BigInt::from(3)
+        );
+        assert_eq!(
+            int(&run_op(25, &[SExp::from(15), SExp::from(48)]).unwrap()),
+            BigInt::from(63)
+        );
+        assert_eq!(
+            int(&run_op(26, &[SExp::from(15), SExp::from(51)]).unwrap()),
+            BigInt::from(60)
+        );
+        // (lognot 0) -> -1
+        assert_eq!(
+            int(&run_op(27, &[SExp::from(0)]).unwrap()),
+            BigInt::from(-1)
+        );
+    }
+
+    #[test]
+    fn boolean_not_any_all() {
+        assert_eq!(
+            int(&run_op(32, &[SExp::default()]).unwrap()),
+            BigInt::from(1)
+        );
+        assert!(run_op(32, &[SExp::from(5)]).unwrap().nullp());
+        assert_eq!(
+            int(&run_op(33, &[SExp::default(), SExp::from(1)]).unwrap()),
+            BigInt::from(1)
+        );
+        assert!(
+            run_op(33, &[SExp::default(), SExp::default()])
+                .unwrap()
+                .nullp()
+        );
+        assert_eq!(
+            int(&run_op(34, &[SExp::from(1), SExp::from(2)]).unwrap()),
+            BigInt::from(1)
+        );
+        assert!(
+            run_op(34, &[SExp::from(1), SExp::default()])
+                .unwrap()
+                .nullp()
+        );
+    }
 }

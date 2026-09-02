@@ -27,23 +27,12 @@ pub struct RewardChainBlock {
 }
 
 impl RewardChainBlock {
-    /// chia `std_hash(bytes(reward_chain_block))`. The consensus hash of this reward-chain block: sha256
-    /// over its streamable encoding. This is the value a block record carries as
-    /// `reward_infusion_new_challenge` and the foliage commits as `reward_block_hash`. As a blockchain
-    /// (not network) type its encoding — hence this hash — is independent of the negotiated protocol
-    /// version.
-    ///
-    /// # Errors
-    /// Returns an error if the streamable encoding of the reward-chain block fails.
     pub fn hash(&self) -> Result<Bytes32, Error> {
         Ok(Bytes32::from(hash_256(
             self.to_bytes(ChiaProtocolVersion::default())?,
         )))
     }
 
-    /// chia `reward_chain_block.get_unfinished()`. The [`RewardChainBlockUnfinished`] view of this block:
-    /// the signage-point-and-earlier fields, dropping the infusion-point VDFs and the transaction flag.
-    /// Header validation hashes it to check the foliage's `unfinished_reward_block_hash`.
     #[must_use]
     pub fn get_unfinished(&self) -> RewardChainBlockUnfinished {
         RewardChainBlockUnfinished {

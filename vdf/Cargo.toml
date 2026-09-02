@@ -13,7 +13,17 @@ dg_xch_core = { path = "../core", version = "3.0.0", default-features = false }
 num-bigint = "0.4.6"
 num-integer = "0.1.46"
 num-traits = "0.2.19"
+rug = { version = "1.28", default-features = false, features = ["integer", "std"] }
+# rug -> gmp-mpfr-sys compiles GMP from source, and its build script refuses host != target
+# builds unless `force-cross` is set. Feature-only, inert natively.
+gmp-mpfr-sys = { version = "1.7.1", default-features = false, features = ["force-cross"] }
 sha2 = "0.10.9"
 
 [dev-dependencies]
 hex = "0.4.3"
+
+[features]
+# Wall-time phase accumulators inside square_with — assembly-targeting measurement.
+phase-profile = []
+# Per-call stderr trace of hash_prime (bits, seed hash, candidate count) — the redundancy probe.
+hashprime-probe = []

@@ -1,0 +1,43 @@
+# Fuzzing harness for the CLVM VM. Excluded from the workspace so a normal `cargo build` never
+# needs the nightly toolchain libfuzzer requires.
+#
+#   cargo +nightly fuzz run parse_program
+#   cargo +nightly fuzz run run_program
+#
+# The seeded corpora in `core/tests/clvm_parser_robustness.rs` and
+# `core/tests/clvm_random_differential.rs` explore what was written down; these explore what was
+# not. Both matter — the deterministic tests gate CI, the fuzzers find the cases to add to them.
+
+[package]
+name = "dg-xch-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+dg_xch_core = { path = "../core" }
+
+[[bin]]
+name = "parse_program"
+path = "fuzz_targets/parse_program.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "run_program"
+path = "fuzz_targets/run_program.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "roundtrip"
+path = "fuzz_targets/roundtrip.rs"
+test = false
+doc = false
+bench = false

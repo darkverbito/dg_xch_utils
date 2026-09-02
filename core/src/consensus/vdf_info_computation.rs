@@ -1,5 +1,4 @@
 // Reconstructing a block's signage-point VDF inputs and challenges.
-// Ports chia/consensus/vdf_info_computation.py (no chia_rs port exists).
 
 use crate::blockchain::block_record::BlockRecord;
 use crate::blockchain::class_group_element::ClassgroupElement;
@@ -10,8 +9,8 @@ use crate::consensus::{missing, rejected};
 use std::collections::HashMap;
 use std::io::Error;
 
-// chia get_signage_point_vdf_info. Returns
-// (cc_vdf_challenge, rc_vdf_challenge, cc_vdf_input, rc_vdf_input, cc_vdf_iters, rc_vdf_iters);
+// Returns (cc_vdf_challenge, rc_vdf_challenge, cc_vdf_input, rc_vdf_input, cc_vdf_iters,
+// rc_vdf_iters);
 // rc_vdf_input is always the identity element and cc_vdf_iters == rc_vdf_iters == sp_vdf_iters.
 #[allow(clippy::type_complexity)]
 pub fn get_signage_point_vdf_info(
@@ -73,8 +72,7 @@ pub fn get_signage_point_vdf_info(
         if curr.total_iters < sp_total_iters {
             sp_vdf_iters = u64::try_from(sp_total_iters - curr.total_iters)
                 .map_err(|_| rejected("sp_vdf: iters"))?;
-            cc_vdf_input = ClassgroupElement::try_from(&curr.challenge_vdf_output)
-                .map_err(|_| rejected("invalid challenge VDF output"))?;
+            cc_vdf_input = curr.challenge_vdf_output;
             rc_vdf_challenge = curr.reward_infusion_new_challenge;
         } else {
             let hashes = curr
@@ -144,8 +142,7 @@ pub fn get_signage_point_vdf_info(
         if let Some(pre) = sp_pre_sb {
             sp_vdf_iters = u64::try_from(sp_total_iters - pre.total_iters)
                 .map_err(|_| rejected("sp_vdf: iters"))?;
-            cc_vdf_input = ClassgroupElement::try_from(&pre.challenge_vdf_output)
-                .map_err(|_| rejected("invalid challenge VDF output"))?;
+            cc_vdf_input = pre.challenge_vdf_output;
             rc_vdf_challenge = pre.reward_infusion_new_challenge;
         } else {
             sp_vdf_iters = sp_iters;
@@ -165,8 +162,7 @@ pub fn get_signage_point_vdf_info(
         if curr.total_iters < sp_total_iters {
             sp_vdf_iters = u64::try_from(sp_total_iters - curr.total_iters)
                 .map_err(|_| rejected("sp_vdf: iters"))?;
-            cc_vdf_input = ClassgroupElement::try_from(&curr.challenge_vdf_output)
-                .map_err(|_| rejected("invalid challenge VDF output"))?;
+            cc_vdf_input = curr.challenge_vdf_output;
             rc_vdf_challenge = curr.reward_infusion_new_challenge;
         } else {
             let hashes = curr

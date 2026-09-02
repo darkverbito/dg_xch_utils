@@ -10,9 +10,7 @@ repository.workspace = true
 
 [dependencies]
 async-trait = "0.1.89"
-bls12_381 = "0.8.0"
-blst = { version = "0.3.16", features = ["portable"] }
-bumpalo = "3.20.2"
+blst = { version = "0.3.16", features = ["portable"], optional = true }
 bytes = "1.11.1"
 const-hex = "1.16.0"
 der = "0.7.9"
@@ -21,6 +19,7 @@ dg_parser_macro = {path = "../parser_macro", version="3.0.0"}
 dg_xch_serialize = {path = "../serialize", version="3.0.0"}
 futures-util = "0.3.32"
 hex = "0.4.3"
+ring = "0.17.14"
 hkdf = "0.12.4"
 hyper = {version="1.8.1", features=["full"]}
 hyper-util = {version="0.1.20", features=["full"]}
@@ -48,15 +47,35 @@ uuid = {version="1.21.0", features=["v4"]}
 x509-cert = { version = "0.2.5", features = ["std", "pem", "builder"] }
 
 [dev-dependencies]
+serde_json = "1.0.145"
 dg_logger = { path = "../logging" }
 criterion = "0.7.0"
+# Independent test-only BLS implementation used by operator tests and benchmarks.
+bls12_381 = "0.8.0"
 
 [[bench]]
 name = "clvm"
 harness = false
 
+[[bench]]
+name = "bls"
+harness = false
+required-features = ["bls"]
+
+[[bench]]
+name = "bls_ops"
+harness = false
+required-features = ["bls"]
+
 [features]
+# BLS12-381 cryptography via blst (C + assembly). Default-on. Disabling it leaves the
+# pure-data surface (wire/chain types, serialization, RPC structs) compiling without a
+# C toolchain dependency on blst; the CLVM VM stays available but the BLS opcodes error,
+# and the consensus validation/producer modules, signing helpers and key conversions are
+# compiled out — a `bls`-less build is NOT consensus-capable.
+bls = ["dep:blst"]
 mysql = ["sqlx/mysql"]
 postgres = ["sqlx/postgres"]
+sqlite = ["sqlx/sqlite"]
 metrics = ["dep:prometheus"]
-default = ["sqlx", "postgres"]
+default = ["sqlx", "postgres", "bls"]

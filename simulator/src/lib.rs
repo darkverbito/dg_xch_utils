@@ -1,21 +1,38 @@
-use dg_logger::DruidGardenLogger;
-use log::Level;
-use log::info;
-use portfu::prelude::ServerBuilder;
-use std::env;
-use std::io::Error;
+#[cfg(feature = "pos2")]
+pub mod chain;
+pub mod config;
+#[cfg(feature = "server")]
+pub(crate) mod control;
+pub mod error;
+#[cfg(feature = "pos2")]
+pub mod factory;
+pub mod plots;
+#[cfg(feature = "pos2")]
+pub mod pos2;
+pub mod rpc;
+#[cfg(feature = "server")]
+pub mod server;
+pub mod stats;
+pub mod step;
+pub mod timelord;
 
-pub async fn start_simulator() -> Result<(), Error> {
-    let _logger = DruidGardenLogger::build()
-        .use_colors(true)
-        .current_level(Level::Info)
-        .init()
-        .map_err(|e| Error::other(format!("{e:?}")))?;
-    let hostname = env::var("SIMULATOR_HOSTNAME").unwrap_or("0.0.0.0".to_string());
-    let port = env::var("SIMULATOR_PORT")
-        .map(|s| s.parse().unwrap())
-        .unwrap_or(8080u16);
-    let server = ServerBuilder::default().host(hostname).port(port).build();
-    info!("Starting Server");
-    server.run().await
+pub use config::{HarnessConfig, SimConfig};
+pub use error::{ConfigError, SimError, ValidationTier};
+pub use plots::PlotKeys;
+#[cfg(feature = "pos2")]
+pub use pos2::{Plot, PlotSet};
+pub use rpc::start_simulator;
+pub use step::{TimestampEmitter, reorg_seed};
+pub use timelord::prove_vdf;
+
+fn _version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+fn _pkg_name() -> &'static str {
+    env!("CARGO_PKG_NAME")
+}
+
+#[must_use]
+pub fn version() -> String {
+    format!("{}: {}", _pkg_name(), _version())
 }

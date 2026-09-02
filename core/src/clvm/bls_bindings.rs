@@ -44,6 +44,39 @@ pub fn aggregate_verify_signature(
     )
 }
 
+/// Aggregate compressed G2 signatures for a block. Empty input produces the group identity.
+///
+/// # Errors
+/// Returns `Err` with the malformed signature's index if any input fails to deserialize.
+pub fn aggregate_signatures<
+    'a,
+    I: IntoIterator<Item = &'a crate::blockchain::sized_bytes::Bytes96>,
+>(
+    signatures: I,
+) -> Result<crate::blockchain::sized_bytes::Bytes96, String> {
+    use blst::min_pk::AggregateSignature;
+    let mut parsed: Vec<Signature> = Vec::new();
+    for (i, sig) in signatures.into_iter().enumerate() {
+        parsed.push(
+            Signature::from_bytes(sig.as_ref())
+                .map_err(|e| format!("signature {i} failed to deserialize: {e:?}"))?,
+        );
+    }
+    let Some((first, rest)) = parsed.split_first() else {
+        let mut infinity = [0_u8; 96];
+        infinity[0] = 0xc0;
+        return Ok(crate::blockchain::sized_bytes::Bytes96::from(infinity));
+    };
+    let mut agg = AggregateSignature::from_signature(first);
+    for sig in rest {
+        agg.add_signature(sig, false)
+            .map_err(|e| format!("aggregation failed: {e:?}"))?;
+    }
+    Ok(crate::blockchain::sized_bytes::Bytes96::from(
+        agg.to_signature().to_bytes(),
+    ))
+}
+
 #[must_use]
 pub fn sign(local_sk: &SecretKey, msg: &[u8]) -> Signature {
     local_sk.sign(msg, AUG_SCHEME_DST, &local_sk.sk_to_pk().to_bytes())

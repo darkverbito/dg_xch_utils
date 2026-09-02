@@ -292,7 +292,8 @@ impl<T: Sync + Send + 'static> MessageHandler for RespondSignaturesHandle<T> {
                                         info!("Declaring Proof of Space: {request:?}");
                                         #[cfg(feature = "metrics")]
                                         if let Some(r) = self.metrics.write().await.as_mut() {
-                                            if let Some(c) = &mut r.proofs_declared {
+                                            {
+                                                let c = &r.proofs_declared;
                                                 c.inc();
                                             }
                                         }

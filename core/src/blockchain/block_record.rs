@@ -1,7 +1,7 @@
+use crate::blockchain::class_group_element::ClassgroupElement;
 use crate::blockchain::coin::Coin;
 use crate::blockchain::sized_bytes::Bytes32;
 use crate::blockchain::sub_epoch_summary::SubEpochSummary;
-use crate::blockchain::vdf_output::VdfOutput;
 use crate::consensus::constants::ConsensusConstants;
 use crate::consensus::pot_iterations::{calculate_ip_iters, calculate_sp_iters};
 use dg_xch_macros::ChiaSerial;
@@ -16,8 +16,8 @@ pub struct BlockRecord {
     pub weight: u128,
     pub total_iters: u128,
     pub signage_point_index: u8,
-    pub challenge_vdf_output: VdfOutput,
-    pub infused_challenge_vdf_output: Option<VdfOutput>,
+    pub challenge_vdf_output: ClassgroupElement,
+    pub infused_challenge_vdf_output: Option<ClassgroupElement>,
     pub reward_infusion_new_challenge: Bytes32,
     pub challenge_block_info_hash: Bytes32,
     pub sub_slot_iters: u64,
@@ -64,7 +64,7 @@ impl BlockRecord {
         )
     }
 
-    /// chia_rs `BlockRecord::sp_iters` — the signage-point iterations for this record.
+    /// The signage-point iterations for this record.
     ///
     /// # Errors
     /// Returns an error if `calculate_sp_iters` rejects the record's iteration parameters.
@@ -72,7 +72,7 @@ impl BlockRecord {
         calculate_sp_iters(constants, self.sub_slot_iters, self.signage_point_index)
     }
 
-    /// chia_rs `BlockRecord::ip_sub_slot_total_iters` — total iterations at the infusion point of the
+    /// Total iterations at the infusion point of the
     /// sub-slot that contains this record (`total_iters - ip_iters`).
     ///
     /// # Errors
@@ -88,7 +88,7 @@ impl BlockRecord {
             })
     }
 
-    /// chia_rs `BlockRecord::sp_sub_slot_total_iters` — total iterations at the start of the sub-slot
+    /// Total iterations at the start of the sub-slot
     /// that contains this record's signage point. Equal to `ip_sub_slot_total_iters`, less one full
     /// `sub_slot_iters` when this record is an overflow block.
     ///
@@ -109,7 +109,7 @@ impl BlockRecord {
         }
     }
 
-    /// chia_rs `BlockRecord::sp_total_iters` — total iterations at this record's signage point
+    /// Total iterations at this record's signage point
     /// (`sp_sub_slot_total_iters + sp_iters`).
     ///
     /// # Errors

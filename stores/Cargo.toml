@@ -1,0 +1,37 @@
+[package]
+name = "dg_xch_stores"
+description = "Full-node storage layer: query-shaped CoinStore/BlockStore/HintStore traits over sqlx backends (sqlite first)."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+# The database layer of the full node: owns the coin/block schema, migrations, and the
+# query-shaped repository traits. Depends only on core types and the wire codec.
+[dependencies]
+dg_xch_core = { path = "../core", version = "3.0.0", default-features = false, features = ["sqlite"] }
+dg_xch_serialize = { path = "../serialize", version = "3.0.0" }
+async-trait = "0.1.89"
+log = "0.4.28"
+sqlx = { version = "=0.8.6", features = ["macros", "runtime-tokio", "tls-rustls-aws-lc-rs", "sqlite"] }
+tokio = { version = "1.50.0", features = ["rt-multi-thread", "sync", "macros"] }
+memmap2 = { version = "0.9", optional = true }
+zstd = "0.13.2"
+
+ [dev-dependencies]
+tempfile = "3"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+tokio = { version = "1.50.0", features = ["rt-multi-thread", "macros", "time"] }
+
+[features]
+default = []
+# Service-tier secondary indexes a pure validating node refuses to build (write-amplification + RAM).
+coin-index = []
+hint = ["coin-index"]
+# The industrial multi-writer backend: sqlx-Postgres serving the identical trait contract.
+postgres = ["sqlx/postgres", "dg_xch_core/postgres"]
+# The embedded libbitcoin-style backend (the Pi profile): mmap logs + slot-table indexes.
+mmap = ["dep:memmap2"]

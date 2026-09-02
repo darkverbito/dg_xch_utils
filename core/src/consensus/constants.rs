@@ -2,7 +2,10 @@ use crate::blockchain::sized_bytes::Bytes32;
 use std::fmt::Display;
 use std::str::FromStr;
 
-#[derive(Copy, Clone, Eq, PartialEq)]
+/// Serde uses the same lowercase names as [`FromStr`], so a network reads the same from a config
+/// file as from a command line.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ChiaNetwork {
     Mainnet = 0,
     Simulator = 1,
@@ -98,10 +101,28 @@ pub struct ConsensusConstants {
     pub hard_fork_height: u32,
     pub hard_fork_fix_height: u32,
 
+    // The soft fork staged by the 2.6/2.7 releases:
+    // DISABLE_OP (modpow disabled until hard fork 2) + LIMITS (division-family operand-size caps).
+    pub soft_fork8_height: u32,
+    // Same release train: SIMPLE_GENERATOR + CANONICAL_INTS + LIMIT_SPENDS.
+    pub soft_fork9_height: u32,
+    pub hard_fork2_height: u32,
+
     // the plot filter adjustment heights
     pub plot_filter_128_height: u32,
     pub plot_filter_64_height: u32,
     pub plot_filter_32_height: u32,
+
+    // proof of space 2 (activates with hard fork 2): the fixed v2 plot size, the strength range a
+    // plot may choose, the v1 phase out window, and the v2 plot filter with its own schedule
+    pub number_zero_bits_plot_filter_v2: u8,
+    pub plot_size_v2: u8,
+    pub min_plot_strength: u8,
+    pub max_plot_strength: u8,
+    pub plot_v1_phase_out_epoch_bits: u8,
+    pub plot_filter_v2_first_adjustment_height: u32,
+    pub plot_filter_v2_second_adjustment_height: u32,
+    pub plot_filter_v2_third_adjustment_height: u32,
 
     //This is NOT standard, but makes some things easier
     pub bech32_prefix: &'static str,
@@ -176,7 +197,7 @@ pub const MAINNET: ConsensusConstants = ConsensusConstants {
         "3d8765d3a597ec1d99663f6c9816d915b9f68613ac94009884c4addaefcce6af",
     ),
     max_vdf_witness_size: 64,
-    mempool_block_buffer: 50,
+    mempool_block_buffer: 10,
     max_coin_amount: u64::MAX,
     max_block_cost_clvm: 11_000_000_000_u64,
     cost_per_byte: 12000,
@@ -191,9 +212,20 @@ pub const MAINNET: ConsensusConstants = ConsensusConstants {
     soft_fork3_height: 4_510_000,
     hard_fork_height: 5_496_000,
     hard_fork_fix_height: 5_496_000,
+    soft_fork8_height: 8_655_000,
+    soft_fork9_height: 8_655_000,
+    hard_fork2_height: 0xFFFF_FFFA,
     plot_filter_128_height: 10_542_000,
     plot_filter_64_height: 15_592_000,
     plot_filter_32_height: 20_643_000,
+    number_zero_bits_plot_filter_v2: 5,
+    plot_size_v2: 28,
+    min_plot_strength: 2,
+    max_plot_strength: 32,
+    plot_v1_phase_out_epoch_bits: 8,
+    plot_filter_v2_first_adjustment_height: 0xFFFF_FFFB,
+    plot_filter_v2_second_adjustment_height: 0xFFFF_FFFC,
+    plot_filter_v2_third_adjustment_height: 0xFFFF_FFFD,
     bech32_prefix: "xch",
     is_testnet: false,
     simulated: false,
@@ -318,7 +350,7 @@ pub const TESTNET_7: ConsensusConstants = ConsensusConstants {
     genesis_pre_farm_pool_puzzle_hash: Bytes32::const_hex(
         "d23da14695a188ae5708dd152263c4db883eb27edeb936178d4d988b8f3ce5fc",
     ),
-    mempool_block_buffer: 50,
+    mempool_block_buffer: 10,
     min_plot_size: 18,
     bech32_prefix: "txch",
     is_testnet: true,
@@ -381,6 +413,8 @@ pub const TESTNET_11: ConsensusConstants = ConsensusConstants {
     //Forks activated from the beginning on this network
     hard_fork_height: 0,
     hard_fork_fix_height: 0,
+    soft_fork8_height: 3_755_000,
+    soft_fork9_height: 3_924_000,
     plot_filter_128_height: 6_029_568,
     plot_filter_64_height: 11_075_328,
     plot_filter_32_height: 16_121_088,

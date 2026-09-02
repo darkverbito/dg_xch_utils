@@ -1,35 +1,35 @@
+use crate::clvm::arena::{Arena, NodePtr};
 use crate::clvm::dialect::Dialect;
 use crate::clvm::more_ops::BOOL_BASE_COST;
-use crate::clvm::sexp::SExp;
-use crate::constants::NULL_SEXP;
 use log::info;
 use std::io::Error;
 
-pub fn op_print<'a, D: Dialect>(
-    args: &'a SExp<'a>,
+/// Debug print for the `(all "$print$" ...)` convention: `args` are the operands AFTER the
+/// print keyword, in order. Output format: `first: second, third`.
+pub fn op_print<D: Dialect>(
+    arena: &Arena,
+    args: &[NodePtr],
     _max_cost: u64,
-    _dialect: &'a D,
-) -> Result<(u64, SExp<'a>), Error> {
-    let mut args = args.ref_list();
-    args.reverse();
+    _dialect: &D,
+) -> Result<(u64, NodePtr), Error> {
     if args.is_empty() {
-        Ok((BOOL_BASE_COST, NULL_SEXP.clone()))
+        Ok((BOOL_BASE_COST, NodePtr::NIL))
     } else {
         let mut buffer = String::new();
         match args.first() {
             Some(arg) => {
-                buffer.extend(format!("{arg}:").chars());
+                buffer.extend(format!("{}:", arena.export(*arg)).chars());
                 let mut cost = BOOL_BASE_COST * 2;
                 let iter = args.iter().skip(1);
                 for arg in iter {
                     cost += BOOL_BASE_COST;
-                    buffer.extend(format!(" {arg},",).chars());
+                    buffer.extend(format!(" {},", arena.export(*arg)).chars());
                 }
                 buffer.remove(buffer.len() - 1);
                 info!("CLVM DEBUG: {buffer}");
-                Ok((cost, NULL_SEXP.clone()))
+                Ok((cost, NodePtr::NIL))
             }
-            None => Ok((BOOL_BASE_COST, NULL_SEXP.clone())),
+            None => Ok((BOOL_BASE_COST, NodePtr::NIL)),
         }
     }
 }
@@ -38,6 +38,7 @@ pub fn op_print<'a, D: Dialect>(
 fn test_print_ops() {
     use crate::clvm::assemble::assemble_text;
     use crate::clvm::program::Program;
+    use crate::clvm::sexp::SExp;
     use crate::clvm::utils::INFINITE_COST;
     use dg_logger::DruidGardenLogger;
     use log::Level;

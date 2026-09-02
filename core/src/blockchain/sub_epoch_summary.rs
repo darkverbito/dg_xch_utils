@@ -16,14 +16,6 @@ pub struct SubEpochSummary {
 }
 
 impl SubEpochSummary {
-    /// chia `std_hash(bytes(ses))` (ref `chia/consensus/make_sub_epoch_summary.py`). The consensus hash
-    /// of this summary: sha256 over its streamable encoding. `SubEpochSummary` is a blockchain (not
-    /// network) type, so this encoding — hence this hash — is independent of the negotiated protocol
-    /// version. This is the value committed on-chain as `subepoch_summary_hash` and linked by the next
-    /// summary's `prev_subepoch_summary_hash`.
-    ///
-    /// # Errors
-    /// Returns an error if the streamable encoding of the summary fails.
     pub fn hash(&self) -> Result<Bytes32, Error> {
         Ok(Bytes32::from(hash_256(
             self.to_bytes(ChiaProtocolVersion::default())?,

@@ -101,6 +101,7 @@ async fn try_peer(
         software_version: None,
         protocol_version: version,
         additional_headers: None,
+        rate_limited: false,
     });
     let run = Arc::new(AtomicBool::new(true));
     let client = WsClient::with_ca(

@@ -4,7 +4,6 @@ use crate::clvm::sexp_ext::SExpNumber;
 use crate::errors::ClvmError;
 use crate::formatting::prep_hex_str;
 use crate::traits::SizedBytes;
-use blst::min_pk::{PublicKey, SecretKey, Signature};
 use bytes::Buf;
 use const_hex::const_decode_to_array;
 use dg_xch_serialize::ChiaProtocolVersion;
@@ -413,6 +412,41 @@ impl<'r, const SIZE: usize> sqlx::Encode<'r, sqlx::Postgres> for SizedBytesImpl<
         SIZE
     }
 }
+#[cfg(feature = "sqlite")]
+impl<'r, const SIZE: usize> sqlx::Decode<'r, sqlx::Sqlite> for SizedBytesImpl<SIZE> {
+    fn decode(value: sqlx::sqlite::SqliteValueRef<'r>) -> Result<Self, sqlx::error::BoxDynError> {
+        let bytes = <&[u8] as sqlx::Decode<'_, sqlx::Sqlite>>::decode(value)?;
+        Ok(Self::parse(bytes)
+            .map_err(|e| std::io::Error::new(ErrorKind::InvalidData, e.to_string()))?)
+    }
+}
+#[cfg(feature = "sqlite")]
+impl<'q, const SIZE: usize> sqlx::Encode<'q, sqlx::Sqlite> for SizedBytesImpl<SIZE> {
+    fn encode(
+        self,
+        buf: &mut <sqlx::Sqlite as sqlx::Database>::ArgumentBuffer<'q>,
+    ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError>
+    where
+        Self: Sized,
+    {
+        buf.push(sqlx::sqlite::SqliteArgumentValue::Blob(
+            std::borrow::Cow::Owned(self.bytes.to_vec()),
+        ));
+        Ok(sqlx::encode::IsNull::No)
+    }
+    fn encode_by_ref(
+        &self,
+        buf: &mut <sqlx::Sqlite as sqlx::Database>::ArgumentBuffer<'q>,
+    ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
+        buf.push(sqlx::sqlite::SqliteArgumentValue::Blob(
+            std::borrow::Cow::Owned(self.bytes.to_vec()),
+        ));
+        Ok(sqlx::encode::IsNull::No)
+    }
+    fn size_hint(&self) -> usize {
+        SIZE
+    }
+}
 struct SizedBytesImplVisitor<const SIZE: usize>;
 impl<const SIZE: usize> Visitor<'_> for SizedBytesImplVisitor<SIZE> {
     type Value = SizedBytesImpl<SIZE>;
@@ -530,6 +564,15 @@ macro_rules! impl_sized_bytes {
                     <Vec<u8> as sqlx::Type<sqlx::Postgres>>::compatible(ty)
                 }
             }
+            #[cfg(feature = "sqlite")]
+            impl sqlx::Type<sqlx::Sqlite> for $name {
+                fn type_info() -> sqlx::sqlite::SqliteTypeInfo {
+                    <Vec<u8> as sqlx::Type<sqlx::Sqlite>>::type_info()
+                }
+                fn compatible(ty: &sqlx::sqlite::SqliteTypeInfo) -> bool {
+                    <Vec<u8> as sqlx::Type<sqlx::Sqlite>>::compatible(ty)
+                }
+            }
             impl ChiaSerialize for $name {
                 fn to_bytes(&self, _version: ChiaProtocolVersion) -> Result<Vec<u8>, std::io::Error> {
                     Ok(self.bytes().to_vec())
@@ -561,73 +604,111 @@ impl_sized_bytes!(
     Bytes480, 480
 );
 
-impl From<&Bytes32> for SecretKey {
-    fn from(val: &Bytes32) -> Self {
-        SecretKey::from_bytes(val.as_ref()).unwrap_or_default()
+// Sized-bytes <-> BLS key/signature conversions live behind the `bls` feature: they are the
+// only part of this module that touches `blst`, and the plain byte types must stay usable in
+// builds that carry no BLS cryptography.
+#[cfg(feature = "bls")]
+mod bls_conversions {
+    use super::{Bytes32, Bytes48, Bytes96};
+    use crate::traits::SizedBytes;
+    use blst::min_pk::{PublicKey, SecretKey, Signature};
+    use std::io::{Error, ErrorKind};
+
+    impl From<&Bytes32> for SecretKey {
+        fn from(val: &Bytes32) -> Self {
+            SecretKey::from_bytes(val.as_ref()).unwrap_or_default()
+        }
     }
-}
-impl From<Bytes32> for SecretKey {
-    fn from(val: Bytes32) -> Self {
-        SecretKey::from_bytes(val.as_ref()).unwrap_or_default()
+    impl From<Bytes32> for SecretKey {
+        fn from(val: Bytes32) -> Self {
+            SecretKey::from_bytes(val.as_ref()).unwrap_or_default()
+        }
+    }
+
+    impl From<&SecretKey> for Bytes32 {
+        fn from(val: &SecretKey) -> Self {
+            Bytes32::new(val.to_bytes())
+        }
+    }
+    impl From<SecretKey> for Bytes32 {
+        fn from(val: SecretKey) -> Self {
+            Bytes32::new(val.to_bytes())
+        }
+    }
+
+    impl From<&Bytes48> for PublicKey {
+        fn from(val: &Bytes48) -> Self {
+            PublicKey::from_bytes(val.as_ref()).unwrap_or_default()
+        }
+    }
+    impl From<Bytes48> for PublicKey {
+        fn from(val: Bytes48) -> Self {
+            PublicKey::from_bytes(val.as_ref()).unwrap_or_default()
+        }
+    }
+    impl From<&PublicKey> for Bytes48 {
+        fn from(val: &PublicKey) -> Self {
+            Bytes48::new(val.to_bytes())
+        }
+    }
+    impl From<PublicKey> for Bytes48 {
+        fn from(val: PublicKey) -> Self {
+            (&val).into()
+        }
+    }
+    impl TryFrom<&Bytes96> for Signature {
+        type Error = Error;
+
+        fn try_from(val: &Bytes96) -> Result<Signature, Error> {
+            Signature::from_bytes(val.as_ref())
+                .map_err(|e| Error::new(ErrorKind::InvalidInput, format!("{e:?}")))
+        }
+    }
+
+    impl TryFrom<Bytes96> for Signature {
+        type Error = Error;
+
+        fn try_from(val: Bytes96) -> Result<Signature, Error> {
+            Signature::from_bytes(val.as_ref())
+                .map_err(|e| Error::new(ErrorKind::InvalidInput, format!("{e:?}")))
+        }
+    }
+    impl From<&Signature> for Bytes96 {
+        fn from(val: &Signature) -> Bytes96 {
+            Bytes96::new(val.to_bytes())
+        }
+    }
+
+    impl From<Signature> for Bytes96 {
+        fn from(val: Signature) -> Bytes96 {
+            Bytes96::new(val.to_bytes())
+        }
     }
 }
 
-impl From<&SecretKey> for Bytes32 {
-    fn from(val: &SecretKey) -> Self {
-        Bytes32::new(val.to_bytes())
-    }
-}
-impl From<SecretKey> for Bytes32 {
-    fn from(val: SecretKey) -> Self {
-        Bytes32::new(val.to_bytes())
-    }
-}
+#[cfg(all(test, feature = "postgres", feature = "sqlite"))]
+mod codec_tests {
+    use super::Bytes32;
+    use crate::traits::SizedBytes;
 
-impl From<&Bytes48> for PublicKey {
-    fn from(val: &Bytes48) -> Self {
-        PublicKey::from_bytes(val.as_ref()).unwrap_or_default()
-    }
-}
-impl From<Bytes48> for PublicKey {
-    fn from(val: Bytes48) -> Self {
-        PublicKey::from_bytes(val.as_ref()).unwrap_or_default()
-    }
-}
-impl From<&PublicKey> for Bytes48 {
-    fn from(val: &PublicKey) -> Self {
-        Bytes48::new(val.to_bytes())
-    }
-}
-impl From<PublicKey> for Bytes48 {
-    fn from(val: PublicKey) -> Self {
-        (&val).into()
-    }
-}
-impl TryFrom<&Bytes96> for Signature {
-    type Error = Error;
+    #[test]
+    fn bytes32_round_trips_through_pg_and_sqlite_codecs() {
+        let original = Bytes32::from(std::array::from_fn::<u8, 32, _>(|i| i as u8));
 
-    fn try_from(val: &Bytes96) -> Result<Signature, Error> {
-        Signature::from_bytes(val.as_ref())
-            .map_err(|e| Error::new(ErrorKind::InvalidInput, format!("{e:?}")))
-    }
-}
+        let mut pg_buf = sqlx::postgres::PgArgumentBuffer::default();
+        let _ = <Bytes32 as sqlx::Encode<sqlx::Postgres>>::encode_by_ref(&original, &mut pg_buf)
+            .unwrap();
+        let pg_bytes: &[u8] = &pg_buf;
+        assert_eq!(Bytes32::parse(pg_bytes).unwrap(), original);
 
-impl TryFrom<Bytes96> for Signature {
-    type Error = Error;
+        let mut sq_buf: Vec<sqlx::sqlite::SqliteArgumentValue> = Vec::new();
+        let _ =
+            <Bytes32 as sqlx::Encode<sqlx::Sqlite>>::encode_by_ref(&original, &mut sq_buf).unwrap();
+        let sqlx::sqlite::SqliteArgumentValue::Blob(sq_bytes) = &sq_buf[0] else {
+            panic!("sqlite encode did not produce a Blob");
+        };
+        assert_eq!(Bytes32::parse(sq_bytes).unwrap(), original);
 
-    fn try_from(val: Bytes96) -> Result<Signature, Error> {
-        Signature::from_bytes(val.as_ref())
-            .map_err(|e| Error::new(ErrorKind::InvalidInput, format!("{e:?}")))
-    }
-}
-impl From<&Signature> for Bytes96 {
-    fn from(val: &Signature) -> Bytes96 {
-        Bytes96::new(val.to_bytes())
-    }
-}
-
-impl From<Signature> for Bytes96 {
-    fn from(val: Signature) -> Bytes96 {
-        Bytes96::new(val.to_bytes())
+        assert_eq!(pg_bytes, sq_bytes.as_ref());
     }
 }

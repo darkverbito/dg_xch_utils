@@ -2,7 +2,7 @@ use crate::blockchain::spend::Spend;
 use crate::blockchain::unsized_bytes::UnsizedBytes;
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Debug)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Debug, Default)]
 pub struct SpendBundleConditions {
     pub spends: Vec<Spend>,
     pub reserve_fee: u64,

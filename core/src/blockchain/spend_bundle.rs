@@ -1,34 +1,58 @@
 use crate::blockchain::coin::Coin;
 use crate::blockchain::coin_spend::CoinSpend;
-use crate::blockchain::condition_with_args::{ConditionWithArgs, Message, MessageArgs};
-use crate::blockchain::sized_bytes::{Bytes32, Bytes48, Bytes96};
+use crate::blockchain::condition_with_args::ConditionWithArgs;
+#[cfg(feature = "bls")]
+use crate::blockchain::condition_with_args::{Message, MessageArgs};
+#[cfg(feature = "bls")]
+use crate::blockchain::sized_bytes::Bytes48;
+use crate::blockchain::sized_bytes::{Bytes32, Bytes96};
+#[cfg(feature = "bls")]
 use crate::blockchain::utils::{pkm_pairs_for_conditions, verify_agg_sig_unsafe_message};
+#[cfg(feature = "bls")]
 use crate::clvm::bls_bindings;
+#[cfg(feature = "bls")]
 use crate::clvm::bls_bindings::{aggregate_verify_signature, verify_signature};
-use crate::clvm::condition_utils::{agg_sig_additional_data_for_opcode, conditions_for_solution};
+#[cfg(feature = "bls")]
+use crate::clvm::condition_utils::agg_sig_additional_data_for_opcode;
+use crate::clvm::condition_utils::conditions_for_solution;
+use crate::clvm::utils::INFINITE_COST;
+#[cfg(feature = "bls")]
 use crate::clvm::utils::{
-    COST_CONDITIONS, DISABLE_SIGNATURE_VALIDATION, IGNORE_ASSERT_CONCURRENT_NULL, INFINITE_COST,
-    NO_UNKNOWN_OPS,
+    COST_CONDITIONS, DISABLE_SIGNATURE_VALIDATION, IGNORE_ASSERT_CONCURRENT_NULL, NO_UNKNOWN_OPS,
 };
+#[cfg(feature = "bls")]
 use crate::consensus::constants::{ConsensusConstants, MAINNET};
+#[cfg(feature = "bls")]
 use crate::consensus::{AGG_SIG_COST, CREATE_COIN_COST};
+#[cfg(feature = "bls")]
 use crate::errors::ClvmError;
+#[cfg(feature = "bls")]
 use crate::formatting::u64_to_bytes;
+#[cfg(feature = "bls")]
 use crate::traits::SizedBytes;
 use crate::utils::hash_256;
+#[cfg(feature = "bls")]
 use blst::min_pk::{AggregateSignature, PublicKey, SecretKey, Signature};
 use dg_xch_macros::ChiaSerial;
 use dg_xch_serialize::{ChiaProtocolVersion, ChiaSerialize};
+#[cfg(feature = "bls")]
 use log::{error, info};
+#[cfg(feature = "bls")]
 use num_traits::ToPrimitive;
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "bls")]
 use std::cmp::{max, min};
 use std::collections::HashSet;
+#[cfg(feature = "bls")]
 use std::future::Future;
-use std::io::{Error, ErrorKind};
+use std::io::Error;
+#[cfg(feature = "bls")]
+use std::io::ErrorKind;
 
+#[cfg(feature = "bls")]
 const ANNOUNCEMENT_LIMIT: u64 = 1024;
 
+#[cfg(feature = "bls")]
 #[derive(Default, Clone, Debug)]
 struct ValidationState {
     pub coins_spent: HashSet<Coin>,
@@ -85,6 +109,7 @@ impl SpendBundle {
     pub fn name(&self) -> Result<Bytes32, Error> {
         Ok(hash_256(&self.to_bytes(ChiaProtocolVersion::default())?).into())
     }
+    #[cfg(feature = "bls")]
     pub fn aggregate(bundles: Vec<SpendBundle>) -> Result<Self, Error> {
         let mut coin_spends = vec![];
         let mut signatures = vec![];
@@ -152,6 +177,7 @@ impl SpendBundle {
             .collect())
     }
 
+    #[cfg(feature = "bls")]
     pub fn add_signature(mut self, sig: Signature) -> Result<Self, Error> {
         let mut sigs: Vec<Signature> = vec![sig];
         if !self.aggregated_signature.is_null() {
@@ -168,6 +194,7 @@ impl SpendBundle {
         Ok(self)
     }
 
+    #[cfg(feature = "bls")]
     pub async fn sign<F, Fut>(
         mut self,
         key_function: F,
@@ -230,6 +257,7 @@ impl SpendBundle {
         Ok(self)
     }
 
+    #[cfg(feature = "bls")]
     pub async fn vault_sign<F, Fut>(
         mut self,
         sign_function: F,
@@ -289,6 +317,7 @@ impl SpendBundle {
         self.aggregated_signature = aggsig.to_bytes().into();
         Ok(self)
     }
+    #[cfg(feature = "bls")]
     pub fn validate(
         &self,
         max_cost: Option<u64>,
@@ -789,6 +818,7 @@ impl SpendBundle {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "bls")]
 fn verify_send_recieve(
     send_type: &u8,
     receive_type: &u8,

@@ -10,7 +10,7 @@ use dg_xch_core::clvm::bls_bindings::{sign, sign_prepend};
 use dg_xch_core::consensus::constants::ChiaNetwork::Mainnet;
 use dg_xch_core::consensus::constants::{CONSENSUS_CONSTANTS, ChiaNetwork, ConsensusConstants};
 use dg_xch_core::consensus::pot_iterations::{
-    calculate_iterations_quality, calculate_sp_interval_iters,
+    calculate_iterations_quality_for_proof, calculate_sp_interval_iters,
 };
 use dg_xch_core::constants::AUG_SCHEME_DST;
 #[cfg(feature = "metrics")]
@@ -81,10 +81,10 @@ impl<T: PoolClient + Sized + Sync + Send + 'static> MessageHandler for NewProofO
                         new_pos.sp_hash,
                         sp.peak_height,
                     ) {
-                        let required_iters = calculate_iterations_quality(
-                            constants.difficulty_constant_factor,
+                        let required_iters = calculate_iterations_quality_for_proof(
+                            &constants,
+                            &new_pos.proof,
                             qs,
-                            new_pos.proof.size,
                             sp.difficulty,
                             new_pos.sp_hash,
                         );
@@ -294,10 +294,10 @@ impl<T: PoolClient + Sized + Sync + Send + 'static> NewProofOfSpaceHandle<T> {
             .map(|v| v.current_difficulty)
         {
             (
-                calculate_iterations_quality(
-                    constants.difficulty_constant_factor,
+                calculate_iterations_quality_for_proof(
+                    constants,
+                    &new_pos.proof,
                     qs,
-                    new_pos.proof.size,
                     pool_dif,
                     new_pos.sp_hash,
                 ),
@@ -481,7 +481,8 @@ impl<T: PoolClient + Sized + Sync + Send + 'static> NewProofOfSpaceHandle<T> {
                             if let Some(r) = self.metrics.write().await.as_mut() {
                                 use std::time::Duration;
                                 let now = Instant::now();
-                                if let Some(c) = &mut r.points_acknowledged_24h {
+                                {
+                                    let c = &r.points_acknowledged_24h;
                                     if let Some(v) = self
                                         .pool_state
                                         .write()
@@ -517,7 +518,8 @@ impl<T: PoolClient + Sized + Sync + Send + 'static> NewProofOfSpaceHandle<T> {
                             }
                             #[cfg(feature = "metrics")]
                             if let Some(r) = self.metrics.write().await.as_mut() {
-                                if let Some(c) = &mut r.current_difficulty {
+                                {
+                                    let c = &r.current_difficulty;
                                     c.with_label_values(&[&p2_singleton_puzzle_hash.to_string()])
                                         .set(resp.new_difficulty);
                                 }

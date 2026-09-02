@@ -28,6 +28,31 @@ pub fn validate_vdf_info_result(
     proof: &VdfProof,
     target_vdf_info: Option<&VdfInfo>,
 ) -> Result<()> {
+    validate_vdf_info_impl(constants, input_el, info, proof, target_vdf_info, true)
+}
+
+/// [`validate_vdf_info`] through the serial proof verifier ([`crate::proof::verify_vdf_serial`])
+/// — identical result, no inner two-thread split per segment. For batch drains that already
+/// saturate every core with one proof per worker.
+#[must_use]
+pub fn validate_vdf_info_serial(
+    constants: &ConsensusConstants,
+    input_el: &ClassgroupElement,
+    info: &VdfInfo,
+    proof: &VdfProof,
+    target_vdf_info: Option<&VdfInfo>,
+) -> bool {
+    validate_vdf_info_impl(constants, input_el, info, proof, target_vdf_info, false).is_ok()
+}
+
+fn validate_vdf_info_impl(
+    constants: &ConsensusConstants,
+    input_el: &ClassgroupElement,
+    info: &VdfInfo,
+    proof: &VdfProof,
+    target_vdf_info: Option<&VdfInfo>,
+    parallel: bool,
+) -> Result<()> {
     if target_vdf_info.is_some_and(|target| target != info) {
         return Err(Error::TargetVdfMismatch);
     }
@@ -42,7 +67,12 @@ pub fn validate_vdf_info_result(
     proof_blob.extend_from_slice(info.output.data.as_ref());
     proof_blob.extend_from_slice(proof.witness.as_slice());
 
-    if verify_vdf(
+    let verify = if parallel {
+        verify_vdf
+    } else {
+        crate::proof::verify_vdf_serial
+    };
+    if verify(
         info.challenge.as_ref(),
         input_el.data.as_ref(),
         &proof_blob,
