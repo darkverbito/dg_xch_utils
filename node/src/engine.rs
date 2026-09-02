@@ -1207,6 +1207,11 @@ where
         &self,
         ref_list: &[u32],
     ) -> Result<Vec<GeneratorReference>, NodeError> {
+        // The consensus cap gates the list BEFORE any per-entry resolution: the list is
+        // peer-controlled, and each entry below costs a store point-read.
+        if ref_list.len() > self.constants.max_generator_ref_list_size as usize {
+            return Err(ChiaError::TooManyGeneratorRefs.into());
+        }
         let mut refs = Vec::with_capacity(ref_list.len());
         for (index, &height) in ref_list.iter().enumerate() {
             // Overlay first (`staged_generator` = in-window staged block, THEN the out-of-span seed

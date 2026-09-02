@@ -1128,6 +1128,7 @@ where
         &self,
         blocks: &[dg_xch_core::blockchain::full_block::FullBlock],
     ) -> Vec<u32> {
+        let cap = self.engine.constants().max_generator_ref_list_size as usize;
         let in_span: std::collections::HashSet<u32> = blocks
             .iter()
             .filter(|b| b.transactions_generator.is_some())
@@ -1135,6 +1136,11 @@ where
             .collect();
         let mut missing = std::collections::BTreeSet::new();
         for block in blocks {
+            // An over-cap list is consensus-invalid: seed nothing for it (validation rejects
+            // the block before any ref is needed).
+            if block.transactions_generator_ref_list.len() > cap {
+                continue;
+            }
             for r in &block.transactions_generator_ref_list {
                 if in_span.contains(r)
                     || missing.contains(r)
@@ -1162,6 +1168,7 @@ where
         &self,
         blocks: &[dg_xch_core::blockchain::full_block::FullBlock],
     ) -> std::collections::HashMap<u32, dg_xch_core::clvm::program::SerializedProgram> {
+        let cap = self.engine.constants().max_generator_ref_list_size as usize;
         let in_span: std::collections::HashSet<u32> = blocks
             .iter()
             .filter(|b| b.transactions_generator.is_some())
@@ -1169,6 +1176,10 @@ where
             .collect();
         let mut out = std::collections::HashMap::new();
         for block in blocks {
+            // An over-cap list is consensus-invalid: resolve nothing for it.
+            if block.transactions_generator_ref_list.len() > cap {
+                continue;
+            }
             for r in &block.transactions_generator_ref_list {
                 if in_span.contains(r) || out.contains_key(r) {
                     continue;
@@ -1289,6 +1300,12 @@ where
                     continue;
                 }
                 tx_total += 1;
+                if block.transactions_generator_ref_list.len()
+                    > self.engine.constants().max_generator_ref_list_size as usize
+                {
+                    // Consensus-invalid list: leave it for the inline path's rejection.
+                    continue;
+                }
                 if provided
                     .as_ref()
                     .is_some_and(|m| m.contains_key(&block.height()))
@@ -2046,6 +2063,11 @@ pub fn precompute_window_bodies_standalone<P: crate::primitives::ConsensusPrimit
     )> = Vec::new();
     for block in blocks {
         if !block.is_transaction_block() || block.transactions_generator.is_none() {
+            continue;
+        }
+        if block.transactions_generator_ref_list.len()
+            > constants.max_generator_ref_list_size as usize
+        {
             continue;
         }
         let mut refs = Vec::with_capacity(block.transactions_generator_ref_list.len());
