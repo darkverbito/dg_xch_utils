@@ -4590,9 +4590,30 @@ async fn recovery_source(
     )
 }
 
+// A served out-of-span ref block yields its generator only when the bytes hash to the
+// generator root the block's own transactions_info committed to — a serving peer cannot
+// substitute a generator without re-committing the block.
+fn verified_seed_generator(
+    block: &dg_xch_core::blockchain::full_block::FullBlock,
+    height: u32,
+) -> Option<(Bytes32, dg_xch_core::clvm::program::SerializedProgram)> {
+    if block.height() != height {
+        return None;
+    }
+    let ti = block.transactions_info.as_ref()?;
+    let generator = block.transactions_generator.clone()?;
+    if dg_xch_core::consensus::block_generator::transactions_generator_root(&generator)
+        != ti.generator_root
+    {
+        return None;
+    }
+    block.header_hash().ok().map(|hash| (hash, generator))
+}
+
 async fn fetch_seed_refs<S: BlockStore + CoinStore + Send + Sync + 'static>(
     node: &Arc<Node<S>>,
     source: &Arc<dyn BlockRangeSource>,
+    witness: Option<&Arc<dyn BlockRangeSource>>,
     heights: &[u32],
 ) -> Vec<(u32, dg_xch_core::clvm::program::SerializedProgram)> {
     let mut out = Vec::with_capacity(heights.len());
@@ -4613,17 +4634,49 @@ async fn fetch_seed_refs<S: BlockStore + CoinStore + Send + Sync + 'static>(
                     warn!("recovery peer failed to serve ref block height={}", h);
                     continue;
                 };
-                let Some(generator) = fetched
-                    .into_iter()
-                    .find(|b| b.height() == h)
-                    .and_then(|b| b.transactions_generator)
+                let Some((header_hash, generator)) =
+                    fetched.iter().find_map(|b| verified_seed_generator(b, h))
                 else {
                     warn!(
-                        "recovery peer served no generator for ref block height={}",
+                        "recovery peer served no committed generator for ref block height={}",
                         h
                     );
                     continue;
                 };
+                // Bind the served block to the chain where a record exists (the epoch-depth
+                // backfill covers the anchor's neighborhood); below every record, require a
+                // second peer to serve the identical generator.
+                match node.store.get_block_record_by_height(h).await {
+                    Ok(Some(record)) => {
+                        if record.header_hash != header_hash {
+                            warn!("recovery peer served an off-chain ref block height={}", h);
+                            continue;
+                        }
+                    }
+                    _ => {
+                        if let Some(witness) = witness {
+                            let corroborated = match witness.fetch_range(h, h).await {
+                                Ok(blocks) => blocks
+                                    .iter()
+                                    .find_map(|b| verified_seed_generator(b, h))
+                                    .is_some_and(|(_, g)| g == generator),
+                                Err(_) => false,
+                            };
+                            if !corroborated {
+                                warn!(
+                                    "recovery peers disagree on ref block height={}; dropping",
+                                    h
+                                );
+                                continue;
+                            }
+                        } else {
+                            warn!(
+                                "single-peer ref block height={} accepted without a witness",
+                                h
+                            );
+                        }
+                    }
+                }
                 info!(
                     "fetched out-of-span generator ref for the consumer height={}",
                     h
@@ -4664,7 +4717,12 @@ async fn handle_recovery<S: BlockStore + CoinStore + Send + Sync + 'static>(
     match req {
         RecoveryRequest::SeedRefs { heights, reply } => {
             let generators = match recovery_source(registry, rotation).await {
-                Some(source) => fetch_seed_refs(node, &source, &heights).await,
+                Some(source) => {
+                    let witness = recovery_source(registry, rotation)
+                        .await
+                        .filter(|w| w.peer_id() != source.peer_id());
+                    fetch_seed_refs(node, &source, witness.as_ref(), &heights).await
+                }
                 None => Vec::new(),
             };
             let _ = reply.send(generators);
@@ -5002,6 +5060,7 @@ async fn block_processor<S: BlockStore + CoinStore + Send + Sync + 'static>(
                     }
                 }
                 Err(e) if e.is_orphan() => {
+                    node.seed_ref_cache.lock().await.clear();
                     warn!(
                         "consumer window orphaned; delegating backtrack to the driver from={} to={} error={}",
                         sfrom, sto, e
@@ -5030,6 +5089,9 @@ async fn block_processor<S: BlockStore + CoinStore + Send + Sync + 'static>(
                     }
                 }
                 Err(e) => {
+                    // A failed window may have validated against a poisoned seed ref: drop the
+                    // cache so the retry re-fetches from the next rotation peer.
+                    node.seed_ref_cache.lock().await.clear();
                     warn!(
                         "consumer follow step failed; requesting a queue reset from={} to={} error={}",
                         sfrom, sto, e
@@ -7770,6 +7832,101 @@ mod tests {
     use super::*;
     use dg_xch_core::blockchain::coin_record::CoinRecord;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn seed_fixture_block() -> dg_xch_core::blockchain::full_block::FullBlock {
+        serde_json::from_str(include_str!(
+            "../../node/tests/fixtures/full_block_5000000.json"
+        ))
+        .expect("full block fixture")
+    }
+
+    struct ServedBlocks(Vec<dg_xch_core::blockchain::full_block::FullBlock>);
+
+    #[async_trait::async_trait]
+    impl BlockRangeSource for ServedBlocks {
+        fn peer_id(&self) -> u64 {
+            1
+        }
+        fn is_closed(&self) -> bool {
+            false
+        }
+        async fn fetch_range(
+            &self,
+            start: u32,
+            end: u32,
+        ) -> Result<Vec<dg_xch_core::blockchain::full_block::FullBlock>, SyncError> {
+            Ok(self
+                .0
+                .iter()
+                .filter(|b| b.height() >= start && b.height() <= end)
+                .cloned()
+                .collect())
+        }
+    }
+
+    async fn seed_test_node() -> Arc<Node<SqliteStore>> {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let db =
+            std::env::temp_dir().join(format!("fn_seedref_{}_{nanos}.sqlite", std::process::id()));
+        Arc::new(
+            Node::boot(Config {
+                p2p: P2pSettings::default(),
+                listen: "127.0.0.1:0".parse().unwrap(),
+                rpc: "127.0.0.1:0".parse().unwrap(),
+                introducer: None,
+                manual_peers: Vec::new(),
+                advertise: None,
+                backend: Backend::Sqlite(db),
+                network_id: "mainnet".to_string(),
+                metrics: None,
+                capture_dir: None,
+                genesis_sync: false,
+                sync_from: 4_999_000,
+                uncompact: false,
+                prefetch_memory_mb: None,
+                prefetch_max_inflight: None,
+                trusted_peers: Vec::new(),
+                trusted_cidrs: Vec::new(),
+                rpc_tls: crate::config::RpcTlsMode::Local,
+                debug_endpoints: false,
+            })
+            .await
+            .expect("boot"),
+        )
+    }
+
+    // A recovery peer must not be able to substitute the generator of an out-of-span ref
+    // block: the served bytes are accepted only when they hash to the generator root the
+    // block's own transactions_info committed to.
+    #[tokio::test]
+    async fn seed_ref_fetch_rejects_a_substituted_generator() {
+        let node = seed_test_node().await;
+        let good = seed_fixture_block();
+        let h = good.height();
+        let mut tampered = good.clone();
+        tampered.transactions_generator =
+            Some(dg_xch_core::clvm::program::SerializedProgram::from(vec![
+                0x01, 0x02, 0x03,
+            ]));
+        let source: Arc<dyn BlockRangeSource> = Arc::new(ServedBlocks(vec![tampered]));
+        let out = fetch_seed_refs(&node, &source, None, &[h]).await;
+        assert!(
+            out.is_empty(),
+            "a generator that does not match the block's committed root must be refused"
+        );
+        assert!(
+            node.seed_ref_cache.lock().await.is_empty(),
+            "a refused generator must not enter the seed cache"
+        );
+
+        let source: Arc<dyn BlockRangeSource> = Arc::new(ServedBlocks(vec![good.clone()]));
+        let out = fetch_seed_refs(&node, &source, None, &[h]).await;
+        assert_eq!(out.len(), 1, "the committed generator is accepted");
+        assert_eq!(out[0].0, h);
+    }
 
     // A subscribed coin spent on branch A must read UNSPENT again after a reorg to branch B where
     // the spend never happened, which means delivering the POST-ROLLBACK records to subscribers.
