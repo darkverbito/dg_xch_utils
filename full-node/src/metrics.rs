@@ -396,6 +396,8 @@ pub struct MetricsSnapshot {
     // join wait on that precompute before the window could start.
     pub window_body_provided: u64,
     pub window_pre_wait_micros: u64,
+    // Stage-ahead pipeline: how long the confirm waited on the previous window's spawned drain.
+    pub window_drain_wait_micros: u64,
     // jemalloc's own view: `allocated` = live bytes the program holds; `resident` =
     // pages jemalloc keeps from the OS. resident >> allocated = allocator holdback;
     // allocated climbing = true retention. All 0 when jemalloc isn't the global allocator.
@@ -549,6 +551,7 @@ impl<S: BlockStore + Send + Sync> MetricsSources<S> {
             window_tx_blocks: m.window_tx_blocks.load(Ordering::Relaxed),
             window_body_provided: m.window_body_provided.load(Ordering::Relaxed),
             window_pre_wait_micros: m.window_pre_wait_micros.load(Ordering::Relaxed),
+            window_drain_wait_micros: m.window_drain_wait_micros.load(Ordering::Relaxed),
             alloc_allocated: jemalloc_stat_allocated(),
             alloc_active: jemalloc_stat_active(),
             alloc_resident: jemalloc_stat_resident(),
@@ -837,6 +840,13 @@ pub fn render_metrics(s: &MetricsSnapshot) -> String {
         "Microseconds the driver waited joining the previous window's body precompute before starting the last window (0 = precompute finished in time or none ran).",
         "gauge",
         s.window_pre_wait_micros,
+    );
+    g(
+        &mut out,
+        "fullnode_window_drain_wait_micros",
+        "Microseconds the confirm waited on the previous window's spawned vdf/sig drain (the stage-ahead pipeline's backpressure signal).",
+        "gauge",
+        s.window_drain_wait_micros,
     );
     g(
         &mut out,
@@ -1577,6 +1587,7 @@ mod tests {
             window_tx_blocks: 13,
             window_body_provided: 11,
             window_pre_wait_micros: 71_000,
+            window_drain_wait_micros: 380_000,
             alloc_allocated: 900_000_000,
             alloc_active: 950_000_000,
             alloc_resident: 1_100_000_000,
@@ -1636,6 +1647,7 @@ mod tests {
         assert!(text.contains("fullnode_window_tx_blocks 13"));
         assert!(text.contains("fullnode_window_body_provided 11"));
         assert!(text.contains("fullnode_window_pre_wait_micros 71000"));
+        assert!(text.contains("fullnode_window_drain_wait_micros 380000"));
         assert!(text.contains("fullnode_alloc_allocated_bytes 900000000"));
         assert!(text.contains("fullnode_alloc_resident_bytes 1100000000"));
         assert!(text.contains("fullnode_engine_cache_records 4096"));

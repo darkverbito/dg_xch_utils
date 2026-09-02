@@ -3331,6 +3331,33 @@ where
         self.finish_follow_step(peak, &deltas).await
     }
 
+    // Stage half of the stage-ahead pipeline: window into the overlay, no writer, no drains —
+    // callable while the PREVIOUS window's spawned drain still owns the CPU. An `Err` here has
+    // NOT cleared the overlay (see `Chaser::stage_window_pre`); the caller confirms its pending
+    // window first, then clears.
+    async fn stage_step_window(
+        &self,
+        blocks: Vec<dg_xch_core::blockchain::full_block::FullBlock>,
+        pre: Option<std::collections::HashMap<u32, dg_xch_node::engine::PrecomputedBody>>,
+    ) -> Result<dg_xch_node::sync::StagedWindow, SyncError> {
+        let mut chaser = self.chaser.lock().await;
+        chaser.stage_window_pre(blocks, pre).await
+    }
+
+    // Confirm half: the drain's verdict lands the window (archive + coins + peak, one
+    // transaction) and the per-peak side effects fire exactly as in the serial step.
+    async fn confirm_step_window(
+        &self,
+        window: dg_xch_node::sync::StagedWindow,
+        verdict: dg_xch_node::sync::WindowVerdict,
+    ) -> Result<Option<(Bytes32, u32)>, SyncError> {
+        let (peak, deltas) = {
+            let mut chaser = self.chaser.lock().await;
+            chaser.confirm_window_pre(window, verdict).await?
+        };
+        self.finish_follow_step(peak, &deltas).await
+    }
+
     /// The mirrored `short_sync_backtrack` step, driven when a follow
     /// window fails with the unknown-parent orphan: the chain reorged at/below our stored tip, so
     /// the fork point is fetched backward from the same peer and the collected branch resubmitted
@@ -4934,7 +4961,14 @@ async fn block_processor<S: BlockStore + CoinStore + Send + Sync + 'static>(
             std::collections::HashMap<u32, dg_xch_node::engine::PrecomputedBody>,
         >,
     )> = None;
-    while node.run.load(Ordering::Relaxed) {
+    // Stage-ahead pipeline (depth 1): the previous window, staged with its vdf/sig drain running
+    // on a blocking thread. Confirmed at the top of the NEXT iteration, after this iteration's
+    // stage has overlapped the drain. Depth 1 is enough — the drain dominates the serial residue.
+    let mut pipeline: Option<(
+        dg_xch_node::sync::StagedWindow,
+        tokio::task::JoinHandle<dg_xch_node::sync::WindowVerdict>,
+    )> = None;
+    'consumer: while node.run.load(Ordering::Relaxed) {
         // Park until the head height is present; the idle tick is only a shutdown backstop.
         tokio::select! {
             () = queue.wait_ready() => {}
@@ -4950,7 +4984,7 @@ async fn block_processor<S: BlockStore + CoinStore + Send + Sync + 'static>(
         node.follow_inflight_since
             .store(unix_secs(), Ordering::Relaxed);
         let window = queue.drain_ready_window(FOLLOW_BATCH);
-        if window.is_empty() {
+        if window.is_empty() && pipeline.is_none() {
             node.follow_inflight_since.store(0, Ordering::Relaxed);
             continue;
         }
@@ -5034,71 +5068,126 @@ async fn block_processor<S: BlockStore + CoinStore + Send + Sync + 'static>(
                 }),
             ));
         }
-        let step = node.follow_step_blocks_pre(&window, pre).await;
-        node.follow_inflight_since.store(0, Ordering::Relaxed);
-        match step {
-            Ok(Some((hash, height))) => {
-                // Height-monotone SPSC feed to the announcer. NON-BLOCKING: a stalled announcer must
-                // never stall the confirm consumer, which would back-pressure it off the BlockQueue
-                // and stall the whole pipeline. `emit_confirmed_peak` drops a best-effort
-                // announcement under a full buffer and only reports failure when the announcer is gone.
-                if !emit_confirmed_peak(&peak_tx, ConfirmedPeak { hash, height }) {
-                    break;
+        // Confirm results to consume this iteration, each with the bounds of the window it
+        // belongs to (the pipeline lags announcement by one window).
+        let mut steps: Vec<(u32, u32, StepOutcome)> = Vec::new();
+        let near_tip = { node.chaser.lock().await.near_tip() };
+        if near_tip || window.is_empty() {
+            // Near the tip (or on a drain-only tick) the pipeline empties first: the per-block
+            // path must own the writer and the overlay alone.
+            if let Some((prev, handle)) = pipeline.take() {
+                let (pfrom, pto) = prev.bounds();
+                let verdict = join_drain(handle, &pipe_metrics).await;
+                steps.push((pfrom, pto, node.confirm_step_window(prev, verdict).await));
+            }
+            if !window.is_empty() && steps.iter().all(|(_, _, s)| s.is_ok()) {
+                steps.push((from, to, node.follow_step_blocks_pre(&window, pre).await));
+            }
+        } else {
+            // Stage THIS window first — it overlaps the previous window's in-flight drain —
+            // then confirm the predecessor, then hand this window's drain to a blocking thread.
+            let staged = node.stage_step_window(window, pre).await;
+            if let Some((prev, handle)) = pipeline.take() {
+                let (pfrom, pto) = prev.bounds();
+                let verdict = join_drain(handle, &pipe_metrics).await;
+                steps.push((pfrom, pto, node.confirm_step_window(prev, verdict).await));
+            }
+            match staged {
+                Ok(mut staged_window) => {
+                    if steps.iter().all(|(_, _, s)| s.is_ok()) {
+                        let input = staged_window.take_drain_input();
+                        let constants = pipe_constants;
+                        pipeline = Some((
+                            staged_window,
+                            tokio::task::spawn_blocking(move || {
+                                dg_xch_node::sync::drain_staged_window(
+                                    &NativePrimitives,
+                                    &constants,
+                                    input,
+                                )
+                            }),
+                        ));
+                    }
+                    // Predecessor confirm failed: its error path retracted the overlay this
+                    // window staged against — drop it; the queue reset re-fetches both spans.
                 }
-                // The window fully advanced the peak iff the confirmed height reached the drained top;
-                // in that case `low_water == height + 1` already holds. A partial advance (a tail
-                // that staged as a side-branch candidate without outweighing) left `low_water` ahead of
-                // the peak, so realign by rebasing to `peak + 1` — the driver drops the drained-but-
-                // unconfirmed tail and the producer re-fetches it.
-                if height < to
-                    && !await_reset(&recovery_tx, |reply| RecoveryRequest::Reset { reply }).await
-                {
-                    break;
+                Err(e) => {
+                    // Stage failure leaves the overlay for us (the predecessor's confirm had to
+                    // land first); clear it now that it has.
+                    node.chaser.lock().await.clear_staged_overlay();
+                    steps.push((from, to, Err(e)));
                 }
             }
-            // No peak advance: the whole window staged as candidates below the peak (a known-parent side
-            // branch). `low_water` advanced on drain but the peak did not, so realign to `peak + 1`. The
-            // engine keeps the staged candidates, so weight still accumulates toward an eventual reorg.
-            Ok(None) => {
-                if !await_reset(&recovery_tx, |reply| RecoveryRequest::Reset { reply }).await {
-                    break;
+        }
+        if pipeline.is_none() {
+            node.follow_inflight_since.store(0, Ordering::Relaxed);
+        }
+        for (sfrom, sto, step) in steps {
+            match step {
+                Ok(Some((hash, height))) => {
+                    // Height-monotone SPSC feed to the announcer. NON-BLOCKING: a stalled announcer must
+                    // never stall the confirm consumer, which would back-pressure it off the BlockQueue
+                    // and stall the whole pipeline. `emit_confirmed_peak` drops a best-effort
+                    // announcement under a full buffer and only reports failure when the announcer is gone.
+                    if !emit_confirmed_peak(&peak_tx, ConfirmedPeak { hash, height }) {
+                        break 'consumer;
+                    }
+                    // The window fully advanced the peak iff the confirmed height reached the drained top;
+                    // in that case `low_water == height + 1` already holds. A partial advance (a tail
+                    // that staged as a side-branch candidate without outweighing) left `low_water` ahead of
+                    // the peak, so realign by rebasing to `peak + 1` — the driver drops the drained-but-
+                    // unconfirmed tail and the producer re-fetches it.
+                    if height < sto
+                        && !await_reset(&recovery_tx, |reply| RecoveryRequest::Reset { reply })
+                            .await
+                    {
+                        break 'consumer;
+                    }
                 }
-            }
-            Err(e) if e.is_orphan() => {
-                warn!(
-                    "consumer window orphaned; delegating backtrack to the driver from={} to={} error={}",
-                    from, to, e
-                );
-                if !await_reset(&recovery_tx, |reply| RecoveryRequest::Orphan {
-                    from,
-                    to,
-                    reply,
-                })
-                .await
-                {
-                    break;
+                // No peak advance: the whole window staged as candidates below the peak (a known-parent side
+                // branch). `low_water` advanced on drain but the peak did not, so realign to `peak + 1`. The
+                // engine keeps the staged candidates, so weight still accumulates toward an eventual reorg.
+                Ok(None) => {
+                    if !await_reset(&recovery_tx, |reply| RecoveryRequest::Reset { reply }).await {
+                        break 'consumer;
+                    }
                 }
-            }
-            Err(e) if e.is_missing_record() => {
-                warn!(
-                    "consumer needs records below the floor; delegating repair from={} to={} error={}",
-                    from, to, e
-                );
-                if !await_reset(&recovery_tx, |reply| RecoveryRequest::MissingRecord {
-                    reply,
-                })
-                .await
-                {
-                    break;
+                Err(e) if e.is_orphan() => {
+                    warn!(
+                        "consumer window orphaned; delegating backtrack to the driver from={} to={} error={}",
+                        sfrom, sto, e
+                    );
+                    if !await_reset(&recovery_tx, |reply| RecoveryRequest::Orphan {
+                        from: sfrom,
+                        to: sto,
+                        reply,
+                    })
+                    .await
+                    {
+                        break 'consumer;
+                    }
                 }
-            }
-            Err(e) => {
-                warn!(
-                    "consumer follow step failed; requesting a queue reset from={} to={} error={}",
-                    from, to, e
-                );
-                if !await_reset(&recovery_tx, |reply| RecoveryRequest::Reset { reply }).await {
-                    break;
+                Err(e) if e.is_missing_record() => {
+                    warn!(
+                        "consumer needs records below the floor; delegating repair from={} to={} error={}",
+                        sfrom, sto, e
+                    );
+                    if !await_reset(&recovery_tx, |reply| RecoveryRequest::MissingRecord {
+                        reply,
+                    })
+                    .await
+                    {
+                        break 'consumer;
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        "consumer follow step failed; requesting a queue reset from={} to={} error={}",
+                        sfrom, sto, e
+                    );
+                    if !await_reset(&recovery_tx, |reply| RecoveryRequest::Reset { reply }).await {
+                        break 'consumer;
+                    }
                 }
             }
         }
@@ -5106,6 +5195,29 @@ async fn block_processor<S: BlockStore + CoinStore + Send + Sync + 'static>(
     if let Some((_, handle)) = pre_task.take() {
         handle.abort();
     }
+    // A staged-unconfirmed window at shutdown vanishes wholly (crash class A): abort its drain;
+    // resume re-fetches from the durable peak.
+    if let Some((_, handle)) = pipeline.take() {
+        handle.abort();
+    }
+}
+
+// One confirmed-or-failed follow step awaiting consumption, keyed by its window bounds.
+type StepOutcome = Result<Option<(Bytes32, u32)>, SyncError>;
+
+// Join a spawned window drain, recording how long the confirm actually waited on it (the
+// stage-ahead pipeline's backpressure gauge). A panicked drain fails closed: nothing confirms
+// and the window re-stages after the queue reset.
+async fn join_drain(
+    handle: tokio::task::JoinHandle<dg_xch_node::sync::WindowVerdict>,
+    metrics: &std::sync::Arc<dg_xch_node::sync::SyncMetrics>,
+) -> dg_xch_node::sync::WindowVerdict {
+    let waited = std::time::Instant::now();
+    let verdict = handle.await;
+    metrics
+        .window_drain_wait_micros
+        .store(waited.elapsed().as_micros() as u64, Ordering::Relaxed);
+    verdict.unwrap_or_else(|_| dg_xch_node::sync::WindowVerdict::failed_closed())
 }
 
 // Send a `()`-reply recovery request and park on its completion (called only after the Chaser lock
