@@ -209,3 +209,34 @@ async fn a_precompute_cannot_smuggle_past_an_unresolvable_ref() {
     );
 }
 
+// A store failure inside the confirm must retract the staged overlay on its way out: the
+// unconfirmed window re-stages wholesale after the queue reset, and a stale height-keyed
+// overlay entry from the abandoned attempt must not shadow anything that stages later.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_confirm_store_failure_retracts_the_staged_overlay() {
+    use common::fault::FaultStore;
+    use dg_xch_node::sync::drain_staged_window;
+
+    let base = common::load_full_block(5_000_000);
+    let chain = build_chain(&base, 100, 107, common::synth_hash(0xae, 99));
+
+    let (store, fail_apply, _fail_set_peak) = FaultStore::new(common::new_store().await);
+    let mut chaser = Chaser::new(Engine::new(store, NativePrimitives, MAINNET), cfg());
+    let mut staged = chaser
+        .stage_window_pre(chain, None)
+        .await
+        .expect("window stages");
+    let constants = MAINNET;
+    let verdict = drain_staged_window(&NativePrimitives, &constants, staged.take_drain_input());
+
+    fail_apply.store(true, Ordering::Relaxed);
+    chaser
+        .confirm_window_pre(staged, verdict)
+        .await
+        .expect_err("the injected store fault surfaces");
+    let (_, _, overlay) = chaser.engine().collection_sizes();
+    assert_eq!(
+        overlay, 0,
+        "a confirm that failed in the store left {overlay} staged overlay entries resident"
+    );
+}

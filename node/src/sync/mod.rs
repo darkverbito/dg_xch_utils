@@ -1473,35 +1473,49 @@ where
         let confirm_upto = verdict.confirm_upto.min(staged.len());
         let vdf_err = verdict.err;
         let confirm_started = std::time::Instant::now();
-        // Deferred archive persistence: EVERY staged row lands (the confirmed prefix plus any
-        // rejected tail's candidates — matching the batch the staging loop used to carry), before
-        // coins + set_peak in the same transaction.
-        let mut window_batch: Option<dg_xch_stores::BatchHandle> = None;
-        if !archive_written && !staged.is_empty() {
-            let mut batch = self.engine.store().begin().await?;
-            let rows: Vec<(&FullBlock, &BlockDelta)> = staged
-                .iter()
-                .map(|(delta, _, _, bi)| (&blocks[*bi], delta))
-                .collect();
-            self.engine
-                .persist_archive_window(&rows, &mut batch)
+        let confirmed: Result<_, SyncError> = async {
+            // Deferred archive persistence: EVERY staged row lands (the confirmed prefix plus any
+            // rejected tail's candidates — matching the batch the staging loop used to carry),
+            // before coins + set_peak in the same transaction.
+            let mut window_batch: Option<dg_xch_stores::BatchHandle> = None;
+            if !archive_written && !staged.is_empty() {
+                let mut batch = self.engine.store().begin().await?;
+                let rows: Vec<(&FullBlock, &BlockDelta)> = staged
+                    .iter()
+                    .map(|(delta, _, _, bi)| (&blocks[*bi], delta))
+                    .collect();
+                self.engine
+                    .persist_archive_window(&rows, &mut batch)
+                    .await?;
+                window_batch = Some(batch);
+            }
+            // One store batch confirms the whole window; the engine falls back to per-block fork
+            // choice the moment a delta isn't a plain extension.
+            let to_confirm: Vec<BlockDelta> =
+                staged.drain(..confirm_upto).map(|(d, _, _, _)| d).collect();
+            let reported: Vec<BlockDelta> = to_confirm.clone();
+            // A stale reorg report from a non-reporting confirm path must never mis-attach to
+            // this window's outcomes: only reports pushed by the batch below are consumed by the
+            // expansion.
+            self.engine.clear_reorg_reports();
+            log::debug!("window.confirm blocks={}", to_confirm.len());
+            let outcomes = self
+                .engine
+                .confirm_staged_batch_in(to_confirm, window_batch.take())
                 .await?;
-            window_batch = Some(batch);
+            Ok((outcomes, reported))
         }
-        // One store batch confirms the whole window; the engine falls back to per-block fork
-        // choice the moment a delta isn't a plain extension.
-        let to_confirm: Vec<BlockDelta> =
-            staged.drain(..confirm_upto).map(|(d, _, _, _)| d).collect();
-        let reported: Vec<BlockDelta> = to_confirm.clone();
+        .await;
+        let (outcomes, reported) = match confirmed {
+            Ok(v) => v,
+            Err(e) => {
+                // A store failure mid-confirm strands whatever the batch had not yet applied:
+                // retract the whole overlay so the re-staged window reads no stale entries.
+                self.engine.clear_staged_overlay();
+                return Err(e);
+            }
+        };
         let mut deltas = Vec::new();
-        // A stale reorg report from a non-reporting confirm path must never mis-attach to this
-        // window's outcomes: only reports pushed by the batch below are consumed by the expansion.
-        self.engine.clear_reorg_reports();
-        log::debug!("window.confirm blocks={}", to_confirm.len());
-        let outcomes = self
-            .engine
-            .confirm_staged_batch_in(to_confirm, window_batch.take())
-            .await?;
         self.metrics.window_confirm_micros.store(
             confirm_started.elapsed().as_micros() as u64,
             Ordering::Relaxed,
