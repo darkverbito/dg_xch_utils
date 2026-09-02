@@ -1202,7 +1202,7 @@ impl ReadStream {
                                     }
                                 }
                                 Message::Close(e) => {
-                                    info!("Got Close Message: {e:?}");
+                                    debug!("Got Close Message: {e:?}");
                                     return;
                                 },
                                 _ => {
