@@ -3719,58 +3719,6 @@ where
         let Some(validated) = self.validated_proof(&peers).await? else {
             return Ok(false);
         };
-        let start = h.saturating_sub(64);
-        let end = h.saturating_add(31);
-        // Peers reject RequestBlocks spans wider than 32, so the anchor span is fetched in
-        // 32-block chunks; a peer that fails any chunk is abandoned for the next peer.
-        let mut fetched = None;
-        'peers: for peer in &peers {
-            let source = OutboundPeerSource::new(peer.clone(), REQUEST_TIMEOUT);
-            let mut span = Vec::new();
-            let mut lo = start;
-            while lo <= end {
-                let hi = end.min(lo + 31);
-                match source.fetch_range(lo, hi).await {
-                    Ok(blocks) if !blocks.is_empty() => span.extend(blocks),
-                    Ok(_) | Err(_) => continue 'peers,
-                }
-                lo = hi + 1;
-            }
-            fetched = Some(span);
-            break;
-        }
-        let Some(mut blocks) = fetched else {
-            warn!(
-                "sync-from anchor: no peer served the anchor span; retrying start={} end={} peers={}",
-                start,
-                end,
-                peers.len()
-            );
-            return Ok(false);
-        };
-        blocks.sort_by_key(dg_xch_core::blockchain::full_block::FullBlock::height);
-        let headers: Vec<_> = blocks
-            .iter()
-            .map(dg_xch_node::header_block_from_full_block)
-            .collect();
-        let mut chaser = self.chaser.lock().await;
-        let schedule = chaser.epoch_schedule(&validated.summaries);
-        chaser
-            .sync_headers(&headers, &schedule, &validated.summaries)
-            .await
-            .map_err(|e| Error::other(e.to_string()))?;
-        // The proof's summary chain outlives the anchor span: the first included-SES block ABOVE
-        // the span has neither local ancestry nor a headers-first candidate to serve its summary
-        // — the engine falls back to this chain, hash-gated as ever.
-        chaser.seed_summary_chain(validated.summaries.to_vec());
-        // The anchor span alone cannot serve the FIRST epoch retarget the follow hits: its
-        // `get_second_to_last_transaction_block_in_previous_epoch` walk reads records back past
-        // the previous epoch surpass — up to a full epoch below the span (the 4,575,744-boundary
-        // wall: --sync-from=4575000 seeded [4574936, 4575031], staging 4,575,758 walked to
-        // 4,571,135 and died on "block record not found"). Backfill those records headers-first
-        // now, exactly as the from-zero bulk sync does after its weight-proof landing. Fail
-        // closed: without them the follow WILL wall at the boundary, so retry the anchor next
-        // tick rather than establish a known-incomplete one.
         let sources: Vec<Arc<dyn BlockRangeSource>> = peers
             .iter()
             .map(|p| {
@@ -3778,25 +3726,89 @@ where
                     as Arc<dyn BlockRangeSource>
             })
             .collect();
-        match chaser
-            .backfill_epoch_depth(&sources, &validated.summaries, start)
-            .await
-        {
-            Ok(n) => info!("sync-from epoch-depth backfill complete records={}", n),
-            Err(e) => {
+        self.anchor_with_sources(&sources, &validated, h).await
+    }
+
+    // The source-driven half of the anchor: every candidate peer gets one shot per attempt —
+    // a span the header pass rejects burns only its serving peer, and the NEXT peer is tried in
+    // the same call, so one bad-but-fast peer can never hold the anchor un-established.
+    async fn anchor_with_sources(
+        &self,
+        sources: &[Arc<dyn BlockRangeSource>],
+        validated: &ValidatedTip,
+        h: u32,
+    ) -> Result<bool, Error> {
+        let start = h.saturating_sub(64);
+        let end = h.saturating_add(31);
+        // Peers reject RequestBlocks spans wider than 32, so the anchor span is fetched in
+        // 32-block chunks; a peer that fails any chunk is abandoned for the next peer.
+        'sources: for source in sources {
+            let mut span = Vec::new();
+            let mut lo = start;
+            while lo <= end {
+                let hi = end.min(lo + 31);
+                match source.fetch_range(lo, hi).await {
+                    Ok(blocks) if !blocks.is_empty() => span.extend(blocks),
+                    Ok(_) | Err(_) => continue 'sources,
+                }
+                lo = hi + 1;
+            }
+            span.sort_by_key(dg_xch_core::blockchain::full_block::FullBlock::height);
+            let headers: Vec<_> = span
+                .iter()
+                .map(dg_xch_node::header_block_from_full_block)
+                .collect();
+            let mut chaser = self.chaser.lock().await;
+            let schedule = chaser.epoch_schedule(&validated.summaries);
+            if let Err(e) = chaser
+                .sync_headers(&headers, &schedule, &validated.summaries)
+                .await
+            {
                 warn!(
-                    "sync-from epoch-depth backfill failed; retrying anchor next tick error={}",
+                    "sync-from anchor: header pass rejected the span from peer {}; trying the next peer error={}",
+                    source.peer_id(),
                     e
                 );
-                return Ok(false);
+                continue 'sources;
             }
+            // The proof's summary chain outlives the anchor span: the first included-SES block ABOVE
+            // the span has neither local ancestry nor a headers-first candidate to serve its summary
+            // — the engine falls back to this chain, hash-gated as ever.
+            chaser.seed_summary_chain(validated.summaries.to_vec());
+            // The anchor span alone cannot serve the FIRST epoch retarget the follow hits: its
+            // `get_second_to_last_transaction_block_in_previous_epoch` walk reads records back past
+            // the previous epoch surpass — up to a full epoch below the span. Backfill those
+            // records headers-first now, exactly as the from-zero bulk sync does after its
+            // weight-proof landing. Fail closed: without them the follow WILL wall at the
+            // boundary, so retry the anchor next tick rather than establish a known-incomplete
+            // one.
+            match chaser
+                .backfill_epoch_depth(sources, &validated.summaries, start)
+                .await
+            {
+                Ok(n) => info!("sync-from epoch-depth backfill complete records={}", n),
+                Err(e) => {
+                    warn!(
+                        "sync-from epoch-depth backfill failed; retrying anchor next tick error={}",
+                        e
+                    );
+                    return Ok(false);
+                }
+            }
+            if let Err(e) = chaser.warm_engine_cache().await {
+                warn!("sync-from cache warm failed error={}", e);
+            }
+            *self.sync_from_anchor.write().await = Some(start);
+            info!("sync-from anchor established anchor={} target={}", start, h);
+            return Ok(true);
         }
-        if let Err(e) = chaser.warm_engine_cache().await {
-            warn!("sync-from cache warm failed error={}", e);
-        }
-        *self.sync_from_anchor.write().await = Some(start);
-        info!("sync-from anchor established anchor={} target={}", start, h);
-        Ok(true)
+        warn!(
+            "sync-from anchor: no peer served a valid anchor span; retrying start={} end={} peers={}",
+            start,
+            end,
+            sources.len()
+        );
+        Ok(false)
     }
 
     async fn local_peak_weight(&self) -> Option<u128> {
@@ -7896,6 +7908,129 @@ mod tests {
             .await
             .expect("boot"),
         )
+    }
+
+    struct CountingSource {
+        blocks: Vec<dg_xch_core::blockchain::full_block::FullBlock>,
+        calls: std::sync::atomic::AtomicUsize,
+        id: u64,
+    }
+
+    #[async_trait::async_trait]
+    impl BlockRangeSource for CountingSource {
+        fn peer_id(&self) -> u64 {
+            self.id
+        }
+        fn is_closed(&self) -> bool {
+            false
+        }
+        async fn fetch_range(
+            &self,
+            start: u32,
+            end: u32,
+        ) -> Result<Vec<dg_xch_core::blockchain::full_block::FullBlock>, SyncError> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Ok(self
+                .blocks
+                .iter()
+                .filter(|b| b.height() >= start && b.height() <= end)
+                .cloned()
+                .collect())
+        }
+    }
+
+    // One peer serving a span the header pass rejects must not exhaust the anchor attempt:
+    // the next peer's span is tried in the same call.
+    #[tokio::test]
+    async fn a_rejected_anchor_span_moves_to_the_next_peer_in_the_same_attempt() {
+        use dg_xch_core::blockchain::challenge_chain_subslot::ChallengeChainSubSlot;
+        use dg_xch_core::blockchain::class_group_element::ClassgroupElement;
+        use dg_xch_core::blockchain::end_of_subslot_bundle::EndOfSubSlotBundle;
+        use dg_xch_core::blockchain::reward_chain_subslot::RewardChainSubSlot;
+        use dg_xch_core::blockchain::subslot_proofs::SubSlotProofs;
+        use dg_xch_core::blockchain::vdf_info::VdfInfo;
+        use dg_xch_core::blockchain::vdf_proof::VdfProof;
+
+        let node = seed_test_node().await;
+        let h = 220_000u32;
+        let base = seed_fixture_block();
+        let span = |declare_ses: bool| -> Vec<dg_xch_core::blockchain::full_block::FullBlock> {
+            let mut blocks: Vec<_> = (h - 64..=h + 31)
+                .map(|height| {
+                    let mut b = base.clone();
+                    b.reward_chain_block.height = height;
+                    b
+                })
+                .collect();
+            if declare_ses {
+                let vdf = VdfInfo {
+                    challenge: Bytes32::default(),
+                    number_of_iterations: 1,
+                    output: ClassgroupElement::get_default_element(),
+                };
+                let proof = VdfProof {
+                    witness_type: 0,
+                    witness: dg_xch_core::blockchain::unsized_bytes::UnsizedBytes::default(),
+                    normalized_to_identity: false,
+                };
+                blocks[0].finished_sub_slots = vec![EndOfSubSlotBundle {
+                    challenge_chain: ChallengeChainSubSlot {
+                        challenge_chain_end_of_slot_vdf: vdf,
+                        infused_challenge_chain_sub_slot_hash: None,
+                        subepoch_summary_hash: Some(Bytes32::from([0x5e; 32])),
+                        new_sub_slot_iters: None,
+                        new_difficulty: None,
+                    },
+                    infused_challenge_chain: None,
+                    reward_chain: RewardChainSubSlot {
+                        end_of_slot_vdf: vdf,
+                        challenge_chain_sub_slot_hash: Bytes32::default(),
+                        infused_challenge_chain_sub_slot_hash: None,
+                        deficit: 16,
+                    },
+                    proofs: SubSlotProofs {
+                        challenge_chain_slot_proof: proof.clone(),
+                        infused_challenge_chain_slot_proof: None,
+                        reward_chain_slot_proof: proof,
+                    },
+                }];
+            }
+            blocks
+        };
+        // Peer 1's first block declares a sub-epoch summary the weight proof does not carry —
+        // the header pass rejects that span outright; peer 2's span is merely unanchorable
+        // (nothing below it to backfill).
+        let first = Arc::new(CountingSource {
+            blocks: span(true),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            id: 1,
+        });
+        let second = Arc::new(CountingSource {
+            blocks: span(false),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            id: 2,
+        });
+        let sources: Vec<Arc<dyn BlockRangeSource>> =
+            vec![first.clone() as Arc<dyn BlockRangeSource>, second.clone() as _];
+        let validated = ValidatedTip {
+            tip: Bytes32::default(),
+            wp: Arc::new(WeightProof {
+                sub_epochs: Vec::new(),
+                sub_epoch_segments: Vec::new(),
+                recent_chain_data: Vec::new(),
+            }),
+            summaries: Arc::new(Vec::new()),
+        };
+        let anchored = node
+            .anchor_with_sources(&sources, &validated, h)
+            .await
+            .expect("a rejected span fails over instead of failing the attempt");
+        assert!(!anchored, "junk spans cannot anchor");
+        assert!(
+            second.calls.load(Ordering::Relaxed) > 0,
+            "a span the header pass rejected must burn only its peer — the second peer's span \
+             is tried in the same attempt"
+        );
     }
 
     // A recovery peer must not be able to substitute the generator of an out-of-span ref

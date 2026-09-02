@@ -1224,8 +1224,8 @@ where
     /// [`Self::follow_blocks_reporting`] with window bodies the caller precomputed while the
     /// PREVIOUS window validated (the cross-window body pipeline). `provided` entries skip the
     /// inline precompute; tx blocks not covered take the inline path unchanged, and the engine's
-    /// stage-time flag-key check still guards every precompute, so a stale entry degrades to an
-    /// inline recompute, never to a wrong verdict.
+    /// stage-time refs-digest check still guards every precompute, so a stale entry degrades to
+    /// an inline recompute, never to a wrong verdict.
     ///
     /// Serial composition of the stage-ahead pipeline halves ([`Self::stage_window_pre`], the pure
     /// [`drain_staged_window`], [`Self::confirm_window_pre`]) — behavior-identical to the
@@ -2023,6 +2023,11 @@ fn run_precompute_jobs<P: crate::primitives::ConsensusPrimitives + Sync>(
                                     crate::engine::PrecomputedBody {
                                         conds,
                                         agg_sig_verified: verified,
+                                        refs_digest: crate::engine::precompute_refs_digest(
+                                            block.height(),
+                                            refs,
+                                            *verify_sig,
+                                        ),
                                     },
                                 )
                             })
@@ -2044,8 +2049,8 @@ fn run_precompute_jobs<P: crate::primitives::ConsensusPrimitives + Sync>(
 /// body pipeline. Generator refs resolve from the window itself or from `extra` (the driver's
 /// confirmed-store snapshot, [`Chaser::confirmed_ref_generators`]); a block with a ref neither
 /// can serve is skipped here and takes the engine's inline path, and the engine's stage-time
-/// flag-key check still guards every entry — a mismatch degrades to an inline recompute, never
-/// to a changed verdict.
+/// refs-digest check still guards every entry — a mismatch degrades to an inline recompute,
+/// never to a changed verdict.
 #[must_use]
 pub fn precompute_window_bodies_standalone<P: crate::primitives::ConsensusPrimitives + Sync>(
     primitives: &P,
