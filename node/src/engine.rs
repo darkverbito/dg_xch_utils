@@ -505,6 +505,50 @@ where
         .await
     }
 
+    /// [`Engine::stage_block_pre`] with the archive writes DEFERRED entirely — no batch opens and
+    /// no writer is touched; the caller persists the archive rows later (inside the confirm
+    /// transaction, via [`Engine::persist_archive_window`]). This is the staging half the
+    /// stage-ahead pipeline uses: window N+1 stages against the overlay while window N's drain
+    /// still owns the CPU and window N's confirm still owns the writer. The overlay inserts
+    /// ([`Engine::finish_stage`]'s walk-cache/staged-delta entries) happen exactly as in the
+    /// writing variants, so in-window and cross-window staged reads are unchanged.
+    ///
+    /// # Errors
+    /// As [`Engine::stage_block_pre`].
+    pub async fn stage_block_pre_dry(
+        &mut self,
+        block: &FullBlock,
+        vdf_sink: &crate::header::HeaderSink,
+        pre: Option<PrecomputedBody>,
+    ) -> Result<Option<BlockDelta>, NodeError> {
+        // Await-safe instrumentation: see `stage_block_pre`.
+        log::debug!("block.stage height={}", block.height());
+        async move {
+            let Some(delta) = self.prepare_delta(block, Some(vdf_sink), pre).await? else {
+                return Ok(None);
+            };
+            Ok(Some(self.finish_stage(block, delta)))
+        }
+        .await
+    }
+
+    /// Persist the archive rows for a dry-staged window into an OPEN batch — the deferred half of
+    /// [`Engine::stage_block_pre_dry`], called from the confirm with its transaction so archive
+    /// rows still land before `set_peak` inside the same commit.
+    ///
+    /// # Errors
+    /// Returns [`NodeError::Store`] on a persistence failure.
+    pub async fn persist_archive_window(
+        &self,
+        rows: &[(&FullBlock, &BlockDelta)],
+        batch: &mut BatchHandle,
+    ) -> Result<(), NodeError> {
+        for (block, delta) in rows {
+            self.persist_archive_in(block, delta, batch).await?;
+        }
+        Ok(())
+    }
+
     /// [`Engine::stage_block_pre`] with the archive writes threaded into a caller-owned WINDOW
     /// staging batch instead of a per-block commit — the CATCH-UP half of the phase-aware commit
     /// granularity [`Engine::confirm_staged_batch`] already applies on the confirm side (batch
