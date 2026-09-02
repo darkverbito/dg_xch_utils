@@ -240,3 +240,4 @@ async fn a_confirm_store_failure_retracts_the_staged_overlay() {
         "a confirm that failed in the store left {overlay} staged overlay entries resident"
     );
 }
+

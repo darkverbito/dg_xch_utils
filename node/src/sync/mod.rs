@@ -1474,13 +1474,14 @@ where
         let vdf_err = verdict.err;
         let confirm_started = std::time::Instant::now();
         let confirmed: Result<_, SyncError> = async {
-            // Deferred archive persistence: EVERY staged row lands (the confirmed prefix plus any
-            // rejected tail's candidates — matching the batch the staging loop used to carry),
-            // before coins + set_peak in the same transaction.
+            // Deferred archive persistence: ONLY the confirmed prefix lands, before its coins +
+            // set_peak in the same transaction. A row past the confirm boundary failed its
+            // deferred verification — persisting it would stamp a validated status on a block
+            // no gate passed; the rejected tail re-fetches and re-stages wholesale instead.
             let mut window_batch: Option<dg_xch_stores::BatchHandle> = None;
-            if !archive_written && !staged.is_empty() {
+            if !archive_written && confirm_upto > 0 {
                 let mut batch = self.engine.store().begin().await?;
-                let rows: Vec<(&FullBlock, &BlockDelta)> = staged
+                let rows: Vec<(&FullBlock, &BlockDelta)> = staged[..confirm_upto]
                     .iter()
                     .map(|(delta, _, _, bi)| (&blocks[*bi], delta))
                     .collect();
@@ -2145,6 +2146,83 @@ mod tests {
     use super::tip_epoch_from;
     use dg_xch_core::blockchain::sized_bytes::Bytes32;
     use dg_xch_core::blockchain::sub_epoch_summary::SubEpochSummary;
+
+    // A PARTIALLY rejected window must persist archive rows only for its confirmed prefix: the
+    // batch that commits the prefix's coins and peak must not carry validated-stamped rows for
+    // the tail whose deferred verification failed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_rejected_tail_leaves_no_archive_rows() {
+        use crate::engine::Engine;
+        use crate::primitives::NativePrimitives;
+        use dg_xch_core::blockchain::full_block::FullBlock;
+        use dg_xch_core::consensus::constants::MAINNET;
+        use dg_xch_stores::{BlockStore, SqliteStore};
+        use std::sync::Arc;
+
+        let base: FullBlock = serde_json::from_str(include_str!(
+            "../../tests/fixtures/full_block_5000000.json"
+        ))
+        .expect("fixture");
+        let mut prev = Bytes32::from([0xB6; 32]);
+        let mut chain = Vec::new();
+        for h in 100u32..108 {
+            let mut b = base.clone();
+            b.reward_chain_block.height = h;
+            b.reward_chain_block.weight = 1_000_000 + u128::from(h) * 10;
+            b.foliage.prev_block_hash = prev;
+            prev = b.header_hash().expect("hash");
+            chain.push(b);
+        }
+        let tail_hash = chain.last().unwrap().header_hash().unwrap();
+
+        let dir = std::env::temp_dir().join(format!(
+            "sync_tail_rows_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let store = Arc::new(SqliteStore::open(&dir).await.expect("store opens"));
+        store.set_near_tip(false);
+        let mut chaser = super::Chaser::new(
+            Engine::new(store, NativePrimitives, MAINNET),
+            super::SyncConfig {
+                peers: 1,
+                window: 32,
+                batch: 32,
+                request_timeout: std::time::Duration::from_secs(20),
+                assume_valid: 10_000_000,
+            },
+        );
+        let staged = chaser
+            .stage_window_pre(chain, None)
+            .await
+            .expect("window stages");
+        let verdict = super::WindowVerdict {
+            confirm_upto: 4,
+            err: Some(
+                crate::error::NodeError::Invalid("INVALID_VDF at height 104 (window drain)".into())
+                    .into(),
+            ),
+            vdf_micros: 0,
+            sig_micros: 0,
+        };
+        chaser
+            .confirm_window_pre(staged, verdict)
+            .await
+            .expect_err("the rejection surfaces");
+        assert!(
+            chaser
+                .engine()
+                .store()
+                .get_block_record(&tail_hash)
+                .await
+                .expect("record read")
+                .is_none(),
+            "a drain-rejected tail block left a durable archive row"
+        );
+    }
 
     fn ses(new_difficulty: Option<u64>, new_sub_slot_iters: Option<u64>) -> SubEpochSummary {
         SubEpochSummary {
