@@ -2240,3 +2240,33 @@ impl dg_xch_core::errors::ErrorCode for RpcError {
         }
     }
 }
+
+#[cfg(test)]
+mod red_security_review_tests {
+    use super::*;
+
+    // Red demonstration for docs/security-review-2026-09.md (finding 6); run with
+    // `cargo test -p full-node --lib red_oversized -- --ignored`. The body cap must bound what
+    // is MATERIALIZED, not merely what is accepted afterwards. When the fix lands, remove the
+    // ignore and keep the test as the regression gate.
+    #[tokio::test]
+    #[ignore = "red: finding 6 in docs/security-review-2026-09.md — the body is fully buffered before the cap"]
+    async fn red_oversized_body_is_rejected_while_streaming() {
+        let oversized = vec![0u8; MAX_RPC_BODY_BYTES * 2];
+        let request = http::Request::builder()
+            .method("POST")
+            .uri("/push_tx")
+            .body(http_body_util::Full::new(bytes::Bytes::from(oversized)))
+            .expect("request builds");
+        let (_, _, body) = read_body(RpcRequest {
+            request_type: RequestType::Sized(request),
+            response_headers: HeaderMap::new(),
+        })
+        .await;
+        assert!(
+            body.len() <= MAX_RPC_BODY_BYTES,
+            "read_body materialized {} bytes — the cap must bound collection, not follow it",
+            body.len()
+        );
+    }
+}
