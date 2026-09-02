@@ -126,14 +126,17 @@ async fn outbound_slot(
                 peer.stop();
                 registry.release_outbound(&endpoint).await;
                 if held.elapsed() >= SHORT_SESSION_HOLD {
-                    attempt = 0;
                     book.lock().await.reclaim(&addr, false);
                 } else {
-                    attempt = attempt.saturating_add(1);
+                    // The ADDRESS was the problem (a peer at capacity, or one that cut us
+                    // off), not the slot: cool the address and move straight on to the next
+                    // candidate. Growing the slot backoff here would slow the bootstrap
+                    // burn-through that finds the healthy peers in the first place.
                     book.lock()
                         .await
                         .reclaim_after(&addr, SHORT_SESSION_COOLDOWN);
                 }
+                attempt = 0;
             }
             Err(_) => {
                 registry.release_outbound(&endpoint).await;
