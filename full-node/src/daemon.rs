@@ -4918,36 +4918,50 @@ async fn block_processor<S: BlockStore + CoinStore + Send + Sync + 'static>(
             // Stage THIS window first — it overlaps the previous window's in-flight drain —
             // then confirm the predecessor, then hand this window's drain to a blocking thread.
             let staged = node.stage_step_window(window, pre).await;
+            // Spawn THIS window's drain before confirming the predecessor: the drain (pure CPU
+            // on already-built queues) then also overlaps that confirm and the next iteration's
+            // driver work — otherwise that residue runs with the verification cores idle.
+            let mut stage_failed: Option<SyncError> = None;
+            let mut spawned: Option<(
+                dg_xch_node::sync::StagedWindow,
+                tokio::task::JoinHandle<dg_xch_node::sync::WindowVerdict>,
+            )> = None;
+            match staged {
+                Ok(mut staged_window) => {
+                    let input = staged_window.take_drain_input();
+                    let constants = pipe_constants;
+                    spawned = Some((
+                        staged_window,
+                        tokio::task::spawn_blocking(move || {
+                            dg_xch_node::sync::drain_staged_window(
+                                &NativePrimitives,
+                                &constants,
+                                input,
+                            )
+                        }),
+                    ));
+                }
+                Err(e) => stage_failed = Some(e),
+            }
             if let Some((prev, handle)) = pipeline.take() {
                 let (pfrom, pto) = prev.bounds();
                 let verdict = join_drain(handle, &pipe_metrics).await;
                 steps.push((pfrom, pto, node.confirm_step_window(prev, verdict).await));
             }
-            match staged {
-                Ok(mut staged_window) => {
-                    if steps.iter().all(|(_, _, s)| s.is_ok()) {
-                        let input = staged_window.take_drain_input();
-                        let constants = pipe_constants;
-                        pipeline = Some((
-                            staged_window,
-                            tokio::task::spawn_blocking(move || {
-                                dg_xch_node::sync::drain_staged_window(
-                                    &NativePrimitives,
-                                    &constants,
-                                    input,
-                                )
-                            }),
-                        ));
-                    }
-                    // Predecessor confirm failed: its error path retracted the overlay this
-                    // window staged against — drop it; the queue reset re-fetches both spans.
-                }
-                Err(e) => {
-                    // Stage failure leaves the overlay for us (the predecessor's confirm had to
-                    // land first); clear it now that it has.
-                    node.chaser.lock().await.clear_staged_overlay();
-                    steps.push((from, to, Err(e)));
-                }
+            if let Some(e) = stage_failed {
+                // Stage failure leaves the overlay for us (the predecessor's confirm had to
+                // land first); clear it now that it has.
+                node.chaser.lock().await.clear_staged_overlay();
+                steps.push((from, to, Err(e)));
+            }
+            if steps.iter().all(|(_, _, s)| s.is_ok()) {
+                pipeline = spawned;
+            } else if let Some((_, handle)) = spawned.take() {
+                // A failed confirm (or stage) retracted the overlay this window staged
+                // against: abort its drain and drop it — the queue reset re-fetches both
+                // spans. The extra clear is idempotent and covers the confirm-failure path.
+                handle.abort();
+                node.chaser.lock().await.clear_staged_overlay();
             }
         }
         if pipeline.is_none() {
