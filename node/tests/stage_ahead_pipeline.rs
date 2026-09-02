@@ -164,3 +164,48 @@ async fn an_abandoned_dry_staged_window_leaves_no_trace_and_replays() {
         "the abandoned window replays to its tip"
     );
 }
+
+// A provided precompute must never widen what validation accepts: a block whose committed ref
+// list names a height with no generator anywhere on the chain is invalid inline, and must stay
+// invalid when a precompute (built without that ref) is handed in — the engine's refs-digest
+// check drops the mismatched precompute and the inline path rejects.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_precompute_cannot_smuggle_past_an_unresolvable_ref() {
+    use dg_xch_core::consensus::block_generator::transactions_generator_refs_root;
+    use dg_xch_node::engine::{PrecomputedBody, precompute_refs_digest, run_body_expensive};
+
+    let base = common::load_full_block(5_000_000);
+    let mut chain = build_chain(&base, 100, 107, common::synth_hash(0xad, 99));
+    let victim_height = 107;
+    {
+        let victim = chain.last_mut().unwrap();
+        victim.transactions_generator_ref_list = vec![99];
+        victim
+            .transactions_info
+            .as_mut()
+            .expect("fixture tx block carries transactions_info")
+            .generator_refs_root = transactions_generator_refs_root(&[99]).expect("refs root");
+    }
+    let victim = chain.last().unwrap().clone();
+    let (conds, verified) =
+        run_body_expensive(&NativePrimitives, &MAINNET, &victim, &[], false).expect("body runs");
+    let pre = PrecomputedBody {
+        conds,
+        agg_sig_verified: verified,
+        refs_digest: precompute_refs_digest(victim_height, &[], false),
+    };
+    let provided = std::collections::HashMap::from([(victim_height, pre)]);
+
+    let store = Arc::new(common::new_store().await);
+    store.set_near_tip(false);
+    let mut chaser = Chaser::new(Engine::new(store, NativePrimitives, MAINNET), cfg());
+    let err = chaser
+        .follow_blocks_reporting_pre(&chain, Some(provided))
+        .await
+        .expect_err("a ref to a generator-less height is invalid, precompute or not");
+    assert!(
+        format!("{err:?}").contains("GeneratorRefHasNoGenerator"),
+        "wrong rejection: {err:?}"
+    );
+}
+

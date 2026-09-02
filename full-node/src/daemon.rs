@@ -4850,7 +4850,7 @@ async fn block_processor<S: BlockStore + CoinStore + Send + Sync + 'static>(
     // Cross-window body pipeline: while window N runs its stage/vdf/sig/confirm phases, window
     // N+1's body precompute (pure CPU over blocks already resident in the queue) runs here in a
     // blocking task. Keyed by the window's first height so a rebase/reorg between spawn and use
-    // discards it (worst case: wasted compute, never a stale verdict — the engine's flag-key
+    // discards it (worst case: wasted compute, never a stale verdict — the engine's refs-digest
     // guard re-verifies every precompute at stage time).
     let (pipe_constants, pipe_assume_valid, pipe_metrics) = {
         let chaser = node.chaser.lock().await;
