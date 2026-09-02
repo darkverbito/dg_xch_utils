@@ -1,6 +1,6 @@
 [package]
 name = "full-node"
-description = "dg_xch full-node daemon: wires the stores, p2p, node engine, and RPC/wallet servers into one running Chia node."
+description = "dg_xch full-node daemon with storage, P2P, consensus, RPC, and wallet services"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -43,9 +43,7 @@ dg_xch_weight_proof = { path = "../weight-proof", version = "3.0.0" }
 dg_xch_clients = { path = "../clients", version = "3.0.0" }
 dg_xch_servers = { path = "../servers", version = "3.0.0" }
 async-trait = "0.1.89"
-# CIDR matchers for the trusted-peer tier's `--trusted-cidr` list (chia `trusted_cidrs`): parse an
-# IPv4/IPv6 CIDR string once at boot, then `IpNet::contains(&IpAddr)` per gate. Already in the lock
-# tree (transitive); pinned direct here.
+# CIDR matching for trusted peer configuration.
 ipnet = "2.12"
 uuid = { version = "1.24.0", features = ["v4"] }
 bytes = "1.10.1"
@@ -71,7 +69,6 @@ tikv-jemallocator = { version = "0.6", features = ["background_threads"] }
 tikv-jemallocator = "0.6"
 
 [dev-dependencies]
-# Proof-fixture hex compares (the chia_rs 0.42.1 byte-parity gates in daemon.rs wallet_queries).
 hex = "0.4.3"
 # Test builds get the coin-index store tier (the FF lineage lookup + the FaultStore test double's
 # delegating impls, gated any(feature = "coin-index", test)); production feature defaults untouched.

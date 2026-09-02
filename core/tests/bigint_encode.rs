@@ -1,12 +1,6 @@
 use dg_xch_core::formatting::{bigint_to_bytes, number_from_slice};
 use num_bigint::BigInt;
 
-// `bigint_to_bytes` corrupted the sign-pad byte of any positive value whose minimal
-// encoding is exactly 4k data bytes with the high bit set (e.g. 0xCECD48C0 encoded as
-// C0CECD48C0 instead of 00CECD48C0) — the tail loop re-read the already-consumed top u32 word.
-// Mainnet block 5,494,140 rejected with AssertAnnounceConsumedFailed because an offer puzzle's
-// announcement carried such a value through the BigInt path. The reference is chia's
-// int_to_bytes: minimal big-endian two's complement.
 fn reference(v: &BigInt) -> Vec<u8> {
     if v == &BigInt::from(0) {
         return vec![];

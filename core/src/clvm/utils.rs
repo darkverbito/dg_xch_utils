@@ -15,46 +15,21 @@ pub const STRICT_ARGS_COUNT: u32 = 0x0008_0000;
 pub const COST_CONDITIONS: u32 = 0x0080_0000;
 pub const IGNORE_ASSERT_CONCURRENT_NULL: u32 = 0x0800_0000;
 pub const ENABLE_KECCAK_OPS_OUTSIDE_FORK: u32 = 0x0000_0100;
-// clvmr NEW_COST_MODEL (0x2000): selects the revised div/mod/modpow cost formulas.
+// Selects the revised division-family cost formulas.
 pub const NEW_COST_MODEL: u32 = 0x0000_2000;
-// clvmr DISABLE_OP (0x0200): soft fork 8 — modpow disabled, mod dividend capped at 2048 bytes,
-// until hard fork 2's bounded cost model re-enables them.
+// Disables modpow and caps modulus operands before the bounded cost model activates.
 pub const DISABLE_OP: u32 = 0x0000_0200;
-// clvmr LIMITS (0x0040): soft fork 8 — operand-size caps on the division-family operators.
+// Enables operand-size limits for division-family operators.
 pub const LIMITS: u32 = 0x0000_0040;
-// Soft fork 9 — CANONICAL_INTS. clvm_rs names this `ClvmFlags::CANONICAL_INTS = 0x0001`
-// (clvm_rs `src/chia_dialect.rs`), but 0x0001 is already NO_NEG_DIV in this VM
-// (`crate::clvm::dialect::NO_NEG_DIV`), so we assign an internal free bit — the numeric
-// value is dg_xch's own; only the SEMANTIC and the height activation must match chia.
-//
-// Semantic (clvm_rs `src/op_utils.rs::uint_atom`, canonical branch): when set, a
-// fixed-width unsigned integer atom may carry AT MOST one leading `0x00`, and only when
-// the next byte's high bit is set (i.e. the zero is needed to keep the value positive);
-// any other leading zero is rejected ("requires uN arg with no leading zeros"). When
-// clear, all leading zeros are stripped (non-canonical encodings accepted) — the
-// pre-SF9 behavior. In the CLVM VM the ONLY consumer is the `softfork` operator's
-// extension/expected-cost decode (clvm_rs `src/run_program.rs::parse_softfork_arguments`,
-// `uint_atom::<4>` / `uint_atom::<8>`); condition-argument canonicalization is a SEPARATE,
-// flag-INDEPENDENT rule (chia_rs `crates/chia-consensus/src/sanitize_int.rs::sanitize_uint`
-// takes no flag and always rejects non-canonical leading zeros). Activated at
-// `soft_fork9_height` by `BlockGeneratorFlags::for_height`.
+// Rejects redundant leading zeroes in fixed-width unsigned integer atoms.
 pub const CANONICAL_INTS: u32 = 0x0400_0000;
-// Hard fork 2 — RELAXED_BLS. clvmr names this `ClvmFlags::RELAXED_BLS` ("make bls_g1_negate
-// and bls_g2_negate accept invalid points", clvmr `src/chia_dialect.rs`); chia_rs OR-s it in
-// at `hard_fork2_height` (`get_flags_for_height_and_constants`). Internal free bit — as with
-// CANONICAL_INTS, only the semantic and the height activation must match chia. Consumers:
-// the two BLS negate operators (`crate::clvm::bls_ops`), which skip point validation when set.
+// Allows BLS negate operators to process invalid points after the activating fork.
 pub const RELAXED_BLS: u32 = 0x0000_4000;
 pub const MEMPOOL_MODE: u32 = NO_UNKNOWN_OPS | LIMIT_HEAP;
 pub const INFINITE_COST: u64 = 0x7FFF_FFFF_FFFF_FFFF;
 
-/// Whether a serialized CLVM buffer is entirely in canonical form — chia
-/// `is_clvm_canonical` (chia/full_node/mempool_manager.py:183-224): every atom's length
-/// prefix uses the shortest possible encoding, no back-references, and no trailing
-/// garbage. The mempool enforces this on the solution of every DEDUP-eligible coin spend
-/// (mempool_manager.py:676-677) so identical spends have exactly one byte representation.
-/// Defensive on malformed input (returns `false`, never panics) — chia only calls it on
-/// already-parsed solutions.
+/// Returns whether a CLVM buffer uses minimal atom lengths, contains no back-references, and has
+/// no trailing data.
 #[must_use]
 pub fn is_clvm_canonical(clvm: &[u8]) -> bool {
     if clvm.is_empty() {
@@ -81,8 +56,6 @@ pub fn is_clvm_canonical(clvm: &[u8]) -> bool {
             tokens_left -= 1;
             offset += 1;
         } else {
-            // The length-prefix classes of chia's `is_atom_canonical`: (extra prefix bytes,
-            // value mask of the first byte, smallest length REQUIRING this class).
             let (prefix_len, mask, min_value): (usize, u8, u64) = if b & 0b1100_0000 == 0b1000_0000
             {
                 (0, 0b0011_1111, 1)

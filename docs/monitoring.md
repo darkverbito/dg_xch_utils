@@ -1,9 +1,7 @@
 # Monitoring a dg_xch Full Node (Prometheus + Grafana)
 
 Every node exposes Prometheus text metrics on `--metrics` (default `0.0.0.0:9100`,
-path `/metrics`). This doc is everything needed to scrape them and stand up the
-dashboards in any cluster — written so you (DaOneLuna) can wire it into your own
-Prometheus/Grafana without asking us anything.
+path `/metrics`).
 
 ## The metrics
 

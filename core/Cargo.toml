@@ -50,9 +50,7 @@ x509-cert = { version = "0.2.5", features = ["std", "pem", "builder"] }
 serde_json = "1.0.145"
 dg_logger = { path = "../logging" }
 criterion = "0.7.0"
-# Differential oracle for the CLVM BLS operators (`pubkey_for_exp`/`point_add`);
-# tests/bls_ops_differential.rs and benches/bls_ops.rs replay it against the blst-backed
-# operators. Tests/benches only — not part of the shipped library.
+# Independent test-only BLS implementation used by operator tests and benchmarks.
 bls12_381 = "0.8.0"
 
 [[bench]]

@@ -1,22 +1,3 @@
-//! A prerequisite-validation harness — a synthetic-peer capture tool that PROVES, against a
-//! RUNNING full node, that the node gossips the frames a real timelord and a real farmer depend on.
-//! "Deployed the code" is not "watched a peer receive it": this connects to the node p2p WebSocket as
-//! a synthetic Timelord and a synthetic Farmer (chia-CA mTLS, the same identity model as `FarmerClient`),
-//! captures inbound frames, and asserts on them — printing the captured fields as evidence.
-//!
-//! Run from a host that can reach the node:
-//!   validate_node_ws \
-//!     --ws-host dg-xch-node --ws-port 8444 \
-//!     --metrics-host dg-xch-node-rpc --metrics-port 9100
-//!
-//! Endpoint defaults match the node's service names and its container args
-//! (--listen=0.0.0.0:8444, --metrics=0.0.0.0:9100, mainnet). Override with flags or the
-//! DGXCH_VALIDATE_NODE_WS env var.
-//!
-//! Chia identity model: node-0 follows chia MAINNET, whose CA is a PUBLIC root; a valid peer presents a
-//! cert signed by that CA (generated on the fly from the embedded CHIA_CA_CRT/CHIA_CA_KEY, exactly as
-//! FarmerClient does). The peer id is hash_256(cert). No private node cert is needed or used.
-
 use async_trait::async_trait;
 use clap::Parser;
 use dg_xch_clients::websocket::{WsClient, WsClientConfig};
@@ -75,19 +56,15 @@ struct Args {
     /// Node p2p WebSocket host (service: dg-xch-node).
     #[arg(long, env = "DGXCH_VALIDATE_NODE_WS", default_value = "dg-xch-node")]
     ws_host: String,
-    /// Node p2p WebSocket port (node arg: --listen=0.0.0.0:8444).
     #[arg(long, default_value_t = 8444)]
     ws_port: u16,
     /// Node metrics host (service: dg-xch-node-rpc).
     #[arg(long, default_value = "dg-xch-node-rpc")]
     metrics_host: String,
-    /// Node metrics port (node arg: --metrics=0.0.0.0:9100).
     #[arg(long, default_value_t = 9100)]
     metrics_port: u16,
-    /// Chia network id to advertise in the handshake.
     #[arg(long, default_value = "mainnet")]
     network: String,
-    /// Window to wait for a NewPeakTimelord frame. Chia peaks land every few seconds to ~18s.
     #[arg(long, default_value_t = 60)]
     timelord_window_secs: u64,
     /// Window to capture NewSignagePoint frames. Index-0 SPs recur ~once per sub-slot (~10 min on
@@ -125,8 +102,6 @@ impl MessageHandler for CaptureHandler {
     }
 }
 
-/// Connect to the node as `node_type` with a chia-CA client cert, complete the handshake, and return
-/// the live client plus the receiver end of the capture channel.
 async fn connect_synthetic_peer(
     args: &Args,
     node_type: NodeType,
@@ -269,8 +244,6 @@ fn validate_new_peak_timelord(np: &NewPeakTimelord, ok: &mut bool) {
         !np.previous_reward_challenges.is_empty(),
         ok,
     );
-    // At an epoch boundary chia sets new_difficulty and new_sub_slot_iters together; off one, both are
-    // None. Either way the two Option flags must agree.
     let ses_consistent = match &np.sub_epoch_summary {
         None => true,
         Some(ses) => ses.new_difficulty.is_some() == ses.new_sub_slot_iters.is_some(),
@@ -497,7 +470,6 @@ async fn run_farmer_check(args: &Args) -> bool {
     ok
 }
 
-/// Raw HTTP GET of the node metrics text (plain HTTP on the metrics port, no TLS).
 async fn scrape_metrics(host: &str, port: u16, timeout_secs: u64) -> Result<String, Error> {
     let body = tokio::time::timeout(Duration::from_secs(timeout_secs), async {
         let mut stream = TcpStream::connect((host, port)).await?;
@@ -631,7 +603,6 @@ async fn main() {
     // 4) Farmer peer: NewSignagePoint prerequisites.
     let farmer_ok = run_farmer_check(&args).await;
 
-    // Verdict.
     println!("\n== VERDICT ==");
     println!("  metrics families    : {}", verdict(metrics_ok));
     println!("  timelord gossip     : {}", verdict(timelord_ok));

@@ -16,14 +16,6 @@ pub struct ChallengeBlockInfo {
 }
 
 impl ChallengeBlockInfo {
-    /// chia `std_hash(bytes(challenge_block_info))`. The consensus hash of this challenge-block info:
-    /// sha256 over its streamable encoding. This is the value a block record carries as
-    /// `challenge_block_info_hash`, used as the infused-challenge-chain challenge for challenge blocks. As
-    /// a blockchain (not network) type its encoding — hence this hash — is independent of the negotiated
-    /// protocol version.
-    ///
-    /// # Errors
-    /// Returns an error if the streamable encoding of the challenge-block info fails.
     pub fn hash(&self) -> Result<Bytes32, Error> {
         Ok(Bytes32::from(hash_256(
             self.to_bytes(ChiaProtocolVersion::default())?,

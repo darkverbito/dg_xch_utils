@@ -1,15 +1,3 @@
-// The introducer seed must RETRY while the node is peer-starved.
-//
-// Production finding: the introducer seed ran exactly once at daemon boot; a
-// boot-time failure (DNS not ready yet — "introducer seed failed") left the address book empty and
-// the node peer-poor forever. chia never has this failure mode: FullNodeDiscovery._connect_to_peers
-// (chia/server/node_discovery.py:256-292) re-queries the introducer on a doubling backoff
-// (introducer_backoff 1s → ×2 → 300s cap) whenever peers are needed and the address pool cannot
-// supply them, resetting the backoff once addresses flow again.
-//
-// The supervisor's introducer session mirrors that: retry while the outbound peer count is below
-// target, backoff doubling from `retry_timeout` to the 300s cap, quiet once the target is met.
-
 mod common;
 
 use common::{fast_settings, free_port, peer, spawn_introducer_on, wait_until};
@@ -56,11 +44,6 @@ async fn boot_time_introducer_failure_recovers_when_the_introducer_appears() {
     server.run.store(false, Ordering::Relaxed);
 }
 
-// While the book can still supply a dial candidate the introducer is left alone — chia's
-// `size == 0 or retry_introducers` gate (node_discovery.py:263): a non-empty address pool feeds
-// the outbound slots first; only exhaustion re-opens the introducer. (Deliberately no
-// `start_outbound` here: a real dial on the test host is the known t041 flake — the gate is
-// what's under test, and it must hold with zero live outbound peers.)
 #[tokio::test]
 async fn introducer_is_quiet_while_the_book_can_supply_candidates() {
     let intro_port = free_port();
@@ -83,9 +66,6 @@ async fn introducer_is_quiet_while_the_book_can_supply_candidates() {
     intro.run.store(false, Ordering::Relaxed);
 }
 
-// At (or above) the outbound target the introducer is never queried even with an empty book —
-// chia resets its introducer backoff and stops querying once peers are no longer needed
-// (node_discovery.py:385 `retry_introducers = False` when `extra_peers_needed == 0`).
 #[tokio::test]
 async fn introducer_is_quiet_once_the_outbound_target_is_met() {
     let intro_port = free_port();

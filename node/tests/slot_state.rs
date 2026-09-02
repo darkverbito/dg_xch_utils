@@ -1,8 +1,3 @@
-// SlotState structural rules (skip_vdf_validation exercises every check EXCEPT the class-group
-// proofs, which the era-corpus gate covers with real mainnet VDFs on the builders). Each test
-// pins one rule a peer could otherwise abuse: challenge linkage, SES placement, ICC presence,
-// SP indexing.
-
 use dg_xch_core::blockchain::challenge_chain_subslot::ChallengeChainSubSlot;
 use dg_xch_core::blockchain::class_group_element::ClassgroupElement;
 use dg_xch_core::blockchain::end_of_subslot_bundle::EndOfSubSlotBundle;

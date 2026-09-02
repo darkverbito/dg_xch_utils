@@ -250,13 +250,6 @@ impl RpcServer {
         })
     }
 
-    /// Build a server on an ALREADY-CONSTRUCTED rustls [`ServerConfig`] — for callers that need
-    /// a non-default TLS posture (e.g. the full node's client-certificate enforcement on 8555)
-    /// while keeping the accept loop and handler plumbing here. The `config.ssl_info` field is
-    /// ignored; only host/port are read.
-    ///
-    /// # Errors
-    /// Returns an I/O error if the host address fails to parse.
     pub fn new_with_server_config(
         config: &RpcServerConfig,
         server_config: Arc<ServerConfig>,

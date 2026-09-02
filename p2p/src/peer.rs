@@ -162,11 +162,6 @@ pub(crate) fn dial_handlers(
     }
 }
 
-// Bounded dial: connect + handshake under the connect timeout, using the embedded
-// mainnet CA identity (Chia mTLS). Reused by the outbound, manual, and seed sessions.
-///
-/// # Errors
-/// Returns [`Error`] if the TLS connect or the handshake fails or times out.
 pub async fn dial(
     host: &str,
     port: u16,
@@ -187,16 +182,35 @@ pub async fn dial(
         // loop.
         rate_limited: true,
     });
-    WsClient::with_ca(
-        config,
-        NodeType::FullNode,
-        handlers,
-        run,
-        CHIA_CA_CRT.as_bytes(),
-        CHIA_CA_KEY.as_bytes(),
-        settings.connect_timeout.as_secs(),
-    )
+    let timeout = settings.connect_timeout.as_secs();
+    let runtime = tokio::runtime::Handle::current();
+    tokio::task::spawn_blocking(move || {
+        runtime.block_on(WsClient::with_ca(
+            config,
+            NodeType::FullNode,
+            handlers,
+            run,
+            CHIA_CA_CRT.as_bytes(),
+            CHIA_CA_KEY.as_bytes(),
+            timeout,
+        ))
+    })
     .await
+    .map_err(|error| Error::other(format!("connection task failed: {error}")))?
+}
+
+impl dg_xch_core::errors::ErrorCode for AdmitError {
+    fn band(&self) -> dg_xch_core::errors::ErrorBand {
+        dg_xch_core::errors::ErrorBand::Peer
+    }
+
+    fn variant(&self) -> u16 {
+        match self {
+            AdmitError::InboundCapReached => 1,
+            AdmitError::DuplicateEndpoint => 2,
+            AdmitError::SelfConnection => 3,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -268,18 +282,5 @@ mod tests {
             reg.reserve_outbound(&ep(8444)).await.unwrap_err(),
             AdmitError::SelfConnection
         );
-    }
-}
-
-impl dg_xch_core::errors::ErrorCode for AdmitError {
-    fn band(&self) -> dg_xch_core::errors::ErrorBand {
-        dg_xch_core::errors::ErrorBand::Peer
-    }
-    fn variant(&self) -> u16 {
-        match self {
-            AdmitError::InboundCapReached => 1,
-            AdmitError::DuplicateEndpoint => 2,
-            AdmitError::SelfConnection => 3,
-        }
     }
 }

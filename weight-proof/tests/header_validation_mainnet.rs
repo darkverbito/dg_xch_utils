@@ -1,6 +1,3 @@
-// Mainnet cross-check for get_block_challenge and header_block_to_sub_block_record: the real recent chain
-// is a hash-exact oracle for both.
-
 mod common;
 
 use std::collections::HashMap;

@@ -1157,11 +1157,6 @@ where
         self.follow_blocks_reporting_pre(blocks, None).await
     }
 
-    /// [`Self::follow_blocks_reporting`] with window bodies the caller precomputed while the
-    /// PREVIOUS window validated (the cross-window body pipeline). `provided` entries skip the
-    /// inline precompute; tx blocks not covered take the inline path unchanged, and the engine's
-    /// stage-time flag-key check still guards every precompute, so a stale entry degrades to an
-    /// inline recompute, never to a wrong verdict.
     pub async fn follow_blocks_reporting_pre(
         &mut self,
         blocks: &[dg_xch_core::blockchain::full_block::FullBlock],
@@ -1372,13 +1367,6 @@ where
             }
         }
 
-        // Header-signature drain: same two-tier shape as the VDF drain — fast whole-window batch,
-        // then on a failure a per-block slice replay that attributes the exact failing height and
-        // rejection string. `confirm_upto` takes the minimum of the VDF- and sig-determined
-        // boundaries so a block bad in either gate is never confirmed; the reported error is
-        // whichever fails at the lower height. Because the sig gates are deferred, a block invalid
-        // in multiple gates can report a different first-fault string than the fully-inline path;
-        // the accept/reject decision and the failing height are always identical.
         let mut sig_err: Option<SyncError> = None;
         if !sig_queue.is_empty() {
             log::debug!(
@@ -1542,9 +1530,6 @@ impl EpochSchedule {
     }
 }
 
-// The tip epoch's `(sub_slot_iters, difficulty)`: the last summary that declares each, falling
-// back to the genesis constants when the proof declares none. Kept as the tests' independent
-// oracle — the schedule's value at the tip must equal this anchor.
 #[cfg(test)]
 fn tip_epoch_from(
     summaries: &[SubEpochSummary],
@@ -1593,8 +1578,6 @@ async fn validate_downloaded_batch<S>(
 where
     S: BlockStore + Sync,
 {
-    // (1) Exact coverage: count + ascending-contiguous heights over the reserved range. The gate
-    // lives here (not only in OutboundPeerSource) so it covers every source.
     let expected = usize::try_from(u64::from(end) - u64::from(start) + 1).unwrap_or(usize::MAX);
     let covers = blocks.len() == expected
         && blocks
@@ -1812,13 +1795,6 @@ fn run_precompute_jobs<P: crate::primitives::ConsensusPrimitives + Sync>(
     })
 }
 
-/// The expensive pure half of body validation for a window (CLVM generator run + BLS aggregate
-/// verify), precomputable by the DRIVER while the previous window validates — the cross-window
-/// body pipeline. Generator refs resolve IN-WINDOW ONLY: a block referencing an earlier window
-/// is skipped here and takes the engine's inline path (which may consult staged state and the
-/// store), so this can never observe not-yet-staged state, and the engine's stage-time flag-key
-/// check still guards every entry — a mismatch degrades to an inline recompute, never to a
-/// changed verdict.
 #[must_use]
 pub fn precompute_window_bodies_standalone<P: crate::primitives::ConsensusPrimitives + Sync>(
     primitives: &P,

@@ -65,7 +65,6 @@ impl ActiveNode {
         with_backend!(self, h => h.sources.health_check().await)
     }
 
-    /// A dashboard-sized status line: the sync numbers plus the health verdict.
     pub async fn status_json(&self) -> String {
         with_backend!(self, h => {
             let snap = h.sources.sample_liveness().await;
@@ -119,10 +118,6 @@ impl ActiveNode {
     }
 }
 
-/// Everything the boot phase wires up before the portfu server starts: the
-/// outbound supervisor and its peer registry, the inbound peer map, and the run
-/// flags of the two protocol servers (chia P2P and RPC) that keep their own
-/// specialized TLS listeners.
 pub struct NodeServices {
     pub registry: Arc<dyn OutboundPeers>,
     pub peer_registry: Arc<dg_xch_p2p::PeerRegistry>,

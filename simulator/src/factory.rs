@@ -130,11 +130,6 @@ pub fn farm_genesis(
     ))
 }
 
-/// Assemble the genesis unfinished block from a farmed proof.
-///
-/// The farmer signatures are `g2_infinity` placeholders: the producer embeds them without checking
-/// and a simulated chain does not gate on them. The signage point VDFs are `None` because the first
-/// signage point coincides with the sub-slot start.
 pub fn build_genesis_unfinished(
     constants: &ConsensusConstants,
     farmed: &FarmedProof,

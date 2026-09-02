@@ -195,7 +195,6 @@ fn free_port() -> u16 {
         .port()
 }
 
-// Spawn a full-node peer server serving `api` over the Chia mTLS handshake; returns (port, run-flag).
 pub async fn spawn_serving_node(api: Arc<MapApi>) -> (u16, Arc<AtomicBool>) {
     use dg_xch_servers::websocket::{WebsocketServer, WebsocketServerConfig};
     let _ = rustls::crypto::ring::default_provider().install_default();

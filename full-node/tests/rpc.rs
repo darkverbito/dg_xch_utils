@@ -622,9 +622,6 @@ async fn coin_records_by_hint_resolves_indexed_coins() {
     assert!(none.is_empty(), "an unindexed hint resolves to no coins");
 }
 
-// get_puzzle_and_solution's height gate: an unspent coin (or a mismatched height) is refused before
-// any generator run — INVALID_HEIGHT_FOR_COIN. Real reveal+solution extraction over a
-// post-hard-fork generator is proven in core's `coin_spend_extraction` fixture test.
 #[tokio::test]
 async fn puzzle_and_solution_rejects_unspent_coin() {
     let (node, _mp) = rpc().await;

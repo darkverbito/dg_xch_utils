@@ -1,9 +1,3 @@
-//! Bounded block reorder buffer (`BlockQueue`) — sync-decoupling phase 1.
-//!
-//! Proves the reorder-buffer invariants on real mainnet bodies (re-stamped to synthetic contiguous heights):
-//! in-order drain under any completion order, monotone low-water, no double-count, the
-//! byte-budget over-fill bias, and the bounded-buffer wakeups (deadlock/starvation-freedom).
-
 mod common;
 
 use common::{load_full_block, restamp_block};
@@ -211,8 +205,6 @@ async fn wait_ready_wakes_on_head_complete() {
         .expect("waiter task ok");
     assert_eq!(got, Some(0));
 }
-
-// ── sync-decoupling phase 2 ──────────────────────────────────────────────────────────────────────
 
 // drain_ready_window pulls the maximal contiguous PRESENT run from low_water in one call (the
 // consumer's batch pull that keeps the frozen core's window-precompute intact), stops at the first
@@ -465,10 +457,6 @@ async fn notified_created_before_the_check_captures_a_later_notify_waiters() {
     );
 }
 
-// Liveness under contention (race-catcher for the wait_space/wait_ready lost-wakeup): a producer and a
-// consumer hand a single-block-budget queue back and forth for many rounds on a multi-thread runtime,
-// each round gated on the other's wakeup landing. A single lost wakeup wedges a round and the overall
-// deadline trips. Green on the enable()-fixed methods.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_wait_notify_makes_progress_under_load() {
     let b = base();

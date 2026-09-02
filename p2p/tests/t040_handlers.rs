@@ -250,9 +250,6 @@ async fn concurrent_requests_on_one_connection_do_not_cross_replies() {
         .store(false, std::sync::atomic::Ordering::Relaxed);
 }
 
-// ---- Red-first suite: chia request_blocks range cap, headers-only strip, and the
-// ---- unsolicited-block-reply posture (chia 2.7.1 full_node_api.py:403-517). --------------------
-
 // A MemApi holding `count` contiguous heights from `start`, each a clone of the 5_000_000 fixture
 // (the handler serves whatever the api returns — internal block heights are irrelevant here).
 // RequestFeeEstimates/RespondFeeEstimates round-trip byte-for-byte (the wallet wire contract).
@@ -293,9 +290,6 @@ fn fee_estimates_wire_roundtrips() {
     );
 }
 
-// The wallet p2p round-trip end to end: RequestFeeEstimates(89) dispatched over the real WS link
-// answers RespondFeeEstimates(90) with one estimate per requested time (rate 0 from the store-blind
-// MemApi default — chia always answers, never drops).
 #[tokio::test]
 async fn fee_estimates_request_is_served_over_the_wire() {
     let api = Arc::new(MemApi {
@@ -387,10 +381,6 @@ async fn request_blocks_raw(
     .expect("a correlated reply (RespondBlocks or RejectBlocks)")
 }
 
-// chia full_node_api.py:425-431: a range wider than MAX_BLOCK_COUNT_PER_REQUESTS (=32,
-// default_constants.py:77) rejects BEFORE the store is touched — the missing cap was a
-// request-the-whole-chain self-DoS. The check is `end - start > 32` over an INCLUSIVE range
-// (the documented off-by-one), so end - start == 32 (33 blocks) must still serve.
 #[tokio::test]
 async fn oversized_block_range_is_rejected_and_the_cap_span_still_serves() {
     let server = spawn_full_node(contiguous_api(100, 34)).await;
@@ -408,7 +398,6 @@ async fn oversized_block_range_is_rejected_and_the_cap_span_still_serves() {
         .expect("decode RejectBlocks");
     assert_eq!((rej.start_height, rej.end_height), (100, 133));
 
-    // 33 blocks (end - start = 32 == cap): chia's off-by-one — still served in full.
     let reply = request_blocks_raw(&client, 100, 132, false).await;
     assert_eq!(reply.msg_type, ProtocolMessageTypes::RespondBlocks);
     let resp = RespondBlocks::from_bytes(&mut Cursor::new(reply.data.as_slice()), version)
@@ -420,8 +409,6 @@ async fn oversized_block_range_is_rejected_and_the_cap_span_still_serves() {
         .store(false, std::sync::atomic::Ordering::Relaxed);
 }
 
-// chia full_node_api.py:426: end_height < start_height rejects (RejectBlocks echoing the range).
-// Before the fix the inclusive `start..=end` loop was simply empty — an EMPTY RespondBlocks.
 #[tokio::test]
 async fn inverted_block_range_is_rejected() {
     let server = spawn_full_node(contiguous_api(100, 2)).await;
@@ -443,9 +430,6 @@ async fn inverted_block_range_is_rejected() {
         .store(false, std::sync::atomic::Ordering::Relaxed);
 }
 
-// chia full_node_api.py:432-436: ANY unknown height in the range — an interior hole or a
-// fully-future span — rejects with RejectBlocks echoing the requested range. (Regression lock:
-// this path predates the cap fix; it must survive it.)
 #[tokio::test]
 async fn unknown_and_future_heights_in_range_are_rejected() {
     let mut blocks = HashMap::new();
@@ -476,9 +460,6 @@ async fn unknown_and_future_heights_in_range_are_rejected() {
         .store(false, std::sync::atomic::Ordering::Relaxed);
 }
 
-// chia full_node_api.py:415-416 (request_block) and :438-451 (request_blocks): a headers-only pull
-// (include_transaction_block=false) strips ONLY transactions_generator; transactions_info and
-// transactions_generator_ref_list ship untouched. include_transaction_block=true is unchanged.
 #[tokio::test]
 async fn headers_only_pull_strips_only_the_generator() {
     let fixture = load_full_block(5_000_000);
@@ -578,11 +559,6 @@ async fn headers_only_pull_strips_only_the_generator() {
         .store(false, std::sync::atomic::Ordering::Relaxed);
 }
 
-// chia full_node_api.py:482-517: an unsolicited RespondBlock / RespondBlocks / RejectBlock /
-// RejectBlocks bans the sender (`peer.close(RATE_LIMITER_BAN_SECONDS)`). Ours closes the
-// connection and evicts the peer from the map (no timed ban list yet — a known
-// delta from chia). A solicited reply is consumed by the read loop's correlation-id fast path, so it can
-// never trip this arm — proven by every other test in this file doing solicited pulls.
 #[tokio::test]
 async fn unsolicited_block_replies_close_the_peer() {
     let server = spawn_full_node(contiguous_api(100, 1)).await;

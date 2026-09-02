@@ -156,8 +156,6 @@ mod sign_tests {
 
     #[test]
     fn a_plot_signature_verifies_under_the_plot_public_key() {
-        // The header validator checks the signage-point and foliage signatures with the plot public
-        // key. A successor block is only farmable if this aggregate signature clears that gate.
         let keys = PlotKeys::derive(42, 0).expect("derive");
         let msg = Bytes32::from([0x33; 32]);
         let sig = keys.sign(msg).expect("sign");

@@ -801,8 +801,6 @@ impl SlotState {
         false
     }
 
-    // Env-gated rejection tap (DGXCH_TRACE_SP): names the branch that parked a signage point, the
-    // diagnostic that localizes a slot-state divergence from a single corpus-gate run.
     fn trace_sp(reason: &str, detail: &str) {
         if std::env::var("DGXCH_TRACE_SP").is_ok() {
             eprintln!("sp-reject {reason}: {detail}");

@@ -431,14 +431,6 @@ mod tests {
 
     #[test]
     fn instant_takes_never_shrink_the_depth() {
-        // The starvation ratchet the CNI bake-off exposed: on fast (LAN) peers
-        // every take is instant BECAUSE the deep buffer is doing its job, so a
-        // shrink-on-instant-take policy walks depth 64 -> 1 (observed live:
-        // 64 -> 5 over ~90 min, throughput down ~35% with the validator's CPU
-        // going idle) and depth can only recover by first PAYING a >50ms
-        // starvation stall. Memory is already bounded by the byte budget at
-        // dispatch (`depth_within_budget`) — the only legitimate downward
-        // force — so instant takes must leave the depth alone.
         let mut depth = 64;
         let mut streak = 0;
         for _ in 0..10_000 {

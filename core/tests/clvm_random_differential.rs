@@ -1,28 +1,3 @@
-// Randomized differential gate for the CLVM VM.
-//
-// The fixed vectors in `clvm_op_vectors.rs` pin operators one at a time on inputs a human chose.
-// They cannot cover interaction: an operator fed the output of another operator, nesting, argument
-// shapes nobody thought to write down. That gap is exactly where a change to the VM's internal
-// value representation would hide, because such a change is invisible until some particular tree
-// shape or atom encoding is reached.
-//
-// So this generates programs instead of listing them. Generation is TYPE-DIRECTED: every operator
-// declares the kind of value each argument wants (a small int, a 32-byte hash, a list, an arbitrary
-// subtree), and the generator supplies that kind — sometimes as a literal, sometimes as a nested
-// call returning it. Untyped random trees would almost all die on the first argument check and
-// never reach the interesting code; typed ones run deep.
-//
-// Every program is executed under all six dialect configurations that occur on chain — the fork
-// ladder from genesis through hard fork 2, plus mempool mode — and the outcome —
-// exact cost and printed result, or the exact error — is pinned in
-// `fixtures/clvm_random_differential.json` (UPDATE_GOLDEN=1 re-harvests).
-//
-// The generator is a seeded PRNG with no dependencies, so the corpus is identical on every machine
-// and every run: the golden is a stable artifact, and a failure names the exact seed to reproduce.
-//
-// This is the gate that makes a value-representation change safe to attempt. Reproduce one case:
-//   cargo test -p dg_xch_core --test clvm_random_differential -- --nocapture
-
 use dg_xch_core::clvm::runtime::ClvmRuntime;
 use dg_xch_core::clvm::sexp::{AtomBuf, SExp};
 use dg_xch_core::clvm::utils::{

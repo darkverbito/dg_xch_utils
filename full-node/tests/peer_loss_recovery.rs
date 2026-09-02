@@ -1,32 +1,3 @@
-// Peer-loss recovery, end-to-end over real sockets — the `on_connect` symmetry that lets a
-// node re-acquire its sync target after a peer drops.
-//
-// There is NO active peak solicitation (no RequestPeak message). Recovery works because
-// `on_connect` fires on EVERY new connection in BOTH directions and each side sends its own
-// `full_node_protocol.NewPeak` greeting: the acceptor greets the dialer and the dialer greets
-// the acceptor. So after any drop + redial, the reconnected peer's greeting re-records the claim,
-// and `claimed_peak` (the sync-target gauge) climbs back to the tip.
-//
-// Our node implements both halves of that symmetry:
-//   * dialer greeting  -> `full_node::outbound_on_connect` (daemon.rs), fired by the supervisor's
-//     per-connection on-connect hook on every (re)dial (`manual_slot` / `outbound_slot`,
-//     p2p/src/sessions/mod.rs — both redial forever, reclaiming the address on every drop);
-//   * acceptor greeting -> `StoreApi::full_node_peak` (daemon.rs:1886) sent from the inbound
-//     handshake handler (p2p/src/handlers.rs), which the node records via `on_new_peak`
-//     (daemon.rs:364, the only claim-recording path) into the `PeakBook`.
-//
-// This test drives the WHOLE loop against a REAL peer over a REAL mTLS socket (no mock of the seam
-// under test): baseline claim, hard drop (retraction to 0 — `sync_store.peer_disconnected`),
-// then a fresh reconnect whose greeting must re-record the claim. It guards the live-regression
-// class where a lost peer collapses `claimed_peak` to 0 and the node never re-acquires a target.
-//
-// Observability: `Node::claimed_peak` is private; it is read through the public RPC
-// (`get_blockchain_state().state.sync.sync_tip_height`). With an EMPTY node store (no local peak)
-// and `synced == false`, that field mirrors the raw `claimed_peak` gauge exactly — the display
-// substitution `sync_tip_height = peak_height when (sync_mode && claimed == 0)` degrades to `0`
-// because `peak_height == 0` here (rpc.rs get_blockchain_state), and returns `claimed` verbatim
-// when `claimed > 0`.
-
 use async_trait::async_trait;
 use dg_xch_core::blockchain::full_block::FullBlock;
 use dg_xch_core::blockchain::peer_info::TimestampedPeerInfo;
@@ -59,8 +30,7 @@ fn config(listen: SocketAddr, rpc: SocketAddr) -> Config {
     Config {
         rpc_tls: full_node::RpcTlsMode::Local,
         debug_endpoints: false,
-        target_outbound: None,
-        target_peer_count: None,
+        p2p: Default::default(),
         listen,
         rpc,
         introducer: None,
@@ -107,7 +77,6 @@ impl FullNodeApi for GreetingPeer {
     async fn on_new_peak(&self, _peer: Bytes32, _peak: NewPeak) {}
 }
 
-// Bring up the peer server over the Chia mTLS handshake; returns (port, run-flag).
 async fn spawn_greeting_peer() -> (u16, Arc<AtomicBool>) {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let port = free_addr().port();
@@ -145,8 +114,6 @@ async fn spawn_greeting_peer() -> (u16, Arc<AtomicBool>) {
     (port, run)
 }
 
-// The raw `claimed_peak` gauge, read through the public RPC. Exact mirror on an empty+unsynced node
-// (see the header note).
 async fn observed_claimed(node: &Arc<Node>) -> u32 {
     node.rpc
         .get_blockchain_state()

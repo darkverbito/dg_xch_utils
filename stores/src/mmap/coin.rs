@@ -348,9 +348,6 @@ impl CoinStore for MmapStore {
         if puzzle_hashes.is_empty() {
             return Ok(Vec::new());
         }
-        // The mmap coin tier is a sequential scan (no puzzle-hash index); filter created-OR-spent from
-        // min_height, mirroring chia coin_store.py:486, and project to CoinState. Bounded by the
-        // caller's `max_items` (chia's max_items parameter) at the scan's match cut-off.
         let set: std::collections::HashSet<Bytes32> = puzzle_hashes.iter().copied().collect();
         let records = self
             .scan_coins(|cr| {
@@ -375,14 +372,10 @@ impl CoinStore for MmapStore {
         filters: &CoinStateFilters,
         max_items: usize,
     ) -> Result<(Vec<CoinState>, Option<u32>), StoreError> {
-        // chia coin_store.py:610-633: nothing requested, or filters that admit nothing, finish empty.
         if puzzle_hashes.is_empty() || (!filters.include_spent && !filters.include_unspent) {
             return Ok((Vec::new(), None));
         }
         let set: std::collections::HashSet<Bytes32> = puzzle_hashes.iter().copied().collect();
-        // The hint join (chia coin_store.py:655-671) on the mmap scan tier: one sweep of the
-        // append-only hint log collecting the coin ids any requested hash hints at (same tradeoff
-        // as get_coins_for_hint — this backend trades query speed for zero write-path indexes).
         #[cfg(feature = "hint")]
         let hinted: std::collections::HashSet<Bytes32> = if filters.include_hinted {
             use dg_xch_core::traits::SizedBytes;
@@ -406,8 +399,6 @@ impl CoinStore for MmapStore {
         };
         #[cfg(not(feature = "hint"))]
         let hinted: std::collections::HashSet<Bytes32> = std::collections::HashSet::new();
-        // Sequential coin sweep with chia's row filters (coin_store.py:635-648): puzzle hash (or
-        // hint) match, activity at/above min_height, the spent/unspent predicates, and min_amount.
         let include_spent = filters.include_spent;
         let include_unspent = filters.include_unspent;
         let min_amount = filters.min_amount;
@@ -425,8 +416,6 @@ impl CoinStore for MmapStore {
                     && cr.coin.amount >= min_amount
             })
             .await?;
-        // The scan visits each coin once (no dedup pressure); the bounded merge + page cut give
-        // chia's ordered `max_items + 1` window and the whole-height page boundary.
         let mut merged = std::collections::HashMap::new();
         merge_coin_states_bounded(
             &mut merged,
@@ -465,7 +454,6 @@ impl CoinStore for MmapStore {
         use dg_xch_core::traits::SizedBytes;
         let mut out = Vec::new();
         let mut off = 0u64;
-        // The scan stops at `max_items` matches (chia hint_store's LIMIT, hint_store.py:26/42).
         while out.len() < max_items {
             let Ok(frame) = self.hints.read(off).await else {
                 break;

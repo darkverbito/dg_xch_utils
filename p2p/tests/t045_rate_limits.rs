@@ -1,15 +1,5 @@
 mod common;
 
-// Integration suite for the per-connection inbound rate limiter enforced at the read loop
-// (chia `WSChiaConnection.inbound_rate_limiter` in `_read_one_message`). A violation closes the
-// connection and evicts the peer from the shared map — the same enforceable action proven for
-// unsolicited block replies, with the timed-ban list still a known behavioral delta from chia.
-//
-// The unit-level numeric behaviour (v1 vs v2 selection, the aggregate window, the incoming-commit
-// semantics) is proven in `dg_xch_core::protocols::rate_limits::tests`. These tests exercise the
-// wire path: real client↔server over loopback TLS, enforcement at the server's read loop, and the
-// self-safety of our own solicited fetch cadence at the client's read loop.
-
 use common::{
     connect, contiguous_api, rate_limited_client, spawn_full_node_rate_limited, wait_until,
 };
@@ -44,9 +34,6 @@ fn sized_msg(msg_type: ProtocolMessageTypes, len: usize) -> ChiaMessage {
     }
 }
 
-// chia rate_limit_numbers.py:95 — request_proof_of_weight is 5/min with no v2 override, so the 6th in
-// a window is a violation. A compliant peer under the cap stays connected; the flooding peer is
-// closed and evicted from the server's peer map (chia `close(RATE_LIMITER_BAN_SECONDS)`).
 #[tokio::test]
 async fn flooding_a_frequency_capped_type_closes_and_evicts_the_peer() {
     let server = spawn_full_node_rate_limited(contiguous_api(100, 1)).await;
@@ -84,9 +71,6 @@ async fn flooding_a_frequency_capped_type_closes_and_evicts_the_peer() {
         .store(false, std::sync::atomic::Ordering::Relaxed);
 }
 
-// chia rate_limits.py:132 — a single message over its type's max_size is a violation on its own.
-// request_block's max_size is 100 bytes (rate_limit_numbers.py:97); a 200-byte one closes the peer
-// before the inner RequestBlock is even decoded.
 #[tokio::test]
 async fn a_single_oversized_message_closes_and_evicts_the_peer() {
     let server = spawn_full_node_rate_limited(contiguous_api(100, 1)).await;
@@ -154,13 +138,6 @@ async fn a_compliant_peer_stays_connected() {
         .store(false, std::sync::atomic::Ordering::Relaxed);
 }
 
-// Self-safety (the item-5 fetch-cadence proof): our OWN sync solicits RespondBlocks/RejectBlocks
-// bursts, which arrive at the dialing client's read loop and are counted there BEFORE the correlation
-// fast-path consumes them. chia makes respond_blocks/reject_blocks `Unlimited` (size-only, no
-// frequency) precisely so a peer can sync from another under the same limits — so a rapid burst must
-// never trip our client's inbound limiter and close our own connection. Here the client IS rate
-// limited (the p2p dialer's posture) and fires a burst of ranges well past any per-type frequency; it
-// must stay up and every reply must be delivered.
 #[tokio::test]
 async fn solicited_respond_blocks_burst_does_not_self_trip_the_client_limiter() {
     let server = spawn_full_node_rate_limited(contiguous_api(1_000, 40)).await;

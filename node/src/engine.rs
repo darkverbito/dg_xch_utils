@@ -101,28 +101,6 @@ pub fn run_body_expensive<P: ConsensusPrimitives>(
     Ok((conds, verified))
 }
 
-/// The transactions half of unfinished-block validation, run on every received unfinished block
-/// AFTER its header validates and BEFORE it may enter the served cache or the relay queue: the
-/// structural generator/`transactions_info` bindings, the generator EXECUTION with the aggregate
-/// signature verify (the `GENERATOR_RUNTIME_ERROR` gate), and the cost rules. Peers ban the
-/// sender on any failure here; a node that relays such a block without running its generator
-/// eats that ban itself from every honest peer that fetches the block.
-///
-/// The run budget is `min(MAX_BLOCK_COST_CLVM, transactions_info.cost)`, so a generator whose
-/// true cost exceeds its claim fails DURING the run (`BlockCostExceedsMax`) after burning at
-/// most the CLAIMED cost of CPU — never the full block budget. A run that finishes under the
-/// claim is then held to exact equality (`InvalidBlockCost`).
-///
-/// `height` is the unfinished block's own height (parent + 1) — the CLVM flag-ladder key;
-/// `prev_tx_height` is the previous TRANSACTION block's height — the SF9
-/// body-rule key. Two regimes, two keys, exactly as `validate_body` above.
-///
-/// Returns the executed conditions for a generator-bearing block, `None` for a block with no
-/// generator.
-///
-/// # Errors
-/// [`NodeError::Consensus`] with the matching [`ChiaError`] code on any structural, execution,
-/// cost, or signature failure — the caller must DROP the block, never cache or relay it.
 pub fn validate_unfinished_block_body<P: ConsensusPrimitives>(
     primitives: &P,
     constants: &ConsensusConstants,
@@ -321,15 +299,6 @@ pub struct Engine<S, P> {
     // set of earlier blocks of the SAME window, whose coins are not applied to the store until
     // the window confirms. Inserted at stage, drained at confirm; bounded by the window size.
     staged_deltas: HashMap<Bytes32, BlockDelta>,
-    // The window staging READ preload (batched instead of per-block): candidate records for
-    // every window header hash fetched in ONE call, plus the confirmed peak height at window
-    // start. Serves
-    // `prepare_delta`'s AlreadyHave gate and headers-first candidate lookup without one awaited
-    // store round-trip per staged block (~2 point reads per block, serialized across the
-    // window). `None` = no preload — every non-window path reads the store directly. Same
-    // lifecycle as the staged overlay: set by
-    // [`Engine::preload_stage_context`], cleared with [`Engine::clear_staged_overlay`] /
-    // [`Engine::clear_stage_preload`].
     stage_preload: Option<StagePreload>,
     horizon: u32,
     // assume-valid seam: below this height script/sig validation is bypassed but the block is
@@ -762,17 +731,6 @@ where
         self.stage_preload = None;
     }
 
-    /// Batch the staging loop's per-block store reads for one window: ONE
-    /// `get_block_records_by_hash` over every window header hash + one
-    /// peak read, consulted by `prepare_delta`'s AlreadyHave gate and candidate lookup instead of
-    /// two awaited point reads per staged block. The window loop calls this right before staging;
-    /// the context dies with the staged overlay (error paths) or via [`Self::clear_stage_preload`]
-    /// (the window's end), so no later per-block path can see a stale snapshot. Taking the peak
-    /// snapshot here is sound for the whole window: the engine is `&mut` throughout the loop —
-    /// nothing confirms between the preload and the last staged block.
-    ///
-    /// # Errors
-    /// Returns [`NodeError::Store`] on a store read failure.
     pub async fn preload_stage_context(&mut self, blocks: &[FullBlock]) -> Result<(), NodeError> {
         let mut covered = std::collections::HashSet::with_capacity(blocks.len());
         let mut hashes = Vec::with_capacity(blocks.len());
@@ -901,9 +859,6 @@ where
         pre: Option<PrecomputedBody>,
     ) -> Result<Option<BlockDelta>, NodeError> {
         let header_hash = block.header_hash()?;
-        // The window read preload covers this block's candidate lookup and AlreadyHave gate
-        // without per-block store reads; a hash outside the preloaded window (or no preload —
-        // every non-window path) reads the store exactly as before.
         let preloaded_candidate = match &self.stage_preload {
             Some(p) if p.covered.contains(&header_hash) => {
                 Some(p.candidates.get(&header_hash).cloned())
@@ -981,14 +936,6 @@ where
                 ));
             }
         }
-        // Check 26a: a transaction block's timestamp must not be more than MAX_FUTURE_TIME2
-        // seconds beyond wall-clock now. This is a NON-DETERMINISTIC wall-clock gate, so it is
-        // deliberately excluded from the deterministic header validator and enforced HERE at
-        // ingest instead. Historical sync blocks carry past timestamps, so the accept path (corpus
-        // replay, real gossip) is unaffected; only a block claiming a far-future timestamp is refused.
-        // MAX_FUTURE_TIME2 applies unconditionally: the pre-soft-fork2 MAX_FUTURE_TIME is dead on
-        // mainnet, where soft_fork2_height == 0. Placed before body/record work so it wins
-        // over the timestamp-dependent foliage-hash checks a forged timestamp would also trip.
         if let Some(ftb) = block.foliage_transaction_block.as_ref() {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1051,9 +998,6 @@ where
         Ok(Some(delta))
     }
 
-    // `true` when the error is a `NotFound` from a consensus ancestry walk ("block record not
-    // found") — the walk-cache-miss class the store fallback repairs. Mirrors
-    // `SyncError::is_missing_record`.
     fn is_record_miss(e: &NodeError) -> bool {
         matches!(e, NodeError::Io(io) if io.kind() == std::io::ErrorKind::NotFound)
     }
@@ -1873,8 +1817,6 @@ where
                     }
                     cursor = Self::step_parent(cursor, d.prev_hash, d.height, &mut last_height)?;
                 }
-                // Checkpoint-anchor bootstrap: no local parent record. Only reachable with
-                // enforcement forced on an anchored store — the auto gate is off there.
                 None => return Ok(view),
             }
         }
@@ -2073,24 +2015,6 @@ where
         }
     }
 
-    // required_iters for the record. When the deep ancestor context is cached, run full PoW/VDF header
-    // validation — it returns the block's required_iters as a by-product and derives the
-    // ValidationState (ssi + difficulty) through the general retarget path, correct across an epoch
-    // boundary. When it is NOT (a bootstrap/checkpoint entry point whose ancestors are not yet synced),
-    // DERIVE THE REAL VALUE FROM THE PROOF OF SPACE — never a fabricated 0: a stored
-    // required_iters == 0 poisons every descendant's difficulty retarget, which reads it back through
-    // get_next_sub_slot_iters_and_difficulty -> prev_b.sp_total_iters() -> ip_iters() ->
-    // calculate_ip_iters(), and correctly rejects 0 ("Required iters 0 is not below the sp interval iters").
-    // required_iters itself needs no VDF/ancestor chain, only the proof of space, so it is
-    // always computable and always >= 1 (the max(_, 1) clamp).
-    // The recent-chain warm gate: full validation and
-    // the epoch-machinery walks engage only once more than 2 sub-slot boundaries AND more than 11
-    // transaction blocks of ancestry are reachable in the cache (reaching genesis always qualifies —
-    // the whole ancestry is known there). With less context, the backward walks (icc challenge
-    // derivation, `can_finish_sub_and_full_epoch`, the deficit chains) read checkpoint-cold records —
-    // or, after a process restart, fall off the cache edge mid-window — and reject real blocks (the
-    // live INVALID_ICC_VDF wall at 9,143,837 and the record-not-found wall at 9,143,851). EVERY
-    // strict walk on the confirm path must sit behind this same gate.
     fn warm_ancestry(ancestors: &HashMap<Bytes32, BlockRecord>, p: &BlockRecord) -> bool {
         let mut sub_slots = 0usize;
         let mut tx_blocks = 0usize;
@@ -2258,15 +2182,6 @@ where
             Some(p) => candidate_ssi.unwrap_or(p.sub_slot_iters),
             None => candidate_ssi.unwrap_or(self.constants.sub_slot_iters_starting),
         };
-        // The included sub-epoch summary: when any finished
-        // sub-slot declares a subepoch_summary_hash, the record must carry the summary itself — the
-        // difficulty/epoch machinery (can_finish_sub_and_full_epoch, the get_next_* pass-throughs) reads
-        // its presence from records, and a boundary record stored WITHOUT it makes every later new-slot
-        // block in the sub-epoch spuriously "finishable" (rejected INVALID_SUB_EPOCH_SUMMARY). The
-        // preimage comes from the local construction (make_sub_epoch_summary over the cached ancestry)
-        // or, at a checkpoint where that walk reaches below the sync start, from the headers-first
-        // candidate record's weight-proof-attested summary. Either way the declared hash — authenticated
-        // by the challenge-chain VDF chain — is the correctness gate.
         let declared_ses_hash = header
             .finished_sub_slots
             .iter()

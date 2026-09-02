@@ -64,7 +64,6 @@ pub struct BlockQueue {
     inner: Mutex<Inner>,
     /// Hard byte ceiling `W` (default [`crate::sync::READAHEAD_BYTE_BUDGET`] = 256 MiB).
     budget: u64,
-    /// Lock-free mirror of `Inner::bytes` for the resident-bytes gauge and `wait_space` fast path.
     resident_bytes: AtomicU64,
     /// Producer wakeup: fired when a `drain_next` frees budget (all parked producers re-contend).
     space: Notify,
@@ -137,8 +136,6 @@ impl BlockQueue {
         self.lock().generation
     }
 
-    /// Admission gate: a producer may start a fetch while resident PRESENT bytes are strictly below
-    /// the budget. Checked pre-add, so overshoot is at most one in-flight block.
     #[must_use]
     pub fn can_admit(&self) -> bool {
         self.resident_bytes.load(Ordering::Relaxed) < self.budget

@@ -57,8 +57,6 @@ pub async fn log_stream(
     Ok(())
 }
 
-/// Push the sync status every two seconds: confirmed peak, claimed tip, and
-/// the health verdict — enough for a live dashboard without polling /metrics.
 #[websocket("/ws/status")]
 pub async fn status_stream(
     socket: WebSocket,

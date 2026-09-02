@@ -143,9 +143,6 @@ async fn mmap_serves_the_block_and_coin_contract() {
     );
 }
 
-// The persisted weight-proof segment seam, identical expectations to the SQLite/Postgres
-// backends (chia's sub_epoch_segments_v3, block_store.py:85-88): miss → None, round-trip,
-// re-persist replaces (repointing the table entry at a fresh log frame), reopen survives.
 #[tokio::test]
 async fn mmap_sub_epoch_segments_round_trip_replace_and_survive_reopen() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -599,9 +596,6 @@ async fn mmap_journal_surviving_a_completed_reorg_converges_conservatively() {
     assert_converged_to_fork(&store, &rig, dir.path()).await;
 }
 
-// The batch_coin_states_by_puzzle_hashes contract on the mmap scan tier (chia coin_store.py:590):
-// same paging + filter + hint semantics the SQLite leg proves in coin_store.rs, exercised against
-// the scan/hint-log implementation.
 #[cfg(all(feature = "coin-index", feature = "hint"))]
 #[tokio::test]
 async fn mmap_batch_coin_states_pages_filters_and_joins_hints() {

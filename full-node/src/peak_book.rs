@@ -1,17 +1,3 @@
-//! Per-peer peak-claim book. Tracks every peer's announced peak per connection, selects the
-//! long-sync target as the HEAVIEST collected claim (weight, not height, is the fork-choice
-//! ordering key), retracts a peer's claim when its connection dies, and quarantines a peak hash
-//! whose weight proof failed so it is never re-selected. The daemon's `sync_target` layers the
-//! not-interested-in-lighter-peaks gate on top.
-//!
-//! Bounds: claims are one entry per live connection, hard-capped at [`MAX_TRACKED_CLAIMS`]; the
-//! quarantine cache is capped at [`BAD_PEAK_CACHE_SIZE`] evicting the lowest height. Claims
-//! additionally expire after [`STALE_CLAIM_TTL`] without a re-announcement — a liveness backstop:
-//! our outbound retraction rides the per-connection handler map's `Drop` ([`ClaimGuard`]), whose
-//! timing follows the last `Arc` release rather than the socket close, so a claim nobody
-//! refreshes must eventually stop steering the sync band on its own. An honest peer re-announces
-//! on every network peak (~18.75 s mainnet cadence), so live claims never expire.
-
 use dg_xch_core::blockchain::sized_bytes::Bytes32;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -50,9 +36,6 @@ struct Inner {
     published: Option<PeakClaim>,
 }
 
-/// The per-connection peak-claim book. `published_height` mirrors the heaviest selectable claim's
-/// height into the daemon's `claimed_peak` gauge (metrics + the declare plot-filter height), and —
-/// unlike the fetch_max slot it replaces — rolls BACK when the top claim is retracted or quarantined.
 pub struct PeakBook {
     published_height: Arc<AtomicU32>,
     next_outbound_key: AtomicU64,

@@ -44,8 +44,6 @@ pub async fn wallet_subscription_reaper(
     Ok(())
 }
 
-/// Bridge the portfu server's run flag into the node's: the driver loops gate
-/// on `node.run`, and the server's flag is what ctrl-c clears.
 #[interval(500)]
 pub async fn shutdown_bridge(
     active: State<ActiveNode>,

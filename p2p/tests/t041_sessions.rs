@@ -7,8 +7,11 @@ use common::{
 use dg_xch_p2p::Supervisor;
 use std::time::Duration;
 
+static NETWORK_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[tokio::test]
 async fn outbound_dials_and_reconnects_and_inbound_accepts() {
+    let _guard = NETWORK_TEST_LOCK.lock().await;
     let server = spawn_full_node(empty_api()).await;
     let mut sup = Supervisor::new(fast_settings());
     sup.seed_addresses(&[peer("127.0.0.1", server.port, 1)])
@@ -62,6 +65,7 @@ async fn outbound_dials_and_reconnects_and_inbound_accepts() {
 
 #[tokio::test]
 async fn manual_peer_persists_across_a_drop() {
+    let _guard = NETWORK_TEST_LOCK.lock().await;
     let server = spawn_full_node(empty_api()).await;
     let mut sup = Supervisor::new(fast_settings());
     sup.start_manual("127.0.0.1", server.port);
@@ -102,6 +106,7 @@ async fn manual_peer_persists_across_a_drop() {
 
 #[tokio::test]
 async fn seed_is_one_shot_and_fills_the_pool() {
+    let _guard = NETWORK_TEST_LOCK.lock().await;
     // The introducer hands back two peers over the introducer protocol (RequestPeersIntroducer ->
     // RespondPeersIntroducer); the seed pulls them into the book and exits.
     let server = spawn_introducer(vec![peer("1.1.1.1", 8444, 42), peer("2.2.2.2", 8444, 42)]).await;

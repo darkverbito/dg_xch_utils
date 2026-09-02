@@ -1,7 +1,6 @@
 pub mod discriminant;
 pub mod error;
 pub mod form;
-pub mod gmp_form;
 mod limbs;
 #[cfg(target_arch = "aarch64")]
 mod limbs_a72;
@@ -35,8 +34,6 @@ fn test_version() {
     println!("{}", version());
 }
 
-/// Test-surface exports for the BPSW differential gates: the native verdict and the
-/// reference (rug/GMP) verdict, so integration tests can compare them at scale.
 pub mod testing {
     use num_bigint::BigUint;
 

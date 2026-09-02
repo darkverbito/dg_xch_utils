@@ -1,12 +1,4 @@
-//! Singleton fast-forward — the mempool's ability to rebase a spend of an older singleton
-//! version onto the newest unspent version of the same singleton, so a transaction that raced a
-//! block stays valid instead of dying as a double-spend.
-//!
-//! Port of chia_rs 0.42.1 `chia-consensus/src/fast_forward.rs` (`fast_forward_singleton`) and the
-//! wheel's `supports_fast_forward` (chia_rs `wheel/src/api.rs`): given the spend of a
-//! `singleton_top_layer_v1_1` coin, validate the lineage proof against the coin actually being
-//! spent, then rewrite the solution's lineage proof + amount to spend `new_coin` (whose parent is
-//! `new_parent`). The puzzle reveal is unchanged — only the solution moves.
+//! Rebase a singleton spend onto its newest unspent lineage.
 
 use crate::blockchain::coin::Coin;
 use crate::blockchain::coin_spend::CoinSpend;
@@ -71,10 +63,7 @@ fn atom_u64(program: &Program<'_>, what: &str) -> Result<u64, ClvmError> {
         .ok_or_else(|| err(&format!("{what} is not a u64")))
 }
 
-/// Rewrite `spend`'s solution so it spends `new_coin` (child of `new_parent`) instead of
-/// `spend.coin`, validating the singleton shape and the existing lineage proof along the way —
-/// chia_rs 0.42.1 `fast_forward_singleton`, check-for-check. Returns the new solution,
-/// serialized.
+/// Validate a singleton lineage and return a solution rebased onto `new_coin`.
 ///
 /// # Errors
 /// [`ClvmError::InvalidSpendbundle`] when the spend is not a rebasable
@@ -187,10 +176,7 @@ pub fn fast_forward_singleton(
     Program::to(new_solution).serialized()
 }
 
-/// Whether `spend` COULD be fast-forwarded — chia_rs `supports_fast_forward` (wheel/src/api.rs):
-/// attempt the rebase onto a synthesized dummy parent; structural validity is the answer. The
-/// mempool runs this on every `ELIGIBLE_FOR_FF` spend before looking up the singleton's latest
-/// unspent lineage (chia mempool_manager.py:680).
+/// Return whether the spend has a structurally valid fast-forward lineage.
 #[must_use]
 pub fn supports_fast_forward(spend: &CoinSpend) -> bool {
     let new_parent = Coin {

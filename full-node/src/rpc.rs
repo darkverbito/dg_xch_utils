@@ -1,16 +1,3 @@
-// The node's Chia-compatible HTTP RPC.
-//
-// Two layers:
-//   - `NodeRpc` — the typed query surface. Every endpoint reads through the store/mempool traits,
-//     never a backend. Errors are typed (`RpcError`); the HTTP layer decides representation.
-//   - `NodeRpcHandler` — the envelope adapter over `dg_xch_servers::RpcServer`. Every response is
-//     `{"<named_key>": ..., "success": true}` and every application error is an HTTP-200
-//     `{"success": false, "error": "..."}`.
-//
-// Transport is TLS (server cert from the private CA, client certificate REQUIRED and verified
-// against that CA) — see [`build_rpc_tls_context`]. Plain-HTTP liveness/metrics stay on the
-// separate `--metrics` port.
-
 use crate::config::RpcTlsMode;
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -138,7 +125,6 @@ pub struct NodeRpcLive {
     pub node_id: Bytes32,
     /// The `--network` id (`selected_network`).
     pub network_id: String,
-    /// The P2P listen port (`get_connections.local_port`).
     pub local_port: u16,
     /// The heaviest claimed peer peak — sync_tip_height.
     pub claimed_peak: Arc<AtomicU32>,
@@ -568,15 +554,6 @@ where
         })
     }
 
-    /// Full blocks for the height range `start..end` (END-EXCLUSIVE) — `get_blocks`.
-    /// Heights with no confirmed block are skipped. Returns each block with its header hash so
-    /// the HTTP layer can mirror the injected `header_hash` field. `exclude_reorged` is accepted
-    /// for compatibility but a no-op: this store serves only canonical-chain blocks by height
-    /// (orphans are not addressable by height here), so reorged blocks are never returned.
-    ///
-    /// # Errors
-    /// Returns [`RpcError::BadRequest`] if the range exceeds [`MAX_BLOCKS_PER_REQUEST`];
-    /// [`RpcError::Store`] on a query failure.
     pub async fn get_blocks(
         &self,
         start: u32,
@@ -1340,12 +1317,10 @@ pub struct RpcTlsContext {
 
 /// Build the RPC listener's TLS config for the selected [`RpcTlsMode`].
 ///
-/// `Cni` is mutual TLS rooted at the PRIVATE CA: the served cert is signed by a per-install
+/// `PrivateCa` is mutual TLS rooted at a per-install private CA.
 /// private CA and the client MUST present a cert chaining to that CA. The private CA comes from
 /// `PRIVATE_CA_CRT`/`PRIVATE_CA_KEY` (inline PEM) if both are set, else it is loaded from — or
-/// generated once and persisted into — `<ssl_dir>/ca/private_ca.{crt,key}`. The world-public
-/// Chia CA is NEVER the client-auth anchor: its private key is public, so a verifier rooted at it
-/// authenticates nobody.
+/// generated once and persisted into `<ssl_dir>/ca/private_ca.{crt,key}`.
 ///
 /// `Local` is server-only TLS with an ephemeral self-signed cert and NO client-cert requirement,
 /// for private/loopback operation; it is refused on a non-loopback `--rpc` bind (fail closed).
@@ -1354,27 +1329,23 @@ pub struct RpcTlsContext {
 ///
 /// # Errors
 /// Returns an I/O error on cert generation/parsing/verifier failure, if `Local` is selected for a
-/// routable bind, or if the resolved private CA is the world-public Chia CA.
+/// routable bind, or if the resolved private CA is the public network CA.
 pub fn build_rpc_tls_context(
     mode: &RpcTlsMode,
     bind: SocketAddr,
 ) -> Result<RpcTlsContext, IoError> {
     match mode {
-        RpcTlsMode::Cni { ssl_dir } => build_cni_rpc_tls(ssl_dir),
+        RpcTlsMode::PrivateCa { ssl_dir } => build_private_ca_rpc_tls(ssl_dir),
         RpcTlsMode::Local => build_local_rpc_tls(bind),
     }
 }
 
-// CNI-compatible mutual TLS: server cert signed by the private CA, client cert REQUIRED and
-// verified against it.
-fn build_cni_rpc_tls(ssl_dir: &Path) -> Result<RpcTlsContext, IoError> {
+fn build_private_ca_rpc_tls(ssl_dir: &Path) -> Result<RpcTlsContext, IoError> {
     let (ca_crt, ca_key) = resolve_private_ca(ssl_dir)?;
-    // The world-public Chia CA must never back RPC client-auth: its private key is public, so a
-    // verifier rooted at it authenticates no one. Refuse it even if an operator points
-    // PRIVATE_CA_CRT at it.
+    // A publicly distributed CA cannot authenticate RPC clients.
     if ca_crt == CHIA_CA_CRT.as_bytes() {
         return Err(IoError::other(
-            "refusing to root RPC client-auth at the world-public Chia CA (its key is public); \
+            "refusing to root RPC client-auth at the public network CA; \
              supply a private CA (PRIVATE_CA_CRT/KEY or <ssl_dir>/ca) or use --rpc-tls local",
         ));
     }
@@ -1408,7 +1379,7 @@ fn build_local_rpc_tls(bind: SocketAddr) -> Result<RpcTlsContext, IoError> {
     if !bind.ip().is_loopback() {
         return Err(IoError::other(format!(
             "--rpc-tls local is unauthenticated and only allowed on a loopback --rpc bind; got \
-             {bind}. Use --rpc-tls cni for a routable RPC address."
+             {bind}. Use --rpc-tls private-ca for a routable RPC address."
         )));
     }
     // Ephemeral in-memory CA + server leaf: encrypt the loopback transport without a persisted

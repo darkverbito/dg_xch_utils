@@ -1183,9 +1183,6 @@ impl ReadStream {
                                 tokio_tungstenite::tungstenite::Error::Protocol(ProtocolError::ResetWithoutClosingHandshake) => {
                                     warn!("Server Stream Closed without Handshake");
                                 },
-                                // A peer (or port scanner) dropping the socket mid-stream is
-                                // routine on a publicly reachable listener — one line of WARN,
-                                // not an ERROR per abandoned connection.
                                 tokio_tungstenite::tungstenite::Error::Io(e) => {
                                     warn!("Server Stream Closed: {e}");
                                 },

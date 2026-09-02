@@ -6,6 +6,9 @@ config.yaml
 node_modules
 gui/src-tauri/gen/schemas
 *.sqlite
+__pycache__/
+*.py[cod]
+temp/
 flamegraph.svg
 perf.data
 perf.data.old

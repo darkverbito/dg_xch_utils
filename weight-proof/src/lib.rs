@@ -1,5 +1,3 @@
-// Validation for Chia weight proofs.
-
 use dg_xch_core::blockchain::challenge_chain_subslot::ChallengeChainSubSlot;
 use dg_xch_core::blockchain::class_group_element::ClassgroupElement;
 use dg_xch_core::blockchain::header_block::HeaderBlock;
@@ -33,7 +31,6 @@ pub const MAX_RECENT_BLOCKS: usize = 2_000;
 const MAX_SUB_SLOTS_PER_SEGMENT: usize = 10_000;
 const MAX_VDFS_TO_VERIFY: usize = 200_000;
 
-// Sampling constants match Chia's `WeightProofHandler`.
 const SAMPLING_LAMBDA_L: f64 = 100.0; // security parameter (`LAMBDA_L`)
 const SAMPLING_C: f64 = 0.5; // adversary-advantage base (`C`)
 const MAX_SAMPLES: usize = 20; // cap on distinct sampled sub-epochs
@@ -45,7 +42,6 @@ const MAX_SAMPLING_QUERIES: i64 = 100_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WeightProofError {
-    /// A phase is not yet ported. Fail-closed: treated as "invalid", never "valid".
     PhaseUnimplemented(&'static str),
     /// The proof is structurally malformed or empty.
     Malformed(&'static str),
@@ -55,21 +51,6 @@ pub enum WeightProofError {
     Rejected(&'static str),
 }
 
-/// Validate a weight proof against `constants`, returning `(valid, summaries)` on success — mirroring
-/// the reference's `(bool, list[SubEpochSummary])`. Pure: no network, trusts no peer.
-///
-/// The six phases (port map to the reference):
-/// 1. sampling            ← `validate_sub_epoch_sampling` / `_get_weights_for_sampling` / `_sample_sub_epoch`
-/// 2. sub-epoch summaries ← `_validate_sub_epoch_summaries`
-/// 3. summaries weight    ← `_validate_summaries_weight`
-/// 4. sampled segments    ← `_validate_sub_epoch_segments` / `_validate_segment` / `__validate_pospace`
-/// 5. recent blocks       ← `validate_recent_blocks` / `_validate_pospace_recent_chain`
-/// 6. total weight & peak  ← folded into phase 3 (`_validate_summaries_weight`); the reference has no
-///    further standalone total-weight check, so phase 6 is a documented no-op.
-///
-/// All six phases are ported and verified against a real mainnet weight proof: this returns
-/// `Ok((true, summaries))` on a valid proof and fails closed (`Err`) on any structural, weight, VDF,
-/// PoSpace, signature, or reconstruction violation.
 pub fn validate_weight_proof(
     wp: &WeightProof,
     constants: &ConsensusConstants,
@@ -103,11 +84,6 @@ where
         return Err(WeightProofError::TooLarge("recent_chain_data"));
     }
 
-    // --- The six phases, in order. Each is fail-closed until ported + verified. ---
-    // Phase 2 also yields the total accumulated weight and the per-sub-epoch cumulative weight list,
-    // consumed by phase 3 (total) and phase 1 (list).
-    // Every phase is bracketed with an elapsed-ms timing at INFO so the logs alone localize the multi-minute
-    // grind (the measurement discipline: the log is the proof of where the time goes, no profiler required).
     let started = Instant::now();
     progress("phase 2: validating sub-epoch summaries");
     let t = Instant::now();
@@ -186,14 +162,6 @@ fn elapsed_ms(t: Instant) -> u64 {
     u64::try_from(t.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
-/// The proof's hash-anchored sub-epoch summaries WITHOUT the sampled-segment / recent-chain VDF grind —
-/// phase 2 only (`_validate_sub_epoch_summaries`, which reconstructs the genesis-rooted summary chain and
-/// pins it to the recent-chain anchor by hash). For consumers that need the attested epoch schedule of a
-/// proof that has ALREADY passed [`validate_weight_proof`] — the headers-first sub-epoch-summary
-/// attachment, offline tests. NOT a substitute for full validation when accepting a proof from a peer.
-///
-/// # Errors
-/// Returns [`WeightProofError`] on structural bounds violations or a summary-chain/anchor mismatch.
 pub fn sub_epoch_summaries_of(
     wp: &WeightProof,
     constants: &ConsensusConstants,
@@ -247,16 +215,6 @@ fn get_last_ses_hash(
     None
 }
 
-/// Reconstruct the sub-epoch-summary hash-chain from the proof's `SubEpochData`, genesis-anchored, and
-/// accumulate the implied sub-epoch weights. Returns `(summaries, total_weight, sub_epoch_weight_list)`;
-/// phase 2 uses `summaries`, phases 3/6 consume the weights. Pure hashing + integer weight arithmetic —
-/// no VDF, no proof-of-space. (ref: `_map_sub_epoch_summaries`.)
-///
-/// Each summary links the previous by hash (`prev_subepoch_summary_hash`), so the chain is genesis-rooted
-/// and tamper-evident: change any `SubEpochData` field and every downstream hash — including the last —
-/// changes with it. `curr_difficulty` follows the proof's declared `new_difficulty`; it is not re-derived
-/// here (the light-client reference does not re-run difficulty adjustment) — it is pinned instead by the
-/// last-summary hash anchor in [`validate_sub_epoch_summaries`] and the weight check in phase 3.
 fn map_sub_epoch_summaries(
     sub_blocks_for_se: u32,
     genesis_challenge: Bytes32,
@@ -304,23 +262,11 @@ fn map_sub_epoch_summaries(
         prev_ses_hash = ses_hash(&ses)?;
         summaries.push(ses);
     }
-    // The final sub-epoch's start weight closes the list (mirrors the reference's trailing append).
     sub_epoch_weight_list.push(total_weight + curr_difficulty);
 
     Ok((summaries, total_weight, sub_epoch_weight_list))
 }
 
-/// Phase 2 — reconstruct the [`SubEpochSummary`] chain from the proof's `SubEpochData` and prove it
-/// terminates in the sub-epoch-summary hash actually committed on-chain (in the recent chain's finished
-/// sub-slots). Pure hashing/weight arithmetic; no VDF/PoSpace. Produces the summaries the later phases
-/// consume. (ref: `_validate_sub_epoch_summaries`.)
-///
-/// The last-hash equality IS the anti-grinding control: because each summary hashes the previous, a
-/// prover who tampers with any `SubEpochData` (difficulty, sub-slot iters, overflow, reward-chain hash)
-/// produces a different final hash, which cannot match the on-chain commitment — so a re-weighted or
-/// forged history is rejected here without re-deriving difficulty. The light-client surface deliberately
-/// carries no independent `difficulty_change_max_factor`/`significant_bits` clamp; the hash anchor (plus
-/// phase-3 weight and phase-4 sampled-segment checks) is what pins the declared difficulties.
 fn validate_sub_epoch_summaries(
     wp: &WeightProof,
     c: &ConsensusConstants,
@@ -356,8 +302,6 @@ fn validate_sub_epoch_summaries(
 /// C `random_random` produces. Verified against CPython reference vectors in the tests below.
 mod recent_blocks;
 
-/// The serving (construction) half: build a `WeightProof` from a node's `BlockStore` — the mirror image
-/// of the validator above, ported from the reference node's construction side.
 pub mod serve;
 
 mod py_random {
@@ -464,9 +408,6 @@ mod py_random {
             (a * 67_108_864.0 + b) * (1.0 / 9_007_199_254_740_992.0)
         }
 
-        /// CPython's `getrandbits(k)` (`random_getrandbits`): little-endian 32-bit words, the top word
-        /// shifted right to keep exactly `k` bits. Phase 4 only ever needs `k <= 64` (segment counts), so
-        /// the two-word path suffices; wider `k` is not used here.
         pub fn getrandbits(&mut self, k: u32) -> u64 {
             debug_assert!((1..=64).contains(&k));
             if k <= 32 {
@@ -511,11 +452,6 @@ mod py_random {
     }
 }
 
-/// Draw the sampling weights (`_get_weights_for_sampling`): a set of target weights, one per RNG query,
-/// where the query count is derived from how much of the chain the recent window covers. `Ok(None)`
-/// means "sample every sub-epoch" (the reference returns `None` when the adversary-success probability is
-/// non-positive). The float math mirrors the reference operation-for-operation so the draw count and the
-/// resulting set match. (ref: `_get_weights_for_sampling`.)
 fn get_weights_for_sampling(
     rng: &mut py_random::PyRandom,
     total_weight: u128,
@@ -585,12 +521,6 @@ fn sample_sub_epoch(start: u128, end: u128, weight_to_check: Option<&[u128]>) ->
     false
 }
 
-/// Phase 1 — the sampled sub-epochs are exactly those the seed-derived RNG (seeded by the
-/// second-to-last summary hash) selects, and every sampled sub-epoch is backed by challenge segments in
-/// the proof. A prover therefore cannot prove a cherry-picked subset: the seed is fixed by the summary
-/// chain (phase 2), so the sample set is not the prover's to choose, and any sampled sub-epoch missing
-/// its segments is rejected. (ref: `validate_sub_epoch_sampling`, `_get_weights_for_sampling`,
-/// `_sample_sub_epoch`.)
 fn validate_sub_epoch_sampling(
     wp: &WeightProof,
     summaries: &[SubEpochSummary],
@@ -651,15 +581,6 @@ fn validate_sub_epoch_sampling(
     Ok(())
 }
 
-/// Phase 3 — the weight accumulated across the summaries (phase 2's `total_weight`) must equal the weight
-/// the recent chain actually reports at the last sub-epoch boundary. This ties the succinct summary chain
-/// to a concrete, on-chain weight: a prover cannot inflate or deflate the accrued weight without
-/// contradicting the recent block at `ses_end_height`. (ref: `_validate_summaries_weight`.)
-///
-/// `ses_end_height = (len(summaries) - 1) * SUB_EPOCH_BLOCKS + num_blocks_overflow(last) - 1`, computed in
-/// signed space: for a degenerate proof it can go negative (e.g. one summary, zero overflow), which simply
-/// matches no block — the reference reaches the same `curr is None → False`. No panics on malformed input;
-/// the scan is bounded by `recent_chain_data` (already capped by `MAX_RECENT_BLOCKS`).
 fn validate_summaries_weight(
     wp: &WeightProof,
     summaries: &[SubEpochSummary],
@@ -670,7 +591,6 @@ fn validate_summaries_weight(
         .last()
         .ok_or(WeightProofError::Malformed("no summaries for weight check"))?
         .num_blocks_overflow;
-    // Signed to mirror Python's integer arithmetic (a negative height just never matches a block).
     let ses_end_height: i64 =
         (summaries.len() as i64 - 1) * i64::from(c.sub_epoch_blocks) + i64::from(num_over) - 1;
 
@@ -711,9 +631,6 @@ fn ss_is_end_of_slot(s: &SubSlotData) -> bool {
     s.cc_slot_end.is_some()
 }
 
-/// Verify one collected VDF against its reconstructed input — this is `dg_xch_vdf::validate_vdf_info`,
-/// i.e. chia's `validate_vdf` (target check → witness-size check → Wesolowski `verify_vdf`). Counts toward
-/// the DoS bound so a hostile proof cannot force unbounded VDF work.
 fn check_vdf(
     c: &ConsensusConstants,
     input: &ClassgroupElement,
@@ -721,9 +638,6 @@ fn check_vdf(
     proof: &dg_xch_core::blockchain::vdf_proof::VdfProof,
     count: &AtomicUsize,
 ) -> Result<(), WeightProofError> {
-    // Shared across the parallel segment workers (phase 4): one atomic increment per VDF keeps the GLOBAL
-    // `MAX_VDFS_TO_VERIFY` DoS bound exact regardless of thread interleaving — the accept/reject decision is
-    // identical to the serial version (the atomic is negligible against a class-group VDF verify).
     let n = count.fetch_add(1, Ordering::Relaxed) + 1;
     if n > MAX_VDFS_TO_VERIFY {
         return Err(WeightProofError::TooLarge("vdf count"));
@@ -1082,10 +996,6 @@ fn get_rc_sub_slot(
     Ok(Some(rc_sub_slot))
 }
 
-/// Proof of space for the sampled challenge block → required iters. Wires the real pospace verifier
-/// (`dg_xch_pos::verify_and_get_quality_string`, chia's height-agnostic V1 path) then
-/// `calculate_iterations_quality` with `difficulty_constant_factor` pinned from `ConsensusConstants`.
-/// `None` means the pospace did not verify. (ref: `__validate_pospace`.)
 fn validate_pospace(
     c: &ConsensusConstants,
     segment: &SubEpochChallengeSegment,
@@ -1395,12 +1305,6 @@ fn validate_segment(
     Ok(true)
 }
 
-/// Phase 4 — for each sub-epoch that carries segments, reconstruct its reward-chain hash (checked against
-/// the summary), and cryptographically validate the ONE rng-chosen segment: its proof of space (→ required
-/// iters) and every challenge-chain / infused-challenge-chain / reward-chain VDF. The rng that picks the
-/// segment is the *same continued stream* phase 1 seeded (`summaries[-2]` hash) and advanced through its
-/// sampling draws — so the prover cannot know which segment will be checked, and every one must be valid.
-/// (ref: `_validate_sub_epoch_segments` / `_validate_segment` / `__validate_pospace` / `_validate_vdf_batch`.)
 fn validate_sub_epoch_segments(
     wp: &WeightProof,
     summaries: &[SubEpochSummary],
@@ -1411,8 +1315,6 @@ fn validate_sub_epoch_segments(
             "fewer than two sub-epoch summaries",
         ));
     }
-    // Continue the phase-1 RNG: re-seed from summaries[-2] and replay the sampling draws so `randbelow`
-    // (chia's `rng.choice`) below starts from the exact state the reference's shared rng is in.
     let seed = ses_hash(&summaries[summaries.len() - 2])?;
     let mut rng = py_random::PyRandom::new(seed.as_ref());
     let tip = wp
@@ -1451,9 +1353,6 @@ fn validate_sub_epoch_segments(
         // passed to segment validation but never used there, so we omit it).
         let (curr_difficulty, curr_ssi) = get_curr_diff_ssi(c, sub_epoch_n as usize, summaries);
 
-        // Which segment gets cryptographically checked — chia's `rng.choice(range(len(segments)))`. The draw
-        // advances the shared RNG exactly once per sub-epoch, in order, so it CANNOT move into the parallel
-        // pass (that determinism is the anti-grinding property).
         let sampled_seg_index = rng.randbelow(segments.len() as u64) as usize;
 
         let mut prev_ses: Option<&SubEpochSummary> = None;
@@ -1539,8 +1438,6 @@ struct SampledSegment<'a> {
     height: u32,
 }
 
-/// Phase 5 — fully validate the recent-chain tail (PoSpace + VDFs + summary inclusion) so the proof
-/// connects to a concrete, checkable peak. (ref: `validate_recent_blocks`, `_validate_pospace_recent_chain`.)
 fn validate_recent_blocks(
     wp: &WeightProof,
     summaries: &[SubEpochSummary],
@@ -1549,21 +1446,11 @@ fn validate_recent_blocks(
     recent_blocks::validate_recent_blocks(wp, summaries, c)
 }
 
-/// Phase 6 — the whole proof sums to the claimed heaviest chain; the peak height/weight in the last
-/// recent block is consistent with the summaries.
 fn validate_total_weight(
     _wp: &WeightProof,
     _summaries: &[SubEpochSummary],
     _c: &ConsensusConstants,
 ) -> Result<(), WeightProofError> {
-    // No-op by faithful reference diff, not by omission. The reference's ONLY total-weight
-    // reconciliation pins the summaries' accumulated `total_weight` to the concrete recent-chain
-    // block at the last sub-epoch boundary — already ported and enforced as phase 3
-    // (`validate_summaries_weight`). The claimed peak is used only to bound segment sampling,
-    // and the recent chain's per-block weight/height continuity up to the peak is enforced by
-    // phase 5's header validation. The remaining reference step, fork-point location, compares
-    // the proof against a *local* blockchain — out of scope for a standalone light-client trust
-    // anchor. With phases 1-5 green, the proof is fully validated.
     Ok(())
 }
 
@@ -1628,56 +1515,6 @@ mod tests {
         assert_eq!(weights.len(), out.len());
     }
 
-    /// Phase 5 accept path on the real mainnet proof, exercised directly (reconstruct summaries via
-    /// phase 2, then run `validate_recent_blocks`) so it doesn't pay phase 4's ~min of VDF batch work.
-    /// This is the gate-ready proof: the recent-chain header validator (PoSpace + CC/RC/ICC VDFs + BLS
-    /// signatures + SES reconstruction + deficit/epoch state machine) accepts the real chain tail. Runs
-    /// real VDF/BLS verification on the recent tip blocks — run in release.
-    #[test]
-    #[ignore = "heavyweight: recent-chain VDF/BLS verification; run in release with --ignored"]
-    fn phase5_accepts_real_mainnet_proof() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/weight_proof_mainnet_9054698.bin");
-        let bytes = std::fs::read(&path)
-            .unwrap_or_else(|e| panic!("real mainnet fixture at {}: {e}", path.display()));
-        let mut cur = std::io::Cursor::new(bytes.as_slice());
-        let wp = WeightProof::from_bytes(&mut cur, ChiaProtocolVersion::default())
-            .expect("real mainnet weight proof deserializes");
-        let c = &dg_xch_core::consensus::constants::MAINNET;
-        let (summaries, _total, _weights) =
-            validate_sub_epoch_summaries(&wp, c).expect("phase 2 accepts the real mainnet proof");
-        validate_recent_blocks(&wp, &summaries, c).expect("phase 5 accepts the real mainnet proof");
-    }
-
-    /// End-to-end completion: the FULL `validate_weight_proof` accepts the real mainnet proof through all
-    /// six phases and returns `Ok((true, summaries))` with NO `PhaseUnimplemented` markers left. This is
-    /// the "validator complete" bar. Heavyweight — runs phase 4's ~1000-VDF batch plus phase 5's recent
-    /// chain (~10 min); run in release with `--ignored`.
-    #[test]
-    #[ignore = "full pipeline: ~10 min of real VDF/BLS verification (phase 4 batch + phase 5); run in release"]
-    fn phase6_full_validator_accepts_real_mainnet_proof() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/weight_proof_mainnet_9054698.bin");
-        let bytes = std::fs::read(&path)
-            .unwrap_or_else(|e| panic!("real mainnet fixture at {}: {e}", path.display()));
-        let mut cur = std::io::Cursor::new(bytes.as_slice());
-        let wp = WeightProof::from_bytes(&mut cur, ChiaProtocolVersion::default())
-            .expect("real mainnet weight proof deserializes");
-        let c = &dg_xch_core::consensus::constants::MAINNET;
-        let (valid, summaries) = validate_weight_proof_with_progress(&wp, c, &mut |status| {
-            eprintln!("weight-proof: {status}");
-        })
-        .expect("full validator accepts the real mainnet proof");
-        assert!(
-            valid,
-            "validator must return valid=true on the real mainnet proof"
-        );
-        assert_eq!(summaries.len(), 23_579, "returned summary chain length");
-    }
-
-    /// Byte-exact parity of the sampling RNG against CPython's `random.Random`. Determinism is the whole
-    /// security property of phase 1, so this asserts bit-identical `random()` output for fixed seeds
-    /// (vectors captured from CPython, including a leading-zero-byte seed that exercises key sizing).
     #[test]
     fn mt19937_getrandbits_and_randbelow_match_cpython() {
         // getrandbits sequence on one rng (seed 00..1f), then choice(range(n)) on fresh rng each.
@@ -1740,10 +1577,6 @@ mod tests {
         }
     }
 
-    /// Real-prod-data phase-1 accept path on the live mainnet proof: the seed-derived RNG selects a set
-    /// of sub-epochs, and every one must be backed by challenge segments in the proof. A divergent RNG
-    /// would select different sub-epochs and reject here — so this passing is strong evidence the sample
-    /// set matches chia's. (The independent reference-parity on the exact index set is the independent gate.)
     #[test]
     fn phase1_accepts_on_real_mainnet_proof() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1761,10 +1594,6 @@ mod tests {
         );
     }
 
-    /// Real-prod-data phase-3 accept path: phase 2's accumulated `total_weight` must equal the weight the
-    /// recent chain reports at the last sub-epoch boundary, on the live mainnet proof. Also a writer-side
-    /// negative: perturbing the total by one must reject (the reference's independent gate inflates a weight in the
-    /// proof bytes via the public API).
     #[test]
     fn phase3_matches_weight_on_real_mainnet_proof() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1788,36 +1617,8 @@ mod tests {
         ));
     }
 
-    /// Phase 4 (segments) accepts the REAL mainnet weight proof end-to-end: every sampled challenge
-    /// segment's proof of space and all its challenge-chain / infused-challenge-chain / reward-chain VDFs
-    /// verify against the real `dg_xch_pos` / `dg_xch_vdf` primitives. This exercises the full VDF path
-    /// (including the `witness_type=2` n-wesolowski forms whose bqfc serialization once diverged from
-    /// chiavdf). HEAVYWEIGHT: it verifies ~1000 real class-group VDFs — run in release
-    /// (`cargo test -p dg_xch_weight_proof --release phase4_accepts_real_mainnet_proof`); it is slow in a
-    /// debug build (verify with `--release`).
-    #[test]
-    #[ignore = "heavyweight: ~1000 real class-group VDFs; run in release with --ignored"]
-    fn phase4_accepts_real_mainnet_proof() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/weight_proof_mainnet_9054698.bin");
-        let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("real mainnet fixture: {e}"));
-        let wp = WeightProof::from_bytes(
-            &mut std::io::Cursor::new(bytes.as_slice()),
-            ChiaProtocolVersion::default(),
-        )
-        .expect("deserialize");
-        let c = &dg_xch_core::consensus::constants::MAINNET;
-        let (summaries, _t, _w) = validate_sub_epoch_summaries(&wp, c).expect("phase 2");
-        // Phase 4 accepts: all sampled-segment proofs of space + VDFs verify against the real primitives.
-        validate_sub_epoch_segments(&wp, &summaries, c)
-            .expect("phase 4 accepts the real mainnet proof");
-    }
-
     #[test]
     fn an_incomplete_validator_fails_closed_never_accepts() {
-        // A structurally-plausible proof must NOT be accepted while phases are unported — the whole
-        // safety property of a WIP consensus validator. This test must stay green until the port is
-        // complete AND a real accept-vector replaces it.
         let wp = WeightProof {
             sub_epochs: vec![],
             sub_epoch_segments: vec![],

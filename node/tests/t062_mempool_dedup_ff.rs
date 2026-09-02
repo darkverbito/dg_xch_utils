@@ -131,8 +131,6 @@ impl SingletonFixture {
     }
 }
 
-// A plain fee-paying spend: puzzle `1`, one CREATE_COIN for half the amount (the excess is the
-// fee, which also disqualifies it from dedup — chia_rs post_spend).
 fn fee_spend(parent_tag: u8, amount: u64) -> (Coin, CoinSpend) {
     let puzzle = Program::to(1_u64);
     let coin = Coin {

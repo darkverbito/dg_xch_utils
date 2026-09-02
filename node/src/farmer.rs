@@ -45,9 +45,6 @@ pub enum DeclareVerdict {
 }
 
 impl DeclareVerdict {
-    /// The stable metric/event label for this verdict — the `result` dimension of
-    /// `fullnode_producer_declares_validated_total` and the `producer.declare.*` event reason.
-    /// A bounded enum, safe as a Prometheus label.
     #[must_use]
     pub fn result_label(&self) -> &'static str {
         match self {
@@ -248,22 +245,6 @@ impl Default for ProofCandidateStore {
     }
 }
 
-/// A candidate unfinished block awaiting the farmer's foliage signatures. At
-/// `declare_proof_of_space` time the node builds the block with placeholder foliage signatures
-/// and stores it here keyed by the proof's quality string; at `signed_values` time it is
-/// retrieved, its placeholder foliage signatures are spliced with the farmer's real ones, and the
-/// finished block is propagated.
-///
-/// Bounded FIFO like [`ProofCandidateStore`]: evicting an un-signed candidate is harmless (the
-/// farmer simply gets no block from that one proof; the next signage point brings fresh
-/// candidates). `height` is carried alongside for the caller's logging.
-///
-/// No "backup" empty candidate is kept per quality string: self-farmed-block validation is
-/// deferred to the driver (`ub_inbox` → `process_ub_inbox`), so a backup fallback would need a
-/// driver→farmer re-request seam that does not exist. The producer's re-run gate
-/// (`Mempool::create_block_generator` re-executes the emitted generator through our own
-/// validator) covers the generator-bug case; remaining consensus-edge failures lose the single
-/// farm win.
 #[derive(Debug)]
 pub struct CandidateBlockStore {
     map: HashMap<
@@ -391,12 +372,6 @@ pub struct CandidateIters {
     pub candidate_sp_total_iters: u128,
 }
 
-/// Resolve `required_iters` / `sp_iters` / `ip_iters` / `infusion_point_total_iters`, reusing the
-/// same `calculate_*` functions the validator uses (no reimplemented consensus math).
-///
-/// Returns `None` when the proof does not pass the iters filter: `calculate_ip_iters` errors when
-/// `required_iters == 0` or `required_iters >= sp_interval_iters` (the pospace filter gate — the
-/// proof is too weak to infuse), so we bail with no block rather than build an invalid candidate.
 #[must_use]
 // The pospace-to-candidate-iters computation binds this many independent inputs (quality, pos
 // size, difficulty, ssi, sp index, cc-sp hash, slot iters); allow the arity.
@@ -455,10 +430,6 @@ pub struct CandidatePrev {
     /// previous transaction block is genesis, else that block's `header_hash`. Only consumed for
     /// a tx block.
     pub prev_transaction_block_hash: Bytes32,
-    /// The previous transaction block's height — the produce-path mempool gate: the mempool's
-    /// peak (its time-lock reference frame) must be exactly this block before its items may be
-    /// assembled into the candidate; a mismatch yields an empty block, the conservative outcome.
-    /// `0` at genesis (the mempool has no peak yet, so the gate fails closed).
     pub prev_transaction_block_height: u32,
     /// `reward_claims_incorporated` inputs — the prev transaction block (with its `fees`)
     /// followed by the non-transaction blocks between it and the transaction block before it
@@ -682,8 +653,6 @@ mod tests {
 
     #[test]
     fn valid_lookup_reaches_pospace_check_and_rejects_bogus_proof() {
-        // Everything up to the PoSpace check passes; the bogus proof bytes fail verification.
-        // (The ACCEPTED path needs a genuine plot proof — the live dg_fast_farmer gate.)
         let d = declare(0, 5, Bytes32::from([7; 32]));
         let accepted = sp(5);
         let v =

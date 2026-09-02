@@ -51,7 +51,6 @@ fn ses_block(
     }
 }
 
-// Genesis-anchored reconstruction of the on-chain SES sequence from wp.sub_epochs (chia _map_sub_epoch_summaries).
 fn real_sub_epoch_summaries(wp: &WeightProof) -> Vec<SubEpochSummary> {
     let mut prev = MAINNET.genesis_challenge;
     let mut out = Vec::with_capacity(wp.sub_epochs.len());

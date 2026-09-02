@@ -160,8 +160,7 @@ impl SimulatorServer {
             false,
             0,
             false,
-            None,
-            None,
+            Default::default(),
             None,
             None,
             &[],
@@ -178,8 +177,6 @@ impl SimulatorServer {
         builder.farm_genesis().await?;
         let genesis_delta = builder.take_last_delta();
         let chain: SharedChain = Arc::new(Mutex::new(builder));
-        // The simulator is the sole authority on its own chain, so it is always "synced": this clears
-        // the node's NO_TRANSACTIONS_WHILE_SYNCING gate on `SendTransaction`.
         node.synced.store(true, Ordering::Relaxed);
         // Serve stock wallets a v1-shaped proof of space in block headers so they can deserialize
         // `RespondBlockHeader` (a stock wallet has no v2 proof decoder). The chain keeps its v2 proofs.

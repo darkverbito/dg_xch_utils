@@ -555,9 +555,6 @@ mod tests {
         );
     }
 
-    // The five rows added with message-type completeness pin the exact protocol numbers for
-    // error / solve / solution_response / partial_proofs / configure_window_sizes. These are
-    // protocol constants: mirrored, never defaulted.
     #[test]
     fn late_protocol_rows_match_chia_numbers() {
         use ProtocolMessageTypes as P;

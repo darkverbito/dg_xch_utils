@@ -242,9 +242,6 @@ pub const fn get_middle_bits(bit_container: usize, start: u32, nb_bits: u32) -> 
     (bit_container >> (start & reg_mask)) & BIT_MASK[nb_bits as usize] as usize
 }
 
-/// The write side of the bit stream, mirroring the reference `BIT_CStream`. Bits accumulate in a
-/// register from the low end and whole bytes are flushed little-endian, which is the order
-/// [`BitDstream`] reads them back in.
 #[derive(Default)]
 pub struct BitCStream {
     bit_container: usize,

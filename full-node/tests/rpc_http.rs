@@ -294,7 +294,7 @@ fn free_port() -> u16 {
         .port()
 }
 
-// Per-process test SSL dir holding the RPC private CA. Generated once so every Cni-mode server
+// Per-process test SSL dir holding the RPC private CA.
 // shares one private CA and `write_client_certs` can sign client certs against it.
 fn test_ssl_dir() -> std::path::PathBuf {
     std::env::temp_dir().join(format!("rpc_http_ssl_{}", std::process::id()))
@@ -318,7 +318,6 @@ fn ensure_test_private_ca() -> std::path::PathBuf {
 }
 
 fn write_client_certs(tag: &str) -> ClientSSLConfig {
-    // Sign the client cert with the node's per-install private CA, not the world-public Chia CA.
     let ca_dir = ensure_test_private_ca().join("ca");
     let ca_crt = std::fs::read(ca_dir.join("private_ca.crt")).expect("private CA crt");
     let ca_key = std::fs::read(ca_dir.join("private_ca.key")).expect("private CA key");
@@ -341,7 +340,7 @@ async fn spawn_tls_server() -> (
     Arc<Mutex<Mempool>>,
     Arc<NodeRpc<SqliteStore>>,
 ) {
-    spawn_tls_server_mode(full_node::RpcTlsMode::Cni {
+    spawn_tls_server_mode(full_node::RpcTlsMode::PrivateCa {
         ssl_dir: ensure_test_private_ca(),
     })
     .await
@@ -434,7 +433,7 @@ async fn tls_e2e_chia_client_four_endpoints() {
     run.store(false, Ordering::Relaxed);
 }
 
-// A client with no certificate is refused at the handshake; Cni mode requires one.
+// Private-CA mode requires a client certificate.
 #[tokio::test]
 async fn tls_no_client_cert_is_refused() {
     let (port, run, _mp, _rpc) = spawn_tls_server().await;
@@ -525,15 +524,10 @@ async fn raw_request_fails(port: u16, cfg: Arc<rustls::ClientConfig>) -> bool {
     !String::from_utf8_lossy(&buf).starts_with("HTTP/1.1 200")
 }
 
-// The world-public Chia CA must never be a client-auth anchor: its private key is public, so a
-// verifier rooted at it lets anyone mint a chaining client cert and satisfy the mTLS client-auth,
-// leaving the RPC effectively unauthenticated. Cni-mode client-auth is rooted at a per-install
-// private CA instead.
 #[tokio::test]
 async fn tls_public_chia_ca_client_is_an_auth_bypass() {
     use dg_xch_core::ssl::{load_certs_from_bytes, load_private_key_from_bytes};
     let (port, run, _mp, _rpc) = spawn_tls_server().await;
-    // The attacker's entire capability: sign a client cert with the public Chia CA key.
     let (crt, key_bytes) =
         generate_ca_signed_cert_data(CHIA_CA_CRT.as_bytes(), CHIA_CA_KEY.as_bytes())
             .expect("attacker cert signed by the world-public Chia CA");
@@ -553,7 +547,7 @@ async fn tls_public_chia_ca_client_is_an_auth_bypass() {
     run.store(false, Ordering::Relaxed);
 }
 
-// A client cert signed by the node's PRIVATE CA is accepted in Cni mode.
+// A client cert signed by the node's private CA is accepted.
 #[tokio::test]
 async fn tls_private_ca_client_is_accepted() {
     use dg_xch_core::ssl::{load_certs_from_bytes, load_private_key_from_bytes};
@@ -573,7 +567,7 @@ async fn tls_private_ca_client_is_accepted() {
     let refused = raw_request_fails(port, Arc::new(cfg)).await;
     assert!(
         !refused,
-        "a client cert chained to the node's PRIVATE CA must be accepted in Cni mode"
+        "a client cert chained to the node's private CA must be accepted"
     );
     run.store(false, Ordering::Relaxed);
 }
@@ -609,9 +603,6 @@ fn tls_local_mode_refuses_non_loopback_bind() {
     }
 }
 
-// A node started with `--rpc 0.0.0.0` in local mode must not network-expose an unauthenticated
-// RPC: the bind is downgraded to loopback with the port preserved. Cni is authenticated and binds
-// as configured.
 #[test]
 fn local_mode_downgrades_routable_bind_to_loopback() {
     use full_node::RpcTlsMode;
@@ -627,10 +618,12 @@ fn local_mode_downgrades_routable_bind_to_loopback() {
     let loop_in: SocketAddr = "127.0.0.1:8555".parse().unwrap();
     let (b2, d2) = RpcTlsMode::Local.resolve_bind(loop_in);
     assert!(!d2 && b2 == loop_in, "loopback local bind is untouched");
-    // Cni is authenticated, so a routable bind is served as configured (no downgrade).
-    let (b3, d3) = RpcTlsMode::Cni {
+    let (b3, d3) = RpcTlsMode::PrivateCa {
         ssl_dir: std::path::PathBuf::from("ssl"),
     }
     .resolve_bind(routable);
-    assert!(!d3 && b3 == routable, "cni binds exactly as configured");
+    assert!(
+        !d3 && b3 == routable,
+        "private CA binds exactly as configured"
+    );
 }

@@ -1,20 +1,3 @@
-//! Order-independent validation core proofs.
-//!
-//! These are the **corpus-free** analogues of the corpus parity proofs. They
-//! prove the algebraic properties — order-independence and fail-closed cancellation — on
-//! synthetic coins, with no corpus and no block-generator wiring:
-//!
-//!   (b) the SAME block set observed in FORWARD vs many SHUFFLED orders yields the IDENTICAL
-//!       XOR residual AND the IDENTICAL phase-1 root — order-independence, the property;
-//!   (c) a corrupted metadata fold (wrong created-height on a relative-timelock spend) BREAKS
-//!       cancellation AND flips the phase-1 root — the fold is load-bearing;
-//!   (d) a dropped or extra coin BREAKS cancellation.
-//!
-//! The remaining corpus proof (a) — the aggregate over a real coin set's blocks in forward
-//! order cancels to the phase-1-derived root (parity) — requires the corpus and is run by the
-//! `roots/tests/coin_root_mainnet_parity.rs` harness.
-//! Shuffling here uses a seeded LCG (no external RNG dep, deterministic, clippy-clean).
-
 use dg_xch_core::blockchain::sized_bytes::Bytes32;
 use dg_xch_roots::validate::{
     BlockObservation, CoinMeta, Creation, RangeValidator, SpendRef, TimeLockConditions,
@@ -187,8 +170,6 @@ fn order_independence_xor_and_root() {
     }
 }
 
-/// The expected phase-1 root is itself derived order-independently from the scenario (this is
-/// the parity target the corpus proof (a) supplies from the real phase-1 ledger).
 fn expected_root(s: &Scenario) -> Bytes32 {
     let forward: Vec<&BlockObservation> = s.blocks.iter().collect();
     run(&forward)

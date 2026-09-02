@@ -1,54 +1,3 @@
-// Declare-side proof: does our node PROPERLY RESPOND to a DeclareProofOfSpace, driven by REAL
-// off-the-wire proof data? This is the declare-side counterpart to producer_differential's
-// byte-identical block-reconstruction proof, and it closes the one step both the outbound-emission
-// contract (full-node/tests/emission_contract.rs — the `request_signed_values` entry) and
-// node/src/farmer.rs's own unit tests leave UNVERIFIED: the ACCEPT path of a proof of space.
-//
-// ── ARCHITECTURE (verified against the code, not assumed) ────────────────────────────────────────
-// `DeclareProofOfSpace` (ProtocolMessageTypes::DeclareProofOfSpace = 9) is a FARMER↔FULL_NODE message
-// — core/src/protocols/mod.rs groups it under "Farmer protocol (farmer <-> full_node)", alongside
-// NewSignagePoint(8)/RequestSignedValues(10)/SignedValues(11). It is NOT full_node↔full_node gossip
-// (that range is 20+). So a literal DeclareProofOfSpace is NEVER on the full-node gossip wire and
-// cannot be captured off a node's peer stream. What IS on the wire — and what the farmer proved
-// against to build it — is the block: a real `FullBlock` / `NewUnfinishedBlock` carries the
-// `reward_chain_block` (proof_of_space + signage-point VDFs + signage_point_index +
-// pos_ss_cc_challenge_hash + the two SP signatures) and the foliage_block_data (pool_target /
-// pool_signature / farmer_reward_puzzle_hash) — every field a farmer put into the DeclareProofOfSpace
-// that produced that block. We reconstruct the equivalent declare from those real fields.
-//
-// ── WHAT THE HANDLER DOES, AND WHAT WE DRIVE ─────────────────────────────────────────────────────
-// `on_declare_proof_of_space` (full-node/src/daemon.rs) is exactly two pure steps wrapped in
-// store/slot plumbing:
-//   1. validation — `validate_declared_proof(&constants, &declare, height, |cc_sp| slot
-//      .get_signage_point(cc_sp), |cc| slot.get_sub_slot(cc).is_some())` (node/src/farmer.rs). We call
-//      this SAME function with slot closures reconstructed from the real block, and assert
-//      `DeclareVerdict::Accepted(quality)` — the proof of space VALIDATES and the quality string is
-//      computed (not rejected). This is the pospace-verify gate emission_contract.rs flags as needing
-//      "a real plot proof".
-//   2. emission — `try_build_candidate` resolves store/slot inputs and calls `assemble_candidate(...)`
-//      (node/src/farmer.rs) to produce the `(UnfinishedBlock, RequestSignedValues)`. We call that SAME
-//      function with the block's own resolved inputs and assert a `RequestSignedValues` is returned
-//      (not None) with the correct quality + internally-consistent foliage hashes, AND that the
-//      candidate's `RewardChainBlockUnfinished` — the proof-of-space-bearing structure — re-serializes
-//      BYTE-IDENTICALLY to the real block's `reward_chain_block.get_unfinished()`. That closes
-//      declare → candidate → (the wire UB's reward chain block) against real data.
-//
-// ── WHAT A LONE OFF-WIRE MESSAGE CANNOT SUPPLY (documented, not faked) ───────────────────────────
-// We do NOT stand up the full `StoreApi::on_declare_proof_of_space` end to end because
-// `try_build_candidate`'s store/slot resolution needs ACCUMULATED NODE STATE that neither a
-// DeclareProofOfSpace nor a single wire UB carries: the SlotState sub-slot START total_iters
-// (`get_sub_slot(...) -> start`), the finished-sub-slot linkage (`get_finished_sub_slots`), and the
-// peak/prev-block reward-chain backtrack (`backtrack_prev_block` / `challenge_in_chain`). Those are
-// running VDF/block-store accumulations, not fields of the message. The assembly they feed is already
-// pinned byte-for-byte against mainnet by producer_differential; here we feed `assemble_candidate` the
-// block's own resolved inputs so the proof-of-space → RewardChainBlockUnfinished → RequestSignedValues
-// step is proven end to end on real data. The one remaining gap is the SlotState/BlockStore
-// reconstruction, called out here rather than stubbed.
-//
-// ── HOW TO RUN ───────────────────────────────────────────────────────────────────────────────────
-// Runs with no env: two real mainnet transaction blocks + the recent-chain slice:
-//   cargo test -p dg_xch_node --test declare_proof_of_space -- --nocapture
-
 mod common;
 
 use std::io::Cursor;
@@ -217,9 +166,6 @@ fn drive(v: &BlockView) -> Outcome {
     let sp = reconstruct_signage_point(v);
     let height = v.height;
 
-    // ── step 1: the pospace-verify gate — the SAME call on_declare_proof_of_space makes. The two
-    // slot closures reproduce `slot.get_signage_point(cc_sp)` (returns our reconstructed SP for this
-    // declare's challenge_chain_sp) and `slot.get_sub_slot(cc).is_some()` (the pos sub-slot is held).
     let lookup_sp = |cc_sp: &Bytes32| {
         if *cc_sp == declare.challenge_chain_sp {
             Some(sp.clone())

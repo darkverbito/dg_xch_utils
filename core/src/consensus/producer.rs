@@ -28,18 +28,6 @@ use crate::traits::SizedBytes;
 use crate::utils::hash_256;
 use dg_xch_serialize::{ChiaProtocolVersion, ChiaSerialize};
 
-/// The BLS12-381 G2 point at infinity, serialized *compressed* as `0xc0` followed by 95
-/// zero bytes — the `TransactionsInfo.aggregated_signature` for a transaction block
-/// carrying no spend bundle.
-///
-/// NOTE — parity trap: this is NOT `Bytes96::default()` (all zeros). An all-zero G2 is not a valid
-/// point encoding, and the producer/validator boundary treats infinity as `0xc0..`: see
-/// `block_generator.rs::validate_block_aggregate_signature`, which accepts the empty-signature block
-/// only when `aggregated_signature == [0xc0, 0x00 * 95]`.
-///
-/// This is also the correct PLACEHOLDER for the two foliage plot signatures at declare time,
-/// before the farmer signs them; the real signatures arrive on `SignedValues`.
-/// See [`FarmerSignatures`].
 #[must_use]
 pub fn g2_infinity() -> Bytes96 {
     let mut buf = [0u8; 96];
@@ -571,7 +559,6 @@ pub fn create_unfinished_block(
     let challenge_chain_sp_signature = plot_signer(cc_sp_hash, &plot_public_key);
     let reward_chain_sp_signature = plot_signer(rc_sp_hash, &plot_public_key);
 
-    // Field order mirrors the model reward_chain_block_unfinished.rs exactly.
     let reward_chain_block = RewardChainBlockUnfinished {
         total_iters: infusion_point_total_iters,
         signage_point_index,
@@ -866,27 +853,17 @@ pub fn unfinished_block_to_full_block(
     })
 }
 
-/// A non-genesis block whose
-/// pool target is the `(GENESIS_PRE_FARM_POOL_PUZZLE_HASH, 0)` pre-farm target AND whose proof-of-space
-/// carries a pool PUBLIC KEY (the plot-NFT-less pooling scheme) must carry a valid pool signature over
-/// `bytes(pool_target)`. A plot-NFT plot (`pool_public_key is None`, a pool contract puzzle hash instead)
-/// needs no signature at this gate, and a genesis block (`prev_block_hash == GENESIS_CHALLENGE`) is
-/// exempt. Fail-closed on a missing/malformed signature (a verify miss); `true`
-/// whenever the guard does not apply.
 #[must_use]
 pub fn has_valid_pool_sig(constants: &ConsensusConstants, block: &FullBlock) -> bool {
     use blst::min_pk::{PublicKey, Signature};
     let fbd = &block.foliage.foliage_block_data;
     let Some(pool_pk) = block.reward_chain_block.proof_of_space.pool_public_key else {
-        // Plot-NFT plot (pool contract puzzle hash): no key-based pool signature at this gate.
         return true;
     };
     let is_pre_farm_target = fbd.pool_target.puzzle_hash
         == constants.genesis_pre_farm_pool_puzzle_hash
         && fbd.pool_target.max_height == 0;
     if !is_pre_farm_target || block.foliage.prev_block_hash == constants.genesis_challenge {
-        // The signature is only checked for a pre-farm-target block that is NOT genesis; otherwise
-        // the pool signature is validated elsewhere (block body) — this early gate passes.
         return true;
     }
     let (Ok(pool_target_bytes), Some(pool_sig)) = (
@@ -1149,7 +1126,6 @@ mod producer_foliage_tests {
             "empty BIP158 filter [0] => sha256([0])"
         );
         assert_eq!(ftb.prev_transaction_block_hash, MAINNET.genesis_challenge);
-        // Foliage commits the ftb hash and mirrors the (hash Some) == (sig Some) invariant.
         assert_eq!(
             res.foliage.foliage_transaction_block_hash,
             Some(ftb.hash().unwrap())

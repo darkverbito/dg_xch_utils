@@ -156,11 +156,6 @@ impl CoinStore for SqliteStore {
     }
 
     async fn ensure_reorg_indexes(&self) -> Result<(), StoreError> {
-        // The reorg-tier indexes (migration 0006) that back rollback_to's confirmed_index/
-        // spent_index predicates. Deferred to `build_indexes` at the sync->tip transition (pure
-        // write-amp during forward sync), but a reorg below tip needs them now — so ensure them on
-        // the reorg path, idempotently (`IF NOT EXISTS`). One statement per writer-lock acquisition,
-        // mirroring `build_indexes`, so confirms interleave rather than stalling behind one guard.
         for stmt in [
             "CREATE INDEX IF NOT EXISTS coin_record_confirmed_index ON coin_record (confirmed_index)",
             "CREATE INDEX IF NOT EXISTS coin_record_spent_index ON coin_record (spent_index)",

@@ -170,7 +170,6 @@ fn free_port() -> u16 {
         .port()
 }
 
-// Spawn node A serving `api` over the Chia mTLS handshake; returns (port, api handle, server run-flag).
 pub async fn spawn_node_a(
     api: std::sync::Arc<LiveNodeApi>,
 ) -> (u16, std::sync::Arc<std::sync::atomic::AtomicBool>) {

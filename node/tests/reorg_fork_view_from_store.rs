@@ -119,10 +119,6 @@ fn spend_output(parent: Bytes32, amount: u64, puzzle: &Program<'static>) -> SExp
     ])
 }
 
-/// A body-consistent synthetic transaction block on top of `prev_record`: the generator runs
-/// through the same flag ladder the engine uses and ti/foliage are recomputed from the resulting
-/// conditions, so every body gate (roots, filter, ti-hash, cost, reward claims) passes. Mirrors
-/// the t070 `synth_tx_block` vehicle.
 fn synth_tx_block(
     prev_record: &BlockRecord,
     height: u32,

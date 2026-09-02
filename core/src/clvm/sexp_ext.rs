@@ -59,12 +59,7 @@ impl SExpNumber {
 }
 impl<'a> From<&AtomBuf<'a>> for SExpNumber {
     fn from(buf: &AtomBuf) -> Self {
-        // CLVM integers are big-endian signed two's-complement: an empty atom is
-        // `0` and, otherwise, if the high bit of the first byte is set the value
-        // is negative (mirrors chia's `int_from_bytes` /
-        // `int.from_bytes(blob, "big", signed=True)` and `number_from_slice`'s
-        // `BigInt::from_signed_bytes_be`). Atoms up to 16 bytes are sign-extended
-        // into an `i128`; longer atoms defer to the signed `BigInt` decode.
+        // Small atoms are sign-extended into i128; larger atoms use BigInt.
         let buf = buf.as_ref();
         match buf.len() {
             0 => Self::I128(0),

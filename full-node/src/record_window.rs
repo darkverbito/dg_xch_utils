@@ -105,7 +105,6 @@ mod tests {
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    // The byte-identity oracle: the pure per-call store walk.
     async fn store_walk_records_map<S: BlockStore + Send + Sync>(
         store: &S,
         tip: Bytes32,
@@ -252,9 +251,6 @@ mod tests {
         assert_eq!(max_depth, 5_503);
     }
 
-    // Store-read counts, pinned exactly. The oracle walk pays `depth` point reads on EVERY call —
-    // 5,131 at anchor offset 10. The window pays it once cold, then only the new head delta
-    // (32, a follow window) and zero on a same-peak re-serve (the sp-inbox tick).
     #[tokio::test]
     async fn store_reads_collapse_from_depth_per_call_to_head_delta() {
         let store = seeded_store().await;
@@ -306,11 +302,6 @@ mod tests {
         );
     }
 
-    // Byte-identity with the old store walk at every regime edge: the epoch turn itself (offset
-    // 4607 -> depth 5120), the first sub-epoch (offsets 0/1/382 -> 5121..=5503), the collapse back
-    // to the mid-epoch sawtooth (offsets 383/400 -> 896/529). Checked cold (fresh window) AND
-    // against a shared warmed window, and the difficulty/SSI outputs the maps feed must agree
-    // exactly — the NO-behavior-change gate.
     #[tokio::test]
     async fn map_and_ssi_difficulty_are_byte_identical_across_the_boundary() {
         let store = seeded_store().await;

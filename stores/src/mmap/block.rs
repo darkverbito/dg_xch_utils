@@ -133,8 +133,6 @@ impl BlockStore for MmapStore {
         &self,
         h: u32,
     ) -> Result<Option<SerializedProgram>, StoreError> {
-        // Mirror of the SQLite join: the generator lives in the confirmed block occupying `h`.
-        // No cheap generator-only parser exists, so the cold body is decoded to the FullBlock.
         match self.heights.get(h)? {
             None => Ok(None),
             Some(hh) => Ok(self

@@ -1,13 +1,5 @@
 mod common;
 
-// The OUTBOUND self-throttle (chia's `outbound_rate_limiter` on the send
-// path, ws_connection.py:859-885). The numeric pacing / exempt-drop / bounded-shed behaviour is proven
-// deterministically in `dg_xch_core::protocols::outbound_limiter::tests`. This wire test proves the
-// SELF-SAFETY property end-to-end through the real throttle-installed send path (`WsClient::send`):
-// our own normal traffic — under-budget requests and, above all, the `Unlimited` serve/fetch types —
-// is NEVER delayed by the outbound limiter. It mirrors the inbound self-safety proof in
-// `t045_rate_limits.rs::solicited_respond_blocks_burst_does_not_self_trip_the_client_limiter`.
-
 use common::{
     connect, contiguous_api, rate_limited_client, spawn_full_node_rate_limited, wait_until,
 };
@@ -71,9 +63,6 @@ async fn outbound_throttle_does_not_delay_under_budget_requests() {
         .store(false, std::sync::atomic::Ordering::Relaxed);
 }
 
-// A non-rate-limited client (harvester/farmer/wallet role) has NO outbound limiter, so its send path
-// is byte-for-byte the pre-throttle behaviour: a burst is written directly with no pacing. Guards
-// against the throttle leaking onto links chia leaves unpoliced.
 #[tokio::test]
 async fn non_rate_limited_client_send_path_is_unthrottled() {
     let server = spawn_full_node_rate_limited(contiguous_api(1_000, 1)).await;

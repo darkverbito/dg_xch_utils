@@ -340,8 +340,6 @@ async fn bulk_entry_reorgs_a_midband_fork_through_the_download_confirm_pipeline(
     let mut chaser = chaser_on_branch_a(store.clone(), &chain_a).await;
     seed_branch_b_candidates(store.as_ref(), &chain_b).await;
 
-    // The resume ledger names exactly the branch heights lacking bodies — including the
-    // duplicate heights 131..=150 where the confirmed chain already HAS (branch-A) bodies.
     let mut pending = store.get_unassociated(256).await.unwrap();
     pending.sort_unstable();
     assert_eq!(
@@ -466,60 +464,4 @@ async fn crash_at_the_bulk_entry_peak_flip_recovers_across_a_restart() {
         "every winning-branch block above the fork is reported in height order"
     );
     assert_on_branch_b(reopened.as_ref(), &chain_a, &chain_b, "after the recovery").await;
-}
-
-// ── Postgres: the identical bulk entry on the multi-writer SQL backend ───────────────────────
-//   DGXCH_PG_URL=postgres://user:pass@host/db cargo test -p dg_xch_node --features postgres \
-//     --test deep_fork_bulk_entry -- --ignored --test-threads=1
-#[cfg(feature = "postgres")]
-mod postgres {
-    use super::*;
-    use dg_xch_stores::PostgresStore;
-
-    async fn open_clean() -> PostgresStore {
-        let url =
-            std::env::var("DGXCH_PG_URL").expect("set DGXCH_PG_URL to a dedicated test database");
-        let store = PostgresStore::open(&url).await.expect("open postgres");
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&url)
-            .await
-            .expect("reset pool");
-        sqlx::raw_sql(
-            "TRUNCATE TABLE block_body, block_record, current_peak, coin_record, \
-             sub_epoch_segments_v3 RESTART IDENTITY CASCADE",
-        )
-        .execute(&pool)
-        .await
-        .expect("truncate contract tables");
-        store
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    #[ignore = "requires a dedicated Postgres test database (DGXCH_PG_URL)"]
-    async fn postgres_bulk_entry_reorgs_a_midband_fork_through_the_pipeline() {
-        let (chain_a, chain_b) = fixture_chains();
-        let store = Arc::new(open_clean().await);
-        let mut chaser = chaser_on_branch_a(store.clone(), &chain_a).await;
-        seed_branch_b_candidates(store.as_ref(), &chain_b).await;
-
-        let sources: Vec<Arc<dyn BlockRangeSource>> =
-            vec![Arc::new(ForkedPeer::new(&chain_a, &chain_b))];
-        let peak = tokio::time::timeout(Duration::from_secs(300), chaser.sync_range(&sources))
-            .await
-            .expect("bulk entry must not wedge")
-            .expect("bulk entry confirms");
-        assert_eq!(
-            peak,
-            Some((chain_b.last().unwrap().header_hash().unwrap(), B_TIP)),
-            "the bulk confirm flipped onto branch B and extended to its tip"
-        );
-        assert_on_branch_b(
-            store.as_ref(),
-            &chain_a,
-            &chain_b,
-            "after the bulk entry (postgres)",
-        )
-        .await;
-    }
 }

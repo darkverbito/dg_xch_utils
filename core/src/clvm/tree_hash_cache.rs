@@ -1,28 +1,4 @@
-//! Within-block puzzle-reveal tree-hash dedup.
-//!
-//! A pointer-identity mirror of chia_rs `clvm-utils/src/tree_hash.rs`
-//! (`TreeCache` + `tree_hash_cached`, chia_rs 0.47.0): in
-//! `chia-consensus/src/run_block_generator.rs::run_block_generator2` chia runs a
-//! `visit_tree` pre-pass over every puzzle reveal and then hashes each spend with
-//! `tree_hash_cached`, memoizing the hash of every subtree that appears more than
-//! once. chia_rs keys that cache on `NodePtr` identity, which works because
-//! `node_from_bytes_backrefs` materializes every back-reference as the SAME node —
-//! a dust block that spends one puzzle hundreds of times tree-hashes it once.
-//!
-//! Our parser (`sexp_from_bytes_backrefs`) preserves exactly the same sharing as
-//! `Arc` identity: a back-reference clones an `SExp` value whose CHILDREN remain
-//! the original `Arc`s, so every shared subtree has one stable address for the
-//! lifetime of the parsed generator tree. This cache keys on those addresses
-//! (`&SExp as *const _`). Address identity is sound here because the cache never
-//! outlives the tree it walks (one cache per generator run — see
-//! `execute_block_generator_result`): nodes cannot be dropped and re-allocated
-//! while the cache is live, so equal addresses imply the same live node.
-//!
-//! The cache can never change a hash — a hit returns the hash the same subtree
-//! produced before; a miss computes exactly what `SExp::tree_hash` computes
-//! (sha256(1 ‖ atom) / sha256(2 ‖ h(first) ‖ h(rest)), chia's `sha256tree`). The
-//! differential suite (`core/tests/tree_hash_dedup.rs`) proves cached ≡ naive over
-//! randomized shared trees and the real corpus.
+//! Tree-hash memoization for shared puzzle subtrees.
 
 use crate::blockchain::sized_bytes::Bytes32;
 use crate::clvm::sexp::SExp;
@@ -58,10 +34,7 @@ enum TreeOp<'a> {
     ConsCache(usize),
 }
 
-/// Per-block tree-hash memoizer. Mirrors chia_rs `TreeCache` semantics: the visit
-/// pass counts how many times each PAIR node is reachable across the reveal set
-/// (descending into a subtree only on first visit), and the hash pass memoizes
-/// exactly the nodes seen more than once.
+/// Per-block tree-hash memoizer for pair nodes reached more than once.
 #[derive(Default)]
 pub struct TreeHashCache {
     /// visit counts, saturating at 2 — 2 means "shared, memoize its hash".
@@ -70,10 +43,7 @@ pub struct TreeHashCache {
 }
 
 impl TreeHashCache {
-    /// Pre-pass: mark every pair node reachable from `node`, counting repeats.
-    /// Mirrors chia_rs `TreeCache::visit_tree` — a repeated subtree is counted at
-    /// its root and NOT re-descended, so interior nodes of a shared subtree stay
-    /// at count 1 unless they are also shared through another path.
+    /// Mark shared pair nodes before hashing.
     pub fn visit_tree(&mut self, node: &SExp) {
         let mut stack: Vec<&SExp> = vec![node];
         while let Some(n) = stack.pop() {
@@ -91,9 +61,7 @@ impl TreeHashCache {
         }
     }
 
-    /// `sha256tree` of `node`, memoized on shared subtrees. Identical output to
-    /// `SExp::tree_hash` by construction (same leaf/pair hashing, chia_rs
-    /// `tree_hash_cached` op machine).
+    /// Compute the tree hash while memoizing shared subtrees.
     #[must_use]
     pub fn tree_hash(&mut self, node: &SExp) -> Bytes32 {
         let mut hashes: Vec<Bytes32> = Vec::new();

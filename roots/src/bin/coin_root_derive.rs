@@ -57,8 +57,6 @@ struct DeriveOutput {
     roots: Vec<dg_xch_roots::RootV1>,
 }
 
-// Stamped by the build environment when available (`GIT_COMMIT=$(git rev-parse HEAD)`);
-// "unknown" otherwise — the ledger records the exact tool commit alongside each derivation.
 const TOOL_COMMIT: &str = match option_env!("GIT_COMMIT") {
     Some(c) => c,
     None => "unknown",

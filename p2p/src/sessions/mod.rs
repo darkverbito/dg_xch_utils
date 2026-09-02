@@ -27,9 +27,6 @@ pub type OnConnectHook = Arc<
         + Sync,
 >;
 
-// Application-level keepalive probe. Chia has no ping message type, so we use the
-// RequestPeers/RespondPeers round-trip any full node answers, bounded by the pong
-// deadline. A silent (half-open) peer fails to respond in time -> false -> teardown.
 async fn keepalive_ok(peer: &OutboundPeer, settings: &P2pSettings, id: u16) -> bool {
     let version = ChiaProtocolVersion::default();
     let Ok(msg) = ChiaMessage::new(

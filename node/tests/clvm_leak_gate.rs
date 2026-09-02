@@ -1,13 +1,3 @@
-// The memory-leak gate: the VM must retain nothing across runs.
-//
-// Both prior failures stored reference-counted data in an allocator that runs no destructors, so
-// the Arc was never decremented and its buffer or subtree leaked — invisible to a value-asserting
-// test, since nothing computes wrongly and the process just grows. Only a soak sees it.
-//
-// The threshold is near zero, not "small": at 5M blocks a 1 KB/run leak is 5 GB. Coverage spans
-// every shape the VM meets, because the two leaks lived in different ones — owned atoms in any
-// run, owned pairs only where a generator emits conditions.
-
 use dg_xch_core::clvm::program::SerializedProgram;
 use dg_xch_core::consensus::block_generator::{
     BlockGeneratorFlags, BlockGeneratorInput, GeneratorReference, execute_block_generator_result,

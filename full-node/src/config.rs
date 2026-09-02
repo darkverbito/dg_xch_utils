@@ -1,3 +1,4 @@
+use dg_xch_p2p::P2pSettings;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -31,22 +32,9 @@ impl Backend {
     }
 }
 
-/// How the local RPC listener (`--rpc`) authenticates clients.
-///
-/// - `Cni`: CNI-compatible mutual TLS against a per-install PRIVATE certificate authority. The
-///   client MUST present a cert that chains to the private CA; the served cert is signed by it.
-///   The private CA is taken from `PRIVATE_CA_CRT`/`PRIVATE_CA_KEY` (inline PEM) when both are
-///   set, else loaded from — or generated once and persisted into —
-///   `<ssl_dir>/ca/private_ca.{crt,key}`. The world-public Chia CA is NEVER a client-auth anchor
-///   here: its private key is public, so it authenticates nobody. It gates only the public P2P
-///   listener.
-/// - `Local`: for an operator running privately who does not want the cert machinery — server-only
-///   TLS with an ephemeral self-signed cert and NO client-certificate requirement. Permitted only on
-///   a LOOPBACK `--rpc` bind; the daemon refuses to start an unauthenticated RPC on a routable
-///   address (fail closed), so this mode can never become a network-reachable open door.
 #[derive(Clone, Debug, Default)]
 pub enum RpcTlsMode {
-    Cni {
+    PrivateCa {
         ssl_dir: PathBuf,
     },
     #[default]
@@ -54,18 +42,18 @@ pub enum RpcTlsMode {
 }
 
 impl RpcTlsMode {
-    /// Parse `--rpc-tls`: `cni` (default) or `local`. `ssl_dir` is only consulted by `cni`.
+    /// Parse `--rpc-tls`: `private-ca` or `local`.
     ///
     /// # Errors
     /// Returns an error string for an unrecognized mode.
     pub fn parse(mode: &str, ssl_dir: &str) -> Result<Self, String> {
         match mode.trim().to_ascii_lowercase().as_str() {
-            "cni" | "private" | "private-ca" => Ok(RpcTlsMode::Cni {
+            "private" | "private-ca" => Ok(RpcTlsMode::PrivateCa {
                 ssl_dir: PathBuf::from(ssl_dir),
             }),
             "" | "local" | "none" | "loopback" => Ok(RpcTlsMode::Local),
             other => Err(format!(
-                "bad --rpc-tls {other:?} (expected `cni` or `local`)"
+                "bad --rpc-tls {other:?} (expected `private-ca` or `local`)"
             )),
         }
     }
@@ -75,7 +63,7 @@ impl RpcTlsMode {
     /// The effective RPC socket bind for this mode. `Local` is UNAUTHENTICATED, so a routable
     /// configured bind is DOWNGRADED to loopback (returning `true`) rather than exposing an
     /// unauthenticated RPC to the network; the caller logs a loud warning and the operator opts
-    /// into `--rpc-tls cni` for an authenticated network RPC. `Cni` is authenticated and binds
+    /// into `--rpc-tls private-ca` for an authenticated network RPC. `PrivateCa` binds
     /// exactly as configured.
     #[must_use]
     pub fn resolve_bind(&self, configured: SocketAddr) -> (SocketAddr, bool) {
@@ -99,13 +87,8 @@ pub struct Config {
     pub listen: SocketAddr,
     pub rpc: SocketAddr,
     pub rpc_tls: RpcTlsMode,
-    /// `--debug-endpoints`: expose the sensitive /debug/heap jemalloc dump on the metrics port.
-    /// OFF by default — the heap dump can leak in-memory data and writes a file to disk.
     pub debug_endpoints: bool,
     pub introducer: Option<(String, u16)>,
-    // Manual peers dialed directly at startup (host:port each), in addition to any introducer-seeded
-    // addresses. Persistent: a dropped manual peer is reclaimed to the address book and re-dialed. A node
-    // pointed only at trusted, fast full nodes here needs no introducer at all.
     pub manual_peers: Vec<(String, u16)>,
     pub advertise: Option<SocketAddr>,
     pub backend: Backend,
@@ -145,20 +128,12 @@ pub struct Config {
     // connection, never flooding one. Only takes effect alongside `--prefetch-memory-mb` (or on its
     // own, on the default budget).
     pub prefetch_max_inflight: Option<usize>,
-    /// Outbound connections the node keeps open. Unset = the p2p default.
-    pub target_outbound: Option<usize>,
-    /// Total peers (inbound + outbound) the node accepts. Unset = the p2p default.
-    pub target_peer_count: Option<usize>,
+    pub p2p: P2pSettings,
     // `--trusted-peer <node-id-hex>` (repeatable): the cert-hash node ids granted the trusted tier —
     // the `trusted_peers` map, keyed on `node_id.hex()`. A trusted peer gets the larger
     // subscription / response-item caps and high-priority transaction-queue placement.
     // Empty (the default) → no peer trusted by node id.
     pub trusted_peers: Vec<String>,
-    // `--trusted-cidr <cidr>` (repeatable): CIDR networks whose peers are granted the trusted tier by
-    // remote IP. A peer whose host falls in any of these networks gets the
-    // trusted caps + tx priority, exactly like a configured node id. Parsed once at boot; malformed
-    // entries are skipped non-fatally. Note: with no config at all, localhost is STILL auto-trusted
-    // by the trust gate; these CIDRs extend that to a wider trusted subnet.
     pub trusted_cidrs: Vec<String>,
 }
 
@@ -184,8 +159,7 @@ impl Config {
         uncompact: bool,
         prefetch_memory_mb: Option<u64>,
         prefetch_max_inflight: Option<usize>,
-        target_outbound: Option<usize>,
-        target_peer_count: Option<usize>,
+        p2p: P2pSettings,
         trusted_peers: &[String],
         trusted_cidrs: &[String],
     ) -> Result<Self, String> {
@@ -200,6 +174,7 @@ impl Config {
             .map(|a| SocketAddr::from_str(a).map_err(|e| format!("bad --advertise: {e}")))
             .transpose()?;
         let metrics = parse_metrics(metrics)?;
+        p2p.validate()?;
         Ok(Self {
             listen,
             rpc,
@@ -215,8 +190,7 @@ impl Config {
             uncompact,
             prefetch_memory_mb,
             prefetch_max_inflight,
-            target_outbound,
-            target_peer_count,
+            p2p,
             trusted_peers: trusted_peers.to_vec(),
             trusted_cidrs: trusted_cidrs.to_vec(),
             rpc_tls: RpcTlsMode::default(),
@@ -266,8 +240,7 @@ mod tests {
             false,
             None,
             None,
-            None,
-            None,
+            P2pSettings::default(),
             &[],
             &[],
         )
@@ -292,8 +265,7 @@ mod tests {
             false,
             None,
             None,
-            None,
-            None,
+            P2pSettings::default(),
             &["aa".repeat(32)],
             &["10.0.0.0/8".to_string()],
         )
@@ -323,5 +295,59 @@ mod tests {
     #[test]
     fn a_peer_without_a_port_is_rejected() {
         assert!(cfg(&["chia-node-0.peers"]).is_err());
+    }
+
+    #[test]
+    fn p2p_settings_are_validated_and_preserved() {
+        let mut p2p = P2pSettings {
+            host_pool_capacity: 2_000,
+            heartbeat: std::time::Duration::from_secs(30),
+            ..P2pSettings::default()
+        };
+        let c = Config::build(
+            "0.0.0.0:8444",
+            "127.0.0.1:8555",
+            None,
+            &[],
+            None,
+            "sqlite:///data/chain.db",
+            "mainnet",
+            "off",
+            None,
+            false,
+            0,
+            false,
+            None,
+            None,
+            p2p,
+            &[],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(c.p2p, p2p);
+
+        p2p.address_lower = p2p.address_upper + 1;
+        assert!(
+            Config::build(
+                "0.0.0.0:8444",
+                "127.0.0.1:8555",
+                None,
+                &[],
+                None,
+                "sqlite:///data/chain.db",
+                "mainnet",
+                "off",
+                None,
+                false,
+                0,
+                false,
+                None,
+                None,
+                p2p,
+                &[],
+                &[],
+            )
+            .is_err()
+        );
     }
 }

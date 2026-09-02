@@ -193,9 +193,6 @@ pub struct MmapStore {
     pub(crate) coins: DataLog,
     #[cfg(feature = "hint")]
     pub(crate) hints: DataLog,
-    // Persisted weight-proof challenge segments (chia's sub_epoch_segments_v3,
-    // block_store.py:85-88): opaque SubEpochSegments bytes in an append-only log, indexed by
-    // ses block hash. Re-persist orphans the old frame (append-only; chia's INSERT OR REPLACE).
     pub(crate) segments: DataLog,
     pub(crate) blocks_tbl: ChainedTable<BLOCK_PAYLOAD>,
     pub(crate) coins_tbl: ChainedTable<COIN_PAYLOAD>,

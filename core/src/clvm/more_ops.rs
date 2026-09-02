@@ -114,7 +114,6 @@ fn limbs_for_int(v: &BigInt) -> u64 {
 fn limbs_for_num(v: &SExpNumber) -> u64 {
     match v {
         SExpNumber::BigInt(int) => int.bits().div_ceil(8),
-        // magnitude bit length, mirroring num_bigint::BigInt::bits()
         SExpNumber::I128(i) => u64::from(128 - i.unsigned_abs().leading_zeros()).div_ceil(8),
     }
 }

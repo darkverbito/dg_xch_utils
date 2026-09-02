@@ -20,8 +20,6 @@ use dg_xch_core::consensus::constants::MAINNET;
 use dg_xch_core::errors::ChiaError;
 use dg_xch_core::traits::SizedBytes;
 
-// --- harness (mirrors core/tests/block_generator.rs) -----------------------
-
 fn quoted_generator(output: SExp<'static>) -> SerializedProgram {
     Program::to((1_u8, output)).serialized().unwrap()
 }

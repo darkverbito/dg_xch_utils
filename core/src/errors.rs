@@ -216,10 +216,6 @@ pub enum ChiaError {
     TooManySpends = 149,
 }
 
-/// The subsystem bands for [`ErrorCode`]. One band per crate-level error family; codes are
-/// `band << 16 | variant`, append-only, never reused. `Consensus` carries chia's wire error
-/// values verbatim in its low half (as `i16 as u16`) so a code in a log line or an RPC body
-/// can be compared against the reference without translation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
 pub enum ErrorBand {
@@ -273,8 +269,6 @@ impl ErrorCode for ChiaError {
         ErrorBand::Consensus
     }
     fn variant(&self) -> u16 {
-        // The chia wire value itself; negatives keep their two's-complement image so the low
-        // half round-trips through `as i16`.
         (*self as i16) as u16
     }
 }
@@ -282,8 +276,6 @@ impl ErrorCode for ChiaError {
 impl ErrorCode for ClvmError {
     fn band(&self) -> ErrorBand {
         match self {
-            // A condition failure IS a consensus verdict; surface the wire code, not a
-            // wrapper's.
             ClvmError::ConditionFailure(inner) => inner.band(),
             ClvmError::IoError(_) => ErrorBand::Io,
             _ => ErrorBand::Clvm,

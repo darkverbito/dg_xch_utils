@@ -41,8 +41,7 @@ fn config(listen: SocketAddr, rpc: SocketAddr) -> Config {
     Config {
         rpc_tls: full_node::RpcTlsMode::Local,
         debug_endpoints: false,
-        target_outbound: None,
-        target_peer_count: None,
+        p2p: Default::default(),
         listen,
         rpc,
         introducer: None,

@@ -1,19 +1,3 @@
-// Steady-state memory soak — the regression gate for the CLVM/collection leak CLASS.
-//
-// Every memory leak this node has had was the same footgun: per-block work that stores data in a
-// long-lived structure (a collection, or the CLVM bumpalo arena) whose release is missing,
-// conditional, or — as one real bug was — only partial (owned atoms freed, owned pairs not). Rust's
-// ownership does not catch it: the structure is legitimately owned, it just never shrinks. A unit
-// test asserting a value is wrong can't see it; only a SOAK — run the hot path many times and prove
-// live memory does not grow — can.
-//
-// This test wires a deterministic counting allocator (System-backed; unlike jemalloc's cached stats
-// it has no arena/purge noise, so the flatness epsilon is tight) and replays a REAL tx-era block's
-// body validation (CLVM generator parse + run — the exact path a prior bug leaked) many times, asserting
-// live bytes do not grow per run.
-//
-// It runs in the normal `cargo test -p dg_xch_node` gate — no DB, no corpus, no network.
-
 mod common;
 
 use dg_xch_core::consensus::block_generator::{
@@ -89,9 +73,6 @@ fn clvm_body_validation_is_steady_state() {
     }
     let base = LIVE.load(Ordering::Relaxed);
 
-    // 200 is ample: the counting allocator is exact (no jitter), so a per-run leak of ~156 KB
-    // would show ~31 MB retained here while a correct arena shows ~0 — a landslide either way.
-    // Kept low so the gate stays fast in `cargo test`.
     const ITERS: usize = 200;
     for _ in 0..ITERS {
         // Drop each result immediately; a correct arena releases everything on runtime drop.

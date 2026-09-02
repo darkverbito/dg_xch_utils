@@ -176,7 +176,6 @@ mod tests {
                 !Chainer::passes_fast_filter(1, iteration),
                 "iter {iteration}"
             );
-            // Zero passes the low-bit gate everywhere, and zero is below any threshold.
             assert!(
                 Chainer::passes_fast_filter(0, iteration),
                 "iter {iteration}"

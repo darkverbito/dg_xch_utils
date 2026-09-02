@@ -1,16 +1,3 @@
-// The unfinished-block transactions gate, pure-fn species proofs. Unfinished-block validation
-// RUNS the transactions generator with budget `min(MAX_BLOCK_COST_CLVM, transactions_info.cost)`
-// and rejects on any failure — GENERATOR_RUNTIME_ERROR for a generator that will not
-// deserialize or raises mid-run, BLOCK_COST_EXCEEDS_MAX for a run over the claimed budget,
-// INVALID_BLOCK_COST for an inexact claim — BEFORE the block enters the unfinished cache or the
-// relay broadcast. These species need a root-CONSISTENT bogus generator (transactions_info
-// forged to commit to it), which the plot-key foliage signature makes unforgeable through the
-// daemon's full header validation — so the daemon-level red tests
-// (full-node/src/daemon.rs::ub_relay_gate_tests) prove the relay gate on real header-valid
-// blocks, and THIS file proves the execution-stage species directly against
-// `validate_unfinished_block_body`, with real mainnet block 5,000,004 as the honest
-// false-positive guard (real generator, real cost, real aggregate signature).
-
 mod common;
 
 use common::load_full_block;
@@ -81,8 +68,6 @@ fn validate(
     validate_unfinished_block_body(&NativePrimitives, &MAINNET, ub, &[], HEIGHT, PREV_TX)
 }
 
-// GENERATOR_RUNTIME_ERROR species 1 — bytes that are not deserializable CLVM. The forged root
-// MATCHES the bytes, so the gate must reach the RUN to reject — not the structural root check.
 #[test]
 fn undeserializable_generator_is_rejected_at_the_run() {
     let ub = with_forged_generator(
@@ -141,8 +126,6 @@ fn understated_cost_claim_fails_during_the_run() {
     );
 }
 
-// FALSE-POSITIVE GUARD — real mainnet block 5,000,004 untouched: real generator, real cost
-// claim, real aggregate signature. The gate must execute it clean and return its conditions.
 #[test]
 fn honest_mainnet_5000004_validates_with_exact_cost() {
     let ub = unfinished_5000004();

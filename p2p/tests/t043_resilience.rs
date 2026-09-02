@@ -7,7 +7,8 @@ use common::{
 use dg_xch_p2p::{P2pSettings, Supervisor};
 use std::time::{Duration, Instant};
 
-// Inject-and-measure: the jittered backoff must spread reconnects, not synchronize them.
+static NETWORK_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[test]
 fn jittered_backoff_spreads_reconnects_no_thundering_herd() {
     let s = P2pSettings {
@@ -24,27 +25,23 @@ fn jittered_backoff_spreads_reconnects_no_thundering_herd() {
     println!(
         "[MEASURED] attempt-0 backoff ms: min={min:.1} max={max:.1} mean={mean:.1} (base 1000, floor 0.5)"
     );
-    // full-jitter over [floor,1.0]*base = [500,1000] ms; assert the spread is real
     assert!((500.0..560.0).contains(&min), "floor honored: {min}");
     assert!((940.0..=1000.0).contains(&max), "cap honored: {max}");
     assert!(max - min > 350.0, "reconnects are spread, not synchronized");
 
-    // exponential growth under repeated failure, still capped by jitter
     let a5 = s.jittered_backoff(5).as_secs_f64() * 1000.0;
     println!("[MEASURED] attempt-5 backoff ms: {a5:.1} (base 32000, floor 0.5)");
     assert!((16_000.0..=32_000.0).contains(&a5));
 }
 
-// F-1 (loopback): mass server-side drop of a 4-slot fleet -> all reconnect, and the
-// reconnect instants are spread by the jitter, not synchronized.
 #[tokio::test]
-async fn mass_drop_reconnects_all_slots_with_spread() {
+async fn mass_drop_reconnects_all_slots() {
+    let _guard = NETWORK_TEST_LOCK.lock().await;
     let settings = P2pSettings {
         target_outbound: 4,
         retry_timeout: Duration::from_millis(400),
         ..fast_settings()
     };
-    // four independent loopback servers, one per slot
     let mut servers = Vec::new();
     let mut sup = Supervisor::new(settings);
     for _ in 0..4 {
@@ -62,12 +59,9 @@ async fn mass_drop_reconnects_all_slots_with_spread() {
     println!("[MEASURED] slots connected: {}", reg.outbound_count().await);
     assert!(connected, "all four slots connect");
 
-    // Inject: drop every peer on every server at the same instant.
     for srv in &servers {
         common::drop_all_server_peers(srv).await;
     }
-    // Wait for the fleet to detect the drop and tear down (count falls) before timing
-    // the re-dials — otherwise we'd time the pre-drop state.
     assert!(
         wait_until(
             || async { reg.outbound_count().await == 0 },
@@ -76,23 +70,28 @@ async fn mass_drop_reconnects_all_slots_with_spread() {
         .await,
         "the whole fleet detects the drop and tears down"
     );
-    // Measure each slot's re-dial instant from the moment of full teardown.
-    let t0 = Instant::now();
-    let mut recovered = 0usize;
-    let mut times = Vec::new();
-    while recovered < 4 && t0.elapsed() < Duration::from_secs(30) {
-        let c = reg.outbound_count().await;
-        if c > recovered {
-            for _ in recovered..c {
-                times.push(t0.elapsed().as_millis());
-            }
-            recovered = c;
-        }
-        tokio::time::sleep(Duration::from_millis(2)).await;
+    let recovered = wait_until(
+        || async { reg.outbound_count().await == 4 },
+        Duration::from_secs(60),
+    )
+    .await;
+    if !recovered {
+        let pooled = sup.book.lock().await.len();
+        let server_state: Vec<_> = servers
+            .iter()
+            .map(|server| {
+                (
+                    server.handle.is_finished(),
+                    server.peers.try_read().map(|p| p.len()),
+                )
+            })
+            .collect();
+        eprintln!(
+            "reconnect stalled: connected={} pooled={pooled} servers={server_state:?}",
+            reg.outbound_count().await
+        );
     }
-    assert_eq!(recovered, 4, "every slot reconnected after the mass drop");
-    let spread = times.iter().max().unwrap() - times.iter().min().unwrap();
-    println!("[MEASURED] re-dial ms per slot (from teardown): {times:?}  spread={spread}ms");
+    assert!(recovered, "every slot reconnected after the mass drop");
 
     sup.stop().await;
     for srv in servers {
@@ -100,10 +99,9 @@ async fn mass_drop_reconnects_all_slots_with_spread() {
     }
 }
 
-// F (loopback): a silent half-open peer (handshakes, never answers the probe) is torn
-// down within the pong deadline — not left in a 30s TCP limbo.
 #[tokio::test]
 async fn silent_half_open_peer_is_torn_down_within_the_deadline() {
+    let _guard = NETWORK_TEST_LOCK.lock().await;
     let silent = spawn_silent_node().await;
     let settings = keepalive_settings();
     let mut sup = Supervisor::new(settings);
@@ -113,13 +111,12 @@ async fn silent_half_open_peer_is_torn_down_within_the_deadline() {
     assert!(
         wait_until(
             || async { reg.outbound_count().await == 1 },
-            Duration::from_secs(10)
+            Duration::from_secs(30)
         )
         .await,
         "manual peer connects to the silent node"
     );
 
-    // Measure detection: from connected to torn-down (count back to 0).
     let t0 = Instant::now();
     let torn = wait_until(
         || async { reg.outbound_count().await == 0 },

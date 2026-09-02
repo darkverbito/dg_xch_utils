@@ -44,8 +44,7 @@ fn config(listen: SocketAddr, rpc: SocketAddr) -> Config {
     Config {
         rpc_tls: full_node::RpcTlsMode::Local,
         debug_endpoints: false,
-        target_outbound: None,
-        target_peer_count: None,
+        p2p: Default::default(),
         listen,
         rpc,
         introducer: None,
@@ -112,8 +111,6 @@ fn capture_handlers() -> (HandlerMap, mpsc::Receiver<Arc<ChiaMessage>>) {
     (Arc::new(RwLock::new(map)), rx)
 }
 
-// Dial the node as a FULL_NODE peer over the Chia mTLS cert model, capture handlers registered
-// BEFORE the handshake so the greeting cannot race past them.
 async fn dial_full_node(port: u16, handlers: HandlerMap) -> WsClient {
     let cfg = Arc::new(WsClientConfig {
         host: "127.0.0.1".to_string(),
@@ -370,8 +367,6 @@ async fn outbound_dial_greets_the_peer_and_requests_its_mempool() {
     peer_run.store(false, Ordering::Relaxed);
 }
 
-// An UNSYNCED node dialing out still greets with NewPeak but must not request the peer's
-// mempool (the synced gate applies in both directions).
 #[tokio::test]
 async fn unsynced_outbound_dial_sends_no_mempool_request() {
     let (peer_port, peer_run, new_peaks, mempool_filters) = spawn_recording_peer().await;
@@ -417,8 +412,6 @@ async fn unsynced_outbound_dial_sends_no_mempool_request() {
     peer_run.store(false, Ordering::Relaxed);
 }
 
-// The unsynced posture: `if synced and peak_height is not None` gate — NewPeak still
-// greets (it has no synced gate), but no mempool request.
 #[tokio::test]
 async fn unsynced_node_does_not_request_mempool_sync() {
     let (_node, _client, mut rx) = rig(false).await;

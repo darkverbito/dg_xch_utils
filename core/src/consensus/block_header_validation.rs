@@ -74,13 +74,6 @@ pub trait HeaderValidationVerifier {
         height: u32,
     ) -> Option<Bytes32>;
 
-    // AugScheme BLS single-signature gate for one of the five finished-header signatures. DEFAULT:
-    // verify inline, byte-identical to the old direct `bls_verify` call. The window pipeline's
-    // deferred verifier OVERRIDES this to queue (pk, msg, sig, tag) and answer true, draining the
-    // whole window's header sigs across all cores after the sequential walk. Legitimacy of the
-    // deferral is the same as `validate_vdf`: the gate is a pure boolean whose RESULT never feeds a
-    // later input computation, so the block's accept/reject decision is identical — only the
-    // failure short-circuit order moves, costing extra work solely on invalid blocks.
     fn verify_bls_sig(&self, pk: &Bytes48, msg: &[u8], sig: &Bytes96, _tag: HeaderSigTag) -> bool {
         bls_verify(pk, msg, sig)
     }
@@ -121,10 +114,6 @@ pub struct ValidationState {
     pub difficulty: u64,
 }
 
-// AugScheme BLS verify over sized-bytes, fail-closed on malformed sig/key (no panic). `pub` so the
-// window pipeline's parallel header-sig drain (`node::header::verify_sig_batch`) verifies each
-// deferred signature through the EXACT same function the inline gate uses — byte-identical outcome,
-// no second port to drift.
 #[must_use]
 pub fn bls_verify(pk: &Bytes48, msg: &[u8], sig: &Bytes96) -> bool {
     match Signature::try_from(sig) {

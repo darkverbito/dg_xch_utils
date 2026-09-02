@@ -512,19 +512,6 @@ pub trait BlockStore {
     /// Returns [`StoreError::Backend`] on a query failure.
     async fn get_peak(&self) -> Result<Option<(Bytes32, u32)>, StoreError>;
 
-    /// Lowest main-chain height with a record present — the node's local sync FLOOR. 0 on a
-    /// genesis-synced node; the backfilled anchor floor on an era-anchored node (--sync-from),
-    /// which is why this reads the STORE's truth rather than echoing the CLI arg. `None` on an
-    /// empty store (rendered as absent, never as a fake 0 = "genesis"). Cheap per scrape: the SQL
-    /// backends take MIN over the partial main-chain height index; mmap validates a cached floor
-    /// with two point reads.
-    ///
-    /// Required (not a provided default) so the engine's coin-rule gate can call it without an
-    /// `async_trait` `Self: Sync` bound leaking onto every `Engine<S, P>` method (the
-    /// [`CoinStore::apply_hints_in`] precedent).
-    ///
-    /// # Errors
-    /// Returns [`StoreError::Backend`] on a query failure.
     async fn min_record_height(&self) -> Result<Option<u32>, StoreError>;
 
     /// Decompress the cold body back to the exact `FullBlock`.

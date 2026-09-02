@@ -1,5 +1,3 @@
-// Composition parity tests using independent BQF vectors.
-
 use dg_xch_vdf::form::Form;
 use num_bigint::BigInt;
 use std::path::PathBuf;

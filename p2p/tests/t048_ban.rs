@@ -1,17 +1,5 @@
 mod common;
 
-// Timed p2p ban list (chia `ChiaServer.banned_peers`): a recurring residual — our close
-// sites tore the connection down but the peer could immediately
-// reconnect, because we had no ban list. These tests exercise the wire path end-to-end over loopback
-// TLS: a violation closes AND bans the host, a reconnect from the same host is refused at the accept
-// path for the ban window, and clearing the ban restores access. The unit-level registry behaviour
-// (durations, expiry, bounded/prune, host-keying) is proven in
-// `dg_xch_core::protocols::ban::tests`.
-//
-// NOTE: loopback (127.0.0.1) IS bannable here — we deliberately do NOT replicate chia's
-// localhost/trusted/exempt ban exemptions (a separate feature we have not implemented), which is what lets
-// the loopback client observe the refusal.
-
 use common::{connect, contiguous_api, spawn_full_node_rate_limited, try_connect, wait_until};
 use dg_xch_core::blockchain::unsized_bytes::UnsizedBytes;
 use dg_xch_core::protocols::{ChiaMessage, ProtocolMessageTypes};
@@ -52,7 +40,6 @@ async fn trip_rate_limit(server: &common::RunningServer) {
         .await,
         "server registers the inbound peer"
     );
-    // Six request_proof_of_weight: the 6th trips the 5/min cap (chia rate_limit_numbers.py:95).
     for _ in 0..6 {
         raw_send(
             &client,
@@ -78,7 +65,6 @@ async fn banned_host_cannot_reconnect_within_the_window() {
     let server = spawn_full_node_rate_limited(contiguous_api(100, 1)).await;
     trip_rate_limit(&server).await;
 
-    // The host is now banned (chia RATE_LIMITER_BAN_SECONDS = 300s).
     assert!(
         wait_until(
             || async { server.bans.is_banned(&LOOPBACK) },
@@ -137,9 +123,6 @@ async fn host_reconnects_after_the_ban_is_lifted() {
         .store(false, std::sync::atomic::Ordering::Relaxed);
 }
 
-// The close_peer ban path: an unsolicited block reply closes AND bans the sender
-// (chia full_node_api.py respond_block → close(RATE_LIMITER_BAN_SECONDS)). Proves the handler-side
-// close site records the ban, not just the read-loop rate limiter.
 #[tokio::test]
 async fn unsolicited_block_reply_bans_the_sender() {
     let server = spawn_full_node_rate_limited(contiguous_api(100, 1)).await;

@@ -1,22 +1,3 @@
-// Operator-level semantic vectors for the CLVM VM.
-//
-// The block-level gates (cost walls, condition digests) prove whole-generator equivalence, but a
-// wrong operator can hide inside a right total: two ops off in compensating directions, or an op
-// real generators rarely hit. These vectors pin each operator individually — output value AND
-// charged cost — so any VM change diffs at op granularity instead of "some block is wrong".
-//
-// Two oracle classes:
-//   - HAND: the expected value is written from CLVM semantics and computed independently of the
-//     VM (arithmetic by hand, hashes via the sha2 crate). These can never be harvested from a
-//     broken VM.
-//   - GOLDEN: values and every cost come from `fixtures/clvm_op_golden.json`, harvested from the
-//     current VM (UPDATE_GOLDEN=1 rewrites it) and frozen. Costs are golden because the cost
-//     model is the regression surface itself; the block-level cost walls anchor it to on-chain
-//     declared costs, so the golden file cannot drift from consensus unnoticed.
-//
-// Every vector runs twice — base flags and MEMPOOL_MODE — because operator behavior is allowed to
-// differ by flag set and a regression in either mode is a regression.
-
 use dg_xch_core::clvm::assemble::assemble_text;
 use dg_xch_core::clvm::program::Program;
 use dg_xch_core::clvm::runtime::ClvmRuntime;
@@ -27,7 +8,6 @@ use std::collections::BTreeMap;
 
 const GOLDEN_PATH: &str = "tests/fixtures/clvm_op_golden.json";
 
-// (name, program source, hand-oracle expected value source; None = golden-only)
 const VECTORS: &[(&str, &str, Option<&str>)] = &[
     // arithmetic
     ("add", "(+ (q . 10) (q . 13))", Some("23")),
@@ -154,8 +134,6 @@ fn opcall(op: u8, args: Vec<SExp<'static>>) -> SExp<'static> {
 fn structural_vectors() -> Vec<(&'static str, SExp<'static>, Option<String>)> {
     let parent = [1u8; 32];
     let ph = [2u8; 32];
-    // COINID is defined as sha256(parent || puzzle_hash || canonical-int amount); computing it
-    // here with the sha2 crate keeps the oracle independent of the VM.
     let mut hasher = Sha256::new();
     hasher.update(parent);
     hasher.update(ph);

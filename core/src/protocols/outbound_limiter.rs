@@ -197,9 +197,6 @@ mod tests {
         }
     }
 
-    // TEST (2) — self-safety: our own serve/sync traffic is `Unlimited` (RespondBlocks, size-only) and
-    // must NEVER be deferred, no matter how fast we serve. Mirrors the inbound self-safety test
-    // (t045 `solicited_respond_blocks_burst_...`). 2000 back-to-back RespondBlocks all admit.
     #[test]
     fn unlimited_serve_type_is_never_deferred() {
         let ol = OutboundLimiter::with_params(3600, 100, 65, Duration::from_millis(1));

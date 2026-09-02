@@ -1352,7 +1352,7 @@ dependencies = [
  "num-traits",
  "once_cell",
  "parking_lot",
- "portfu",
+ "portfu 1.3.3",
  "prometheus 0.14.0",
  "rand 0.10.2",
  "regex",
@@ -1457,6 +1457,7 @@ dependencies = [
  "dg_xch_weight_proof",
  "hex",
  "libc",
+ "log",
  "pprof",
  "rand 0.10.2",
  "rustls",
@@ -1466,7 +1467,6 @@ dependencies = [
  "sqlx",
  "tempfile",
  "tokio",
- "tracing",
  "uuid",
 ]
 
@@ -1604,7 +1604,7 @@ dependencies = [
  "hyper-util",
  "log",
  "num-bigint",
- "portfu",
+ "portfu 1.3.3",
  "rand_chacha 0.10.0",
  "rustls",
  "serde",
@@ -1672,11 +1672,11 @@ dependencies = [
  "dg_xch_stores",
  "dg_xch_vdf",
  "hex",
+ "log",
  "num-bigint",
  "rayon",
  "sha2",
  "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -2132,6 +2132,7 @@ dependencies = [
  "blst",
  "bytes",
  "clap",
+ "dg_logger",
  "dg_xch_clients",
  "dg_xch_core",
  "dg_xch_node",
@@ -2145,6 +2146,8 @@ dependencies = [
  "http-body-util",
  "hyper",
  "ipnet",
+ "log",
+ "portfu 2.0.0",
  "pprof",
  "rustls",
  "serde",
@@ -2153,8 +2156,6 @@ dependencies = [
  "tikv-jemallocator",
  "tokio",
  "tokio-rustls",
- "tracing",
- "tracing-subscriber",
  "uuid",
  "zstd",
 ]
@@ -3054,6 +3055,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "879f10e63c20629ecabbb64a8010319738c66a5cd0c29b02d63d272b03751d01"
 dependencies = [
  "generic-array",
+]
+
+[[package]]
+name = "inventory"
+version = "0.3.24"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4f0c30c76f2f4ccee3fe55a2435f691ca00c0e4bd87abe4f4a851b1d4dac39b"
+dependencies = [
+ "rustversion",
 ]
 
 [[package]]
@@ -4269,7 +4279,7 @@ dependencies = [
  "log",
  "once_cell",
  "portfu_core",
- "portfu_macros",
+ "portfu_macros 1.3.3",
  "prometheus 0.13.4",
  "rustls",
  "serde",
@@ -4280,6 +4290,51 @@ dependencies = [
  "tokio-tungstenite 0.26.2",
  "uuid",
  "webpki-roots 0.26.11",
+]
+
+[[package]]
+name = "portfu"
+version = "2.0.0"
+source = "git+https://github.com/GalactechsLLC/portfu.git?branch=2.0.0#79d89a874f83b526890d482effb6138b9253018f"
+dependencies = [
+ "futures-util",
+ "http",
+ "http-body",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "inventory",
+ "log",
+ "portfu_common",
+ "portfu_macros 2.0.0",
+ "regex",
+ "tokio",
+ "tokio-tungstenite 0.28.0",
+ "uuid",
+]
+
+[[package]]
+name = "portfu_common"
+version = "2.0.0"
+source = "git+https://github.com/GalactechsLLC/portfu.git?branch=2.0.0#79d89a874f83b526890d482effb6138b9253018f"
+dependencies = [
+ "futures-util",
+ "http",
+ "http-body",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "inventory",
+ "log",
+ "once_cell",
+ "regex",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
+ "tokio",
+ "tokio-tungstenite 0.28.0",
+ "urlencoding",
+ "uuid",
 ]
 
 [[package]]
@@ -4335,6 +4390,17 @@ dependencies = [
  "syn 2.0.119",
  "tokio",
  "url",
+]
+
+[[package]]
+name = "portfu_macros"
+version = "2.0.0"
+source = "git+https://github.com/GalactechsLLC/portfu.git?branch=2.0.0#79d89a874f83b526890d482effb6138b9253018f"
+dependencies = [
+ "portfu_common",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]

@@ -1,9 +1,3 @@
-// Phase 1.3 gate — the transaction gossip loop over a real websocket link, both ends on the
-// production handler stacks: the node under test serves `full_node_handlers`, the announcing peer
-// runs `full_node_handlers_client`. One announcement drives the whole exchange unattended:
-// NewTransaction in → RequestTransaction back out → the peer's handler answers
-// RespondTransaction → server-side CLVM + signature validation → mempool admission.
-
 mod common;
 
 use async_trait::async_trait;
@@ -33,8 +27,7 @@ fn config(listen: SocketAddr, rpc: SocketAddr) -> Config {
     Config {
         rpc_tls: full_node::RpcTlsMode::Local,
         debug_endpoints: false,
-        target_outbound: None,
-        target_peer_count: None,
+        p2p: Default::default(),
         listen,
         rpc,
         introducer: None,
@@ -152,13 +145,6 @@ async fn announced_transaction_is_pulled_validated_and_admitted() {
     serve_run.store(false, Ordering::Relaxed);
 }
 
-// A NOT-synced node must ignore transaction gossip entirely — `full_node_api`
-// new_transaction ("Ignore if syncing", :229-233) returns None before any pull, and
-// add_transaction drops queued bundles with
-// NO_TRANSACTIONS_WHILE_SYNCING. Without this gate every deep-syncing leg burned >98% CPU
-// running full CLVM + BLS on doomed mainnet gossip (the live flamegraph finding). Same rig as
-// the positive test, but the synced flag stays at its boot value (false): the announcement must
-// produce no pull and no admission.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn gossip_is_ignored_while_syncing() {
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -309,10 +295,6 @@ async fn peer_dropped_within(inbound_peers: &dg_xch_core::protocols::PeerMap, ms
     inbound_peers.read().await.is_empty()
 }
 
-// Behavior (b) — `new_transaction` :235-241: a zero-cost announcement is
-// a protocol violation; the peer is banned (`peer.close(CONSENSUS_ERROR_BAN_SECONDS)`). RED on the
-// pre-gate daemon: cost 0 clears the cost ceiling, the mempool is empty, so a RequestTransaction is
-// sent and the peer stays connected. GREEN: the connection is closed and the peer leaves the map.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn zero_cost_announcement_bans_the_peer() {
     let rig = stand_up_rig().await;
@@ -336,10 +318,6 @@ async fn zero_cost_announcement_bans_the_peer() {
     rig.serve_run.store(false, Ordering::Relaxed);
 }
 
-// Behavior (c): an already-seen tx re-announced with a cost/fee that
-// disagrees with our validated mempool item is a ban (outside the tolerated pre-2.4.3 quote diff).
-// The node first admits the bundle honestly, then the same peer re-announces it with a bad cost.
-// Without the gate the mismatch would be silently ignored and the peer would stay; it is banned.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn already_seen_tx_with_mismatched_cost_bans_the_peer() {
     let rig = stand_up_rig().await;
@@ -392,10 +370,6 @@ async fn already_seen_tx_with_mismatched_cost_bans_the_peer() {
     rig.serve_run.store(false, Ordering::Relaxed);
 }
 
-// Behavior (d) — respond_transaction: a transaction body that answers no pull
-// WE issued is unsolicited and dropped before validation. RED on the pre-gate daemon: an
-// unsolicited RespondTransaction is queued and the validator admits it (mempool len 1). GREEN: the
-// body is dropped at the door and the mempool stays empty.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn unsolicited_transaction_body_is_dropped() {
     let rig = stand_up_rig().await;
@@ -601,9 +575,6 @@ async fn fill_mempool_to_capacity(node: &Arc<Node>) {
     assert_eq!(mp.total_cost(), mp.max_total_cost(), "pool exactly full");
 }
 
-// The is_fee_enough PRE-FETCH gate: with the pool at capacity, an
-// announcement whose advertised fee cannot possibly get in is never pulled (spam CLVM
-// protection). A fee that beats the pool's min fee rate is still pulled.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn full_pool_low_fee_announcement_is_not_pulled() {
     let rig = stand_up_capturing_rig().await;

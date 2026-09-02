@@ -257,9 +257,6 @@ fn a_bulky_block_plans_exactly_its_uncompact_field_as_a_request() {
     );
 }
 
-// TEST 2 — the dedup: two scan ticks over the SAME bulky block, same ledger, within the ttl, plan
-// the request ONCE. Without the ledger a fixed-window scan would re-solicit the same field every
-// tick and spam a connected bluebox with duplicate work.
 #[test]
 fn two_ticks_over_the_same_bulky_block_solicit_only_once() {
     let b = common::full_block();

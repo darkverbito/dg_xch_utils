@@ -278,21 +278,6 @@ fn signage_point_index_at_bound_is_invalid_sp_index() {
     );
 }
 
-// ======================================================================================
-// Tier-1 B-class: infusion-point VDF-mutation negatives.
-//
-// The exact per-gate codes are INVALID_CC_IP_VDF / INVALID_RC_IP_VDF. The window pipeline DEFERS
-// every VDF proof out of the sequential header walk and verifies the whole window's batch across
-// all cores afterwards (node/src/header.rs). A `QueuedVdf` — unlike a `QueuedSig` — carries no
-// gate tag, so a deferred-batch VDF failure collapses to the coarse "INVALID_VDF ... (deferred
-// batch)" string on the single-block path, and the B-class arms assert that accepted set instead
-// of the exact code.
-//
-// A garbage VDF PROOF is the cleanest mutation: the proof is a HeaderBlock field, NOT inside the
-// reward_chain_block, so it perturbs no reward-block hash commitment — the deferred batch is the sole
-// catch, no re-cohere. A VDF OUTPUT mutation lives inside the reward_chain_block, so it also breaks
-// the finished reward-block hash (check 32) and needs the pure-hash re-cohere.
-
 fn garbage_proof() -> VdfProof {
     // witness_type 0, a non-empty non-witness, not normalized-to-identity: takes the standard
     // validate_vdf branch, which the deferred batch then fails.

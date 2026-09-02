@@ -599,8 +599,6 @@ impl Arena {
         !self.nullp(node)
     }
 
-    /// Count of list elements (pairs walked down `rest`), stopping early past
-    /// `return_early_if_exceeds` — mirrors `SExp::arg_count`.
     #[must_use]
     pub fn arg_count(&self, node: NodePtr, return_early_if_exceeds: usize) -> usize {
         let mut count = 0;
@@ -615,8 +613,6 @@ impl Arena {
         count
     }
 
-    /// True when `node` is a proper list of exactly `count` elements — mirrors
-    /// `SExp::arg_count_is`.
     #[must_use]
     pub fn arg_count_is(&self, node: NodePtr, mut count: usize) -> bool {
         let mut ptr = node;
@@ -632,8 +628,6 @@ impl Arena {
         }
     }
 
-    /// Mirrors `SExp::as_atom_list`: leading atoms of a proper list; an empty vec if the
-    /// head of any pair is itself a pair.
     #[must_use]
     pub fn as_atom_list(&self, node: NodePtr) -> Vec<Vec<u8>> {
         let mut rtn: Vec<Vec<u8>> = Vec::new();
@@ -981,7 +975,6 @@ mod tests {
             seen.push(a.number(p).unwrap());
         }
         assert_eq!(seen.len(), 3);
-        // improper tail (1 2 . 3) yields the tail atom — SExpIter parity
         let improper = a.import(&SExp::from((1_u8, (2_u8, 3_u8)))).unwrap();
         let mut cur = ArgCursor::new(improper);
         let mut count = 0;
@@ -1033,18 +1026,12 @@ mod tests {
         assert_eq!(a.counters(), (2, 0, 1));
     }
 
-    // Red-first: the ceilings read stored + ghost, and chia's counts are monotone within a run
-    // (its allocator only rewinds at softfork teardown). Rolling ghosts back on every restore
-    // lets a program mint nodes inside rewound operand regions without them ever counting, so a
-    // block chia rejects at the cap would pass here. A restore must convert rewound storage into
-    // ghosts, keeping the logical count monotone.
     #[test]
     fn rewound_storage_stays_counted_against_the_ceilings() {
         let mut a = Arena::new();
         let cp = a.checkpoint();
         let atoms0 = a.atom_vec.len() + a.ghost_atoms;
         let pairs0 = a.pair_vec.len() + a.ghost_pairs;
-        let heap0 = a.u8_vec.len() + a.ghost_heap;
 
         let x = a.new_atom(&[7u8; 40]).unwrap();
         let y = a.new_atom(&[9u8; 40]).unwrap();

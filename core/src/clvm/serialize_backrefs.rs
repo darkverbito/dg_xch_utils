@@ -1,20 +1,4 @@
-//! CLVM back-reference SERIALIZATION — the compressed producer-side encoder, the inverse of the
-//! `sexp_from_bytes_backrefs` decoder in [`crate::clvm::parser`].
-//!
-//! A faithful port of clvmr's `serde::ser_br::node_to_stream_backrefs` +
-//! `serde::read_cache_lookup::ReadCacheLookup` (Chia-Network/clvm_rs, the crate chia_rs 0.42.1
-//! depends on). The serializer walks the tree exactly as the plain serializer does, but before
-//! emitting any node it asks a running `ReadCacheLookup` whether an already-serialized node with the
-//! SAME sha256 tree-hash is reachable by a shorter CLVM path than re-serializing this subtree costs.
-//! If so it emits a back-reference (`0xfe` + the path atom) instead. The dedup key is the tree HASH,
-//! so two structurally-identical subtrees with distinct in-memory addresses still compress — which is
-//! the whole point when a block spends the same puzzle many times.
-//!
-//! Byte-parity is pinned two ways, both against committed chia_rs 0.42.1 test vectors (no oracle
-//! needed): the `l3` fixture from clvm_rs `ser_br.rs` (`serialize_backrefs_l3_byte_parity`), and — at
-//! the generator level — `solution_generator_backrefs`'s `test_solution_generator_backre` vector (see
-//! `consensus::block_generator`). This encoder is the compressed sibling of [`sexp_to_bytes`]; the
-//! two agree byte-for-byte on any tree with no repeated ≥4-byte subtree (compression is a no-op).
+//! CLVM serializer that replaces repeated subtrees with back-references.
 //!
 //! [`sexp_to_bytes`]: crate::clvm::parser::sexp_to_bytes
 
@@ -23,7 +7,7 @@ use crate::clvm::program::SerializedProgram;
 use crate::clvm::sexp::SExp;
 use dg_xch_serialize::{CONS_BOX_MARKER, MAX_SINGLE_BYTE, encode_size};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, Cursor, Write};
 
 const BACK_REFERENCE: u8 = 0xfe;
@@ -54,9 +38,7 @@ fn pair_tree_hash(first: &Bytes32, rest: &Bytes32) -> Bytes32 {
     out.into()
 }
 
-/// Serialized length (WITHOUT back-references) of a single atom — clvmr
-/// `serde::serialized_length::serialized_length_atom`. Used to decide whether a back-reference is
-/// actually smaller than re-serializing the node.
+/// Serialized length of an atom without back-references.
 fn serialized_length_atom(buf: &[u8]) -> u64 {
     let lb = buf.len() as u64;
     if lb == 0 || (lb == 1 && buf[0] < 128) {
@@ -74,9 +56,7 @@ fn serialized_length_atom(buf: &[u8]) -> u64 {
     }
 }
 
-/// Given an atom with `num_bits` significant bits (from the most-significant set bit), the number of
-/// bytes it serializes to — clvmr `serde::serialized_length::atom_length_bits`. `None` when the atom
-/// would be too large to serialize.
+/// Encoded atom length for a value with `num_bits` significant bits.
 fn atom_length_bits(num_bits: u64) -> Option<u64> {
     if num_bits < 8 {
         return Some(1);
@@ -97,9 +77,7 @@ fn atom_length_bits(num_bits: u64) -> Option<u64> {
     }
 }
 
-/// Write a single atom in canonical CLVM form — clvmr `serde::write_atom::write_atom` (identical to
-/// the atom arm of [`crate::clvm::parser::sexp_to_bytes`]): the nil/one-byte forms verbatim,
-/// otherwise a minimal length prefix (`encode_size`) then the bytes.
+/// Write a single atom in canonical CLVM form.
 fn write_atom<W: Write>(f: &mut W, data: &[u8]) -> io::Result<()> {
     if data.is_empty() {
         f.write_all(&[0x80])?;
@@ -112,10 +90,7 @@ fn write_atom<W: Write>(f: &mut W, data: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
-/// Turn a reversed list of left(false)/right(true) steps into the `Vec<u8>` CLVM path atom — clvmr
-/// `serde::read_cache_lookup::reversed_path_to_vec_u8`. `[]` => `1`; appending a `0` doubles the
-/// integer, appending a `1` doubles-and-adds-one; the result is the minimal-length big-endian bytes.
-fn reversed_path_to_vec_u8(path: &[bool]) -> Vec<u8> {
+fn encode_backref_path(path: &[bool]) -> Vec<u8> {
     let byte_count = (path.len() + 1 + 7) >> 3;
     let mut v = vec![0u8; byte_count];
     let mut index = byte_count - 1;
@@ -135,145 +110,110 @@ fn reversed_path_to_vec_u8(path: &[bool]) -> Vec<u8> {
     v
 }
 
-/// Tracks, during serialization, the stack of already-emitted objects (as a CLVM cons-list) so a
-/// node can be replaced by the shortest CLVM path that reaches an equal-hash node already written.
-/// Direct port of clvmr `serde::read_cache_lookup::ReadCacheLookup`. All map keys are sha256 tree
-/// hashes.
-struct ReadCacheLookup {
-    root_hash: Bytes32,
-    /// cons cells of the emitted-object stack: `(left_hash, right_hash)`.
-    read_stack: Vec<(Bytes32, Bytes32)>,
-    count: HashMap<Bytes32, u32>,
-    /// tree-hash -> list of `(parent_hash, is_right_child)`.
-    parent_lookup: HashMap<Bytes32, Vec<(Bytes32, bool)>>,
+/// Index of objects currently reachable from the decoder's value stack.
+struct BackrefStackIndex {
+    root: Bytes32,
+    stack: Vec<(Bytes32, Bytes32)>,
+    active: HashMap<Bytes32, u32>,
+    parents: HashMap<Bytes32, Vec<(Bytes32, bool)>>,
 }
 
-impl ReadCacheLookup {
+impl BackrefStackIndex {
     fn new() -> Self {
-        let root_hash = atom_tree_hash(&[]);
-        let mut count = HashMap::new();
-        count.insert(root_hash, 1);
+        let root = atom_tree_hash(&[]);
+        let mut active = HashMap::new();
+        active.insert(root, 1);
         Self {
-            root_hash,
-            read_stack: Vec::new(),
-            count,
-            parent_lookup: HashMap::new(),
+            root,
+            stack: Vec::new(),
+            active,
+            parents: HashMap::new(),
         }
     }
 
-    /// Update the cache for pushing an object with tree hash `id` onto the stack.
-    fn push(&mut self, id: Bytes32) {
-        let new_root_hash = pair_tree_hash(&id, &self.root_hash);
-        self.read_stack.push((id, self.root_hash));
-        *self.count.entry(id).or_insert(0) += 1;
-        *self.count.entry(new_root_hash).or_insert(0) += 1;
-        self.parent_lookup
-            .entry(id)
+    fn activate(&mut self, hash: Bytes32) {
+        let previous_root = self.root;
+        let new_root = pair_tree_hash(&hash, &previous_root);
+        self.stack.push((hash, previous_root));
+        *self.active.entry(hash).or_default() += 1;
+        *self.active.entry(new_root).or_default() += 1;
+        self.parents
+            .entry(hash)
             .or_default()
-            .push((new_root_hash, false));
-        self.parent_lookup
-            .entry(self.root_hash)
+            .push((new_root, false));
+        self.parents
+            .entry(previous_root)
             .or_default()
-            .push((new_root_hash, true));
-        self.root_hash = new_root_hash;
+            .push((new_root, true));
+        self.root = new_root;
     }
 
-    /// Pop the top object; returns `(object_hash, new_root_hash)`.
-    fn pop(&mut self) -> (Bytes32, Bytes32) {
-        let item = self.read_stack.pop().expect("read stack empty");
-        if let Some(c) = self.count.get_mut(&item.0) {
-            *c = c.saturating_sub(1);
+    fn deactivate_top(&mut self) -> (Bytes32, Bytes32) {
+        let item = self.stack.pop().expect("read stack empty");
+        if let Some(count) = self.active.get_mut(&item.0) {
+            *count = count.saturating_sub(1);
         }
-        if let Some(c) = self.count.get_mut(&self.root_hash) {
-            *c = c.saturating_sub(1);
+        if let Some(count) = self.active.get_mut(&self.root) {
+            *count = count.saturating_sub(1);
         }
-        self.root_hash = item.1;
+        self.root = item.1;
         item
     }
 
-    /// The pop/pop/cons the serializer performs after writing a pair's two children.
-    fn pop2_and_cons(&mut self) {
-        let right = self.pop();
-        let left = self.pop();
-        *self.count.entry(left.0).or_insert(0) += 1;
-        *self.count.entry(right.0).or_insert(0) += 1;
-        let new_root_hash = pair_tree_hash(&left.0, &right.0);
-        self.parent_lookup
-            .entry(left.0)
-            .or_default()
-            .push((new_root_hash, false));
-        self.parent_lookup
-            .entry(right.0)
-            .or_default()
-            .push((new_root_hash, true));
-        self.push(new_root_hash);
+    fn combine_top_pair(&mut self) {
+        let right = self.deactivate_top();
+        let left = self.deactivate_top();
+        *self.active.entry(left.0).or_default() += 1;
+        *self.active.entry(right.0).or_default() += 1;
+        let pair = pair_tree_hash(&left.0, &right.0);
+        self.parents.entry(left.0).or_default().push((pair, false));
+        self.parents.entry(right.0).or_default().push((pair, true));
+        self.activate(pair);
     }
 
-    /// All minimal-length paths to `id` that serialize no larger than `serialized_length` bytes.
-    fn find_paths(&self, id: &Bytes32, serialized_length: u64) -> Vec<Vec<u8>> {
-        if serialized_length < 4 {
-            return vec![];
+    fn shortest_path(&self, hash: Bytes32, plain_length: u64) -> Option<Vec<u8>> {
+        if plain_length < 4 {
+            return None;
         }
-        let mut possible_responses = Vec::new();
-        let mut seen_ids: HashSet<Bytes32> = HashSet::new();
-        let max_bytes_for_path_encoding = serialized_length - 1; // 1 byte for 0xfe
-        let max_path_length: usize = max_bytes_for_path_encoding
+        let max_atom_bytes = plain_length - 1;
+        let max_steps: usize = max_atom_bytes
             .saturating_mul(8)
             .saturating_sub(1)
             .try_into()
             .unwrap_or(usize::MAX);
-        seen_ids.insert(*id);
-        let mut partial_paths: Vec<(Bytes32, Vec<bool>)> = vec![(*id, Vec::new())];
 
-        while !partial_paths.is_empty() {
-            let mut new_partial_paths: Vec<(Bytes32, Vec<bool>)> = Vec::new();
-            for (node, path) in &mut partial_paths {
-                if *node == self.root_hash {
-                    // reversed_path_to_vec_u8 adds the terminator bit, so the encoded atom has
-                    // path.len()+1 significant bits.
-                    if let Some(path_len) = atom_length_bits(path.len() as u64 + 1)
-                        && path_len <= max_bytes_for_path_encoding
-                    {
-                        possible_responses.push(reversed_path_to_vec_u8(path));
-                    }
-                    continue;
-                }
-                if let Some(items) = self.parent_lookup.get(node) {
-                    for (parent, direction) in items {
-                        if self.count.get(parent).copied().unwrap_or(0) > 0
-                            && !seen_ids.contains(parent)
-                        {
-                            if path.len() > max_path_length {
-                                return possible_responses;
-                            }
-                            if path.len() < max_path_length {
-                                let mut new_path = path.clone();
-                                new_path.push(*direction);
-                                new_partial_paths.push((*parent, new_path));
-                            }
-                        }
-                        seen_ids.insert(*parent);
-                    }
-                }
-            }
-            if !possible_responses.is_empty() {
+        let mut queue = VecDeque::from([(hash, Vec::new())]);
+        let mut seen = HashSet::from([hash]);
+        let mut candidates = Vec::new();
+        let mut result_depth = None;
+        while let Some((node, path)) = queue.pop_front() {
+            if result_depth.is_some_and(|depth| path.len() > depth) {
                 break;
             }
-            partial_paths = new_partial_paths;
+            if node == self.root {
+                let encoded = encode_backref_path(&path);
+                if atom_length_bits(path.len() as u64 + 1).is_some_and(|len| len <= max_atom_bytes)
+                {
+                    result_depth = Some(path.len());
+                    candidates.push(encoded);
+                }
+                continue;
+            }
+            if path.len() >= max_steps {
+                continue;
+            }
+            for &(parent, direction) in self.parents.get(&node).into_iter().flatten() {
+                if self.active.get(&parent).copied().unwrap_or_default() == 0
+                    || !seen.insert(parent)
+                {
+                    continue;
+                }
+                let mut next = path.clone();
+                next.push(direction);
+                queue.push_back((parent, next));
+            }
         }
-        possible_responses
-    }
-
-    /// The lexicographically-smallest minimal-length path to `id`, if a shorter-than-`serialized_length`
-    /// back-reference exists.
-    fn find_path(&self, id: &Bytes32, serialized_length: u64) -> Option<Vec<u8>> {
-        let mut paths = self.find_paths(id, serialized_length);
-        if paths.is_empty() {
-            None
-        } else {
-            paths.sort();
-            paths.into_iter().next()
-        }
+        candidates.into_iter().min()
     }
 }
 
@@ -332,7 +272,7 @@ fn node_to_stream_backrefs<W: Write>(root: &SExp, f: &mut W) -> io::Result<()> {
     let (hashes, lens) = compute_memos(root);
     let mut read_op_stack: Vec<ReadOp> = vec![ReadOp::Parse];
     let mut write_stack: Vec<&SExp> = vec![root];
-    let mut rcl = ReadCacheLookup::new();
+    let mut stack_index = BackrefStackIndex::new();
 
     while let Some(node) = write_stack.pop() {
         let op = read_op_stack.pop();
@@ -340,11 +280,11 @@ fn node_to_stream_backrefs<W: Write>(root: &SExp, f: &mut W) -> io::Result<()> {
         let key = addr(node);
         let node_hash = hashes[&key];
         let node_len = lens[&key];
-        match rcl.find_path(&node_hash, node_len) {
+        match stack_index.shortest_path(node_hash, node_len) {
             Some(path) => {
                 f.write_all(&[BACK_REFERENCE])?;
                 write_atom(f, &path)?;
-                rcl.push(node_hash);
+                stack_index.activate(node_hash);
             }
             None => match node {
                 SExp::Pair(pair) => {
@@ -357,21 +297,19 @@ fn node_to_stream_backrefs<W: Write>(root: &SExp, f: &mut W) -> io::Result<()> {
                 }
                 SExp::Atom(atom) => {
                     write_atom(f, atom.as_ref())?;
-                    rcl.push(node_hash);
+                    stack_index.activate(node_hash);
                 }
             },
         }
         while let Some(ReadOp::Cons) = read_op_stack.last() {
             read_op_stack.pop();
-            rcl.pop2_and_cons();
+            stack_index.combine_top_pair();
         }
     }
     Ok(())
 }
 
-/// Serialize `sexp` with CLVM back-reference compression — the inverse of
-/// [`crate::clvm::parser::sexp_from_bytes_backrefs`]. Byte-identical to clvmr `node_to_bytes_backrefs`
-/// (and to [`crate::clvm::parser::sexp_to_bytes`] whenever the tree has no repeated ≥4-byte subtree).
+/// Serialize `sexp` with CLVM back-reference compression.
 ///
 /// # Errors
 /// Propagates the underlying `io::Error` (an in-memory `Cursor` write only fails on allocation).
@@ -395,12 +333,8 @@ mod tests {
         SExp::Pair(PairBuf::Owned((Arc::new(first), Arc::new(rest))))
     }
 
-    // clvm_rs `ser_br.rs::test_serialize_limit`: leaf = [1,2,3,4,5]; l1=(leaf.leaf);
-    // l2=(l1.l1); l3=(l2.l2). node_to_bytes_backrefs(l3) is the committed vector below — three
-    // conses, the leaf once, then three `fe 02` back-references (path [2] = the sibling just
-    // serialized). This is the canonical byte-parity anchor, straight from clvm_rs source.
     #[test]
-    fn serialize_backrefs_l3_byte_parity() {
+    fn repeated_subtrees_use_short_backrefs() {
         let leaf = atom(&[1, 2, 3, 4, 5]);
         let l1 = cons(leaf.clone(), leaf.clone());
         let l2 = cons(l1.clone(), l1.clone());
@@ -409,7 +343,7 @@ mod tests {
         assert_eq!(
             out.as_ref(),
             &[255, 255, 255, 133, 1, 2, 3, 4, 5, 254, 2, 254, 2, 254, 2],
-            "node_to_bytes_backrefs(l3) must match clvm_rs's committed vector"
+            "the repeated sibling must use the shortest path encoding"
         );
     }
 

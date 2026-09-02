@@ -1,5 +1,4 @@
-// Block challenge-chain challenge and the pre-signage-point transaction-block walk.
-// Ports chia/consensus/get_block_challenge.py (no chia_rs port exists).
+// Challenge-chain lookup and pre-signage-point transaction-block traversal.
 
 use crate::blockchain::block_record::BlockRecord;
 use crate::blockchain::sized_bytes::Bytes32;
@@ -9,7 +8,6 @@ use crate::consensus::pot_iterations::is_overflow_block;
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind};
 
-// chia get_block_challenge.
 pub fn get_block_challenge(
     constants: &ConsensusConstants,
     finished_sub_slots: &[crate::blockchain::subslot_bundle::SubSlotBundle],
@@ -93,7 +91,7 @@ pub fn get_block_challenge(
         })
 }
 
-// chia pre_sp_tx_block. None when prev_b_hash is the genesis challenge.
+/// Return the transaction block preceding the signage point.
 pub fn pre_sp_tx_block<'a>(
     constants: &ConsensusConstants,
     blocks: &'a HashMap<Bytes32, BlockRecord>,
@@ -128,7 +126,6 @@ pub fn pre_sp_tx_block<'a>(
     Ok(Some(curr))
 }
 
-// chia pre_sp_tx_block_height. 0 when there is no such block.
 pub fn pre_sp_tx_block_height(
     constants: &ConsensusConstants,
     blocks: &HashMap<Bytes32, BlockRecord>,

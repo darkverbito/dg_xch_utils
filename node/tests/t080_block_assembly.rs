@@ -1,24 +1,3 @@
-// The mempool→block-generator path on the produce side: the mempool assembles a block generator
-// that is spliced into the candidate via `create_unfinished_block`.
-//
-// The suite pins the assembly semantics:
-//   * fee-priority selection (`priority DESC, seq ASC` — items_by_fee) and the FIFO seq tiebreak;
-//   * the SF9 6,000-spend cap enforced AT BUILD (MAX_SPENDS_PER_BLOCK);
-//   * the skip/stop heuristics (MAX_SKIPPED_ITEMS=10 — break ON the tenth skip;
-//     MIN_COST_THRESHOLD=6_000_000);
-//   * cost accounting: BlockTransactions.cost == the re-run cost == item admission cost +
-//     BLOCK_OVERHEAD (BLOCK_OVERHEAD = QUOTE_BYTES*COST_PER_BYTE + QUOTE_EXECUTION_COST =
-//     24_020 on mainnet constants);
-//   * the aggregate signature of the included bundles verifies against the re-run conditions;
-//   * the post-SF9 emitted-generator form: quoted spend list (`ff01` prefix), canonical
-//     serialization, empty ref list (pinned byte-for-byte by core's
-//     chia_rs_solution_generator_byte_parity);
-//   * empty mempool ⇒ byte-identical empty-block path (the producer_differential corpus is the
-//     hard gate; this is the explicit unit);
-//   * the assembled block passes OUR OWN transaction-body validation (validate_transaction_block —
-//     the T0-1/t070-hardened rules: refs ban, canonical encoding, spend cap, generator root, agg
-//     sig, cost, fees, roots, transactions_info hash, condition context) with SF9 live.
-
 use dg_xch_core::blockchain::coin::Coin;
 use dg_xch_core::blockchain::coin_record::CoinRecord;
 use dg_xch_core::blockchain::coin_spend::CoinSpend;
@@ -774,10 +753,6 @@ async fn backref_compression_packs_extra_spend_over_plain_limit() {
     );
 }
 
-// ── Test 5: the aggregate signature of the included bundles verifies ──────────────────────────────
-// The aggregate over the included items' aggregated signatures; the block's
-// signature must verify against the re-run conditions' AGG_SIG pairs (validate_block_aggregate_
-// signature — the same gate the body validator runs).
 #[tokio::test]
 async fn aggregate_signature_of_included_bundles_verifies() {
     use blst::min_pk::SecretKey;
@@ -887,7 +862,6 @@ async fn empty_mempool_yields_the_unchanged_empty_block() {
     );
 }
 
-// A pool whose peak was never set (pre-genesis) must not build — the daemon's gate fails closed.
 #[tokio::test]
 async fn no_peak_builds_nothing() {
     let mp = Mempool::new(&MAINNET);

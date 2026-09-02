@@ -545,10 +545,6 @@ fn simple_generator_mode_rejects_complex_generator_shape() {
 
 #[test]
 fn height_flags_select_legacy_before_hardfork() {
-    // Generator MODE keys on hard fork 1 — chia's validator picks run_block_generator2 at
-    // HARD_FORK_HEIGHT — while the CLVM flag set stays empty until soft fork 8/9. The two
-    // ladders are separate; conflating them walled a live sync at 5,496,002 with
-    // InvalidBlockCost.
     let before = BlockGeneratorFlags::for_height(&MAINNET, MAINNET.hard_fork_height - 1);
     let after = BlockGeneratorFlags::for_height(&MAINNET, MAINNET.hard_fork_height);
 
@@ -557,9 +553,6 @@ fn height_flags_select_legacy_before_hardfork() {
     assert_eq!(after.clvm_flags, 0, "no CLVM flag activates at hard fork 1");
 }
 
-// Soft fork 9 CANONICAL_INTS activates strictly by height (chia_rs
-// get_flags_for_height_and_constants; on mainnet SF9 shares soft fork 8's height). Below the
-// activation height the clvm flag set is byte-identical to today (bit unset).
 #[test]
 fn height_flags_activate_canonical_ints_at_soft_fork9() {
     use dg_xch_core::clvm::utils::CANONICAL_INTS;
@@ -643,14 +636,6 @@ fn historical_generator_ref_block_4671894_matches_chia_generator_fixture() {
 
     assert_matches_chia_fixture(&conds, &expected);
 }
-
-// ---------------------------------------------------------------------------
-// Enforcement of the five previously-dropped consensus opcodes:
-// ASSERT_CONCURRENT_SPEND (64), ASSERT_CONCURRENT_PUZZLE (65),
-// SEND_MESSAGE (66), RECEIVE_MESSAGE (67), ASSERT_EPHEMERAL (76).
-// Each rule is exercised on both its satisfied and violated path, asserting the
-// exact chia error code on violation (chia-consensus 0.37.0 validation_error.rs).
-// ---------------------------------------------------------------------------
 
 fn coin_of(parent: Bytes32, amount: u64, puzzle: &Program<'static>) -> Coin {
     Coin {
@@ -818,26 +803,6 @@ fn send_and_receive_with_mismatched_message_fails_147() {
     assert_eq!(err as i64, 147);
 }
 
-// ===========================================================================
-// Batch 2 — condition parsing + validation harvested from
-// chia/_tests/core/full_node/test_conditions.py.
-//
-// chia drives every case through a full block containing an EASY_PUZZLE
-// (SerializedProgram `0x01`, which returns its solution as the condition list)
-// and asserts the block is accepted (Err == None) or rejected with a specific
-// `Err.*`. dg_xch has no block-building simulator, so we reproduce the *soul*:
-// the identical condition list flows through `execute_block_generator_result`
-// (parse + aggregate) and `validate_block_conditions` / `validate_spend_context`
-// (the consensus checker), with the timing context supplied directly.
-//
-// chia's chain model for the parametrized `test_condition` (used to pin the
-// boundaries below): 4 prior blocks, spend in the 5th (height 4); the spent coin
-// was created at height 2; genesis ts 10000, 10s/block. Absolute conditions are
-// checked against the previous-transaction-block (height 3, ts 10030); relative
-// conditions against the coin's creation (height 2, ts 10020). We encode those
-// same boundaries directly.
-// ===========================================================================
-
 // EASY_PUZZLE: CLVM path `1` returns the solution verbatim, so conditions live in
 // the solution and the coin id does NOT depend on them (needed for MY_COIN_ID).
 fn easy_puzzle() -> Program<'static> {
@@ -908,8 +873,6 @@ fn seconds_ctx(timestamp: u64) -> ConditionValidationContext {
     }
 }
 
-// -------- ASSERT_HEIGHT_ABSOLUTE (83) --------------------------------------
-// chia: assert current height >= N. Boundary at N: pass when block_height >= N.
 #[test]
 fn assert_height_absolute_boundary_matches_chia() {
     let conds = conds_for_solution(
@@ -924,8 +887,6 @@ fn assert_height_absolute_boundary_matches_chia() {
     );
 }
 
-// -------- ASSERT_BEFORE_HEIGHT_ABSOLUTE (85) -------------------------------
-// chia: assert current height < N. Boundary at N: pass when block_height < N.
 #[test]
 fn assert_before_height_absolute_boundary_matches_chia() {
     let conds = conds_for_solution(
@@ -940,8 +901,6 @@ fn assert_before_height_absolute_boundary_matches_chia() {
     );
 }
 
-// -------- ASSERT_SECONDS_ABSOLUTE (81) -------------------------------------
-// chia: assert prev-tx-block timestamp >= N. Boundary at N=10030 (chia's ts).
 #[test]
 fn assert_seconds_absolute_boundary_matches_chia() {
     let conds = conds_for_solution(
@@ -956,8 +915,6 @@ fn assert_seconds_absolute_boundary_matches_chia() {
     );
 }
 
-// -------- ASSERT_BEFORE_SECONDS_ABSOLUTE (84) ------------------------------
-// chia: assert prev-tx-block timestamp < N. Boundary at N=10031.
 #[test]
 fn assert_before_seconds_absolute_boundary_matches_chia() {
     let conds = conds_for_solution(
@@ -972,9 +929,6 @@ fn assert_before_seconds_absolute_boundary_matches_chia() {
     );
 }
 
-// -------- ASSERT_HEIGHT_RELATIVE (82) --------------------------------------
-// chia: assert current height >= created_height + N. Coin created at height 2.
-// Boundary N=2: pass at block_height 4, fail at 3.
 #[test]
 fn assert_height_relative_boundary_matches_chia() {
     let parent = Bytes32::new([1; 32]);
@@ -1004,9 +958,6 @@ fn assert_height_relative_boundary_matches_chia() {
     );
 }
 
-// -------- ASSERT_BEFORE_HEIGHT_RELATIVE (86) -------------------------------
-// chia: assert current height < created_height + N. Boundary N=2, created 2:
-// pass at block_height 3, fail at 4.
 #[test]
 fn assert_before_height_relative_boundary_matches_chia() {
     let parent = Bytes32::new([1; 32]);
@@ -1036,9 +987,6 @@ fn assert_before_height_relative_boundary_matches_chia() {
     );
 }
 
-// -------- ASSERT_SECONDS_RELATIVE (80) -------------------------------------
-// chia: assert prev-tx-block ts >= created_ts + N. Created ts 10020, N=10:
-// pass at ts 10030, fail at 10029.
 #[test]
 fn assert_seconds_relative_boundary_matches_chia() {
     let parent = Bytes32::new([1; 32]);
@@ -1068,10 +1016,6 @@ fn assert_seconds_relative_boundary_matches_chia() {
     );
 }
 
-// -------- ASSERT_MY_BIRTH_HEIGHT (75) --------------------------------------
-// chia: the spend's asserted birth height must equal the coin's real birth
-// height. dg_xch flags a mismatch as InvalidCondition (chia uses the specific
-// ASSERT_MY_BIRTH_HEIGHT_FAILED; both reject).
 #[test]
 fn assert_my_birth_height_matches_and_mismatches() {
     let parent = Bytes32::new([1; 32]);
@@ -1106,10 +1050,6 @@ fn assert_my_birth_height_matches_and_mismatches() {
     );
 }
 
-// -------- ASSERT_MY_COIN_ID (70) -------------------------------------------
-// chia test_valid_my_id / test_invalid_my_id. dg_xch enforces this inside the
-// generator: a wrong coin id aborts execution (InvalidBlockSolution); chia uses
-// the specific ASSERT_MY_COIN_ID_FAILED. Both reject the spend.
 #[test]
 fn assert_my_coin_id_valid_and_invalid() {
     let parent = Bytes32::new([1; 32]);
@@ -1137,13 +1077,8 @@ fn assert_my_coin_id_valid_and_invalid() {
     );
 }
 
-// -------- announcement limit (chia test_announce_conditions_limit) ---------
-// dg_xch enforces a hard cap of 1024 announcements per block. chia removed this
-// limit in HARD_FORK_3_0; below that fork dg_xch matches the 1024/1025 boundary.
 #[test]
 fn announcement_limit_is_mempool_only_consensus_accepts_1025() {
-    // The 1024-announcement cap is chia's MEMPOOL rule; consensus accepts
-    // announcement-heavy blocks (mainnet 4,693,324 is an 830-spend dust sweep past the cap).
     for count in [1024usize, 1025] {
         let conds = conds_for_solution(
             Bytes32::new([1; 32]),
@@ -1161,32 +1096,6 @@ fn announcement_limit_is_mempool_only_consensus_accepts_1025() {
     }
 }
 
-// ===========================================================================
-// Negative / out-of-range height/seconds condition arguments.
-// FIXED: condition-arg decode now saturates a signed CLVM integer into the u32/
-// u64 slot (`formatting::saturating_u32_from_bigint` / `saturating_u64_from_bigint`),
-// and the assertion direction (>= for ASSERT_*, < for ASSERT_BEFORE_*) resolves
-// which end is a no-op and which is a failure — matching chia exactly.
-//
-// Per-opcode rule confirmed against
-// chia/_tests/core/full_node/test_conditions.py::TestConditions::test_condition
-// (block_height 3, prev-tx ts 10030, spent coin born height 2 / ts 10020):
-//
-//   family                       | negative arg  | arg > type max
-//   -----------------------------|---------------|----------------
-//   ASSERT_HEIGHT/SECONDS_*       | no-op, PASS   | FAIL (unreachable future)
-//   ASSERT_BEFORE_HEIGHT/SECONDS_*| FAIL          | no-op, PASS (bound never hit)
-//
-// The two families move in OPPOSITE directions for an impossible bound. dg_xch
-// collapses the specific chia error codes (ASSERT_BEFORE_*_FAILED /
-// IMPOSSIBLE_*_CONSTRAINTS) into AssertHeightAbsoluteFailed / AssertSecondsAbsoluteFailed
-// for absolute and AssertHeight/SecondsRelativeFailed for relative — the
-// accept/reject direction is what these tests pin.
-//
-// The negative ASSERT_BEFORE_* direction was the dangerous one: it previously
-// decoded UNSIGNED (`-1` -> 255), admitting a spend the network rejects.
-// ===========================================================================
-
 // Two big-endian bytes that decode (signed) to +2^32, one past u32::MAX.
 fn u32_overflow_arg() -> Vec<u8> {
     vec![0x01, 0x00, 0x00, 0x00, 0x00]
@@ -1199,7 +1108,6 @@ fn u64_overflow_arg() -> Vec<u8> {
 
 #[test]
 fn negative_height_absolute_is_noop_like_chia() {
-    // chia: (83 -1) => None (pass). Coin spent at block_height 0.
     let conds = conds_for_raw(
         Bytes32::new([1; 32]),
         100,
@@ -1215,7 +1123,6 @@ fn negative_height_absolute_is_noop_like_chia() {
 
 #[test]
 fn negative_seconds_absolute_is_noop_like_chia() {
-    // chia: (81 -1) => None (pass). -1 clamps to 0; 0 <= ts 0 => satisfied.
     let conds = conds_for_raw(
         Bytes32::new([1; 32]),
         100,
@@ -1228,14 +1135,8 @@ fn negative_seconds_absolute_is_noop_like_chia() {
     assert!(validate_block_conditions(&conds, &seconds_ctx(0)).is_ok());
 }
 
-// ---- both-direction coverage: ASSERT_BEFORE_* negative must REJECT ----------
-// This was the dangerous under-rejection: `-1` decoded UNSIGNED to 255 admitted
-// a spend chia rejects. A before-bound in the past is unsatisfiable => FAIL.
-
 #[test]
 fn negative_before_height_absolute_rejects_like_chia() {
-    // chia: (87 -1) => ASSERT_BEFORE_HEIGHT_ABSOLUTE_FAILED. -1 clamps to 0;
-    // block_height 0 >= before-bound 0 => rejected at every height.
     let conds = conds_for_raw(
         Bytes32::new([1; 32]),
         100,
@@ -1253,7 +1154,6 @@ fn negative_before_height_absolute_rejects_like_chia() {
 
 #[test]
 fn negative_before_seconds_absolute_rejects_like_chia() {
-    // chia: (85 -1) => ASSERT_BEFORE_SECONDS_ABSOLUTE_FAILED.
     let conds = conds_for_raw(
         Bytes32::new([1; 32]),
         100,
@@ -1271,8 +1171,6 @@ fn negative_before_seconds_absolute_rejects_like_chia() {
 
 #[test]
 fn negative_before_height_relative_rejects_like_chia() {
-    // chia: (86 -1) => ASSERT_BEFORE_HEIGHT_RELATIVE_FAILED. -1 clamps to 0;
-    // block_height >= spent_height + 0 is always true once spent => FAIL.
     let parent = Bytes32::new([1; 32]);
     let amount = 100;
     let coin = coin_of(parent, amount, &easy_puzzle());
@@ -1301,7 +1199,6 @@ fn negative_before_height_relative_rejects_like_chia() {
 
 #[test]
 fn negative_before_seconds_relative_rejects_like_chia() {
-    // chia: (84 -1) => ASSERT_BEFORE_SECONDS_RELATIVE_FAILED.
     let parent = Bytes32::new([1; 32]);
     let amount = 100;
     let coin = coin_of(parent, amount, &easy_puzzle());
@@ -1334,8 +1231,6 @@ fn negative_before_seconds_relative_rejects_like_chia() {
 
 #[test]
 fn overflow_height_absolute_rejects_like_chia() {
-    // chia: (83 0x100000000) => ASSERT_HEIGHT_ABSOLUTE_FAILED. +2^32 saturates
-    // to u32::MAX, which exceeds any real block height => FAIL.
     let conds = conds_for_raw(
         Bytes32::new([1; 32]),
         100,
@@ -1353,7 +1248,6 @@ fn overflow_height_absolute_rejects_like_chia() {
 
 #[test]
 fn overflow_seconds_absolute_rejects_like_chia() {
-    // chia: (81 0x10000000000000000) => ASSERT_SECONDS_ABSOLUTE_FAILED.
     let conds = conds_for_raw(
         Bytes32::new([1; 32]),
         100,
@@ -1371,8 +1265,6 @@ fn overflow_seconds_absolute_rejects_like_chia() {
 
 #[test]
 fn overflow_before_height_absolute_is_noop_like_chia() {
-    // chia: (87 0x100000000) => None (pass). +2^32 saturates to u32::MAX; a real
-    // block height is always < u32::MAX => the before-bound is never hit.
     let conds = conds_for_raw(
         Bytes32::new([1; 32]),
         100,
@@ -1387,8 +1279,6 @@ fn overflow_before_height_absolute_is_noop_like_chia() {
 
 #[test]
 fn overflow_before_seconds_absolute_is_noop_like_chia() {
-    // chia: (85 0x10000000000000000) => None (pass). +2^64 saturates to u64::MAX;
-    // a real timestamp is always < u64::MAX => the before-bound is never hit.
     let conds = conds_for_raw(
         Bytes32::new([1; 32]),
         100,
@@ -1400,24 +1290,6 @@ fn overflow_before_seconds_absolute_is_noop_like_chia() {
     .expect("parsing an out-of-range before-seconds must not error");
     assert!(validate_block_conditions(&conds, &seconds_ctx(10030)).is_ok());
 }
-
-// ===========================================================================
-// BLS G1 infinity public key rejected in AGG_SIG conditions.
-//
-// chia rejects the identity/infinity element (0xc0 followed by 47 zero bytes) as
-// an AGG_SIG_* public key with Err.INVALID_CONDITION under the soft-fork-5 rule,
-// now enforced at every current mainnet height. dg_xch previously parsed it as an
-// ordinary Bytes48 and deferred any failure to signature verification. The fix
-// (ConditionWithArgs::agg_sig_infinity_pubkey + spend_from_conditions) refuses the
-// key during condition aggregation, before signature verification, surfacing the
-// same INVALID_CONDITION (Err code 10).
-// chia oracle: test_conditions.py::test_agg_sig_infinity.
-//
-// Note on the expected error: the original evidence stub asserted only that the
-// infinity key produced no agg_sig entry. The faithful chia behavior is an
-// outright block rejection with INVALID_CONDITION, so this re-derived test now
-// asserts execution returns Err(ChiaError::InvalidCondition) (Err code 10).
-// ===========================================================================
 
 // The disallowed G1 identity element in compressed form: 0xc0 then 47 zero bytes.
 fn g1_infinity_pubkey() -> Bytes48 {
@@ -1500,13 +1372,6 @@ fn agg_sig_non_infinity_pubkey_is_still_accepted() {
         );
     }
 }
-
-// ===========================================================================
-// conditions_from_spend_bundle — the mempool-admission analog of the generator
-// run (chia_rs run_spendbundle). The EASY_PUZZLE (`1`) echoes its solution as
-// the condition list, so a hand-built CoinSpend exercises the whole path:
-// byte-cost charging, puzzle-hash binding, per-spend parse, dup detection.
-// ===========================================================================
 
 fn easy_coin_spend(parent: Bytes32, amount: u64, conditions: Vec<ConditionWithArgs>) -> CoinSpend {
     let puzzle = easy_puzzle();
@@ -1654,10 +1519,6 @@ mod agg_sig_verifier_equivalence {
         }
     }
 
-    // A 48-byte key that is not a valid compressed G1 point must reject (never panic). The
-    // per-occurrence path decays it to the default/infinity point (`unwrap_or_default` in
-    // `From<Bytes48> for PublicKey`) and blst rejects it as BLST_PK_IS_INFINITY; the deduped
-    // path rejects at deserialize — the same verdict.
     #[test]
     fn malformed_pk_bytes_reject() {
         assert_bad_pk_rejects_in_both_branches(vec![0x01u8; 48], "malformed pk");
@@ -1686,17 +1547,6 @@ mod agg_sig_verifier_equivalence {
             .expect("distinct-key pair set verifies");
     }
 
-    // A key that deserializes (on-curve E1 point) but is NOT in the G1 subgroup must reject.
-    // This pins the reject VERDICT on both branches (blst catches it per occurrence under
-    // `pks_validate`; the deduped branch catches it once per distinct key via
-    // `PublicKey::validate()`). Note the verdict alone cannot prove WHICH check rejected: with
-    // an honest aggregate the pairing equation fails for a torsion-bearing key anyway, and the
-    // AUG scheme's pk-prefixed messages make a cross-pair torsion-cancellation forgery
-    // infeasible — so branch-equivalence of the subgroup check rests on the cited blst
-    // semantics (aggregate.c PAIRING_Aggregate_PK_in_G1), with this test pinning the reachable
-    // behavior. Vector: x = 4 on E1 (found by scanning small x with blst: deserializes,
-    // `PublicKey::validate()` = BLST_POINT_NOT_IN_GROUP; E1's cofactor is ~7.6e37 so a random
-    // on-curve point is essentially never in G1).
     #[test]
     fn non_subgroup_pk_rejects() {
         let mut non_subgroup_pk = vec![0u8; 48];
@@ -1705,8 +1555,6 @@ mod agg_sig_verifier_equivalence {
         assert_bad_pk_rejects_in_both_branches(non_subgroup_pk, "non-subgroup pk");
     }
 
-    // The infinity public key must reject, matching blst's unconditional PK_IS_INFINITY
-    // rejection in PAIRING_Aggregate_PK_in_G1 (and chia's infinity-G1 hardening).
     #[test]
     fn infinity_pk_rejects() {
         let mut infinity_pk = vec![0u8; 48];

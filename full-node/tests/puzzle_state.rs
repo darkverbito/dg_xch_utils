@@ -1,27 +1,4 @@
-// "Sage protocol" — the modern wallet-sync surface over the wire, both ends on production
-// stacks: the node under test serves `full_node_handlers`, the wallet-side peer dials as
-// `NodeType::Wallet` (exactly how Sage connects). Four messages were silently dropped (no dispatch
-// arm — every request timed out) and one push was never sent at all:
-//
-//   RequestPuzzleState (98)              → RespondPuzzleState (99) / RejectPuzzleState (100)
-//   RequestCoinState (101)               → RespondCoinState (102) / RejectCoinState (103)
-//   RequestRemovePuzzleSubscriptions (94) → RespondRemovePuzzleSubscriptions (95)
-//   RequestRemoveCoinSubscriptions (96)  → RespondRemoveCoinSubscriptions (97)
-//   NewPeakWallet (50)                   → pushed on wallet connect + on every peak advance
-//
-// Semantics under test: `request_puzzle_state` / `request_coin_state` — the
-// `previous_height`/`header_hash` reorg-consistency check against `height_to_hash`
-// (previous_height=None compares against the GENESIS_CHALLENGE) rejecting
-// `RejectStateReason.REORG` on mismatch; `CoinStateFilters` and paging; the subscribe side
-// effect counting against `max_subscriptions`; `request_remove_*_subscriptions` with `None` =
-// remove-all returning the removed set. NO sync gate: these serve from whatever chain state the
-// node has (there is no `synced` check in either handler).
-// on_connect` greets a WALLET peer with the current peak as
-// `NewPeakWallet` (fork_point = peak height), and `update_wallets` broadcasts
-// `NewPeakWallet` to every wallet peer on a peak advance. Sage DROPS a peer that stays silent
-// for 2s after the handshake (sage-wallet sync_manager/peer_discovery.rs `try_add_peer`,
-// options.rs `initial_peak = 2s`), so without the on-connect push the query surface is
-// unreachable — Sage disconnects before ever asking.
+#![cfg(feature = "hint")]
 
 mod common;
 
@@ -66,8 +43,7 @@ fn config(listen: SocketAddr, rpc: SocketAddr) -> Config {
     Config {
         rpc_tls: full_node::RpcTlsMode::Local,
         debug_endpoints: false,
-        target_outbound: None,
-        target_peer_count: None,
+        p2p: Default::default(),
         listen,
         rpc,
         introducer: None,
@@ -136,9 +112,6 @@ fn push_capture_handlers() -> (HandlerMap, mpsc::Receiver<Arc<ChiaMessage>>) {
     (Arc::new(RwLock::new(map)), rx)
 }
 
-// Dial the node exactly as Sage does: a `NodeType::Wallet` handshake over the Chia mTLS cert model.
-// (`dg_xch_p2p::dial` is the FULL-NODE dialer; a wallet must advertise NodeType::Wallet or the
-// node cannot know to greet it with NewPeakWallet.)
 async fn dial_wallet(port: u16, handlers: HandlerMap) -> WsClient {
     let cfg = Arc::new(WsClientConfig {
         host: "127.0.0.1".to_string(),
@@ -441,9 +414,6 @@ async fn mismatched_previous_header_hash_rejects_reorg() {
     drop(node);
 }
 
-// ── 3. NO sync gate: `request_puzzle_state`/request_coin_state serve regardless of sync state
-// (no `synced` check in either handler — unlike send_transaction). A catching-up node answers from
-// the chain it has.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn unsynced_node_still_serves_puzzle_state() {
     let (node, client, _push) = rig(false).await;
@@ -779,7 +749,7 @@ async fn sage_sync_sequence_end_to_end() {
 
 // (The over-cap ExceededSubscriptionLimit reject and the paging/filter matrix are proven at the
 // api level in `daemon.rs`'s test module, where the 100k response budget and 200k subscription
-// cap are injectable — seeding 200k+ live subscriptions over the wire is impractical. CNI
+// cap are injectable because seeding 200k live subscriptions over the wire is impractical.
 // additionally truncates the request LISTS at parse time via its `list_limits` decorator
 // (→ parse_list_limited); our handlers apply the identical
 // truncation after decode, which is byte-stream- and semantics-equivalent.)

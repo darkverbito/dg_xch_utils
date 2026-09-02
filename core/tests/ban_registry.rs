@@ -1,7 +1,3 @@
-//! Unit coverage for the timed peer ban list (chia `ChiaServer.banned_peers`). Kept as an
-//! integration test against the fully-public `BanRegistry` API so it runs independently of the
-//! crate's in-tree `#[cfg(test)]` code.
-
 use dg_xch_core::protocols::ban::{BanCause, BanRegistry};
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
@@ -10,8 +6,6 @@ fn ip(a: u8, b: u8, c: u8, d: u8) -> IpAddr {
     IpAddr::V4(Ipv4Addr::new(a, b, c, d))
 }
 
-// Test 3: each ban cause maps to chia's protocol_timing.py duration exactly (verified against chia
-// 2.7.1: RATE_LIMITER=300, CONSENSUS_ERROR=600, INVALID_PROTOCOL/API_EXCEPTION/INTERNAL=10).
 #[test]
 fn ban_cause_durations_match_chia() {
     assert_eq!(BanCause::RateLimit.ban_seconds(), 300);
@@ -48,7 +42,6 @@ fn ban_expires_and_is_pruned() {
     assert_eq!(reg.len(), 0, "the expired entry was pruned");
 }
 
-// chia `ban_peer`: re-banning never shortens an existing ban.
 #[test]
 fn reban_keeps_the_longer_expiry() {
     let reg = BanRegistry::default();

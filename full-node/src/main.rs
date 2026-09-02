@@ -1,8 +1,10 @@
 use clap::Parser;
 use dg_logger::DruidGardenLoggerBuilder;
+use dg_xch_p2p::P2pSettings;
 use full_node::{Config, Node};
 use log::Level;
 use std::sync::Arc;
+use std::time::Duration;
 
 // jemalloc as the global allocator. glibc malloc grows one 64MB arena per contending thread
 // (up to 8x cores) and never returns freed non-main-arena pages to the OS — under the
@@ -13,32 +15,22 @@ use std::sync::Arc;
 #[global_allocator]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-// dg_xch full-node daemon. Honors the documented CLI flags; env conventions FULLNODE_HOST / FULLNODE_PORT.
-// No network-specific env vars — network identity enters only via ConsensusConstants + --network.
 #[derive(Parser, Debug)]
 #[command(name = "full-node", about = "dg_xch validating full node")]
 struct Cli {
-    /// Chia P2P listen address (peers reach us here).
     #[arg(long, default_value = "0.0.0.0:8444")]
     listen: String,
     /// Local RPC listen address.
     #[arg(long, default_value = "127.0.0.1:8555")]
     rpc: String,
-    /// RPC client-auth posture: `local` (default) = no client certs, loopback-only (a routable
-    /// --rpc bind is downgraded to loopback with a warning); `cni` = CNI-compatible mutual TLS
-    /// against a per-install private CA (auto-generated under --ssl-dir if absent) for an
-    /// authenticated network RPC. The world-public Chia CA is never a client-auth anchor in either.
     #[arg(long = "rpc-tls", default_value = "local")]
     rpc_tls: String,
-    /// Directory holding the RPC private CA for `--rpc-tls cni` (`<ssl-dir>/ca/private_ca.{crt,key}`,
+    /// Directory holding the RPC private CA for `--rpc-tls private-ca` (`<ssl-dir>/ca/private_ca.{crt,key}`,
     /// generated once and persisted). Distribute the crt to RPC tooling; keep the key node-private.
     #[arg(long = "ssl-dir", default_value = "ssl")]
     ssl_dir: String,
-    /// Seed introducer host:port for peer bootstrap.
     #[arg(long)]
     introducer: Option<String>,
-    /// Manual peer host:port to dial directly, repeatable. Bypasses the introducer for these peers and
-    /// re-dials them if dropped; point at trusted, fast full nodes to bootstrap without the public introducer.
     #[arg(long = "peer")]
     peer: Vec<String>,
     /// External WAN address advertised for peer gossip behind NAT.
@@ -64,9 +56,6 @@ struct Cli {
     /// nodes each fully validate a disjoint chain segment in parallel.
     #[arg(long, default_value_t = 0)]
     sync_from: u32,
-    /// Enable the compact-VDF (bluebox) solicitation scan. OFF by default, like chia's
-    /// `send_uncompact_interval: 0`. The serve + consume halves run unconditionally; this only
-    /// turns on the background scan for bulky proofs (no effect without bluebox timelord peers).
     #[arg(long, default_value_t = false)]
     uncompact: bool,
     /// RAM budget (MiB) for the sync window readahead's resident block bodies. Unset = the shipped
@@ -88,9 +77,30 @@ struct Cli {
     /// Total peers (inbound + outbound) to accept. Unset = the built-in default.
     #[arg(long)]
     target_peer_count: Option<usize>,
-    /// Cert-hash node id (64 hex chars) granted the TRUSTED tier, repeatable — chia's `trusted_peers`.
-    /// A trusted peer gets the larger subscription (2,000,000) and response-item (500,000) caps and
-    /// high-priority transaction-queue placement. Empty (default) = every peer untrusted.
+    /// Maximum addresses retained for future outbound connections.
+    #[arg(long, default_value_t = 1_000)]
+    host_pool_capacity: usize,
+    /// Refill the address pool when it drops below this count.
+    #[arg(long, default_value_t = 5)]
+    address_lower: usize,
+    /// Stop requesting addresses when the pool reaches this count.
+    #[arg(long, default_value_t = 10)]
+    address_upper: usize,
+    #[arg(long, default_value_t = 30)]
+    connect_timeout_secs: u64,
+    #[arg(long, default_value_t = 15)]
+    handshake_timeout_secs: u64,
+    #[arg(long, default_value_t = 1)]
+    retry_timeout_secs: u64,
+    #[arg(long, default_value_t = 120)]
+    heartbeat_secs: u64,
+    #[arg(long, default_value_t = 30)]
+    pong_deadline_secs: u64,
+    #[arg(long, default_value_t = 6_000)]
+    recent_peer_threshold_secs: u64,
+    /// Lower bound for randomized reconnect backoff, from 0 through 1.
+    #[arg(long, default_value_t = 0.5)]
+    jitter_floor: f64,
     #[arg(long = "trusted-peer")]
     trusted_peer: Vec<String>,
     /// CIDR network (IPv4 or IPv6, e.g. 10.0.0.0/8) whose peers are granted the TRUSTED tier by
@@ -99,8 +109,6 @@ struct Cli {
     /// auto-trusted regardless.)
     #[arg(long = "trusted-cidr")]
     trusted_cidr: Vec<String>,
-    /// Expose /debug/heap (jemalloc heap dump) on the metrics port. OFF by default — it can leak
-    /// in-memory data and writes a file to disk. /metrics and /health are always served.
     #[arg(long = "debug-endpoints", default_value_t = false)]
     debug_endpoints: bool,
 }
@@ -117,6 +125,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| format!("failed to initialize logger: {e}"))?;
 
     let cli = Cli::parse();
+    let defaults = P2pSettings::default();
+    let p2p = P2pSettings {
+        target_outbound: cli.target_outbound.unwrap_or(defaults.target_outbound),
+        target_peer_count: cli.target_peer_count.unwrap_or(defaults.target_peer_count),
+        host_pool_capacity: cli.host_pool_capacity,
+        address_lower: cli.address_lower,
+        address_upper: cli.address_upper,
+        connect_timeout: Duration::from_secs(cli.connect_timeout_secs),
+        handshake_timeout: Duration::from_secs(cli.handshake_timeout_secs),
+        retry_timeout: Duration::from_secs(cli.retry_timeout_secs),
+        heartbeat: Duration::from_secs(cli.heartbeat_secs),
+        pong_deadline: Duration::from_secs(cli.pong_deadline_secs),
+        recent_peer_threshold: Duration::from_secs(cli.recent_peer_threshold_secs),
+        jitter_floor: cli.jitter_floor,
+    };
     let mut config = Config::build(
         &cli.listen,
         &cli.rpc,
@@ -132,15 +155,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cli.uncompact,
         cli.prefetch_memory_mb,
         cli.prefetch_max_inflight,
-        cli.target_outbound,
-        cli.target_peer_count,
+        p2p,
         &cli.trusted_peer,
         &cli.trusted_cidr,
     )
     .map_err(std::io::Error::other)?;
 
-    // The RPC client-auth trust anchor is chosen here (default CNI private-CA mTLS). It is never
-    // the world-public Chia CA, whose private key authenticates nobody.
+    // Select the RPC client-auth trust anchor after parsing the base configuration.
     config.rpc_tls =
         full_node::RpcTlsMode::parse(&cli.rpc_tls, &cli.ssl_dir).map_err(std::io::Error::other)?;
     config.debug_endpoints = cli.debug_endpoints;

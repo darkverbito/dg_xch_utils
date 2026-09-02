@@ -248,11 +248,6 @@ async fn mismatched_request_aborts_the_plan() {
     assert!(rig.drained().await);
 }
 
-// Property 6 — adaptive depth is grow-only: a take that measurably waits grows K toward the
-// ceiling, and instant takes leave it alone. The old shrink-on-streak policy was a starvation
-// ratchet on fast peers (instant takes are the pipeline WORKING, not over-provisioned; the CNI
-// bake-off measured depth walking 64 → 5 with throughput down ~35%); resident memory stays
-// bounded by the byte budget at dispatch, the only legitimate downward force.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn depth_grows_on_wait_and_holds_on_instant_takes() {
     let rig = Rig::new();
@@ -272,8 +267,6 @@ async fn depth_grows_on_wait_and_holds_on_instant_takes() {
         "a measured wait grows the depth"
     );
     assert!(ra.depth() <= READAHEAD_MAX_DEPTH);
-    // Hold: many takes that never wait (resolved long before the take) must NOT walk the
-    // depth back down — that decay is the bake-off starvation ratchet.
     let fast: Vec<_> = (0..8).map(|i| rig.peer(8 + i)).collect();
     let mut from = BATCH;
     for _ in 0..64 {

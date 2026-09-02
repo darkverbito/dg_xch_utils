@@ -1,18 +1,3 @@
-// Full-conditions golden digest over committed mainnet blocks.
-//
-// The cost walls prove each block's total cost is exact, but cost is one number — two condition
-// parses can disagree while costing the same. This gate pins EVERYTHING the VM emits for a block:
-// every spend's coin id, parent, puzzle hash, amount, every created coin with hint, every timelock
-// and announcement, every agg-sig class, every message, reserve_fee, and the addition/removal
-// totals. The whole `SpendBundleConditions` is canonicalized (spends sorted by coin id, the
-// create-coin set sorted) and hashed; one digest per block, frozen in
-// `fixtures/clvm_conditions_digests.json` (UPDATE_GOLDEN=1 re-harvests).
-//
-// Any semantic drift in any operator, the condition parser, or the ROM anywhere in these blocks
-// moves a digest. The corpus is every committed generator fixture: 46 contiguous real mainnet
-// blocks (9,179,155..9,179,200), three cost-maxed blocks, and the standalone generator fixtures —
-// no chain sync required.
-
 use dg_xch_core::blockchain::full_block::FullBlock;
 use dg_xch_core::blockchain::spend_bundle_conditions::SpendBundleConditions;
 use dg_xch_core::clvm::program::SerializedProgram;

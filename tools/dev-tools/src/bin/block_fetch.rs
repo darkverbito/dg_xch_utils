@@ -7,14 +7,6 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
-// Wire-capture a mainnet block range from a live peer into offline replay corpus frames —
-// `blocks_<a>_<b>.bin` RespondBlocks blobs, the exact format `corpus-import` emits and the
-// sync-replay harnesses load. This is the peer-sourced sibling of `corpus-import`: it dials any
-// reachable full node with the embedded mainnet CA identity and issues `RequestBlocks` with
-// `include_transaction_block=true`, windowed at 32 blocks per request (peers cap a
-// `RequestBlocks` range at 32).
-//
-// Usage: block_fetch --host <peer> --port 8444 --start <h> --end <h> --out <dir>
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut host = None;
     let mut port = 8444u16;

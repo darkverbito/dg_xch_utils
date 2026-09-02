@@ -21,13 +21,6 @@ impl ClassgroupElement {
         }
     }
 
-    /// chia `std_hash(bytes(output))`. The consensus hash of this class-group element (a VDF output):
-    /// sha256 over its streamable encoding. Used as the signage-point challenge derived from a
-    /// signage-point VDF output during header validation. As a blockchain (not network) type its encoding
-    /// — hence this hash — is independent of the negotiated protocol version.
-    ///
-    /// # Errors
-    /// Returns an error if the streamable encoding of the element fails.
     pub fn hash(&self) -> Result<Bytes32, Error> {
         Ok(Bytes32::from(hash_256(
             self.to_bytes(ChiaProtocolVersion::default())?,

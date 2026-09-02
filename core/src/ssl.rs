@@ -82,13 +82,6 @@ impl ClientCertVerifier for AllowAny {
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
         vec![
-            // The RSA_PSS schemes are load-bearing: this list becomes the TLS 1.3
-            // CertificateRequest's signature_algorithms, and RFC 8446 §4.2.3 forbids
-            // rsa_pkcs1_* for TLS 1.3 handshake signatures. Chia certs are RSA, so without
-            // PSS here an OpenSSL peer has no scheme it may sign its CertificateVerify with
-            // and sends an EMPTY client Certificate list — the server then sees no peer
-            // cert, has no cert-hash identity, and drops the connection
-            // (NoCertificatesPresented).
             SignatureScheme::RSA_PSS_SHA256,
             SignatureScheme::RSA_PSS_SHA384,
             SignatureScheme::RSA_PSS_SHA512,

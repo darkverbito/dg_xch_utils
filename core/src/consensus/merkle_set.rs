@@ -1,19 +1,4 @@
-//! The wallet-facing `MerkleSet` — the tree construction and INCLUSION/EXCLUSION proof
-//! generation behind `request_additions` / `request_removals`, whose proofs a light wallet
-//! verifies against the block header's foliage `additions_root` / `removals_root`.
-//!
-//! The proof byte encoding is consensus-frozen; byte-parity is pinned by
-//! `core/tests/merkle_set_proofs.rs` and the block-5,000,000 fixtures in `full-node/tests`.
-//!
-//! The producer/validator-side ROOT computation (`block_generator.rs::merkle_set_root`) is the
-//! collapsed single-pass recursion over the same node hashing; this module additionally retains
-//! the tree (`nodes_vec`) so proofs can be generated. `canonical_removals_root(x)` and
-//! `MerkleSet::from_leafs(x).get_root()` agree bit-for-bit (cross-checked in tests).
-//!
-//! Proof wire format (node-type prefixed pre-order): `EMPTY=0`, `TERMINAL=1` + 32-byte leaf,
-//! `MIDDLE=2` + left + right, `TRUNCATED=3` + 32-byte subtree hash. Proofs include every tree
-//! layer down to the leaf pair (no collapsing — `pad_middles_for_proof_gen` re-expands the
-//! collapsed levels), while node HASHES are computed as-if collapsed (the `MidDbl` propagation).
+//! Merkle-set construction and proof validation for wallet requests.
 
 use crate::utils::hash_256;
 
@@ -24,8 +9,7 @@ const HASH_PREFIX: [u8; 30] = [0u8; 30];
 /// The empty-set root / empty-subtree hash (all zeros).
 pub const BLANK: [u8; 32] = [0u8; 32];
 
-// sha256(bytes([0] * 32)) — the nodes_vec placeholder hash for inserted Empty nodes.
-// Never enters a proof or a root.
+// Internal placeholder for empty nodes retained in the proof tree.
 const EMPTY_NODE_HASH: [u8; 32] = [
     0x66, 0x68, 0x7a, 0xad, 0xf8, 0x62, 0xbd, 0x77, 0x6c, 0x8f, 0xc1, 0x8b, 0x8e, 0x9f, 0x8e, 0x20,
     0x08, 0x97, 0x14, 0x85, 0x6e, 0xe2, 0x33, 0xb3, 0x90, 0x2a, 0x59, 0x1d, 0x0d, 0x5f, 0x29, 0x25,
@@ -79,22 +63,34 @@ fn get_bit(val: &[u8; 32], bit: u8) -> bool {
     (val[(bit / 8) as usize] & (0x80 >> (bit & 7))) != 0
 }
 
-/// The stored node shape (indexes into `nodes_vec`).
+/// The shape of a node retained for proof generation.
 #[derive(PartialEq, Debug, Copy, Clone)]
-enum ArrayTypes {
+enum StoredKind {
     Leaf,
     Middle(u32, u32),
     Empty,
     Truncated,
 }
 
-impl From<ArrayTypes> for NodeType {
-    fn from(val: ArrayTypes) -> NodeType {
+impl From<StoredKind> for NodeType {
+    fn from(val: StoredKind) -> NodeType {
         match val {
-            ArrayTypes::Empty => NodeType::Empty,
-            ArrayTypes::Leaf => NodeType::Term,
-            ArrayTypes::Middle(_, _) | ArrayTypes::Truncated => NodeType::Mid,
+            StoredKind::Empty => NodeType::Empty,
+            StoredKind::Leaf => NodeType::Term,
+            StoredKind::Middle(_, _) | StoredKind::Truncated => NodeType::Mid,
         }
+    }
+}
+
+#[derive(PartialEq, Debug, Copy, Clone)]
+struct StoredNode {
+    kind: StoredKind,
+    hash: [u8; 32],
+}
+
+impl StoredNode {
+    const fn new(kind: StoredKind, hash: [u8; 32]) -> Self {
+        Self { kind, hash }
     }
 }
 
@@ -114,9 +110,7 @@ impl std::error::Error for SetError {}
 /// A retained merkle set over 32-byte leaves: all nodes in a vec, root last.
 #[derive(PartialEq, Debug, Clone, Default)]
 pub struct MerkleSet {
-    nodes_vec: Vec<(ArrayTypes, [u8; 32])>,
-    // True when rebuilt from a proof: the tree may contain truncated subtrees, so newly generated
-    // proofs don't round-trip — generate_proof then reports inclusion with an EMPTY proof.
+    nodes: Vec<StoredNode>,
     from_proof: bool,
 }
 
@@ -130,7 +124,9 @@ impl MerkleSet {
             ..Default::default()
         };
         if leafs.is_empty() {
-            merkle_tree.nodes_vec.push((ArrayTypes::Empty, BLANK));
+            merkle_tree
+                .nodes
+                .push(StoredNode::new(StoredKind::Empty, BLANK));
             return merkle_tree;
         }
         merkle_tree.generate_merkle_tree_recurse(leafs, 0);
@@ -184,8 +180,8 @@ impl MerkleSet {
                     let b = read_exact(proof, &mut pos, 1)?[0];
                     match b {
                         EMPTY => {
-                            values.push((self.nodes_vec.len() as u32, NodeType::Empty));
-                            self.nodes_vec.push((ArrayTypes::Empty, BLANK));
+                            values.push((self.nodes.len() as u32, NodeType::Empty));
+                            self.nodes.push(StoredNode::new(StoredKind::Empty, BLANK));
                         }
                         TERMINAL => {
                             let mut leaf = [0u8; 32];
@@ -196,14 +192,14 @@ impl MerkleSet {
                                     return Err(SetError);
                                 }
                             }
-                            values.push((self.nodes_vec.len() as u32, NodeType::Term));
-                            self.nodes_vec.push((ArrayTypes::Leaf, leaf));
+                            values.push((self.nodes.len() as u32, NodeType::Term));
+                            self.nodes.push(StoredNode::new(StoredKind::Leaf, leaf));
                         }
                         TRUNCATED => {
                             let mut th = [0u8; 32];
                             th.copy_from_slice(read_exact(proof, &mut pos, 32)?);
-                            values.push((self.nodes_vec.len() as u32, NodeType::Mid));
-                            self.nodes_vec.push((ArrayTypes::Truncated, th));
+                            values.push((self.nodes.len() as u32, NodeType::Mid));
+                            self.nodes.push(StoredNode::new(StoredKind::Truncated, th));
                         }
                         MIDDLE => {
                             if depth > 256 {
@@ -243,25 +239,27 @@ impl MerkleSet {
                         // A collapsed layer: copy the double-terminal child's hash upward.
                         (NodeType::Empty, NodeType::MidDbl) => {
                             values.push(right);
-                            self.nodes_vec[right.0 as usize].1
+                            self.nodes[right.0 as usize].hash
                         }
                         (NodeType::MidDbl, NodeType::Empty) => {
                             values.push(left);
-                            self.nodes_vec[left.0 as usize].1
+                            self.nodes[left.0 as usize].hash
                         }
                         // Not collapsed: hash the pair.
                         (_, _) => {
-                            values.push((self.nodes_vec.len() as u32, new_node_type));
+                            values.push((self.nodes.len() as u32, new_node_type));
                             hash(
-                                self.nodes_vec[left.0 as usize].0.into(),
-                                self.nodes_vec[right.0 as usize].0.into(),
-                                &self.nodes_vec[left.0 as usize].1,
-                                &self.nodes_vec[right.0 as usize].1,
+                                self.nodes[left.0 as usize].kind.into(),
+                                self.nodes[right.0 as usize].kind.into(),
+                                &self.nodes[left.0 as usize].hash,
+                                &self.nodes[right.0 as usize].hash,
                             )
                         }
                     };
-                    self.nodes_vec
-                        .push((ArrayTypes::Middle(left.0, right.0), node_hash));
+                    self.nodes.push(StoredNode::new(
+                        StoredKind::Middle(left.0, right.0),
+                        node_hash,
+                    ));
                     depth -= 1;
                 }
             }
@@ -276,13 +274,13 @@ impl MerkleSet {
     /// The set's root hash: empty → all-zeros, single leaf → `Sha256(1 || leaf)`.
     #[must_use]
     pub fn get_root(&self) -> [u8; 32] {
-        let Some(last) = self.nodes_vec.last() else {
+        let Some(last) = self.nodes.last() else {
             return BLANK;
         };
-        match last.0 {
-            ArrayTypes::Leaf => hash_leaf(&last.1),
-            ArrayTypes::Middle(_, _) | ArrayTypes::Truncated => last.1,
-            ArrayTypes::Empty => BLANK,
+        match last.kind {
+            StoredKind::Leaf => hash_leaf(&last.hash),
+            StoredKind::Middle(_, _) | StoredKind::Truncated => last.hash,
+            StoredKind::Empty => BLANK,
         }
     }
 
@@ -296,7 +294,7 @@ impl MerkleSet {
     pub fn generate_proof(&self, leaf: &[u8; 32]) -> Result<(bool, Vec<u8>), SetError> {
         let mut proof = Vec::new();
         let included = self.generate_proof_impl(
-            self.nodes_vec.len().checked_sub(1).ok_or(SetError)?,
+            self.nodes.len().checked_sub(1).ok_or(SetError)?,
             leaf,
             &mut proof,
             0,
@@ -315,32 +313,32 @@ impl MerkleSet {
         proof: &mut Vec<u8>,
         depth: u8,
     ) -> Result<bool, SetError> {
-        match self.nodes_vec[current_node_index].0 {
-            ArrayTypes::Empty => {
+        match self.nodes[current_node_index].kind {
+            StoredKind::Empty => {
                 proof.push(EMPTY);
                 Ok(false)
             }
-            ArrayTypes::Leaf => {
+            StoredKind::Leaf => {
                 proof.push(TERMINAL);
-                proof.extend_from_slice(&self.nodes_vec[current_node_index].1);
-                Ok(&self.nodes_vec[current_node_index].1 == leaf)
+                proof.extend_from_slice(&self.nodes[current_node_index].hash);
+                Ok(&self.nodes[current_node_index].hash == leaf)
             }
-            ArrayTypes::Middle(left, right) => {
+            StoredKind::Middle(left, right) => {
                 if matches!(
                     (
-                        self.nodes_vec[left as usize].0,
-                        self.nodes_vec[right as usize].0
+                        self.nodes[left as usize].kind,
+                        self.nodes[right as usize].kind
                     ),
-                    (ArrayTypes::Leaf, ArrayTypes::Leaf)
+                    (StoredKind::Leaf, StoredKind::Leaf)
                 ) {
                     pad_middles_for_proof_gen(
                         proof,
-                        &self.nodes_vec[left as usize].1,
-                        &self.nodes_vec[right as usize].1,
+                        &self.nodes[left as usize].hash,
+                        &self.nodes[right as usize].hash,
                         depth,
                     );
-                    return Ok(&self.nodes_vec[left as usize].1 == leaf
-                        || &self.nodes_vec[right as usize].1 == leaf);
+                    return Ok(&self.nodes[left as usize].hash == leaf
+                        || &self.nodes[right as usize].hash == leaf);
                 }
 
                 proof.push(MIDDLE);
@@ -355,22 +353,22 @@ impl MerkleSet {
                     Ok(r)
                 }
             }
-            ArrayTypes::Truncated => Err(SetError),
+            StoredKind::Truncated => Err(SetError),
         }
     }
 
     // The not-traversed sibling subtree, as needed to recompute the root: Empty stays a code,
     // a leaf is TERMINAL (double-terminal collapse needs the real leaf), else TRUNCATED + hash.
     fn other_included(&self, current_node_index: usize, proof: &mut Vec<u8>) {
-        match self.nodes_vec[current_node_index].0 {
-            ArrayTypes::Empty => proof.push(EMPTY),
-            ArrayTypes::Middle(_, _) | ArrayTypes::Truncated => {
+        match self.nodes[current_node_index].kind {
+            StoredKind::Empty => proof.push(EMPTY),
+            StoredKind::Middle(_, _) | StoredKind::Truncated => {
                 proof.push(TRUNCATED);
-                proof.extend_from_slice(&self.nodes_vec[current_node_index].1);
+                proof.extend_from_slice(&self.nodes[current_node_index].hash);
             }
-            ArrayTypes::Leaf => {
+            StoredKind::Leaf => {
                 proof.push(TERMINAL);
-                proof.extend_from_slice(&self.nodes_vec[current_node_index].1);
+                proof.extend_from_slice(&self.nodes[current_node_index].hash);
             }
         }
     }
@@ -385,7 +383,7 @@ impl MerkleSet {
         assert!(!range.is_empty(), "empty range in merkle tree recursion");
 
         if range.len() == 1 {
-            self.nodes_vec.push((ArrayTypes::Leaf, range[0]));
+            self.nodes.push(StoredNode::new(StoredKind::Leaf, range[0]));
             return (range[0], NodeType::Term);
         }
 
@@ -417,26 +415,27 @@ impl MerkleSet {
                 // All 256 bits identical: a duplicate value, collapsed to one leaf (it's a set).
                 debug_assert!(range.len() > 1);
                 debug_assert!(range[0] == range[1]);
-                self.nodes_vec.push((ArrayTypes::Leaf, range[0]));
+                self.nodes.push(StoredNode::new(StoredKind::Leaf, range[0]));
                 (range[0], NodeType::Term)
             } else {
                 // One-sided at this level: forward the child, inserting an Empty node only when
                 // the child is a (non-collapsing) Mid.
                 let (child_hash, child_type) = self.generate_merkle_tree_recurse(range, depth + 1);
                 if child_type == NodeType::Mid {
-                    self.nodes_vec.push((ArrayTypes::Empty, EMPTY_NODE_HASH));
-                    let node_length = self.nodes_vec.len() as u32;
+                    self.nodes
+                        .push(StoredNode::new(StoredKind::Empty, EMPTY_NODE_HASH));
+                    let node_length = self.nodes.len() as u32;
                     if left_empty {
                         let node_hash = hash(NodeType::Empty, child_type, &BLANK, &child_hash);
-                        self.nodes_vec.push((
-                            ArrayTypes::Middle(node_length - 1, node_length - 2),
+                        self.nodes.push(StoredNode::new(
+                            StoredKind::Middle(node_length - 1, node_length - 2),
                             node_hash,
                         ));
                         (node_hash, NodeType::Mid)
                     } else {
                         let node_hash = hash(child_type, NodeType::Empty, &child_hash, &BLANK);
-                        self.nodes_vec.push((
-                            ArrayTypes::Middle(node_length - 2, node_length - 1),
+                        self.nodes.push(StoredNode::new(
+                            StoredKind::Middle(node_length - 2, node_length - 1),
                             node_hash,
                         ));
                         (node_hash, NodeType::Mid)
@@ -449,24 +448,26 @@ impl MerkleSet {
             // Bottom-of-tree split of the last distinct pair (u8 depth would overflow).
             debug_assert!(range.len() > 1);
             debug_assert!(left < range.len() as i32);
-            self.nodes_vec.push((ArrayTypes::Leaf, range[0]));
-            self.nodes_vec
-                .push((ArrayTypes::Leaf, range[left as usize]));
-            let nodes_len = self.nodes_vec.len() as u32;
+            self.nodes.push(StoredNode::new(StoredKind::Leaf, range[0]));
+            self.nodes
+                .push(StoredNode::new(StoredKind::Leaf, range[left as usize]));
+            let nodes_len = self.nodes.len() as u32;
             let node_hash = hash(
                 NodeType::Term,
                 NodeType::Term,
                 &range[0],
                 &range[left as usize],
             );
-            self.nodes_vec
-                .push((ArrayTypes::Middle(nodes_len - 2, nodes_len - 1), node_hash));
+            self.nodes.push(StoredNode::new(
+                StoredKind::Middle(nodes_len - 2, nodes_len - 1),
+                node_hash,
+            ));
             (node_hash, NodeType::MidDbl)
         } else {
             // A middle node proper: recurse both sides.
             let (left_hash, left_type) =
                 self.generate_merkle_tree_recurse(&mut range[..left as usize], depth + 1);
-            let left_child_index = self.nodes_vec.len() as u32 - 1;
+            let left_child_index = self.nodes.len() as u32 - 1;
             let (right_hash, right_type) =
                 self.generate_merkle_tree_recurse(&mut range[left as usize..], depth + 1);
 
@@ -476,8 +477,8 @@ impl MerkleSet {
             } else {
                 NodeType::Mid
             };
-            self.nodes_vec.push((
-                ArrayTypes::Middle(left_child_index, self.nodes_vec.len() as u32 - 1),
+            self.nodes.push(StoredNode::new(
+                StoredKind::Middle(left_child_index, self.nodes.len() as u32 - 1),
                 node_hash,
             ));
             (node_hash, node_type)
@@ -658,10 +659,8 @@ mod tests {
         ]
     }
 
-    // Roots + full proof round-trips (inclusion for every leaf, exclusion for probes) over
-    // the corpus.
     #[test]
-    fn ported_chia_rs_corpus_roots_and_proof_round_trips() {
+    fn corpus_roots_and_proofs_round_trip() {
         for (root, leafs) in merkle_set_test_cases() {
             let tree = MerkleSet::from_leafs(&mut leafs.clone());
             assert_eq!(tree.get_root(), root);
@@ -699,10 +698,8 @@ mod tests {
         }
     }
 
-    // Pinned proof hex: every level down to the leaf pair is present (no collapsing), for
-    // inclusion AND exclusion.
     #[test]
-    fn pinned_chia_rs_complete_proof_vector() {
+    fn complete_proof_vector_is_stable() {
         let a = hx("c000000000000000000000000000000000000000000000000000000000000000");
         let b = hx("c800000000000000000000000000000000000000000000000000000000000000");
         let c = hx("7000000000000000000000000000000000000000000000000000000000000000");

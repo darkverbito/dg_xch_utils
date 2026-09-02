@@ -8,17 +8,6 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
 
-// Build a weight proof out of a node store and serialize it — the offline half of the serving arm,
-// for oracle-gating the construction against chia (`WeightProofHandler.validate_weight_proof` /
-// this crate's own validator on the produced bytes). Mirrors corpus_import's arg style.
-//
-// Usage:
-//   wp_build --db <sqlite path | sqlite://path | postgres://url> \
-//            --tip <64-hex header hash | height> \
-//            --out wp.bin [--network mainnet|testnet11]
-//
-// The proof serializes with dg_xch_serialize at the default protocol version — the exact bytes a
-// RespondProofOfWeight would carry, loadable by chia's WeightProof.from_bytes for the oracle check.
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut db = None;
     let mut tip = None;

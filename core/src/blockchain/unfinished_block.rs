@@ -26,14 +26,6 @@ pub struct UnfinishedBlock {
 }
 
 impl UnfinishedBlock {
-    /// chia `UnfinishedBlock.get_hash()`: sha256 over the streamable encoding of the WHOLE
-    /// unfinished block — the exact-duplicate identity `full_node_store.seen_unfinished_block`
-    /// dedups on (many foliages can share one reward-chain trunk, so the trunk hash alone is not
-    /// it). As a blockchain (not network) type its encoding — hence this hash — is independent of
-    /// the negotiated protocol version.
-    ///
-    /// # Errors
-    /// Returns an error if the streamable encoding of the unfinished block fails.
     pub fn hash(&self) -> Result<Bytes32, Error> {
         Ok(Bytes32::from(hash_256(
             self.to_bytes(ChiaProtocolVersion::default())?,

@@ -76,9 +76,6 @@ impl Form {
         self.square_with(&discriminant, &l)
     }
 
-    /// [`Form::square`] with the discriminant and NUCOMP bound precomputed by the caller — the
-    /// hot-loop variant. FLINT `qfb_nudupl`, ported statement-for-statement; the assembly runs on
-    /// wide fixed limbs (no allocation), with BigInt at the Form/GCD boundaries.
     pub fn square_with(&self, discriminant: &BigInt, l: &BigInt) -> Result<Self> {
         use crate::limbs::SwGcd as G;
         use crate::limbs::SwWide as W;
@@ -176,12 +173,6 @@ impl Form {
         self.compose(rhs)
     }
 
-    /// Composition of two forms of the same discriminant via NUCOMP (FLINT `qfb_nucomp`,
-    /// Shanks/Atkin): the partial extended GCD keeps intermediates near `|D|^(1/4)` instead of
-    /// full-size, which is the reference implementations' key speed technique. The raw NUCOMP output
-    /// may be non-reduced; the unique reduced representative is produced by the final `reduce`.
-    /// Differentially gated against the classic 3-congruence composition
-    /// (`compose_reference`) and the chiavdf vector suites.
     fn compose(&self, rhs: &Self) -> Result<Self> {
         // D = b² − 4ac (identical for both operands); L = |D|^(1/4), NUCOMP's partial-reduction bound.
         let discriminant = &self.b * &self.b - ((&self.a * &self.c) << 2usize);
@@ -197,8 +188,6 @@ impl Form {
         Ok(result)
     }
 
-    /// FLINT `qfb_nucomp`, ported statement-for-statement (both the small-`a1` direct branch and the
-    /// partial-GCD branch). Requires primitive operands of the same discriminant `D`; `l = |D|^(1/4)`.
     fn nucomp(f: &Self, g: &Self, discriminant: &BigInt, l: &BigInt) -> Result<Self> {
         if f.a > g.a {
             return Self::nucomp(g, f, discriminant, l);
@@ -273,8 +262,6 @@ impl Form {
         })
     }
 
-    /// The classic 3-congruence composition — retained as the differential oracle for NUCOMP.
-    /// Correct for the general `gcd(a,b) > 1` case via `w = gcd(gcd(a₁,a₂), (b₁+b₂)/2)`.
     #[cfg(test)]
     fn compose_reference(&self, rhs: &Self) -> Result<Self> {
         let two = BigInt::from(2u8);
@@ -324,9 +311,6 @@ impl Form {
     }
 }
 
-// ---- Limb-domain form path: convert once per exponentiation, not per op (chiavdf's structural
-// no-allocation model). The windowed pow loop runs its squarings entirely on stack limbs.
-
 /// A form on wide stack limbs.
 #[derive(Clone, Copy)]
 struct WForm {
@@ -354,7 +338,6 @@ impl WForm {
     }
 }
 
-/// Limb-native `normalize` (mirrors the `BigInt` version exactly).
 fn wnormalize(
     a: &mut crate::limbs::SwWide,
     b: &mut crate::limbs::SwWide,
@@ -371,7 +354,6 @@ fn wnormalize(
     *b = b.add(&ar.shl1());
 }
 
-/// Limb-native single reduction step (mirrors `reduce_impl`: fast `s ∈ {0, ±1}` paths + general).
 fn wreduce_step(
     a: &mut crate::limbs::SwWide,
     b: &mut crate::limbs::SwWide,
@@ -597,9 +579,6 @@ pub fn fast_pow_form(base: &Form, discriminant: &BigInt, exponent: &BigInt) -> R
     fast_pow_form_with(base, discriminant, &nucomp_bound(discriminant), exponent)
 }
 
-/// [`fast_pow_form`] with the NUCOMP bound precomputed by the caller — the per-proof verify hot
-/// path: `check_n_wesolowski` computes the bound once and reuses it across every segment and the
-/// final Wesolowski check, mirroring what `prove_with_discriminant` already does for squaring.
 pub fn fast_pow_form_with(
     base: &Form,
     discriminant: &BigInt,
@@ -770,10 +749,6 @@ fn normalize(a: &mut BigInt, b: &mut BigInt, c: &mut BigInt) {
 }
 
 fn reduce_impl(a: &mut BigInt, b: &mut BigInt, c: &mut BigInt) {
-    // One reduction step: s = floor((c + b) / 2c);  a' = c,  b' = 2·c·s − b,  c' = s·(c·s − b) + a.
-    // Post-NUCOMP/NUDUPL forms are near-reduced, so s is almost always 0 or ±1 — handled below with
-    // compares and adds instead of a full-width division (chiavdf's fast-reduce technique). Every
-    // branch computes the identical exact step; the general quotient falls back to the division.
     if b.magnitude() < c.magnitude() {
         // −c < b < c  ⟹  s = 0:  (a, b, c) ← (c, −b, a) — a swap and a negation, no arithmetic.
         std::mem::swap(a, c);
@@ -1038,15 +1013,11 @@ fn rounded_discriminant_bits(discriminant: &BigInt) -> Result<usize> {
     Ok((d_bits + 31) & !31usize)
 }
 
-/// The bit length of a non-negative value, matching chiavdf's `mpz_sizeinbase(x, 2)` (returns 1 for 0).
 fn xgcd_bitlen(x: &BigInt) -> i64 {
     let b = bit_len(x);
     if b == 0 { 1 } else { b as i64 }
 }
 
-/// The low 64-bit word of `(x >> shift)`, interpreted as signed — chiavdf's
-/// `chiavdf_mpz_extract_uword_from_shift_nonneg`. `x` is non-negative here; the shift is chosen so the
-/// extracted word is ~63 bits, hence non-negative.
 fn xgcd_extract_word(x: &BigInt, shift: i64) -> i128 {
     let w = if shift > 0 {
         u64_low_word(&(x >> (shift as usize)))
@@ -1056,11 +1027,6 @@ fn xgcd_extract_word(x: &BigInt, shift: i64) -> i128 {
     i64::from_ne_bytes(w.to_ne_bytes()) as i128
 }
 
-/// A faithful port of chiavdf's `mpz_xgcd_partial` (Lehmer partial extended GCD). The returned
-/// cofactor `co1` is the canonical value chiavdf's `bqfc_compress` uses for `t`; a pure-slow
-/// Euclidean version diverges (it stops one step short of the word-batched fast path), a bqfc
-/// serialization mismatch. The Lehmer word arithmetic uses `i128` (panic-safe); chiavdf's `i64`
-/// never overflows on valid inputs, so the results are identical there.
 fn xgcd_partial_co1(r2: &mut BigInt, r1: &mut BigInt, limit: &BigInt) -> BigInt {
     let mut co2 = BigInt::zero();
     let mut co1 = -BigInt::one();
@@ -1095,7 +1061,6 @@ fn xgcd_partial_co1(r2: &mut BigInt, r1: &mut BigInt, limit: &BigInt) -> BigInt 
         }
 
         if i == 0 {
-            // Single exact big-integer Euclidean step (chiavdf's slow branch).
             let q = &*r2 / &*r1;
             let rem = &*r2 - &q * &*r1;
             *r2 = r1.clone();
@@ -1130,9 +1095,6 @@ fn xgcd_partial_co1(r2: &mut BigInt, r1: &mut BigInt, limit: &BigInt) -> BigInt 
     co1
 }
 
-/// FLINT `fmpz_xgcd_partial`, ported statement-for-statement: the Lehmer partial extended GCD with
-/// BOTH cofactors, reducing `(r2, r1)` until `r1 <= limit`. Word-level steps use the same helpers as
-/// `xgcd_partial_co1` (the chiavdf variant, whose output convention differs — NUCOMP needs FLINT's).
 fn xgcd_partial(r2: &mut BigInt, r1: &mut BigInt, limit: &BigInt) -> (BigInt, BigInt) {
     use crate::limbs::SwGcd;
     let mut sr2 = SwGcd::from_bigint(r2);
@@ -1298,8 +1260,6 @@ fn lehmer_gcdinv_sw(
     a: &crate::limbs::SwGcd,
 ) -> (crate::limbs::SwGcd, crate::limbs::SwGcd) {
     use crate::limbs::SwGcd as Sw;
-    // The whole loop runs on fixed-width stack limbs (chiavdf's no-allocation technique); BigInt
-    // appears only in the rare exact-division fallback.
     let mut r2 = *a;
     let mut r1 = *b;
     // u2·b ≡ r2 (mod a) with u2 = 0 (r2 = a ≡ 0); u1·b ≡ r1 with u1 = 1.
@@ -1421,9 +1381,6 @@ mod nucomp_tests {
         }
     }
 
-    // NUCOMP must produce the identical reduced form as the reference 3-congruence composition on a
-    // long pseudo-random walk of real-size (1024-bit-discriminant) forms — the differential oracle
-    // for the fast composition path.
     #[test]
     fn nucomp_matches_reference_composition_walk() {
         let d = create_discriminant_int(b"nucomp-differential-seed", 1024).expect("discriminant");

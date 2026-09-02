@@ -1,16 +1,3 @@
-// A1 — the sync-end transition (`_finish_sync`, ).
-//
-// A bulk/fast-sync band confirms through `sync_range` → `engine.add_block` directly, bypassing the
-// per-block follow side effects: no mempool revalidation, no wallet push, no peer broadcast fire
-// until the NEXT follow-step block. The sync-end transition closes this by running
-// peak-post-processing ONCE with empty coin deltas — mempool revalidation against the (tx) peak,
-// NewPeak to full-node peers, `send_peak_to_timelords`, and NewPeakWallet to wallet peers (NO
-// per-coin CoinStateUpdate: `lookup_coin_ids` is empty). `Node::finish_sync_transition` mirrors
-// that; this drives it against live peers and asserts each send.
-//
-// Written RED against the pre-transition daemon: after a fast-sync landing the wallet peer heard
-// nothing and the outbound full-node peer got no NewPeak until the next follow block.
-
 mod common;
 
 use async_trait::async_trait;
@@ -48,8 +35,7 @@ fn config(listen: SocketAddr, rpc: SocketAddr) -> Config {
     Config {
         rpc_tls: full_node::RpcTlsMode::Local,
         debug_endpoints: false,
-        target_outbound: None,
-        target_peer_count: None,
+        p2p: Default::default(),
         listen,
         rpc,
         introducer: None,

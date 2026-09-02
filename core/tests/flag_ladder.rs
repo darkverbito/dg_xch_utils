@@ -1,10 +1,3 @@
-// The CLVM flag ladder, pinned at every fork boundary.
-//
-// An activation height is consensus: a rule enabled early rejects blocks the network accepted,
-// enabled late accepts blocks it rejected. Neither is visible through block fixtures unless one
-// sits in the affected range — three flags were mis-keyed here while every block gate stayed
-// green, because the fixtures sit at 4,671,894 and 9,179,155..9,179,200, outside the window.
-
 use dg_xch_core::clvm::utils::{
     CANONICAL_INTS, COST_CONDITIONS, DISABLE_OP, ENABLE_KECCAK_OPS_OUTSIDE_FORK, LIMITS,
     NEW_COST_MODEL, RELAXED_BLS,

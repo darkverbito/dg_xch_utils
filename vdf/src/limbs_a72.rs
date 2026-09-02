@@ -1,17 +1,3 @@
-//! aarch64 kernels for the limb loops the profile put at the top of the Pi-4's stack —
-//! kept as a measured NEGATIVE result, not used in production.
-//!
-//! The hypothesis was that the compiler's scheduling of the portable u128 carry chains left
-//! a gap on the Cortex-A72 (identical source runs ~40 µs per squaring op there against 26 on
-//! a Xeon). Measured on the idle Pi-4, these hand-held `mul`/`umulh`/`adcs` loops run
-//! 0.92–1.00× of the portable rows: LLVM was already at the floor, and the A72/Xeon gap is
-//! the multiplier's pipelining, not instruction order. See docs/algorithmic-finality.md §1c.
-//!
-//! The kernels stay behind their gates: `kernels_match_portable_rows` pins byte-identical
-//! outputs, `kernel_bench_rows` re-measures the verdict on any ARM core in seconds — no sync
-//! required. Non-aarch64 targets never compile this module; production dispatch is portable
-//! everywhere.
-
 /// One fused row of `out = X·a1 + Y·a2`: processes `n` limbs from `x`/`y` into `out`,
 /// carrying a 65-bit accumulator as (lo, hi). Returns the final (c_lo, c_hi) exactly as the
 /// portable loop does.

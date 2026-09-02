@@ -19,12 +19,6 @@ pub fn verify_n_wesolowski(
     verify_n_wesolowski_result(discriminant, x_s, proof, num_iterations, recursion).is_ok()
 }
 
-/// Whole-proof verification memo; capacity matches the reference node's verify_vdf lru_cache.
-/// Blocks sharing a signage point carry byte-identical sp VDF proofs, and the live tip
-/// re-verifies the same proofs across the unfinished/finished/gossip paths. The key is the EXACT
-/// argument bytes, each variable-length field length-prefixed (injective — no hash-collision
-/// surface on a consensus gate); the value is the deterministic pure-function result, `true` and
-/// `false` alike.
 const VERIFY_MEMO_CAPACITY: usize = 1000;
 
 struct VerifyMemo {
@@ -497,10 +491,6 @@ mod tests {
     use crate::discriminant::create_discriminant_int;
     use crate::form::{B_BYTES, get_b};
 
-    /// Differential gate for the whole-proof memo: the memoized entry point must agree with the
-    /// uncached computation on the miss path, the hit path, and under a single-byte proof
-    /// corruption — a corrupted proof shares no key with the valid one, so it can never inherit
-    /// a cached `true`.
     #[test]
     fn memoized_verify_vdf_is_identical_to_uncached() {
         let challenge =
@@ -563,8 +553,6 @@ mod tests {
             hex::decode("8be26af52b34a1a7c47a35c7f0c1add793d5b6e2b0e56e6e970cbd6bd4e17e2a")
                 .expect("challenge hex is valid");
         let x_s = [0u8; 100];
-        // Wrong-length proofs fail fast (length gate precedes any class-group work), each with a
-        // unique key via the iteration count.
         for i in 0..(VERIFY_MEMO_CAPACITY as u64 + 100) {
             let _ = verify_vdf(&challenge, &x_s, &[0u8; 8], 1024, i, 0);
         }
@@ -602,36 +590,6 @@ mod tests {
             1,
         )
         .expect("depth-1 proof should verify");
-    }
-
-    // Whole-proof serial-verify wall time on the chia vdf.txt fixture (129,499,136 iterations,
-    // depth 0) — the saturated-drain per-proof unit cost, measured below the memo. Run:
-    //   cargo test --release -p dg_xch_vdf --lib bench_serial_whole_proof_verify -- --ignored --nocapture
-    #[test]
-    #[ignore = "timing tool"]
-    fn bench_serial_whole_proof_verify() {
-        let challenge =
-            hex::decode("9104c5b5e45d48f374efa0488fe6a617790e9aecb3c9cddec06809b09f45ce9b")
-                .expect("challenge hex is valid");
-        let discriminant = create_discriminant_int(&challenge, 1024).unwrap();
-        let mut x_s = [0u8; 100];
-        x_s[0] = 0x08;
-        let proof = hex::decode(
-            "0200553bf0f382fc65a94f20afad5dbce2c1ee8ba3bf93053559ac9960c8fd80ac2222e9b649701a4141a4d8999f0dbfe0c39ea744096598a7528328e5199f0aa30aec8aae8ab5018bf1245329a8272ddff1afbd87ad2eaba1b7fd57bd25edc62e0b010000003f0ffcd0dc307a2aa4678bafba661c77d176ef23afc86e7ea9f4f9eac52b8e1850748019245ecc96547da9b731dc72cded5582a9b0c63e13fd42446c7b28b41d3ded1d0b666d5ddb5b29719e4ebe70969e67e42ddd8591eae60d83dbe619f1250400",
-        )
-        .expect("proof hex is valid");
-        // Warm (faults in the discriminant cache).
-        assert!(
-            check_n_wesolowski_impl(&discriminant, &x_s, &proof, 129_499_136, 0, false).is_ok()
-        );
-        const N: u32 = 20;
-        let start = std::time::Instant::now();
-        for _ in 0..N {
-            assert!(
-                check_n_wesolowski_impl(&discriminant, &x_s, &proof, 129_499_136, 0, false).is_ok()
-            );
-        }
-        eprintln!("SERIAL-VERIFY: {:?}/op over {N} ops", start.elapsed() / N);
     }
 
     fn fixed_be_bytes(value: &BigInt, size: usize) -> Vec<u8> {

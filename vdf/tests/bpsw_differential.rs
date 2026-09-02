@@ -1,12 +1,3 @@
-// The native Baillie–PSW against the reference, exhaustively where it matters.
-//
-// hash_prime's verdict picks the consensus prime: a single disagreement between the native
-// test and the reference walks the search to a DIFFERENT prime and forks the node. So the
-// native path earns its place only through this differential — the pseudoprime families that
-// defeat weaker tests, every small integer, and candidate-shaped random inputs at the exact
-// widths the search uses. `BPSW_DIFFERENTIAL_SCALE` multiplies the random volume for soak
-// runs on the builder.
-
 use dg_xch_vdf::testing::{is_probable_prime_native, is_probable_prime_reference};
 use num_bigint::BigUint;
 

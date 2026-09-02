@@ -1,8 +1,3 @@
-//! The node's HTTP surface on the portfu server: the Prometheus scrape and the
-//! kubelet liveness probe, byte-compatible with the responses the standalone
-//! metrics listener served — same renderer, same verdict, same stall
-//! self-report.
-
 use crate::service::ActiveNode;
 use portfu::prelude::http::StatusCode;
 use portfu::prelude::{PortfuError, Response, State, get};

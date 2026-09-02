@@ -23,8 +23,7 @@ fn config(listen: SocketAddr, rpc: SocketAddr) -> Config {
         std::process::id()
     ));
     Config {
-        target_outbound: None,
-        target_peer_count: None,
+        p2p: Default::default(),
         listen,
         rpc,
         introducer: None,
@@ -146,11 +145,6 @@ async fn daemon_boots_syncs_serves_and_answers_rpc_and_wallet() {
         Some(u64::from(common::PEAK_HEIGHT)),
         "RPC reports the synced peak"
     );
-    // The fixture peak is HISTORICAL (its tx-block timestamp is years old), and synced carries
-    // chia's semantic — `FullNode.synced` (chia full_node.py:930-948): current iff the last tx
-    // block's timestamp is within 7 minutes. Chia's own get_blockchain_state reports false for a
-    // stale-tip chain; so do we. (The synced=true case with a fresh-timestamped peak is covered by
-    // announce_pull.rs::synced_flag_requires_a_current_chain_tip.)
     assert_eq!(state["sync"]["synced"].as_bool(), Some(false));
 
     // ---- drain ----
@@ -159,9 +153,6 @@ async fn daemon_boots_syncs_serves_and_answers_rpc_and_wallet() {
     peer_run.store(false, Ordering::Relaxed);
 }
 
-// A Chia-cert-model TLS client (server cert unvalidated, CLIENT CERT PRESENTED — the daemon's
-// RPC posture requires a certificate chained to the CA) that issues a raw
-// HTTP/1.1 GET and returns the parsed JSON body.
 async fn rpc_get_blockchain_state(addr: SocketAddr) -> serde_json::Value {
     use dg_xch_core::constants::{CHIA_CA_CRT, CHIA_CA_KEY};
     use dg_xch_core::ssl::{

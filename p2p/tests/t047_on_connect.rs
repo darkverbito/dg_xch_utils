@@ -1,15 +1,3 @@
-// On-connect greetings (chia full_node.py on_connect, :967-1010).
-//
-// The moment a peer's handshake completes, chia's full node greets it by type:
-//   FULL_NODE → NewPeak of the current peak (:991-998) AND — when synced — a
-//               RequestMempoolTransactions carrying our BIP158 mempool filter (:967-982);
-//   WALLET    → NewPeakWallet (:1000-1008; landed in T2-3, covered by the full-node suite);
-//   TIMELORD  → send_peak_to_timelords (:1009-1010).
-//
-// These tests drive the PRODUCTION inbound handler stack (FullNodeHandler dispatch) with a
-// canned-value api and dial in as each node type, asserting the greeting arrives on the wire —
-// written RED against the silent Handshake arm.
-
 mod common;
 
 use async_trait::async_trait;
@@ -165,7 +153,6 @@ async fn spawn_greeting_node(api: GreetingApi) -> RunningServer {
     spawn_full_node(Arc::new(api)).await
 }
 
-// chia full_node.py:991-998 — a FULL_NODE peer is greeted with NewPeak of the current peak.
 #[tokio::test]
 async fn full_node_peer_is_greeted_with_new_peak_on_connect() {
     let server = spawn_greeting_node(GreetingApi {
@@ -191,8 +178,6 @@ async fn full_node_peer_is_greeted_with_new_peak_on_connect() {
         .store(false, std::sync::atomic::Ordering::Relaxed);
 }
 
-// chia full_node.py:967-982 — a synced node asks the new FULL_NODE peer for the mempool items
-// missing from its BIP158 filter.
 #[tokio::test]
 async fn synced_node_requests_mempool_sync_on_full_node_connect() {
     let filter = vec![7u8, 1, 5, 8];
@@ -219,8 +204,6 @@ async fn synced_node_requests_mempool_sync_on_full_node_connect() {
         .store(false, std::sync::atomic::Ordering::Relaxed);
 }
 
-// The not-synced posture: chia's `if synced and peak_height is not None` gate — no mempool
-// request. The api models it as `mempool_sync_filter() == None`.
 #[tokio::test]
 async fn unsynced_node_does_not_request_mempool_sync_on_connect() {
     let server = spawn_greeting_node(GreetingApi {
@@ -251,7 +234,6 @@ async fn unsynced_node_does_not_request_mempool_sync_on_connect() {
         .store(false, std::sync::atomic::Ordering::Relaxed);
 }
 
-// chia full_node.py:1009-1010 — a TIMELORD peer is greeted via send_peak_to_timelords.
 #[tokio::test]
 async fn timelord_peer_is_greeted_with_new_peak_timelord() {
     let want = canned_timelord_peak();
@@ -278,8 +260,6 @@ async fn timelord_peer_is_greeted_with_new_peak_timelord() {
         .store(false, std::sync::atomic::Ordering::Relaxed);
 }
 
-// A FULL_NODE peer of a peak-less node (fresh boot, empty store) gets no NewPeak greeting —
-// chia's `peak_full is None` posture sends nothing.
 #[tokio::test]
 async fn peakless_node_sends_no_greeting() {
     let server = spawn_greeting_node(GreetingApi {

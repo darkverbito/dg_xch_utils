@@ -32,8 +32,6 @@ pub fn offset_classes(b0: u32, b: u32) -> [u32; 4] {
     [b0 - 1, b0, b0 + 1, b0 + b / 2 + 3]
 }
 
-/// The pending epoch boundary for a resume/anchor position `at`: the smallest epoch multiple whose
-/// retarget-trigger window can still be ahead of `at` (mirrors `epoch_backfill_low`'s rounding).
 #[must_use]
 pub fn pending_epoch_boundary(at: u32) -> u32 {
     (at.saturating_sub(MAINNET.sub_epoch_blocks) / MAINNET.epoch_blocks + 1) * MAINNET.epoch_blocks

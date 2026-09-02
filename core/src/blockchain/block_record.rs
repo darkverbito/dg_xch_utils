@@ -16,9 +16,6 @@ pub struct BlockRecord {
     pub weight: u128,
     pub total_iters: u128,
     pub signage_point_index: u8,
-    // Both VDF outputs are `ClassgroupElement` — bare fixed 100-byte values on the wire, no
-    // length prefix. Byte parity is locked by tests/block_record_wire.rs against real mainnet
-    // records.
     pub challenge_vdf_output: ClassgroupElement,
     pub infused_challenge_vdf_output: Option<ClassgroupElement>,
     pub reward_infusion_new_challenge: Bytes32,

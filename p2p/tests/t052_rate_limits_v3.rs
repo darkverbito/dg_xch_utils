@@ -1,16 +1,5 @@
 mod common;
 
-// RATE_LIMITS_V3 over the real WS loopback. The shape:
-//   - the capability is NOT in the default outgoing set; a RESPONDER auto-mirrors it when the
-//     initiator's handshake advertises it, then both sides exchange ConfigureWindowSizes;
-//   - after the exchange, v3-tabled types leave the time-based limiter and bounded request
-//     types are admitted through in-flight windows (window 2 for every request type);
-//   - an invalid configure (bounding one of OUR unlimited response types, empty, oversized) is
-//     an invalid handshake — close;
-//   - localhost/exempt peers bypass WINDOW ENFORCEMENT but v3 still activates. The enforcement
-//     test below swaps the peer-map entry's recorded host to a non-loopback address to exercise
-//     the enforcement arm over the loopback wire.
-
 use async_trait::async_trait;
 use common::{MemApi, connect, spawn_full_node, wait_until};
 use dg_xch_clients::websocket::oneshot;
@@ -59,9 +48,6 @@ fn v3_caps() -> Vec<(u16, String)> {
     caps
 }
 
-// Send a v3-advertising Handshake on an established link and return the server's reply — the
-// server's Handshake arm processes it exactly like the connection-opening handshake (records
-// capabilities, replies, mirrors v3, sends its ConfigureWindowSizes, marks the link offered).
 async fn negotiate_v3(
     client: &dg_xch_clients::websocket::full_node::FullnodeClient,
     version: ChiaProtocolVersion,
@@ -105,9 +91,6 @@ async fn send_plain(
         .expect("send");
 }
 
-// The responder mirror + configure exchange: a v3-advertising handshake gets a reply that ALSO
-// advertises v3, and once the peer's ConfigureWindowSizes lands, the link is v3-active on the
-// server.
 #[tokio::test]
 async fn responder_mirrors_v3_and_activates_after_configure_exchange() {
     let server = spawn_full_node(blind_api()).await;

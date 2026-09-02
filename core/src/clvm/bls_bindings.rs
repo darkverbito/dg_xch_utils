@@ -44,13 +44,7 @@ pub fn aggregate_verify_signature(
     )
 }
 
-/// Aggregate a set of 96-byte compressed G2 signatures — chia `AugSchemeMPL.aggregate(sigs)`, the
-/// block producer's step when combining the included mempool items' `aggregated_signature`s into
-/// `TransactionsInfo.aggregated_signature` (chia/full_node/mempool.py `create_bundle_from_mempool_items`
-/// / chia_rs `BlockBuilder.signature.aggregate`). An empty input yields the G2 identity (the infinity
-/// point, `0xc0` prefix) — chia's `G2Element()` default. Inputs are NOT group-checked here: the
-/// producer aggregates signatures that already passed `validate_block_aggregate_signature` at mempool
-/// admission (chia aggregates unchecked in the same spot).
+/// Aggregate compressed G2 signatures for a block. Empty input produces the group identity.
 ///
 /// # Errors
 /// Returns `Err` with the malformed signature's index if any input fails to deserialize.
@@ -69,7 +63,6 @@ pub fn aggregate_signatures<
         );
     }
     let Some((first, rest)) = parsed.split_first() else {
-        // chia G2Element() — the compressed infinity point.
         let mut infinity = [0_u8; 96];
         infinity[0] = 0xc0;
         return Ok(crate::blockchain::sized_bytes::Bytes96::from(infinity));

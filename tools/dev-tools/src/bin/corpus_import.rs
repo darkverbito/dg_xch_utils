@@ -8,20 +8,6 @@ use std::path::PathBuf;
 // Match the replay harnesses (they load frames with ChiaProtocolVersion::default()).
 const VERSION: ChiaProtocolVersion = ChiaProtocolVersion::Chia0_0_37;
 
-// Assemble an offline replay corpus (`blocks_<start>_<end>.bin` RespondBlocks frames, the format
-// the sync-replay harnesses load) from raw per-height block blobs exported out of a chia
-// full node's blockchain_v2 SQLite database:
-//
-//   sqlite3 "file:blockchain_v2_mainnet.sqlite?mode=ro" \
-//     "SELECT writefile('blobs/'||height, block) FROM full_blocks \
-//      WHERE in_main_chain=1 AND height BETWEEN <a> AND <b>;"
-//
-// chia v2 stores the block column zstd-compressed; blobs are decompressed when the magic matches.
-// An `--anchor <height>` additionally converts that height's exported `record_<height>` blob
-// (the chia BlockRecord, byte-compatible with ours) into `anchor_record_<height>.bin` for
-// mid-chain anchored replays.
-//
-// Usage: corpus-import --blobs <dir> --out <dir> --start <h> --end <h> [--anchor <h>]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut blobs = None;
     let mut out = None;
@@ -88,8 +74,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("wrote {}", path.display());
         window_start = window_end.saturating_add(1);
     }
-    // Pack any ref blobs already exported (block + chia-layout record, both needed to seed the
-    // replay store); report the rest as one exportable height list.
     let mut missing_refs = Vec::new();
     let mut packed_refs = 0usize;
     for r in &out_of_window_refs {
@@ -128,12 +112,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("MISSING_REFS {}", missing_refs.join(","));
     }
 
-    // The anchor RUN: the strict validation walks (icc challenge derivation, deficit chains, the
-    // epoch retarget) read ancestry up to the cache window deep, exactly like the headers-first
-    // recent-chain records below a weight-proof checkpoint. One lone anchor record walls the replay
-    // ~75 blocks in; a full window of converted chia records below the window keeps every walk on
-    // real attested ancestry. Exported records below `anchor` are converted for as far down as the
-    // blobs reach.
     if let Some(h) = anchor {
         let mut run = Vec::new();
         let mut cursor = h;

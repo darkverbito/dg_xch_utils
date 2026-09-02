@@ -263,8 +263,6 @@ async fn shorter_heavier_reorg_clears_the_abandoned_branch() {
     );
 }
 
-// Port of chia `test_get_peak` (empty case) + block-store default status: a fresh store has no peak,
-// and an unknown header hash reports the default Unvalidated status (never an error).
 #[tokio::test]
 async fn empty_store_has_no_peak_and_default_status() {
     let store = common::new_store().await;
@@ -300,9 +298,6 @@ async fn block_status_round_trips() {
     }
 }
 
-// Port of the reservation-window feed (chia's header-first / body-lacking query): records land ahead of
-// their bodies, and get_unassociated returns the lowest N record-heights that still lack a body, in
-// order — a height drops out of the feed once its body is appended.
 #[tokio::test]
 async fn unassociated_reports_record_heights_lacking_bodies() {
     let (store, _records) = stored_with_records().await;
@@ -335,11 +330,6 @@ async fn unassociated_reports_record_heights_lacking_bodies() {
     );
 }
 
-// Port of `test_block_height_map` (contiguity + peak boundary). This backend has no standalone
-// BlockHeightMap component; the height->hash contract is served by
-// block_store.get_block_record_by_height instead.
-// After confirming a contiguous chain to its tip, every height in range resolves to the record whose
-// own height matches, and nothing resolves above the peak.
 #[tokio::test]
 async fn height_map_contiguity_via_block_store() {
     let (store, records) = stored_with_records().await;
@@ -372,10 +362,6 @@ async fn height_map_contiguity_via_block_store() {
     );
 }
 
-// The persisted weight-proof segment seam — chia's sub_epoch_segments_v3 (block_store.py:85-88):
-// miss → None, persist → get round-trips the exact bytes, re-persist REPLACES (block_store.py:169
-// INSERT OR REPLACE), and — the whole point of the table — the row survives a store reopen, so a
-// restarted node answers request_proof_of_weight without rebuilding segments.
 #[tokio::test]
 async fn sub_epoch_segments_round_trip_replace_and_survive_reopen() {
     let path = common::unique_db_path();

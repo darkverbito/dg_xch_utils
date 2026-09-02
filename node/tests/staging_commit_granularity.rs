@@ -1,30 +1,3 @@
-// Staging persistence commit granularity — the catch-up dead-time defect.
-//
-// `Engine::stage_block_pre` committed the archive writes (record + cold body + status) ONE
-// TRANSACTION PER BLOCK (engine.rs `persist_archive` + `store.commit`), unconditionally — while the
-// confirm side is already phase-aware (`confirm_staged_batch`: one batch per window in catch-up,
-// per-block only near the tip; t160_per_block_confirm.rs pins both). On the SQLite backend every
-// staging commit serializes on the single writer connection with an fsync (~100 ms on the iSCSI
-// band): 32 sequential round-trips per window of pure dead time between the parallel body
-// precompute and the confirm — the measured ~12 s/window catch-up crawl, while the validation work
-// itself is ~0.7 s/window.
-//
-// Staging mirrors the confirm side's model: in the CATCH-UP band
-// (`!store.near_tip()`) the window loop (`follow_blocks_reporting`) owns ONE staging transaction
-// spanning every `stage_block_pre` of the window; near the tip staging keeps its per-block commit
-// (per-block durability is correct AT tip). Validation logic is untouched — only where the COMMIT
-// lands.
-//
-// A catch-up window of N blocks with per-block staging pays N staging commits + 1 confirm
-// commit; the batched form pays 2 (one staging, one confirm); the merged form pays exactly 1 —
-// the staging batch is CARRIED into the confirm transaction (archive + coins + peak, a single
-// fsync; the archive-before-peak ordering constraint is satisfied inside the one transaction).
-// The commit counts are read from the
-// store's own phase-labelled commit histograms (`StoreTelemetry::commit_catch_up` /
-// `commit_near_tip` — every COMMIT on the writer connection is recorded there at the fsync-bearing
-// statement, stores/src/sqlite/block.rs `commit`), so the assertion counts real writer
-// round-trips, not code-path guesses.
-
 mod common;
 
 use dg_xch_core::blockchain::full_block::FullBlock;

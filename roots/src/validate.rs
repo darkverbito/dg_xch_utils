@@ -1,36 +1,3 @@
-//! # Order-independent (SwiftSync-class) validation core, layout v2
-//!
-//! DRAFT STATUS: this module is the **algebraic core** only — the v2 metadata-fold leaf, the
-//! commutative MSet-XOR aggregate, the bucket-C condition fold, and order-independent
-//! reconciliation to the phase-1 root. It is deliberately **corpus-free and driver-free**: it
-//! operates on already-reduced per-block observations ([`BlockObservation`]) rather than
-//! parsing generators. The corpus parity proofs run this core against a real synced coin set;
-//! the unit proofs in `roots/tests/validate_v2.rs` prove the same order-independence and
-//! fail-closed properties on synthetic coins with no corpus.
-//!
-//! ## Why v2 drops the leaf index
-//!
-//! The phase-1 v1 coin leaf (`lib.rs`) binds `LE64(i)`, the leaf's canonical index — correct
-//! for an ordered MMR, fatal for a commutative aggregate: an ADD (at creation) and its later
-//! REMOVE (at spend) must produce the *identical* element to cancel, and the spender cannot
-//! know the coin's eventual index. The v2 fold leaf binds only self-authenticating coin data
-//! plus the two bucket-C metadata scalars, so the element is position-independent and
-//! reproducible at both add and remove.
-//!
-//! ## The two-layer check
-//!
-//! 1. **MSet-XOR aggregate** (order-independence engine + cheap fail-closed pre-check): XOR the
-//!    fold leaf on every creation, XOR it again on every spend; XOR is commutative and
-//!    self-inverse, so adds and their matching removes cancel in any order. After the range the
-//!    residual must equal the XOR of the hinted survivors' fold leaves. A wrong survivor hint,
-//!    a wrong metadata value, or a missing/extra coin leaves a non-zero mismatch → fail-closed.
-//! 2. **Phase-1 SHA-256 MMR + spent-bitmap root** (authoritative commitment): the surviving and
-//!    spent creations are canonicalised (`(confirmed_height, coin_id)` ascending — the v1 rule)
-//!    and fed to the phase-1 [`crate::CoinSetAccumulator`], whose root must equal the
-//!    independently-derived phase-1 root for the range. Soundness of the final artifact rests
-//!    on the already-shipped phase-1 hashing, not on XOR's weaker algebra; XOR is only the
-//!    fast order-independence + fail-closed layer.
-
 use crate::{CoinSetAccumulator, RootV1, RootsError};
 use dg_xch_core::blockchain::sized_bytes::Bytes32;
 use sha2::{Digest, Sha256};
@@ -69,9 +36,6 @@ pub fn fold_leaf(coin_id: &Bytes32, meta: CoinMeta) -> [u8; 32] {
     ])
 }
 
-/// The parsed bucket-C conditions of a single spend (the six metadata-dependent opcodes,
-/// mirroring the `Option` fields of `dg_xch_core::blockchain::spend::Spend`). Every other
-/// condition is bucket A/B/D and needs no creation metadata, so it is not represented here.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TimeLockConditions {
     /// ASSERT_MY_BIRTH_HEIGHT (75): `created_height == v`.
@@ -89,19 +53,6 @@ pub struct TimeLockConditions {
 }
 
 impl TimeLockConditions {
-    /// Validate every bucket-C condition of this spend against the (hint-supplied) creation
-    /// metadata and the block's own `now_height`/`now_timestamp`. This is the fold made
-    /// load-bearing: the very scalar checked here is the scalar that must match to cancel the
-    /// coin's ADD in the XOR aggregate, so a metadata value good enough to pass this check is
-    /// provably the true creation metadata.
-    ///
-    /// Semantics and saturating arithmetic mirror the consensus reference, as ported in
-    /// `dg_xch_core::blockchain::condition_with_args` (`saturating_u32/u64_from_bigint`).
-    /// `now_height`/`now_timestamp` are the *previous transaction block* reference the spending
-    /// block carries (bucket B), not wall-clock.
-    ///
-    /// # Errors
-    /// [`TimeLockError`] naming the first condition that fails.
     pub fn check(
         &self,
         meta: CoinMeta,
@@ -252,12 +203,6 @@ pub struct SpendRef {
     pub time_locks: TimeLockConditions,
 }
 
-/// One block reduced to the inputs this core needs. `self_valid` stands in for the block's own
-/// self-contained verdict — generator/roots/aggsig/cost (already order-independent, per-block)
-/// **and** the bucket-D intra-block scoping (announcements 60-63, concurrent 64-65, messages
-/// 66-67, ephemeral 76), which chia resolves atomically inside one block. The full driver
-/// computes `self_valid` by running the block; this core takes it as given (see module DRAFT
-/// note). `now_height`/`now_timestamp` are the block's previous-transaction-block reference.
 #[derive(Clone, Debug)]
 pub struct BlockObservation {
     pub height: u32,

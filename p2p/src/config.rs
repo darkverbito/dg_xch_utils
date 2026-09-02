@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 // Slot targets and caps reuse the full-node config defaults.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct P2pSettings {
     pub target_outbound: usize,
     pub target_peer_count: usize,
@@ -37,6 +37,45 @@ impl Default for P2pSettings {
 }
 
 impl P2pSettings {
+    /// Validate limits that would otherwise fail only after the peer supervisor starts.
+    ///
+    /// # Errors
+    /// Returns an error when a capacity is zero, a peer target is inconsistent, a timeout is
+    /// zero, or the jitter floor is outside the inclusive 0 to 1 range.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.target_peer_count == 0 {
+            return Err("target_peer_count must be greater than zero".to_string());
+        }
+        if self.target_outbound > self.target_peer_count {
+            return Err("target_outbound cannot exceed target_peer_count".to_string());
+        }
+        if self.host_pool_capacity == 0 {
+            return Err("host_pool_capacity must be greater than zero".to_string());
+        }
+        if self.address_lower > self.address_upper {
+            return Err("address_lower cannot exceed address_upper".to_string());
+        }
+        if self.address_upper > self.host_pool_capacity {
+            return Err("address_upper cannot exceed host_pool_capacity".to_string());
+        }
+        for (name, value) in [
+            ("connect_timeout", self.connect_timeout),
+            ("handshake_timeout", self.handshake_timeout),
+            ("retry_timeout", self.retry_timeout),
+            ("heartbeat", self.heartbeat),
+            ("pong_deadline", self.pong_deadline),
+            ("recent_peer_threshold", self.recent_peer_threshold),
+        ] {
+            if value.is_zero() {
+                return Err(format!("{name} must be greater than zero"));
+            }
+        }
+        if !self.jitter_floor.is_finite() || !(0.0..=1.0).contains(&self.jitter_floor) {
+            return Err("jitter_floor must be between 0 and 1".to_string());
+        }
+        Ok(())
+    }
+
     // Full-jitter backoff: retry_timeout scaled to [jitter_floor, 1.0].
     #[must_use]
     pub fn jittered_backoff(&self, attempt: u32) -> Duration {
@@ -44,5 +83,30 @@ impl P2pSettings {
         let base = self.retry_timeout.saturating_mul(1u32 << capped);
         let frac = self.jitter_floor + (1.0 - self.jitter_floor) * rand::random::<f64>();
         base.mul_f64(frac)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults_are_valid() {
+        assert!(P2pSettings::default().validate().is_ok());
+    }
+
+    #[test]
+    fn invalid_limits_are_rejected() {
+        let mut settings = P2pSettings::default();
+        settings.target_outbound = settings.target_peer_count + 1;
+        assert!(settings.validate().is_err());
+
+        settings = P2pSettings::default();
+        settings.address_lower = settings.address_upper + 1;
+        assert!(settings.validate().is_err());
+
+        settings = P2pSettings::default();
+        settings.jitter_floor = f64::NAN;
+        assert!(settings.validate().is_err());
     }
 }

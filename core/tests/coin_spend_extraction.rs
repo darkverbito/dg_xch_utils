@@ -1,12 +1,3 @@
-// Real-mainnet coverage for the wallet/explorer extraction primitives that back the full node's
-// `get_puzzle_and_solution` and the `coin_hint` index (parity item #3):
-//   * `coin_spend_from_generator` re-derives a spent coin's raw (puzzle_reveal, solution) from the
-//     block's own generator — the storage-free half of chia's `get_puzzle_and_solution`.
-//   * `hints_for_conditions` extracts the create-coin hints chia's hint store indexes.
-//
-// Both run against the committed post-hard-fork mainnet fixture (heights 9,138,873–9,138,904), so
-// the generators use the `simple_generator` path that carries reveals — the entire live-wallet era.
-
 use dg_xch_core::blockchain::sized_bytes::Bytes32;
 use dg_xch_core::consensus::block_generator::{
     BlockGeneratorFlags, BlockGeneratorInput, additions_for_conditions, coin_spend_from_generator,

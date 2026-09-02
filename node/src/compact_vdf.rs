@@ -117,13 +117,6 @@ pub fn validate_compact_proof(
         )
 }
 
-/// Full admission gate for an offered compact proof:
-/// - not too recent (`peak_height - height >= 5` — never compactify a recent block);
-/// - the proof is compact and validates from the default element;
-/// - we still hold a bulky proof for that exact field/`VdfInfo` (`needs_compact_proof`).
-///
-/// A whole-block fully-compactified short-circuit is store-side bookkeeping we do not maintain;
-/// the per-field `needs_compact_proof` is the decisive guard, so it is omitted deliberately.
 #[must_use]
 pub fn can_accept_compact_proof(
     constants: &ConsensusConstants,
@@ -275,10 +268,6 @@ impl SolicitLedger {
         }
     }
 
-    /// Should `req` be solicited at `now`? Returns `true` and records the send when the field has
-    /// not been solicited within `ttl` (first sight, or the ttl window has expired); `false` when a
-    /// recent solicitation is still outstanding. A `true` result mutates the ledger (records the
-    /// send + evicts if over capacity); a `false` result leaves it untouched.
     pub fn admit(&mut self, req: &RequestCompactProofOfTime, now: Instant) -> bool {
         let key = solicit_key(req);
         if let Some(&last) = self.seen.get(&key)
@@ -305,16 +294,12 @@ impl SolicitLedger {
         self.seen.len()
     }
 
-    /// Whether the ledger holds no solicited keys.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.seen.is_empty()
     }
 }
 
-/// Build the deduped solicitation list for one stored `block`: every still-bulky VDF field of the
-/// block (see [`uncompact_fields`]) turned into a [`RequestCompactProofOfTime`], minus any the
-/// `ledger` already solicited within its ttl.
 #[must_use]
 pub fn plan_block_solicitations(
     block: &FullBlock,

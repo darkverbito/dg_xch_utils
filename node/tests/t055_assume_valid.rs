@@ -6,11 +6,6 @@ use dg_xch_node::{AddBlockOutcome, Chaser, Engine, NativePrimitives, SyncConfig}
 use dg_xch_stores::BlockStore;
 use dg_xch_stores::types::BlockStatus;
 
-// A real transaction block whose aggregate signature has been corrupted: PoW/generator stay valid, only the
-// BLS check would reject it — the exact thing assume-valid skips below its milestone. The foliage hashes are
-// rebound over the corrupted transactions_info so the block stays STRUCTURALLY consistent: the body-binding
-// rules (chia rule 3, which assume-valid deliberately does NOT skip — the body must stay bound to the
-// attested header or bypassed state would not be exact) pass, leaving the BLS verify as the only violation.
 fn block_with_bad_signature() -> dg_xch_core::blockchain::full_block::FullBlock {
     let mut block = common::load_full_block(5_000_000);
     block

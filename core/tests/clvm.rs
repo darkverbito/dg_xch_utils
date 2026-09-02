@@ -1,10 +1,6 @@
 use dg_xch_core::clvm::runtime::ClvmRuntime;
 use dg_xch_core::clvm::utils::MEMPOOL_MODE;
 
-// Soft fork 9 CANONICAL_INTS, VM-level effect: the `softfork` operator's cost argument must
-// be canonically encoded when the flag is set (mirrors clvm_rs `src/op_utils.rs::uint_atom`
-// canonical branch as consumed by `src/run_program.rs::parse_softfork_arguments`). Below
-// `soft_fork9_height` the flag is unset and non-canonical costs are accepted unchanged.
 #[test]
 fn softfork_canonical_ints_rejects_noncanonical_cost() {
     use dg_xch_core::clvm::sexp::{AtomBuf, SExp};
@@ -349,9 +345,6 @@ fn test_runtime_div() {
 
 #[test]
 fn multiply_running_product_limb_cost_matches_clvmr() {
-    // op_multiply's running-product limb count must come from the value's
-    // magnitude (clvmr's limbs_for_int), never the i128 container width. Costs are
-    // pinned against clvmr 0.16.4, the consensus engine inside chia_rs.
     use dg_xch_core::clvm::program::{Program, SerializedProgram};
     use dg_xch_core::clvm::utils::INFINITE_COST;
     for (hex, want) in [
@@ -367,13 +360,6 @@ fn multiply_running_product_limb_cost_matches_clvmr() {
     }
 }
 
-// The CLVM BLS operators (opcodes 49..=59). Before the port they fell through to
-// `op_unknown` (nil result, token cost): live mainnet 9,179,161 wedged the tip-follow with
-// `InvalidBlockCost` (-5,597,941 = one bls_g2_negate + bls_map_to_g1 + bls_pairing_identity).
-// Every vector here is cost- and value-pinned against clvmr 0.17.7 (the clvmr resolved by
-// chia-consensus 0.42.1, the chia 2.7.x consensus engine), run with the pre-hard-fork-2
-// mainnet flag set. Costs are WHOLE-PROGRAM costs (operator + eval machinery), the same
-// totals clvmr's `run_program` reports.
 #[test]
 #[cfg(feature = "bls")]
 fn bls_ops_cost_and_value_match_clvmr() {
@@ -493,8 +479,6 @@ fn bls_ops_cost_and_value_match_clvmr() {
     let (cost, out) = run(&ok_hex).unwrap();
     assert_eq!(cost, 5_400_081, "pairing_identity cost diverges from clvmr");
     assert!(out.is_empty(), "pairing_identity must return nil");
-    // A single (P, Q) pair is NOT the identity — the program must terminate with an error
-    // (clvmr BLSPairingIdentityFailed), never silently succeed (the pre-port no-op hole).
     let fail_hex = format!("ff3a{}{}80", quote_g1(G1_GEN), quote_g2(G2_GEN));
     assert!(run(&fail_hex).is_err(), "non-identity pairing must raise");
 
@@ -509,7 +493,6 @@ fn bls_ops_cost_and_value_match_clvmr() {
     let (cost, out) = run(&empty_hex).unwrap();
     assert_eq!(cost, 3_000_021, "bls_verify empty cost diverges from clvmr");
     assert!(out.is_empty());
-    // Tampered message must raise (clvmr BLSVerifyFailed), never silently succeed.
     let bad_hex =
         format!("ff3b{}{}ffff0183616264 80", quote_g2(SIG), quote_g1(PK)).replace(' ', "");
     assert!(run(&bad_hex).is_err(), "bad bls_verify must raise");

@@ -44,9 +44,6 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::{Connector, connect_async_tls_with_config};
 
-// Chia block responses (a batch of full blocks, or a weight proof) routinely exceed tungstenite's default
-// 16 MiB per-frame cap — an 18 MB `RespondBlocks` is rejected as `MessageTooLong`, stalling body-fill. Match
-// the protocol's 50 MB message ceiling, with headroom on both the message and frame limits.
 fn large_message_ws_config() -> WebSocketConfig {
     WebSocketConfig::default()
         .max_message_size(Some(64 << 20))
@@ -227,17 +224,11 @@ impl WsClient {
         .map_err(|_| Error::other("Timeout Connecting Client"))?
         .map_err(|e| Error::other(format!("Error Connecting Client: {e:?}")))?;
         let peers = Arc::new(RwLock::new(HashMap::new()));
-        // A full-node link (the p2p dialer sets `rate_limited`) installs the per-connection inbound
-        // limiter so peers we dial cannot flood us; other client roles (harvester/farmer/wallet) leave
-        // it off, matching chia which only polices full-node connections.
         let limiter = if client_config.rate_limited {
             Some(Arc::new(RateLimiter::new(true)))
         } else {
             None
         };
-        // The send-side companion of the inbound limiter: paces frequency-capped messages WE
-        // send to this peer against ITS budget so a re-gossip burst cannot get us banned. Same gate as
-        // the inbound limiter — installed only on full-node links.
         let outbound_limiter = if client_config.rate_limited {
             Some(Arc::new(OutboundLimiter::new()))
         } else {
@@ -260,15 +251,9 @@ impl WsClient {
                 protocol_version: Arc::new(RwLock::new(ChiaProtocolVersion::default())),
                 capabilities: peer_capabilities.clone(),
                 websocket: connection.clone(),
-                // The dialed host, when it is a literal IP (chia keys the ban list on host). A
-                // hostname we did not resolve stays `None` — an outbound link keeps no ban list
-                // (`bans: None`) anyway, so this peer is simply never host-banned from our side.
                 host: client_config.host.parse::<std::net::IpAddr>().ok(),
                 bans: None,
                 outbound_limiter: outbound_limiter.clone(),
-                // Outbound dials keep chia 2.7.1's default capability set (no RATE_LIMITS_V3),
-                // so this link's v3 state stays inert — the responder can only mirror what the
-                // initiator advertises.
                 v3,
             }),
         );
@@ -410,23 +395,6 @@ impl MessageHandler for OneShotHandler {
     }
 }
 
-/// Send `msg` and wait for the reply the connection routes back by correlation id, returning the whole
-/// [`ChiaMessage`] so the caller can dispatch on its `msg_type`. This is the multi-response-type analog
-/// of [`oneshot`]: a request whose reply is EITHER a success or a reject (e.g. `RespondBlocks` /
-/// `RejectBlocks`) resolves the instant either arrives, because both echo the request's id.
-///
-/// The correlation id is minted by the *connection* ([`WebsocketConnection::register_request`]) — unique
-/// across the connection and never reset — so two concurrent in-flight requests on one socket can no
-/// longer alias, and the reply is delivered to exactly this waiter (the demux fix). `custom_fn` and
-/// `msg_id` are retained for source compatibility and are no longer used for correlation.
-///
-/// # Errors
-/// Returns an error if the send fails, the connection drops the waiter, or `timeout` ms elapse first.
-/// RATE_LIMITS_V3 outbound window (chia `_send_message`): when the link negotiated v3 and the
-/// request's type is bounded by the PEER's advertised window, wait for an in-flight slot before
-/// sending — chia defers the message with `_wait_and_retry`; we bound the wait so a peer that
-/// never answers cannot park the sender forever (the request would time out anyway). The slot is
-/// released when the reply routes back (read loop), or by `cancel_request` on timeout/failure.
 async fn acquire_v3_out_window(
     connection: &Arc<RwLock<WebsocketConnection>>,
     msg: &ChiaMessage,

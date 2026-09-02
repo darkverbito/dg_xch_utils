@@ -89,11 +89,13 @@ use dg_xch_node::{
     BlockRecordCache, Chaser, ConfirmedDelta, Engine, Mempool, NativePrimitives, NodeError,
     ReorgWalletDelta, SyncConfig, SyncError, SyncMetrics, validate_unfinished_block_body,
 };
+#[cfg(test)]
+use dg_xch_p2p::P2pSettings;
 #[cfg(feature = "coin-index")]
 use dg_xch_p2p::{AdditionsReply, PuzzleStateReply, RemovalsReply};
 use dg_xch_p2p::{
     BlockHeaderReply, BlockHeadersReply, CoinRegistration, CoinStateReply, FullNodeApi,
-    HandlerFactory, HeaderBlocksReply, NetCounters, OutboundPeer, P2pSettings, PhRegistration,
+    HandlerFactory, HeaderBlocksReply, NetCounters, OutboundPeer, PhRegistration,
     SignagePointResponse, Supervisor, TransactionAnnounceAction, full_node_handlers_client_counted,
     full_node_handlers_counted,
 };
@@ -111,7 +113,6 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Notify, RwLock, mpsc, oneshot};
 
-// One outbound peer's block-range fetch deadline (mirrors SyncConfig default).
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 // An in-flight gossip-transaction fetch (`full_node_store` `pending_tx_request`): WHEN we asked
@@ -212,18 +213,9 @@ struct StoreApi<S> {
     // (`sync_store.peer_disconnected`). `None` on the shared inbound server api, which keys claims
     // by the real inbound peer id and reconciles them against the live inbound map each driver tick.
     claim_guard: Option<Arc<ClaimGuard>>,
-    // Fired by on_new_peak when a peer's announcement changes the heaviest claim, waking the
-    // event-driven tip_follower to close the gap block-by-block (the short-sync-backtrack rung).
     new_peak_signal: Arc<Notify>,
     // Live outbound peers as TimestampedPeerInfo — the RequestPeers gossip answer, refreshed by the driver.
     known_peers: Arc<RwLock<Vec<TimestampedPeerInfo>>>,
-    // `full_node_store.pending_tx_request`: transaction ids with a RequestTransaction in
-    // flight, mapped to the instant we asked. Two jobs: (1) dedup — eight peers announcing the
-    // same tx cost one fetch, not eight (the bitcoin inv/getdata discipline); (2) the
-    // solicited-body gate — respond_transaction admits a body only if its id is a pending entry.
-    // Timestamped (not a bare set) so the driver expires entries by AGE (REQUEST_TIMEOUT), never
-    // by a blanket per-tick clear: a clear would wipe a just-issued request before its body could
-    // arrive and make a legitimate response look unsolicited.
     tx_requested: Arc<Mutex<HashMap<Bytes32, PendingTx>>>,
     // The slot state machine — handlers read it to answer/filter SP gossip; only the
     // driver writes it (validation needs the record ancestry + next-SSI context).
@@ -421,13 +413,6 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
         _peer: Bytes32,
         tx: NewTransaction,
     ) -> TransactionAnnounceAction {
-        // Behavior (a) — new_transaction ("Ignore if syncing"):
-        // a syncing node must not pull gossiped transactions — it cannot admit them (the mempool
-        // keys on the live peak) and each pull costs a full CLVM + BLS run at mainnet gossip
-        // rate. Without this gate, deep-syncing legs spent >98% CPU
-        // validating doomed mainnet gossip (and the per-bundle CLVM runs are the fleet-wide burst
-        // source). The sync-mode and synced gates collapse to our one `synced` atomic, which
-        // already carries the at-tip-and-current semantic.
         if !self.synced.load(Ordering::Relaxed) {
             return TransactionAnnounceAction::Ignore;
         }
@@ -509,9 +494,6 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
     }
 
     async fn on_respond_transaction(&self, peer: Bytes32, host: Option<IpAddr>, tx: SpendBundle) {
-        // Late arrival past the synced gate (a request issued before the flag dropped, or a
-        // stale peer push): dropped (NO_TRANSACTIONS_WHILE_SYNCING) before any CLVM. Drop at the
-        // door; the validator worker re-checks for bundles that race the transition.
         if !self.synced.load(Ordering::Relaxed) {
             return;
         }
@@ -934,9 +916,6 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
                 }
                 request
             }
-            // Promoted debug!->info! per-verdict: each rejection reason is its own
-            // categorical event + declares_validated{result} label, so a declare that produced nothing
-            // resolves to exactly one reason.
             other => {
                 let result = other.result_label();
                 self.producer.validated(result);
@@ -1046,13 +1025,6 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
             "farmed unfinished block: signatures spliced, propagating event={} height={} qs={} partial={:?}",
             "producer.signed.spliced", height, signed.quality_string, partial
         );
-        // Propagate to ourselves: route through the same received-unfinished-block inbox a peer's
-        // block takes, so the driver validates it (validate_unfinished_header_block) and — on success
-        // — caches it and queues the NewUnfinishedBlock / NewUnfinishedBlock2 broadcast. This mirrors
-        // `add_unfinished_block(new_candidate, None, farmed_block=True)`: validate first, then
-        // send_to_all v1/v2 to full-node peers (the origin exclusion is moot — we are the origin).
-        // The timelord half of the broadcast (NewUnfinishedBlockTimelord to the timelord) is
-        // built and queued by process_ub_inbox and drained by broadcast_ub_timelord_announcements.
         let mut inbox = self.ub_inbox.lock().await;
         if inbox.len() < SP_INBOX_CAP {
             inbox.push(candidate);
@@ -1083,9 +1055,6 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
     }
 
     async fn on_new_signage_point_vdf(&self, peer: Bytes32, req: NewSignagePointVDF) {
-        // `full_node_api.new_signage_point_vdf` — sync gate, then rewrap as RespondSignagePoint
-        // and run respond_signage_point. dg_xch's respond-signage-point path queues into sp_inbox for the
-        // driver's slot-state validation, so route there with the identical field mapping.
         if !self.synced.load(Ordering::Relaxed) {
             return;
         }
@@ -1100,10 +1069,6 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
     }
 
     async fn on_new_end_of_sub_slot_vdf(&self, peer: Bytes32, req: NewEndOfSubSlotVDF) {
-        // `full_node_api.new_end_of_sub_slot_vdf` — sync gate; ignore when the sub-slot is already
-        // in the slot state (`get_sub_slot(...) is not None: return None`); else run
-        // add_end_of_sub_slot. dg_xch's respond-end-of-sub-slot path queues into sp_inbox for the driver's
-        // new_finished_sub_slot validation, so mirror the dedup check then route there.
         if !self.synced.load(Ordering::Relaxed) {
             return;
         }
@@ -1154,13 +1119,6 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
         })
     }
 
-    // `send_transaction`: the wallet's spend submit, ALWAYS acked. Gate on sync BEFORE any CLVM
-    // (FAILED, NO_TRANSACTIONS_WHILE_SYNCING), then run the shared admission seam (the same
-    // validate → Mempool::admit → announce path as push_tx and the gossip worker) and map the
-    // outcome to the `(status, error name)` ack. No trusted tier here, and no queue wait
-    // (admission is synchronous, so every ack carries the definitive result).
-    // Runs on the per-message dispatch task (core protocols mod.rs spawns each matched handler),
-    // bounded by the read loop's inbound rate limiter (SendTransaction: 5000/min).
     async fn send_transaction(&self, _peer: Bytes32, tx: SendTransaction) -> TransactionAck {
         let txid = tx.transaction.name().unwrap_or_default();
         if !self.synced.load(Ordering::Relaxed) {
@@ -1718,9 +1676,6 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
         {
             return PuzzleStateReply::Reject(RejectStateReason::ExceededSubscriptionLimit);
         }
-        // — subscribe only once the LAST page is served. (The MEMPOOL_UPDATES
-        // initial push is skipped: we do not advertise Capability.MEMPOOL_UPDATES, and peers gate
-        // mempool_updates_for_puzzle_hashes on the peer capability,.)
         let mut receiver = None;
         if is_finished && req.subscribe_when_finished {
             match self
@@ -1748,12 +1703,6 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
         )
     }
 
-    // `request_coin_state` (code 101): the coin states of a set of
-    // ids above the requester's previous peak. Same reorg-consistency check and subscription-cap
-    // discipline as puzzle_state; the read is get_coin_states_by_ids (include_spent=True,
-    //) — a point-get composition available on every backend, so no coin-index gate.
-    // No paging: the response has no is_finished (the id list is the bound), and the reply never
-    // consults the peak here — an empty chain serves an empty answer.
     async fn coin_state(
         &self,
         peer: Bytes32,
@@ -1796,8 +1745,6 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
         {
             return CoinStateReply::Reject(RejectStateReason::ExceededSubscriptionLimit);
         }
-        // — subscribe unconditionally on request (unlike puzzle_state there is no
-        // is_finished gate). MEMPOOL_UPDATES push skipped (capability not advertised).
         let mut receiver = None;
         if req.subscribe {
             match self
@@ -1916,11 +1863,6 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> FullNodeApi for StoreApi
         .await
     }
 
-    // Mempool sync on connect (on_connect): when synced, the BIP158
-    // filter over OUR mempool transaction ids (`mempool_manager.get_filter`) for the
-    // RequestMempoolTransactions greeting. `None` while unsynced — `if synced and
-    // peak_height is not None` gate (the synced flag subsumes the peak check: it is only ever
-    // true with a current confirmed peak).
     async fn mempool_sync_filter(&self) -> Option<Vec<u8>> {
         on_connect_mempool_filter(&self.synced, &self.mempool).await
     }
@@ -1944,10 +1886,6 @@ async fn on_connect_new_peak<S: BlockStore + Send + Sync>(store: &S) -> Option<N
     })
 }
 
-// The mempool-sync-on-connect filter (the on_connect gate +
-// mempool_manager.get_filter): `None` while unsynced (nothing is requested), otherwise
-// the BIP158 encoding over every mempool transaction id. Shared by the inbound greeting
-// ([`FullNodeApi::mempool_sync_filter`]) and the outbound dial hook ([`outbound_on_connect`]).
 async fn on_connect_mempool_filter(
     synced: &AtomicBool,
     mempool: &Mutex<Mempool>,
@@ -2195,50 +2133,6 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> StoreApi<S> {
         Vec::new()
     }
 
-    /// Assemble the candidate unfinished block for an accepted proof and return the
-    /// `RequestSignedValues` for the farmer to sign — the produce→request-sign half of
-    /// `declare_proof_of_space` (the part after `verify_and_get_quality_string`).
-    ///
-    /// The consensus arithmetic is REUSED from the validation side, never reimplemented:
-    ///   * `required_iters` / `sp_iters` / `ip_iters` / `infusion_point_total_iters` via
-    ///     `farmer::resolve_candidate_iters` (which calls the same `calculate_iterations_quality` /
-    ///     `calculate_sp_iters` / `calculate_ip_iters` / `calculate_infusion_point_total_iters` the
-    ///     header validator uses);
-    ///   * difficulty / sub-slot-iters via `farmer::candidate_difficulty_and_ssi`;
-    ///   * the finished-sub-slot list + reward-chain backtrack via the new `SlotState` accessors;
-    ///   * the candidate body via `create_unfinished_block_with_sigs` (the farmer-signature producer).
-    ///
-    /// Steps:
-    ///   1. slot inputs: SP VDFs, `cc_challenge_hash`, `total_iters_pos_slot`, the rc-challenge for the
-    ///      prev-block backtrack;
-    ///   2. prev-block via the reward-chain backtrack through empty slots + the block-store walk;
-    ///      genesis (`prev == GENESIS_CHALLENGE`, no peak) ⇒ `prev_b = None`,
-    ///      height 0, genesis-pre-farm pool/farmer targets;
-    ///   3. finished sub-slots + the last-slot==pos-sub-slot guard;
-    ///   4. difficulty/ssi, `required_iters`, `sp_iters`, `ip_iters`,
-    ///      `infusion_point_total_iters`; bail if the proof fails the iters filter;
-    ///   5. latency drop (`infusion_point_total_iters < peak.total_iters`) and the empty-block
-    ///      coercion via the O(1) tx-peak link;
-    ///   6. `is_transaction_block` + reward-claim walk + `prev_transaction_block_hash` + timestamp
-    ///      (+ `create_foliage`);
-    ///   7. build with the two SP signatures VERBATIM from `declare` and `g2_infinity()` placeholders
-    ///      for the two foliage signatures; store keyed by the quality string
-    ///      (`add_candidate_block`); return `RequestSignedValues`.
-    ///
-    /// Returns `None` (proof stays held, no farmer signing wasted) on any consensus bail — unresolved
-    /// SP, disconnected sub-slots, failed iters filter, latency drop, or a store gap in a walk.
-    ///
-    /// SIGNAGE-POINT INDEX 0 (the sub-slot start / genesis first SP): fully handled. `SlotState::
-    /// get_signage_point` now returns `SignagePoint(None, None, None, None)` when the SP hash is
-    /// the genesis challenge or a finished sub-slot's cc hash (`get_signage_point`), so an index-0
-    /// declare is accepted at the validation gate and reaches here; the index-0 branches below
-    /// resolve the cc challenge from the SP hash and the rc challenge from the pos sub-slot, and
-    /// `assemble_candidate` is handed `None` to null the signage VDFs (the index-0 null-out).
-    /// `NO_OVERFLOWS_IN_FIRST_SUB_SLOT_NEW_EPOCH` is honored downstream: the candidate
-    /// is routed through `ub_inbox`, whose `validate_unfinished_header_block` enforces that rule
-    /// (`block_header_validation.rs`); dg_xch builds only empty candidates, so there is no
-    /// transaction candidate to retry from (the no-retry / backup-empty rule is satisfied by
-    /// construction).
     async fn try_build_candidate(
         &self,
         declare: &DeclareProofOfSpace,
@@ -2539,8 +2433,6 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> StoreApi<S> {
                 is_transaction_block: true,
                 prev_block_hash: self.constants.genesis_challenge,
                 prev_transaction_block_hash: self.constants.genesis_challenge,
-                // Genesis: no previous transaction block. The mempool has no peak pre-genesis, so
-                // the produce-path mempool gate below fails closed (an empty genesis block).
                 prev_transaction_block_height: 0,
                 reward_claims: Vec::new(),
             },
@@ -2566,14 +2458,6 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> StoreApi<S> {
             Some(pb) => candidate_timestamp(self.store.as_ref(), pb).await,
         };
 
-        // The mempool→block-generator path (`create_block =
-        // mempool_manager.create_block_generator2`, the block_creation=1 default of 2.7.1, +
-        // mempool_manager's `peak.header_hash == last_tb_header_hash` gate): build the transactions
-        // payload only when the candidate IS a transaction block, the empty-block coercion did not
-        // fire, and the mempool's reference frame is exactly the candidate's previous transaction
-        // block (a mismatched frame — mid-reorg, or a candidate on a non-tip ancestor — yields the
-        // conservative empty block, `return None`). The payload builds before the
-        // latency/coercion checks and discards it; building after them only skips wasted work.
         let transactions = {
             let mp = self.mempool.lock().await;
             if may_build_transactions(
@@ -2648,14 +2532,6 @@ impl<S: BlockStore + CoinStore + Send + Sync + 'static> StoreApi<S> {
     }
 }
 
-// Whether the produce path may attach a mempool-built block generator to this candidate — the
-// combined gates: the candidate is a transaction block (a non-tx block cannot carry
-// transactions; dg_xch never attaches a dangling generator),
-// the empty-block coercion did not fire (`candidate_sp_total_iters <=
-// tx_peak.total_iters → new_block_gen = None`), and the mempool's reference frame is exactly the
-// candidate's previous transaction block (`mempool_manager.create_block_generator2`'s
-// `peak.header_hash == last_tb_header_hash` gate, height-keyed here — see
-// `Mempool::create_block_generator`). Any failed gate ⇒ the conservative empty block.
 pub(crate) fn may_build_transactions(
     is_transaction_block: bool,
     coerce_empty: bool,
@@ -2896,8 +2772,6 @@ pub struct Node<S = SqliteStore> {
     // NewTransaction re-broadcast by the driver. Public like `mempool`: the integration suite
     // asserts every admission path queues its announce through this one seam.
     pub tx_announce: Arc<Mutex<Vec<NewTransaction>>>,
-    // The pending_tx_request guard shared with StoreApi (dedup + solicited-body gate); the driver
-    // expires entries by age each tick. See the StoreApi field for the full rationale.
     tx_requested: Arc<Mutex<HashMap<Bytes32, PendingTx>>>,
     // The header hash of the LAST confirmed delta notify_new_peak processed. A delta whose
     // prev_hash breaks this chain is a reorg landing (the engine may emit only the new tip's
@@ -3224,12 +3098,12 @@ where
     pub fn spawn_rpc_server(&self) -> Result<Arc<AtomicBool>, Error> {
         // `--rpc-tls local` is unauthenticated, so a routable --rpc bind is downgraded to
         // loopback with a loud warning rather than exposing an unauthenticated RPC to the
-        // network. `--rpc-tls cni` is the authenticated network RPC.
+        // network. `--rpc-tls private-ca` enables authenticated network RPC.
         let (rpc_bind, downgraded) = self.config.rpc_tls.resolve_bind(self.config.rpc);
         if downgraded {
             log::warn!(
                 "--rpc-tls local is unauthenticated; refusing to bind the RPC to a routable address \
-                 — serving on loopback instead. Use --rpc-tls cni for an authenticated network RPC. configured={} effective={}",
+                 — serving on loopback instead. Use --rpc-tls private-ca for an authenticated network RPC. configured={} effective={}",
                 self.config.rpc,
                 rpc_bind
             );
@@ -3293,9 +3167,6 @@ where
             .map_err(|e| Error::other(e.to_string()))
     }
 
-    // Typed core of [`Node::sync_follow`]: the driver loop keeps the [`SyncError`] shape so the
-    // unknown-parent orphan stays matchable (`SyncError::is_orphan`) — the trigger for the mirrored
-    // short-sync backtrack (the new-peak dispatch ladder).
     async fn follow_step(
         &self,
         source: &Arc<dyn BlockRangeSource>,
@@ -3331,17 +3202,6 @@ where
         self.finish_follow_step(peak, &deltas).await
     }
 
-    /// The mirrored `short_sync_backtrack` step, driven when a follow
-    /// window fails with the unknown-parent orphan: the chain reorged at/below our stored tip, so
-    /// the fork point is fetched backward from the same peer and the collected branch resubmitted
-    /// through the ordinary follow pipeline (the engine's existing fork choice performs the reorg).
-    /// The per-peak side effects (wallet coin-state + mempool revalidation) fire for every newly
-    /// confirmed block exactly as in [`Node::sync_follow`].
-    ///
-    /// # Errors
-    /// [`SyncError::DeepFork`] when the fork is deeper than the backtrack cap — the caller must fall
-    /// back to the weight-proof long sync instead of retrying; any
-    /// fetch/validation/store error otherwise.
     pub async fn sync_backtrack(
         &self,
         source: &Arc<dyn BlockRangeSource>,
@@ -3424,15 +3284,6 @@ where
         Ok(peak)
     }
 
-    /// Recompute the synced flag from the confirmed chain — `FullNode.synced`
-    ///: synced iff the last TRANSACTION block at-or-below the peak
-    /// carries a timestamp within the last 7 minutes. Confirming a peak thousands of blocks below
-    /// the network tip must NOT open the tip-context gossip gates (SP/EOS/unfinished admission,
-    /// the ignore-while-syncing guard): a catching-up node would pull objects anchored at a slot its
-    /// slot state cannot reach, wasting a round trip per announcement and accepting none of them
-    /// (the live 176-pulls / 0-accepts pattern at 8,338 blocks behind). The follow driver calls
-    /// this on every confirmed step and every idle tick, so the flag also DECAYS back to false
-    /// when the tip goes stale (peers lost) — it is recomputed on every gate check.
     pub async fn update_synced(&self) {
         let peak = self.store.get_peak().await.ok().flatten();
         let synced = match peak {
@@ -3704,14 +3555,10 @@ where
         Ok(peak)
     }
 
-    // Whether a mid-chain long-sync landing is anchored (validated weight proof + resolved fork
-    // point) — the producer's FOLLOW fill gate while the deep-gap band is active.
     pub(crate) async fn long_sync_anchored(&self) -> bool {
         self.long_sync_anchor.read().await.is_some()
     }
 
-    // Whether the `--sync-from` anchor span is staged — the producer's FOLLOW fill gate while no
-    // peak exists yet.
     pub(crate) async fn sync_from_anchored(&self) -> bool {
         self.sync_from_anchor.read().await.is_some()
     }
@@ -3910,7 +3757,6 @@ where
         Ok(true)
     }
 
-    // The confirmed local peak's weight, for the not-interested-in-lighter-peaks gate.
     async fn local_peak_weight(&self) -> Option<u128> {
         let (hash, _) = self.store.get_peak().await.ok().flatten()?;
         self.store
@@ -4443,14 +4289,7 @@ where
         let (peer_run, inbound_peers) = self.spawn_peer_server()?;
         let rpc_run = self.spawn_rpc_server()?;
 
-        let mut settings = P2pSettings::default();
-        if let Some(n) = self.config.target_outbound {
-            settings.target_outbound = n;
-        }
-        if let Some(n) = self.config.target_peer_count {
-            settings.target_peer_count = n;
-        }
-        let mut supervisor = Supervisor::new(settings);
+        let mut supervisor = Supervisor::new(self.config.p2p);
         // Register the full_node handler set on every outbound dial BEFORE the slots start.
         supervisor.set_handlers(self.outbound_handler_factory());
         // On-connect greetings for OUTGOING connections (start_client →
@@ -4537,21 +4376,6 @@ where
     }
 }
 
-// Tip-follow sync driver: while running, pull the delta between our confirmed peak and the highest tip a
-// peer announced (bounded to FOLLOW_BATCH blocks per step) from a live outbound peer. Errors are logged and
-// retried next tick — a flaky peer never stalls the loop. The bulk from-zero long-sync (headers-first +
-// weight-proof fast-sync) is the live-deployment driver layered on top of this.
-// The near-tip rung of the new-peak ladder, driven off the NewPeak gossip
-// EVENT rather than the batch tick: within SHORT_SYNC_BLOCKS_BEHIND_THRESHOLD blocks of a peer's peak we
-// pull [local+1, claimed] and confirm it via sync_backtrack (the short_sync_backtrack mirror, which also
-// resolves a shallow reorg), so the confirmed peak tracks the network tip within 0-1 and never trails a
-// whole FOLLOW_BATCH window. The batch (catch-up) and bulk (long) bands stay with the driver, which
-// defers this band on the same in_near_tip_band predicate so the two never race.
-// Wallet coin-state subscription disconnect hygiene: periodically reconcile the `WalletNotifier`
-// registry against the live inbound peer set, dropping subscribers whose socket is gone (their per-peer
-// CoinStateUpdate forwarder then ends on its own as its channel Sender drops). The servers-crate-free
-// disconnect hook. 30s cadence; a subscription that outlives its peer by up to one tick costs one bounded
-// idle task, never traffic (delivery is non-blocking try_send). Runs until the run flag clears / abort.
 pub(crate) async fn reap_wallet_subscriptions_once<
     S: BlockStore + CoinStore + Send + Sync + 'static,
 >(
@@ -4724,10 +4548,6 @@ async fn recovery_source(
     )
 }
 
-// Fetch out-of-span generator refs for `--sync-from` from a peer, LRU-cached (mirrors the fetch+cache
-// half of `seed_missing_refs`); the CONSUMER applies them to the engine overlay, keeping the peer-free
-// invariant. Returns only the refs it could resolve; an unresolved ref is dropped and the consumer's
-// retry then fails transiently (Reset), exactly as a peer that cannot serve a ref does today.
 async fn fetch_seed_refs<S: BlockStore + CoinStore + Send + Sync + 'static>(
     node: &Arc<Node<S>>,
     source: &Arc<dyn BlockRangeSource>,
@@ -4915,11 +4735,6 @@ async fn block_processor<S: BlockStore + CoinStore + Send + Sync + 'static>(
     recovery_tx: mpsc::Sender<RecoveryRequest>,
     peak_tx: mpsc::Sender<ConfirmedPeak>,
 ) {
-    // Cross-window body pipeline: while window N runs its stage/vdf/sig/confirm phases, window
-    // N+1's body precompute (pure CPU over blocks already resident in the queue) runs here in a
-    // blocking task. Keyed by the window's first height so a rebase/reorg between spawn and use
-    // discards it (worst case: wasted compute, never a stale verdict — the engine's flag-key
-    // guard re-verifies every precompute at stage time).
     let (pipe_constants, pipe_assume_valid) = {
         let chaser = node.chaser.lock().await;
         (chaser.constants(), chaser.assume_valid())
@@ -5132,10 +4947,6 @@ fn prefetch_config_for<S: BlockStore + CoinStore + Send + Sync + 'static>(
     }
 }
 
-// The claimed tip to fill toward when the FOLLOW band is ours (the producer's band); `None` when another
-// band owns catch-up — caught up, the driver's `--sync-from` anchor / fast-sync, or the tip_follower's
-// near-tip band. Mirrors the driver's per-tick continue-guards so the detached producer never races them
-// with a redundant window.
 async fn follow_fill_claimed<S: BlockStore + CoinStore + Send + Sync + 'static>(
     node: &Arc<Node<S>>,
 ) -> Option<u32> {
@@ -5215,8 +5026,6 @@ async fn fetch_scheduler<S: BlockStore + CoinStore + Send + Sync + 'static>(
     let mut last_from = 0u32;
     let mut frozen_from_ticks = 0u32;
     while node.run.load(Ordering::Relaxed) {
-        // Backpressure = the over-fill admission gate: park until a consumer drain frees budget. The tick
-        // is a shutdown backstop.
         if !queue.can_admit() {
             tokio::select! {
                 () = queue.wait_space() => {}
@@ -5587,10 +5396,6 @@ pub(crate) async fn sync_driver<S: BlockStore + CoinStore + Send + Sync + 'stati
         // Pre-validate received unfinished blocks and relay the accepted ones.
         process_ub_inbox(&node).await;
         broadcast_ub_announcements(&node, &registry).await;
-        // Timelord infusion return (`new_infusion_point_vdf`): finish OUR cached unfinished block into a
-        // FullBlock and set it as the new peak — the self-farm path that no longer waits for the block to
-        // come back as a peer's RespondBlock. Broadcasts NewPeak/NewPeakTimelord + advances slot state on a
-        // new peak (mirrors the post-confirm side effects of the block-follow step below).
         process_ip_inbox(&node, &registry, &inbound_peers).await;
         // Compact-VDF consume: validate + swap pulled compact proofs, re-gossip accepted ones.
         process_compact_vdf_inbox(&node).await;
@@ -5914,8 +5719,6 @@ async fn process_sp_inbox<S: BlockStore + CoinStore + Send + Sync + 'static>(nod
                         .store(u32::from(sp.index_from_challenge), Ordering::Relaxed);
                     node.signage_points_total
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    // The "finished signage point" INFO line: the accept-side trace the
-                    // protocol-equivalence gate joins on, keyed by the CC/RC VDF-output hashes.
                     if let (Ok(cc), Ok(rc)) = (
                         sp.challenge_chain_vdf.output.hash(),
                         sp.reward_chain_vdf.output.hash(),
@@ -6247,12 +6050,6 @@ async fn respond_weight_proof(req: &WpRequest, wp: &WeightProof, net: &NetCounte
     }
 }
 
-// Validate every received unfinished block: the partial runs
-// through validate_unfinished_header_block (everything except the infusion-point VDFs) with the
-// parent's difficulty context, then enters the cache and queues a v2 relay announcement.
-// (Known specialization: core's validator runs the recent-chain form, skip_overflow_last_ss_
-// validation=false — an overflow partial arriving before its final EOS may park until the slot
-// list catches up; the protocol-trace gate will measure whether that matters live.)
 async fn process_ub_inbox<S: BlockStore + CoinStore + Send + Sync + 'static>(node: &Arc<Node<S>>) {
     let blocks: Vec<UnfinishedBlock> = node.ub_inbox.lock().await.drain(..).collect();
     if blocks.is_empty() {
@@ -6520,12 +6317,6 @@ async fn process_ub_inbox<S: BlockStore + CoinStore + Send + Sync + 'static>(nod
     }
 }
 
-// The daemon half of the unfinished-block transactions gate: resolve the generator
-// back-references against OUR store (at the live tip the store and the parent's branch
-// coincide), then run the pure body validation
-// (`validate_unfinished_block_body` — structural bindings, generator execution, cost rules,
-// aggregate signature). Returns the producer-metrics drop reason alongside the error so every
-// failure class is separately countable.
 async fn validate_ub_body<S: BlockStore + CoinStore + Send + Sync + 'static>(
     node: &Arc<Node<S>>,
     block: &UnfinishedBlock,
@@ -6772,22 +6563,6 @@ async fn assemble_infusion_block<S: BlockStore + CoinStore + Send + Sync + 'stat
     Some(block)
 }
 
-/// Drain the timelord infusion-return inbox and finish each of OUR cached unfinished blocks into a
-/// `FullBlock` set as the new peak (`new_infusion_point_vdf`). For each
-/// `NewInfusionPointVDF`:
-///   1. look the unfinished block up by `unfinished_reward_hash` (`get_unfinished_block`);
-///   2. backtrack the reward-chain challenge through empty finished sub-slots then find
-///      the previous block by walking back from the peak matching `reward_infusion_new_challenge`
-///      — genesis (`target_rc_hash == GENESIS_CHALLENGE`) ⇒ `prev_b = None`;
-///   3. collect the finished sub-slots from `challenge_in_chain` to `last_slot_cc_hash`;
-///   4. next SSI/difficulty and the SP total-iters from the pos sub-slot start;
-///   5. assemble via [`unfinished_block_to_full_block`], check the pool signature, then run it
-///      through the engine (`add_block` → set peak) exactly as a peer's
-///      block: [`Node::follow_step_blocks`] validates, confirms, fires the S8 farmed-header match, and
-///      returns the new peak. On a new peak the node broadcasts `NewPeak` (+ `NewPeakTimelord`) and
-///      advances the slot state — the driver's post-confirm side effects, mirrored here.
-///
-/// Runs on the driver, never the read loop (a VDF-infused block assembly + full validation is heavy).
 async fn process_ip_inbox<S: BlockStore + CoinStore + Send + Sync + 'static>(
     node: &Arc<Node<S>>,
     registry: &Arc<dyn OutboundPeers>,
@@ -6811,7 +6586,6 @@ async fn process_ip_inbox<S: BlockStore + CoinStore + Send + Sync + 'static>(
                     "infused our unfinished block into a FullBlock and set it as the new peak event={} height={} header={} partial={}",
                     "producer.infusion.peak", new_height, hash, partial
                 );
-                // The driver's post-confirm side effects (mirrors the tip-follow peak block).
                 broadcast_new_peak(node, registry, hash, new_height).await;
                 update_slot_state_on_peak(node, hash).await;
                 broadcast_new_peak_timelord(node, inbound_peers, hash).await;
@@ -7238,13 +7012,6 @@ async fn broadcast_ub_timelord_announcements<S: BlockStore + CoinStore + Send + 
     }
 }
 
-// get_recent_reward_challenges: the reward-chain
-// challenges of the most recent ~2*MAX_SUB_SLOT_BLOCKS infusions, returned OLDEST-first as
-// (reward_infusion_new_challenge, total_iters) pairs — the `previous_reward_challenges` a timelord
-// needs to reconstruct the reward chain at the new peak. Walks the depth-bounded ancestor map back
-// from the peak; every first-in-sub-slot record additionally contributes its finished reward-slot
-// hashes, newest first, spaced one `sub_slot_iters` apart. Returns None if the walk falls off the
-// loaded window before the limit or genesis — parity requires the complete list, never a truncated one.
 fn get_recent_reward_challenges(
     constants: &ConsensusConstants,
     peak: &BlockRecord,
@@ -7719,12 +7486,6 @@ async fn broadcast_new_peak<S: BlockStore + CoinStore + Send + Sync + 'static>(
     }
 }
 
-// The bulk-sync decision: a claimed peak far ahead of a near-empty local store. Gating on `local < GAP`
-// keeps it a one-shot from-zero entry — once fast-sync lands near tip, `local` is huge and tip-follow owns
-// `new_peak` ladder: the near-tip rung is a strictly-positive gap within
-// SHORT_SYNC_BLOCKS_BEHIND_THRESHOLD, and only once we already hold a peak (block-by-block extends an
-// existing chain; from-zero/deep catch-up is the batch/bulk bands). The tip_follower engages on this
-// predicate and the driver defers on it, so the two never race the same band.
 fn in_near_tip_band(local: u32, claimed: u32, has_peak: bool) -> bool {
     if !has_peak {
         return false;
@@ -7738,12 +7499,6 @@ fn wants_fast_sync(local: u32, claimed: u32) -> bool {
     local < FAST_SYNC_GAP && claimed.saturating_sub(local) > FAST_SYNC_GAP
 }
 
-// The long-sync band decision: a claimed tip more than SYNC_BLOCKS_BEHIND_THRESHOLD (300)
-// ahead of the local peak enters the WP-anchored long-sync band REGARDLESS of local height. A
-// tip below WEIGHT_PROOF_RECENT_BLOCKS (= FAST_SYNC_GAP) cannot be weight-proof-anchored —
-// our follow band owns that rung. Within the band, `wants_fast_sync`
-// discriminates the near-empty-store sub-case (recent-chain jump) from the mid-chain deep gap
-// (fork-point-anchored batch sync of the whole gap).
 fn wants_long_sync(local: u32, claimed: u32) -> bool {
     claimed >= FAST_SYNC_GAP && claimed.saturating_sub(local) > SYNC_BLOCKS_BEHIND_THRESHOLD
 }
@@ -7865,8 +7620,7 @@ mod tests {
             std::process::id()
         ));
         let node = Node::boot(Config {
-            target_outbound: None,
-            target_peer_count: None,
+            p2p: P2pSettings::default(),
             listen: "127.0.0.1:0".parse().unwrap(),
             rpc: "127.0.0.1:0".parse().unwrap(),
             introducer: None,
@@ -7993,8 +7747,6 @@ mod tests {
         );
     }
 
-    // Unverified — runs in a live deployment. Red-first: bulk sync fires only from a near-empty store that is far
-    // behind, and never once local has advanced past the gate (tip-follow then owns catch-up forever).
     #[test]
     fn fast_sync_triggers_only_from_near_empty_store_far_behind() {
         assert!(wants_fast_sync(0, 9_000_000), "empty store, tip far ahead");
@@ -8016,13 +7768,6 @@ mod tests {
         );
     }
 
-    // The node enters the weight-proof-anchored long sync
-    // whenever a peer's claimed tip is more than `sync_blocks_behind_threshold` (300,
-    // 300) ahead of the local peak — REGARDLESS of local height
-    // (new_peak:856-873: past the short-batch rung it falls through to
-    // `_sync()`). Our band gate only fired from a near-empty store (`local < 1000`), so a node
-    // with history that went offline for weeks ground 32-block FOLLOW windows with full
-    // validation across the whole gap.
     #[test]
     fn deep_mid_chain_gap_selects_the_wp_anchored_long_sync_band() {
         // A node at 2M offline for ~a month (gap ≈ 50k blocks): long sync (gap > 300).
@@ -8031,8 +7776,6 @@ mod tests {
             "a deep mid-chain gap must enter the WP-anchored long-sync band \
              (sync_blocks_behind_threshold = 300)"
         );
-        // Within the threshold the existing follow/backtrack bands own catch-up (the
-        // short_sync_batch rung).
         assert!(
             !wants_long_sync(2_000_000, 2_000_300),
             "a gap at/below the threshold stays with the follow band"
@@ -8043,8 +7786,6 @@ mod tests {
             !wants_long_sync(0, 900),
             "a tip below the weight-proof floor is never long-synced"
         );
-        // The from-zero rung is a SUB-case of the band (near-empty store → recent-chain jump);
-        // a mid-chain node is the fork-point-anchored batch sync instead.
         assert!(wants_long_sync(0, 9_000_000) && wants_fast_sync(0, 9_000_000));
         assert!(wants_long_sync(1500, 9_000_000) && !wants_fast_sync(1500, 9_000_000));
     }
@@ -8508,10 +8249,6 @@ mod tests {
         );
     }
 
-    // Node-level weight gate + quarantine ("Not interested in less heavy peaks" +
-    // request_validate_wp "already caught up" + bad_peak_cache): against a REAL confirmed local peak,
-    // a longer-but-LIGHTER claim is no sync target; a heavier claim is; and once that heavier peak is
-    // quarantined it is never re-selected.
     #[tokio::test]
     async fn sync_target_weight_gates_against_the_local_peak() {
         let nanos = SystemTime::now()
@@ -8523,8 +8260,7 @@ mod tests {
             std::process::id()
         ));
         let config = Config {
-            target_outbound: None,
-            target_peer_count: None,
+            p2p: P2pSettings::default(),
             listen: "127.0.0.1:0".parse().unwrap(),
             rpc: "127.0.0.1:0".parse().unwrap(),
             introducer: None,
@@ -8549,7 +8285,6 @@ mod tests {
         // No local peak, no claims: no target.
         assert_eq!(node.sync_target().await, None);
 
-        // Confirm the real mainnet 5,000,000 record as the local peak (its weight is the gate).
         let records: Vec<dg_xch_core::blockchain::block_record::BlockRecord> =
             serde_json::from_str(include_str!("../tests/fixtures/block_records.json"))
                 .expect("records fixture");
@@ -8618,8 +8353,7 @@ mod tests {
             std::process::id()
         ));
         let config = Config {
-            target_outbound: None,
-            target_peer_count: None,
+            p2p: P2pSettings::default(),
             listen: "127.0.0.1:0".parse().unwrap(),
             rpc: "127.0.0.1:0".parse().unwrap(),
             introducer: None,
@@ -8693,8 +8427,7 @@ mod tests {
             std::process::id()
         ));
         let config = Config {
-            target_outbound: None,
-            target_peer_count: None,
+            p2p: P2pSettings::default(),
             listen: "127.0.0.1:0".parse().unwrap(),
             rpc: "127.0.0.1:0".parse().unwrap(),
             introducer: None,
@@ -8942,14 +8675,6 @@ mod tests {
         );
     }
 
-    // Candidate assembly — the store-derived consensus walks (prev-block reward-chain backtrack,
-    // challenge_in_chain, is_transaction_block, the reward-claim walk, the tx-peak/timestamp) exercised in
-    // isolation against a hand-seeded 4-block chain. This proves the trickiest parts of
-    // try_build_candidate without the live plot proof + VDF-populated SlotState that the full
-    // declare -> candidate path needs (that end-to-end path is the #[ignore]d harness note below).
-    //
-    // The produce-path mempool gate (coercion + mempool_manager's peak
-    // gate + the tx-block requirement) — every failing arm yields the conservative empty block.
     #[test]
     fn mempool_payload_gate_matches_chia() {
         // All gates pass: a tx-block candidate, no coercion, mempool frame == prev tx block.
@@ -9168,10 +8893,6 @@ mod tests {
         .expect("genesis unfinished block builds")
     }
 
-    // The infusion-return dispatch contract (`full_node_api` new_infusion_point_vdf /
-    // new_signage_point_vdf / new_end_of_sub_slot_vdf sync gate + hand-off): a synced node QUEUES the
-    // infusion point for the driver and routes the SP/EOS VDFs to the slot-state validation inbox; a
-    // syncing node drops all three (tip-context objects it cannot finish).
     #[tokio::test]
     async fn infusion_return_handlers_queue_only_when_synced() {
         use dg_xch_core::blockchain::challenge_chain_subslot::ChallengeChainSubSlot;
@@ -9340,8 +9061,7 @@ mod tests {
             std::env::temp_dir().join(format!("fn_ipasm_{}_{nanos}.sqlite", std::process::id()));
         let node = Arc::new(
             Node::boot(Config {
-                target_outbound: None,
-                target_peer_count: None,
+                p2p: P2pSettings::default(),
                 listen: "127.0.0.1:0".parse().unwrap(),
                 rpc: "127.0.0.1:0".parse().unwrap(),
                 introducer: None,
@@ -9465,15 +9185,6 @@ mod tests {
         );
     }
 
-    // The full LIVE path — a real plot proof + timelord VDFs infusing OUR own farmed unfinished block into a
-    // peak under live consensus — needs the dg_fast_farmer harvester gate + a VDF-populated SlotState, so it
-    // runs in a live deployment. The ASSEMBLY half (new_infusion_point_vdf steps 1-5) is proven in-process by
-    // infusion_point_finishes_cached_genesis_unfinished_block; the assembly's byte-level correctness against
-    // real mainnet blocks is proven by core's unfinished_to_full_block_reconstruct fixture; the dispatch/queue
-    // contract by infusion_return_handlers_queue_only_when_synced.
-    // A real SqliteStore with ONE fault injected: `get_block_record` returns a store error while
-    // `fail` is armed, every other call delegates to the real backend. The drop site must survive
-    // this transient-backend condition without losing the candidate.
     struct FaultStore {
         inner: Arc<SqliteStore>,
         fail_get_block_record: Arc<AtomicBool>,
@@ -9789,8 +9500,7 @@ mod tests {
         let node = Arc::new(
             Node::boot_with_store(
                 Config {
-                    target_outbound: None,
-                    target_peer_count: None,
+                    p2p: P2pSettings::default(),
                     listen: "127.0.0.1:0".parse().unwrap(),
                     rpc: "127.0.0.1:0".parse().unwrap(),
                     introducer: None,
@@ -9934,8 +9644,7 @@ mod tests {
         let node = Arc::new(
             Node::boot_with_store(
                 Config {
-                    target_outbound: None,
-                    target_peer_count: None,
+                    p2p: P2pSettings::default(),
                     listen: "127.0.0.1:0".parse().unwrap(),
                     rpc: "127.0.0.1:0".parse().unwrap(),
                     introducer: None,
@@ -10016,13 +9725,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    #[ignore = "needs a real plot proof + VDF-populated SlotState (dg_fast_farmer); run in a live deployment"]
-    async fn declare_to_new_unfinished_block_end_to_end() {}
-
-    // sp_source_data parity: the index-0 farmer signage point for a
-    // finished sub-slot must carry sub_slot_data (the cc/rc SUB-SLOTS), never vdf_data, at index 0,
-    // and survive a wire round-trip.
     #[test]
     fn index_zero_eos_carries_sub_slot_source_data() {
         use dg_xch_core::blockchain::challenge_chain_subslot::ChallengeChainSubSlot;
@@ -10087,22 +9789,17 @@ mod tests {
         assert_eq!(back, sp);
     }
 
-    // `new_peak` ladder: the near-tip block-by-block rung engages within
-    // short_sync_blocks_behind_threshold (20) and ONLY with a confirmed peak; wider gaps stay with the
-    // batch/bulk bands. Both the tip_follower and the driver skip-guard key on this predicate.
     #[test]
     fn near_tip_band_matches_chia_short_sync_threshold() {
         // No confirmed peak: never the near-tip band (from-zero catch-up is the bulk/batch job).
         assert!(!in_near_tip_band(0, 20, false));
         // At the tip (gap 0): nothing to follow.
         assert!(!in_near_tip_band(100, 100, true));
-        // 1..=20 behind: the block-by-block near-tip rung engages.
         assert!(in_near_tip_band(100, 101, true), "1 behind engages");
         assert!(
             in_near_tip_band(100, 120, true),
             "20 behind (the threshold) engages"
         );
-        // 21+ behind: the batch catch-up band owns it, not the near-tip rung.
         assert!(
             !in_near_tip_band(100, 121, true),
             "21 behind is the batch band"
@@ -10330,9 +10027,6 @@ mod tests {
             api_trust(store, wallet, trust, wallet_sync_sem)
         }
 
-        // An api with an EXPLICIT trust policy — the trusted-tier test seam. The same policy `Arc`
-        // governs the api's response-item cap (and tx priority); pair it with a `wallet` built from the
-        // same policy to exercise the subscription-cap gate.
         fn api_trust(
             store: Arc<SqliteStore>,
             wallet: Arc<WalletNotifier>,
@@ -10377,15 +10071,6 @@ mod tests {
             }
         }
 
-        // RequestPuzzleSolution parity: a coin the block's generator spends, re-run out of the stored
-        // block, yields its real puzzle + solution; an unspent/unknown coin is refused (→ reject wire).
-        // RequestPuzzleSolution guards (the store checks this handler adds around the shared generator
-        // extraction): an unknown coin, an unspent coin, and a spent coin queried at the wrong height
-        // all refuse (→ RejectPuzzleSolution on the wire). The Some-path — re-running the block's
-        // generator to recover a real (puzzle, solution) — is the shared primitive proven end-to-end in
-        // `core/tests/coin_spend_extraction.rs` against real POST-hard-fork mainnet blocks (the
-        // live-wallet era this handler serves; block 5,000,000 here is pre-hard-fork, whose compressed
-        // generators carry no inline reveal, so extraction correctly yields None).
         #[tokio::test]
         async fn puzzle_solution_guards_reject_unknown_unspent_and_wrong_height() {
             let store = store_at_peak().await;
@@ -10689,11 +10374,8 @@ mod tests {
             }
         }
 
-        // Byte-parity gate against the fixture merkle_proofs_5000000.json: the served proof bytes
-        // must be byte-equal to an independently-generated oracle over the same block-5,000,000
-        // delta, whose roots were asserted equal to the block's real foliage roots.
         #[tokio::test]
-        async fn served_proofs_are_byte_equal_to_chia_rs_0_42_1() {
+        async fn served_proofs_match_protocol_vectors() {
             #[derive(serde::Deserialize)]
             struct AddCase {
                 puzzle_hash: String,
@@ -10745,14 +10427,14 @@ mod tests {
                 assert_eq!(
                     hex::encode(proof),
                     case.proof,
-                    "served addition proof bytes diverge from the fixture for {}",
+                    "addition proof mismatch for {}",
                     case.puzzle_hash
                 );
                 match (&case.coin_ids_proof, coin_proof) {
                     (Some(expected), Some(served)) => assert_eq!(
                         hex::encode(served),
                         *expected,
-                        "served coin-ids proof bytes diverge for {}",
+                        "coin-ids proof mismatch for {}",
                         case.puzzle_hash
                     ),
                     (None, None) => assert!(!case.included),
@@ -10776,7 +10458,7 @@ mod tests {
                 assert_eq!(
                     hex::encode(proof),
                     case.proof,
-                    "served removal proof bytes diverge from the fixture for {} (included={})",
+                    "removal proof mismatch for {} (included={})",
                     case.coin_name,
                     case.included
                 );
@@ -11703,11 +11385,6 @@ mod tests {
             );
         }
 
-        // Response-item gate: the RequestCoinState id list is truncated to
-        // `max_subscribe_response_items(peer)` — the TRUSTED 500,000-tier budget for a configured
-        // trusted peer, the UNTRUSTED 100,000-tier for everyone else. Injected small (trusted 4 /
-        // untrusted 2) to observe it: a trusted peer echoes all four ids, an untrusted peer only two.
-        // The budget must resolve per-peer from trust, never be a fixed field ignoring the peer.
         #[tokio::test]
         async fn coin_state_response_budget_is_trusted_for_configured_node_id() {
             let trusted = Bytes32::from([0xaa; 32]);
@@ -11753,11 +11430,6 @@ mod tests {
             );
         }
 
-        // Tx-queue priority gate: a trusted peer's gossiped bundle takes the high-priority lane
-        // the validator worker drains first. Enqueue an untrusted body FIRST and a trusted body
-        // SECOND through `on_respond_transaction`, then drain and assert the trusted one is
-        // first. The bodies must be solicited (the respond_transaction gate), so we pre-seed the
-        // pending-request set for each id.
         #[tokio::test]
         async fn on_transaction_gives_trusted_peer_high_priority() {
             let trusted = Bytes32::from([0xaa; 32]);
@@ -11767,8 +11439,6 @@ mod tests {
             let wallet = Arc::new(WalletNotifier::with_trust(policy.clone()));
             let api = api_trust(store, wallet, policy, default_sem());
 
-            // Two distinct empty bundles (distinct agg sigs → distinct names) so the solicited-body gate
-            // admits both.
             let bundle = |b: u8| SpendBundle {
                 coin_spends: vec![],
                 aggregated_signature: dg_xch_core::blockchain::sized_bytes::Bytes96::from([b; 96]),
@@ -11812,10 +11482,6 @@ mod tests {
             assert_eq!(batch[1].0, untrusted, "untrusted bundle follows");
         }
 
-        // Host-rules (response-item gate, via HOST): a LOCALHOST peer resolves
-        // trusted with an EMPTY trusted-peer set via the `is_localhost(host)` short-circuit. The
-        // peer's host must be threaded from `coin_state` into the trust gate: the same peer id and
-        // empty config get the untrusted budget from a remote IP, the trusted one from 127.0.0.1.
         #[tokio::test]
         async fn coin_state_response_budget_is_trusted_for_localhost_host() {
             let peer = Bytes32::from([0xcc; 32]);
@@ -11864,10 +11530,6 @@ mod tests {
             );
         }
 
-        // Host-rules (tx-queue priority gate, via HOST): a localhost peer's bundle
-        // takes the high-priority lane with an EMPTY trusted set — proves host reaches
-        // `on_respond_transaction`'s trust gate. Remote body arrives FIRST, localhost SECOND; the
-        // localhost body still drains first.
         #[tokio::test]
         async fn on_transaction_gives_localhost_peer_high_priority() {
             let local_peer = Bytes32::from([0xcc; 32]);
@@ -12043,20 +11705,6 @@ mod uncompact_solicit_tests {
     }
 }
 
-// The unfinished-block RELAY gate. The transactions generator (and the cost/aggregate-signature
-// rules) must run BEFORE a received unfinished block enters the cache or the
-// NewUnfinishedBlock/2 broadcast: peers ban the sender of a generator-invalid block for 600s, so
-// a node that validates only the header and relays serves the poisoned block to honest peers and
-// eats that ban itself.
-//
-// Harness: the real mainnet recent-chain slice (heights 9,054,336..=9,054,620, the header-validation
-// fixture family) rebuilt into light-path block records and seeded into the store — real proofs of
-// space, real plot-key foliage signatures, real VDFs — so a projected UnfinishedBlock passes the
-// REAL header validation and reaches the cache/relay decision, where a bogus generator is
-// spliced in. (A root-CONSISTENT bogus generator cannot be forged at this level:
-// transactions_info is committed to by the plot-key-signed foliage, which rules 16/17 of the
-// header validator verify — the generator-RUN failure species are proven at the pure-fn level in
-// node/tests/unfinished_body.rs instead.)
 #[cfg(test)]
 mod ub_relay_gate_tests {
     use super::*;
@@ -12124,11 +11772,6 @@ mod ub_relay_gate_tests {
         .expect("valid pospace")
     }
 
-    // Rebuild block records across the slice (light path), in chain order. Extends the header-validation
-    // recipe with the prev-TRANSACTION-block height (the SF9 body-rule key the relay gate reads)
-    // and a placeholder sub-epoch summary marker wherever the real chain infused one (the
-    // difficulty walk gates on ses PRESENCE; the slice starts at the 9,054,336 sub-epoch
-    // boundary, so its ses lands a few blocks in).
     fn build_records(chain: &[HeaderBlock]) -> Vec<BlockRecord> {
         let c = &MAINNET;
         let mut ancestors: HashMap<Bytes32, BlockRecord> = HashMap::new();
@@ -12247,8 +11890,7 @@ mod ub_relay_gate_tests {
         let node = Arc::new(
             Node::boot_with_store(
                 Config {
-                    target_outbound: None,
-                    target_peer_count: None,
+                    p2p: P2pSettings::default(),
                     listen: "127.0.0.1:0".parse().unwrap(),
                     rpc: "127.0.0.1:0".parse().unwrap(),
                     introducer: None,
@@ -12291,11 +11933,6 @@ mod ub_relay_gate_tests {
             .is_some()
     }
 
-    // A header-valid unfinished block with a bogus transactions generator must be DROPPED — never
-    // cached for peers to fetch, never queued for the NewUnfinishedBlock2 announce. Relaying one
-    // gets us banned for 600s by every honest peer that runs the generator. The `ub_body_fail`
-    // counter is the vacuity guard: it proves the block passed header validation and was rejected
-    // by the transactions gate, since a header-stage rejection lands under `ub_validation_fail`.
     #[tokio::test]
     async fn header_valid_ub_with_bogus_generator_is_dropped_not_cached_not_relayed() {
         let (node, chain) = node_with_slice_records().await;
@@ -12328,9 +11965,6 @@ mod ub_relay_gate_tests {
         );
     }
 
-    // The same gate on a TRANSACTION block: real transactions_info (plot-key-committed), bogus
-    // generator bytes — the generator root no longer matches the committed
-    // transactions_info.generator_root (INVALID_TRANSACTIONS_GENERATOR_HASH).
     #[tokio::test]
     async fn tx_ub_with_generator_root_mismatch_is_dropped_not_relayed() {
         let (node, chain) = node_with_slice_records().await;
@@ -12357,9 +11991,6 @@ mod ub_relay_gate_tests {
         assert_eq!(node.producer.dropped_count("ub_validation_fail"), 0);
     }
 
-    // FALSE-POSITIVE GUARD + the empty-generator fast path (the own-farmed non-transaction
-    // shape): an honest unfinished block with no generator must still validate, enter the cache,
-    // and queue the relay announce — the gate must reject ONLY invalid blocks.
     #[tokio::test]
     async fn honest_ub_without_generator_still_validates_caches_and_announces() {
         let (node, chain) = node_with_slice_records().await;

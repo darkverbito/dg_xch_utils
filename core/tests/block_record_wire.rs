@@ -1,15 +1,3 @@
-//! Byte-parity for `BlockRecord` against real mainnet records.
-//!
-//! The `challenge_vdf_output` / `infused_challenge_vdf_output` fields are `ClassgroupElement`
-//! (bare 100-byte `bytes100`, no length prefix). The fixture blobs are actual
-//! `full_blocks.block_record` rows read from a synced 2.7.1 mainnet node, so equality here is
-//! equality with what every peer serializes, not a re-derivation from our own encoder.
-//!
-//! Golden set: heights 3000000-3000003 (consecutive main-chain records, transaction and
-//! non-transaction) plus 3000209 (the first record at/after 3000000 carrying a
-//! `sub_epoch_summary_included`, which also pins the 2.7.1 SubEpochSummary embedding: no
-//! post-2.7.1 fields such as `challenge_merkle_root`).
-
 use dg_xch_core::blockchain::block_record::BlockRecord;
 use dg_xch_core::blockchain::sized_bytes::Bytes32;
 use dg_xch_serialize::{ChiaProtocolVersion, ChiaSerialize};
@@ -87,9 +75,6 @@ fn block_record_reencodes_chia_mainnet_bytes_identically() {
     }
 }
 
-/// The golden set must actually exercise the layout's variable parts, or the parity claim is
-/// weaker than it looks: both VDF outputs, the transaction-block option group, and the
-/// sub-epoch-summary embedding.
 #[test]
 fn golden_set_covers_the_variable_layout() {
     let recs: Vec<BlockRecord> = goldens().iter().map(|g| decode(&g.record)).collect();

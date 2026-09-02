@@ -124,7 +124,6 @@ fn get_deficit(
     }
 }
 
-// validate_recent_blocks (weight_proof.py:1225) — phase 5. Heavy path for tip blocks, light path otherwise.
 #[allow(clippy::collapsible_if)]
 pub(crate) fn validate_recent_blocks(
     wp: &dg_xch_core::blockchain::weight_proof::WeightProof,
@@ -296,8 +295,6 @@ pub(crate) fn validate_recent_blocks(
 mod tests {
     use super::*;
 
-    // Pure deficit state-machine parity spot-checks against the reference (deficit.py). These are
-    // value-level, no fixtures — a fast guard on the trickiest branch (overflow × new-sub-slot).
     fn c() -> ConsensusConstants {
         dg_xch_core::consensus::constants::MAINNET
     }

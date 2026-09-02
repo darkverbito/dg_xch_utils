@@ -92,9 +92,8 @@ fn bench_ops(c: &mut Criterion) {
     group.bench_function("pubkey_for_exp/new_blst", |b| {
         b.iter_batched(
             || setup_op_args(std::slice::from_ref(&exponent)),
-            |(mut arena, args)| {
-                black_box(op_pubkey_for_exp(&mut arena, args, INFINITE_COST, &dialect))
-                    .expect("op ok")
+            |(arena, args)| {
+                black_box(op_pubkey_for_exp(&arena, args, INFINITE_COST, &dialect)).expect("op ok")
             },
             BatchSize::SmallInput,
         );
@@ -106,9 +105,8 @@ fn bench_ops(c: &mut Criterion) {
         group.bench_function(format!("point_add/{n}_points/new_blst"), |b| {
             b.iter_batched(
                 || setup_op_args(&point_atoms[..n]),
-                |(mut arena, args)| {
-                    black_box(op_point_add(&mut arena, args, INFINITE_COST, &dialect))
-                        .expect("op ok")
+                |(arena, args)| {
+                    black_box(op_point_add(&arena, args, INFINITE_COST, &dialect)).expect("op ok")
                 },
                 BatchSize::SmallInput,
             );

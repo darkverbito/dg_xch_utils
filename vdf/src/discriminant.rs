@@ -144,19 +144,7 @@ fn increment_big_endian(bytes: &mut [u8]) {
 }
 
 fn is_probable_prime(n: &BigUint) -> bool {
-    // GMP mpz_probab_prime_p with reps=24: small-prime screen + Baillie-PSW exactly (MR base 2 +
-    // strong Lucas, no extra random-base rounds at reps=24) — the same test as the consensus
-    // reference (chiavdf is strengthened Baillie-PSW with no extra MR rounds). Exceeding the
-    // reference is not extra safety: a BPSW pseudoprime (none known) the reference accepts but
-    // an extra round rejects would make this search continue to a DIFFERENT prime — a consensus
-    // fork. Parity means exactly BPSW.
-    // Native screen first: a candidate with a small factor never reaches the conversion or
-    // GMP at all; the reference rejects the same composites, so the selected prime is
-    // unchanged. The FULL native Baillie-PSW below is verdict-identical (bpsw_differential.rs,
-    // millions of candidates) but measured SLOWER than the reference on both targets — 2.4x on
-    // a Xeon, 2.6x on the Pi-4's A72 (3.40ms vs 1.30ms per 264-bit search): a powm amortizes
-    // mpz call overhead to nothing and GMP's addmul_1 assembly owns the rest. It stays as
-    // dormant verification infrastructure, not the verdict.
+    // The discriminant search must use the same probable-prime strength for every node.
     if let Some(verdict) = small_factor_verdict(n) {
         return verdict;
     }
@@ -171,9 +159,7 @@ const SMALL_PRIMES: [u64; 64] = [
     311,
 ];
 
-// The small primes packed into u64 products with each product's normalized reciprocal, all
-// folded at compile time — the screen itself then runs on multiplies alone (`u128 % u64` is a
-// software builtin on aarch64, same as the divide it would replace).
+// Pack small primes into products so each chunk can be screened with one remainder operation.
 #[derive(Clone, Copy)]
 struct PrimeChunk {
     start: usize,
@@ -242,11 +228,6 @@ const fn build_prime_chunks() -> [PrimeChunk; CHUNK_COUNT] {
     out
 }
 
-// Chunked trial division on the raw limbs: fold the candidate's digits high-to-low through the
-// precomputed reciprocal of each prime product — no bigint arithmetic, no allocation, and no
-// wide division on any target. `Some(v)` is a settled verdict (a small factor was found; `v` is
-// whether n IS that prime); `None` passes the candidate onward. Identical accept/reject
-// semantics to dividing by each prime directly.
 fn small_factor_verdict(n: &BigUint) -> Option<bool> {
     if *n < BigUint::from(2u8) {
         return Some(false);
@@ -495,8 +476,6 @@ pub(crate) fn u64_low_word(value: &BigInt) -> u64 {
 mod cache_tests {
     use super::*;
 
-    /// Differential gate for the memo: the cached path must be byte-identical to a direct
-    /// (uncached) hash_prime derivation, on both the miss and the hit path.
     #[test]
     fn cached_discriminant_is_byte_identical_to_direct_derivation() {
         for i in 0..3u8 {
@@ -545,10 +524,6 @@ mod cache_tests {
         );
     }
 
-    // The screen must be invisible: for every input class — the small primes themselves,
-    // smooth composites, random odds, and hash_prime-shaped 264-bit candidates — the screened
-    // verdict equals GMP's raw verdict, because a different accept/reject sequence would walk
-    // the prime search to a DIFFERENT prime.
     #[test]
     fn small_factor_screen_never_changes_the_verdict() {
         let raw = |n: &BigUint| {

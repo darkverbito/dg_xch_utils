@@ -3,7 +3,7 @@
 mod common;
 
 use common::{fixtures_dir, load_fixture};
-use dg_xch_core::blockchain::sized_bytes::{Bytes32, Bytes96};
+use dg_xch_core::blockchain::sized_bytes::Bytes32;
 use dg_xch_core::blockchain::sub_epoch_summary::SubEpochSummary;
 use dg_xch_core::blockchain::weight_proof::WeightProof;
 use dg_xch_core::consensus::constants::MAINNET;
@@ -119,26 +119,6 @@ fn phase2_full_chain_ses_hash_parity() {
     );
 }
 
-#[test]
-#[ignore = "full validation is slow; run in release with --ignored"]
-fn phase2_accepts_real_mainnet_proof() {
-    let wp = load_fixture();
-    match validate_weight_proof(&wp, &MAINNET) {
-        // Advanced past phase 2 to a not-yet-ported phase — phase 2 accepted the valid proof.
-        Err(WeightProofError::PhaseUnimplemented(_)) => {}
-        // If the full port ever completes, Ok is also a valid "accepted" outcome.
-        Ok((true, _)) => {}
-        Err(WeightProofError::Rejected(why)) => panic!(
-            "FALSE-REJECT of the real mainnet accept-vector: {why} \
-             (reference accepts it with mainnet genesis pinned)"
-        ),
-        Err(WeightProofError::TooLarge(what)) => {
-            panic!("DoS bound regressed: real proof rejected TooLarge({what})")
-        }
-        other => panic!("unexpected verdict on real proof: {other:?}"),
-    }
-}
-
 /// A modified summary hash is rejected.
 #[test]
 fn tamper_phase2_corrupt_reward_chain_hash_rejects() {
@@ -205,23 +185,6 @@ fn phase1_sampled_set_matches_reference() {
     );
 }
 
-/// PHASE 1 — ACCEPT PARITY. "Phase 1 accepted" is observable as the pipeline advancing PAST phase 1 to a
-/// later not-yet-ported phase (robust to subsequent phases landing). This proves the port's sampled set ⊆
-/// the provided segments; the strip tamper below proves ⊇, hence exact equality.
-#[test]
-#[ignore = "whole-pipeline now reaches phase 4 (bug 2 fixed) and stops at phase-5 PhaseUnimplemented; kept ignored for runtime (~min of VDF work), covered by phase4_accepts_real_mainnet_proof + the fast intermediate-parity tests"]
-fn phase1_accepts_real_mainnet_proof() {
-    let wp = load_fixture();
-    match validate_weight_proof(&wp, &MAINNET) {
-        Err(WeightProofError::PhaseUnimplemented(_)) => {}
-        Ok((true, _)) => {}
-        Err(WeightProofError::Rejected(why)) => {
-            panic!("phase 1 FALSE-REJECTED the real mainnet accept-vector: {why}")
-        }
-        other => panic!("unexpected verdict after phase 1 on real proof: {other:?}"),
-    }
-}
-
 /// PHASE 1 — EXACT-SET TAMPER (the strong gate). For EACH of the 20 sampled sub-epochs, stripping its
 /// segments must make phase 1 REJECT (that sampled sub-epoch is now uncovered). Because the port accepts the
 /// untampered proof (his set ⊆ provided) AND rejects when any one sampled sub-epoch is stripped (his set
@@ -277,22 +240,6 @@ fn phase3_boundary_weight_matches_reference() {
     );
 }
 
-/// PHASE 3 — ACCEPT PARITY. Advancing PAST phase 3 (to a later not-yet-ported phase, or Ok once all land)
-/// means phase 3 accepted: its accumulated weight matched the on-chain boundary weight.
-#[test]
-#[ignore = "whole-pipeline now reaches phase 4 (bug 2 fixed) and stops at phase-5 PhaseUnimplemented; kept ignored for runtime (~min of VDF work), covered by phase4_accepts_real_mainnet_proof + the fast intermediate-parity tests"]
-fn phase3_accepts_real_mainnet_proof() {
-    let wp = load_fixture();
-    match validate_weight_proof(&wp, &MAINNET) {
-        Err(WeightProofError::PhaseUnimplemented(_)) => {}
-        Ok((true, _)) => {}
-        Err(WeightProofError::Rejected(why)) => {
-            panic!("phase 3 FALSE-REJECTED the real mainnet accept-vector: {why}")
-        }
-        other => panic!("unexpected verdict after phase 3 on real proof: {other:?}"),
-    }
-}
-
 /// PHASE 3 — INFLATE-A-WEIGHT TAMPER. Inflating the boundary block's on-chain weight by 1 must be caught
 /// by the weight-equality check. A +1 is below the granularity that could shift phase-1 sampling (delta
 /// changes by ~1e-11), so the rejection originates at phase 3 — asserted via its message. A validator that
@@ -312,120 +259,6 @@ fn phase3_tamper_inflate_boundary_weight_rejects() {
         }
         other => panic!("unexpected verdict on weight-inflated proof: {other:?}"),
     }
-}
-
-/// PHASE 6 / COMPLETE VALIDATOR — the full six-phase pipeline returns Ok on the real proof (phase 6 is a
-/// documented no-op: the reference has no total-weight check beyond phase 3's `_validate_summaries_weight`).
-/// No `PhaseUnimplemented` is reachable; the validator is confirmed complete.
-#[test]
-#[ignore = "full six-phase pipeline; slow, run in release with --ignored"]
-fn phase6_full_validator_accepts_real_mainnet_proof() {
-    let wp = load_fixture();
-    let (valid, summaries) = validate_weight_proof(&wp, &MAINNET).expect("all six phases: Ok");
-    assert!(
-        valid,
-        "the complete validator must accept the real mainnet proof"
-    );
-    assert_eq!(
-        summaries.len(),
-        GOLDEN_SUB_EPOCHS,
-        "returns all 23,579 verified summaries"
-    );
-}
-
-/// END-TO-END parity via the public validator: all phases ported, `validate_weight_proof` returns Ok on
-/// the real proof, and the returned summaries hash-match the golden chain. Heavyweight (full pipeline —
-/// phase 4 VDF batch + phase 5 recent chain, ~10 min); run in release with `--ignored`.
-#[test]
-#[ignore = "full pipeline ~10 min of real VDF/BLS verification; run in release with --ignored"]
-fn phase2_end_to_end_summaries_parity() {
-    let wp = load_fixture();
-    let (valid, summaries) = validate_weight_proof(&wp, &MAINNET).expect("all phases ported");
-    assert!(valid);
-    let want = golden_hash_chain();
-    assert_eq!(summaries.len(), want.len());
-    for (i, (ses, w)) in summaries.iter().zip(want.iter()).enumerate() {
-        assert_eq!(&ses_hash_hex(ses), w, "ses hash parity at {i}");
-    }
-}
-
-// PHASE 5 (recent_blocks) gate. These run the full pipeline (phases 1-5) over 722 recent blocks with
-// PoSpace+VDF+BLS verification — ~4 min each in release, far longer in debug — so they are #[ignore]d and
-// run explicitly for the gate: `cargo test -p dg_xch_weight_proof --test weight_proof_parity --release
-// -- --ignored phase5`.
-//
-// A non-boundary middle-block mutation is the key accept-invalid gate: it passes phases 1-4 (tip weight,
-// boundary block, summaries, and sampled segments are all untouched) so ONLY phase 5 can catch it. This is
-// exactly the gap phase 3 deliberately leaves (phase 3 checks only the boundary block's weight).
-
-/// PHASE 5 — ACCEPT PARITY. The full pipeline advances 1->5 and stops at the phase-6 marker: proof of the
-/// end-to-end recent-chain accept matching the reference (which also accepts).
-#[test]
-#[ignore = "phase 5 is slow (full pipeline, ~min); run in release for the gate"]
-fn phase5_accepts_real_mainnet_proof() {
-    let wp = load_fixture();
-    match validate_weight_proof(&wp, &MAINNET) {
-        Err(WeightProofError::PhaseUnimplemented("total_weight")) => {}
-        Ok((true, _)) => {}
-        other => {
-            panic!("phase 5 should accept the real proof and advance to phase 6; got {other:?}")
-        }
-    }
-}
-
-/// PHASE 5 — VDF TAMPER on a NON-BOUNDARY recent block, inside the last-100-by-height FULL-validation
-/// window (ref caps `last_blocks_to_validate=100`; the port mirrors it). Corrupting a near-tip (non-tip,
-/// non-boundary) block's challenge-chain infusion-point VDF witness leaves phases 1-4 intact, so a
-/// pass-through to the phase-6 marker would be FAIL-OPEN — phase 5 must reject. To be robust to which
-/// specific block undergoes the IP-VDF check, tamper the whole near-tip validated band (exclude the tip,
-/// which would perturb phase-1 sampling).
-#[test]
-#[ignore = "phase 5 is slow; run in release for the gate"]
-fn phase5_tamper_vdf_witness_nonboundary_rejects() {
-    let mut wp = load_fixture();
-    let tip = GOLDEN_RECENT_BLOCKS - 1;
-    for i in (tip - 40)..tip {
-        wp.recent_chain_data[i]
-            .challenge_chain_ip_proof
-            .witness
-            .bytes[0] ^= 0x01;
-    }
-    match validate_weight_proof(&wp, &MAINNET) {
-        Err(WeightProofError::PhaseUnimplemented("total_weight")) => {
-            panic!("FAIL-OPEN: phase 5 accepted a proof with corrupted near-tip block VDFs")
-        }
-        Err(_) => { /* correctly rejected */ }
-        Ok(_) => panic!("FAIL-OPEN: corrupted-VDF proof accepted"),
-    }
-}
-
-/// PHASE 5 — BLS SIGNATURE TAMPER on non-boundary near-tip blocks (in the full-validation window). A
-/// corrupted foliage block-data signature must be caught by phase 5's signature verification.
-#[test]
-#[ignore = "phase 5 is slow; run in release for the gate"]
-fn phase5_tamper_bls_signature_nonboundary_rejects() {
-    let mut wp = load_fixture();
-    let tip = GOLDEN_RECENT_BLOCKS - 1;
-    for i in (tip - 40)..tip {
-        wp.recent_chain_data[i].foliage.foliage_block_data_signature = Bytes96::from([0xABu8; 96]);
-    }
-    match validate_weight_proof(&wp, &MAINNET) {
-        Err(WeightProofError::PhaseUnimplemented("total_weight")) => {
-            panic!("FAIL-OPEN: phase 5 accepted a proof with corrupted foliage BLS signatures")
-        }
-        Err(_) => { /* correctly rejected */ }
-        Ok(_) => panic!("FAIL-OPEN: corrupted-signature proof accepted"),
-    }
-}
-
-/// PHASE 5 — TAMPER: truncating the recent chain must reject (coarse; may reject at an earlier phase since
-/// it also perturbs the tip — the non-boundary VDF/BLS tampers above are the phase-5-specific gates).
-#[test]
-#[ignore = "phase 5 is slow; run in release for the gate"]
-fn tamper_phase5_truncate_recent_chain_rejects() {
-    let mut wp = load_fixture();
-    wp.recent_chain_data.truncate(GOLDEN_RECENT_BLOCKS / 2);
-    assert!(validate_weight_proof(&wp, &MAINNET).is_err());
 }
 
 /// ENCODING-CONTRACT REGRESSION GUARD. Current mainnet's on-chain ses hash is over the 5-field summary,

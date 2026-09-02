@@ -277,9 +277,6 @@ async fn subscription_cap_matches_chia_untrusted_max_subscribe_items() {
     );
 }
 
-// Subscription-cap gate: a peer whose cert-hash node id is in the trusted set resolves to
-// `trusted_max_subscribe_items` = 2,000,000, a non-member to the untrusted 200,000. The cap must
-// resolve per-peer from trust, never be a constant fixed at one tier.
 #[tokio::test]
 async fn subscription_cap_is_trusted_for_configured_node_id() {
     let trusted = h(0xaa);

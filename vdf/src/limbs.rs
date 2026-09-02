@@ -1,11 +1,3 @@
-//! Fixed-width stack integers for the class-group GCD hot loops.
-//!
-//! chiavdf's remaining structural speed technique: the Lehmer loops' big-integer updates
-//! (`x·w1 + y·w2` with word-size `w`) run on bounded operands (≤ ~1088 bits), so they fit in a
-//! fixed `[u64; LIMBS]` on the stack — no allocation, no `BigInt` bookkeeping. Only the rare
-//! exact-division fallback converts back to `BigInt`. Every op is differentially property-tested
-//! against `num_bigint` below.
-
 use num_bigint::{BigInt, Sign};
 
 // Width is const-generic: the GCD loops use the narrow SwGcd (20 limbs — operands <= ~1088 bits,
@@ -491,15 +483,6 @@ impl<const N: usize> Sw<N> {
         out
     }
 
-    /// `self·w1 + other·w2` with word coefficients — the Lehmer matrix-application primitive and
-    /// ~77% of class-group squaring (both Lehmer loops apply their 2×2 matrix through it).
-    ///
-    /// Single fused pass (chiavdf's fixed-limb technique), shaped for the hardware carry units:
-    /// the sign-magnitude three-pass dance (two `mul_word_mag` + `add_signed` with a magnitude
-    /// compare) collapses into one sweep of pure u64 `overflowing_add`/`overflowing_sub` chains —
-    /// exactly the adc/sbb structure hand assembly would use, which LLVM lowers to it. Same
-    /// effective signs run the fused add; opposite signs the fused subtract in two's complement
-    /// with one complement pass when the result is negative.
     #[must_use]
     pub fn linear2(&self, w1: i128, other: &Self, w2: i128) -> Self {
         let a1 = w1.unsigned_abs() as u64;
@@ -577,10 +560,6 @@ mod tests {
         Sw::<8>::from_bigint(&v)
     }
 
-    // The division is consensus-adjacent (the Lehmer quotient and every reduction walks through
-    // it), so its gate is a differential against bigint division rather than fixed vectors:
-    // random shapes plus the patterns that historically break Knuth D — the qhat overestimate
-    // (add-back branch), all-ones limbs, minimal normalized divisors, and single-word divisors.
     #[test]
     fn divrem_mag_matches_bigint_division() {
         let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
@@ -601,16 +580,16 @@ mod tests {
         ];
         for _ in 0..4000 {
             let dl = 1 + (rng.next() as usize) % 6;
-            let vl = 1 + (rng.next() as usize) % dl.max(1).min(4);
+            let vl = 1 + (rng.next() as usize) % dl.clamp(1, 4);
             let mut d: Vec<u64> = (0..dl).map(|_| rng.next()).collect();
             let mut v: Vec<u64> = (0..vl).map(|_| rng.next()).collect();
             // Bias toward carry-heavy limbs.
-            if rng.next() % 3 == 0 {
+            if rng.next().is_multiple_of(3) {
                 for x in &mut d {
                     *x |= 0xFFFF_FFFF_0000_0000;
                 }
             }
-            if rng.next() % 3 == 0 {
+            if rng.next().is_multiple_of(3) {
                 for x in &mut v {
                     *x |= 0xFFFF_FFFF_FFFF_0000;
                 }
@@ -643,9 +622,6 @@ mod tests {
 }
 
 impl<const N: usize> Sw<N> {
-    /// Fused `out[..n] = X·a1 + Y·a2` with the 65-bit (lo, hi) carry — kernel on aarch64,
-    /// portable elsewhere. Both stay compiled on aarch64: the portable body is the kernel's
-    /// oracle in the differential and its baseline in the bench.
     #[inline]
     fn addmul2(
         x: &[u64; N],
@@ -807,9 +783,6 @@ mod kernel_tests {
         Sw::<34>::from_bigint(&v)
     }
 
-    // The refactor gate: linear2 and mul against bigint arithmetic, so cutting the row loops
-    // out into dispatchable kernels provably changed nothing on any target — and on aarch64
-    // this same oracle proves the assembly end-to-end.
     #[test]
     fn linear2_and_mul_match_bigint() {
         let mut rng = Rng(0xA5A5_5A5A_DEAD_BEEF);
@@ -916,43 +889,5 @@ mod kernel_tests {
             check(&xd, &yd, rng.next(), rng.next());
         }
         eprintln!("  kernel-vs-portable rows: {cases} cases agreed");
-    }
-
-    // The quantifier: portable vs kernel per-row wall time in the same binary. This is how
-    // the kernels prove their worth on-target in seconds — no chain sync involved.
-    #[cfg(target_arch = "aarch64")]
-    #[test]
-    #[ignore = "manual kernel quantification"]
-    fn kernel_bench_rows() {
-        use std::time::Instant;
-        let mut rng = Rng(0x5EED_5EED_5EED_5EED);
-        // The Lehmer walk's operand distribution: most rows are 4-16 limbs.
-        for n in [4usize, 8, 16, 30] {
-            let x: [u64; 34] = core::array::from_fn(|_| rng.next());
-            let y: [u64; 34] = core::array::from_fn(|_| rng.next());
-            let (a1, a2) = (rng.next() | 1, rng.next() | 1);
-            let iters = 2_000_000u64 / n as u64;
-            let mut sink = 0u64;
-            let t = Instant::now();
-            for _ in 0..iters {
-                let mut out = [0u64; 34];
-                let (lo, hi) = Sw::<34>::addmul2_portable(&x, &y, n, a1, a2, &mut out);
-                sink = sink.wrapping_add(lo ^ hi ^ out[n / 2]);
-            }
-            let portable = t.elapsed();
-            let t = Instant::now();
-            for _ in 0..iters {
-                let mut out = [0u64; 34];
-                let (lo, hi) = addmul2_kernel(&x, &y, n, a1, a2, &mut out);
-                sink = sink.wrapping_add(lo ^ hi ^ out[n / 2]);
-            }
-            let kernel = t.elapsed();
-            eprintln!(
-                "  addmul2 n={n:>2}: portable {:>6.1?}ns/row, kernel {:>6.1?}ns/row, kernel/portable = {:.2}x  (sink {sink})",
-                portable.as_nanos() as f64 / iters as f64,
-                kernel.as_nanos() as f64 / iters as f64,
-                kernel.as_secs_f64() / portable.as_secs_f64(),
-            );
-        }
     }
 }

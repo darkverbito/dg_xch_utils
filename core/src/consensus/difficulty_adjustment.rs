@@ -32,8 +32,6 @@ pub fn height_can_be_first_in_epoch(constants: &ConsensusConstants, height: u32)
     (height - (height % constants.sub_epoch_blocks)).is_multiple_of(constants.epoch_blocks)
 }
 
-// Returns (can_finish_sub_epoch, can_finish_full_epoch).
-// General-node port: always takes the walk-back branch (prev_ses_block=None).
 pub fn can_finish_sub_and_full_epoch(
     constants: &ConsensusConstants,
     blocks: &HashMap<Bytes32, BlockRecord>,
@@ -365,27 +363,6 @@ pub fn get_next_sub_slot_iters_and_difficulty(
     Ok((sub_slot_iters, difficulty))
 }
 
-// How many ancestor records (inclusive of the anchor itself) the get_next_sub_slot_iters_and_
-// difficulty walks can touch below a block at `prev_height`. A caller that materializes a
-// bounded ancestor window must size it to the deepest walk for THIS anchor:
-//   - can_finish_sub_and_full_epoch scans from the anchor down to the last sub-epoch boundary
-//     (height % SUB_EPOCH_BLOCKS == 0) — up to SUB_EPOCH_BLOCKS - 1 records back;
-//   - at an epoch turn (height_can_be_first_in_epoch(height + 1)) the retarget additionally
-//     reaches the fetch floor just below height_prev_epoch_surpass
-//     (height_prev_epoch_surpass - MAX_SUB_SLOT_BLOCKS - 1) — and clear down to genesis while
-//     height_prev_epoch_surpass == 0;
-//   - the residual scans (prev_prev, last_block_curr, the two-transaction-block walk) stay
-//     within 4 * MAX_SUB_SLOT_BLOCKS of slack, mirrored here below the deepest anchor.
-// The bounded record-window capacity that serves EVERY consensus walk without a miss,
-// sized from the constants instead of a flat literal:
-//   - deepest per-anchor `difficulty_record_depth` (epoch-turn regime, anchor offset
-//     SUB_EPOCH_BLOCKS - 2 mod EPOCH_BLOCKS): EPOCH_BLOCKS + (SUB_EPOCH_BLOCKS - 2)
-//     + 4 * MAX_SUB_SLOT_BLOCKS + 1 = 5,503 on mainnet;
-//   - plus 2 * MAX_SUB_SLOT_BLOCKS slack for walk anchors that trail the newest cached head
-//     (an unfinished block's parent; a stage window's base after a restart warm).
-// Mainnet: 4608 + 384 + 6*128 = 5,760 records ≈ 6 MiB. A caller whose walks read ONLY the
-// window must size it to the worst depth WITH margin, or the first-sub-epoch retarget walk
-// falls off the edge (worst-case lookback 5,503).
 #[must_use]
 pub fn consensus_walk_window(constants: &ConsensusConstants) -> usize {
     (constants.epoch_blocks + constants.sub_epoch_blocks + 6 * constants.max_sub_slot_blocks)
@@ -396,8 +373,6 @@ pub fn consensus_walk_window(constants: &ConsensusConstants) -> usize {
 pub fn difficulty_record_depth(constants: &ConsensusConstants, prev_height: u32) -> u32 {
     // The can_finish_sub_and_full_epoch walk floor: the last sub-epoch boundary at or below prev.
     let mut lowest = prev_height - (prev_height % constants.sub_epoch_blocks);
-    // The epoch retarget only runs when the NEXT height can start an epoch — the same gate
-    // can_finish_sub_and_full_epoch applies before get_next_difficulty takes the deep walk.
     if height_can_be_first_in_epoch(constants, prev_height.saturating_add(1)) {
         let height_in_next_epoch = prev_height
             + 2 * constants.max_sub_slot_blocks

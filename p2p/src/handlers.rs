@@ -765,10 +765,6 @@ fn decode<T: ChiaSerialize>(msg: &ChiaMessage, version: ChiaProtocolVersion) -> 
     T::from_bytes(&mut Cursor::new(msg.data.as_slice()), version)
 }
 
-/// `MAX_PUZZLE_HASH_BATCH_SIZE = SQLITE_MAX_VARIABLE_NUMBER - 10 = 32690` — the decode-time list
-/// cap on `request_puzzle_state.puzzle_hashes`. Kept numerically in sync with
-/// `dg_xch_stores::traits::MAX_PUZZLE_HASH_BATCH_SIZE` (this crate is store-blind, so the value is
-/// mirrored here; a cross-crate equality test in `full-node` pins the two together).
 pub const MAX_PUZZLE_HASH_BATCH_SIZE: u32 = 32_700 - 10;
 
 /// Close a misbehaving peer's connection. All three halves of the close: (1) enter the peer's
@@ -833,10 +829,6 @@ impl FullNodeHandler {
                     // version above. Emitting a reply here would be a duplicate mid-stream handshake.
                     return Ok(());
                 }
-                // RATE_LIMITS_V3 responder mirror: if the peer advertises v3, the responder
-                // appends the capability to its reply and both sides exchange
-                // ConfigureWindowSizes. Our outbound dials keep the default capability set,
-                // which has no v3, so only inbound-initiated links ever activate it.
                 let peer_is_v3 = peer_supports_v3(&hs.capabilities);
                 let mut reply_caps: dg_xch_core::protocols::shared::Capabilities = CAPABILITIES
                     .iter()
@@ -1962,10 +1954,6 @@ impl MessageHandler for FullNodeHandler {
     ) -> Result<(), Error> {
         let size = msg.data.as_slice().len();
         self.counters.count_in(msg.msg_type, size);
-        // Inbound rate limiting is enforced upstream at the read loop, which charges EVERY inbound
-        // message — including solicited replies consumed by the correlation fast-path — before
-        // dispatch and closes on violation. The handler trusts that a message reaching it is
-        // within budget.
         let version = peer_version(&peers, &peer_id).await;
         self.dispatch(&msg, &peer_id, &peers, version).await
     }

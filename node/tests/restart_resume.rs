@@ -86,7 +86,6 @@ async fn uncommitted_batch_vanishes_wholly_and_committed_batch_survives_reopen()
                 "body {i} half-landed from an uncommitted batch"
             );
         }
-        // The resume ledger still owes every height: the killed batch lost no candidates.
         let mut pending = store.get_unassociated(16).await.expect("unassociated");
         pending.sort_unstable();
         let expected: Vec<u32> = (BASE..BASE + 8).collect();
@@ -189,10 +188,6 @@ async fn confirmed_peak_survives_reopen_and_the_rewarmed_engine_resumes() {
     );
 }
 
-// Kill-point class C: a mid-range kill resumes with EXACTLY the missing heights — the store is
-// the resume ledger. A stale peer serves only the lower half, the sync fails Exhausted (the
-// kill), and after reopen `get_unassociated` names precisely the un-downloaded upper half: no
-// gap, no dupe. The resumed sync then downloads exactly that many bodies and drains.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn mid_range_kill_resumes_with_exactly_the_missing_heights() {
     let base_block = common::load_full_block(5_000_000);

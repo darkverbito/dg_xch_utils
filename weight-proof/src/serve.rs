@@ -1,13 +1,3 @@
-// The serving (construction) half of the Chia weight proof — the prover-side mirror of this crate's
-// validator, ported from the reference node's construction half. The store surface is the node's
-// own `dg_xch_stores::BlockStore`, so what this builds is exactly what the daemon's p2p arm serves.
-//
-// Sampling reuses the SAME CPython-`random.Random` port and the SAME `_get_weights_for_sampling` /
-// `_sample_sub_epoch` mirrors the validator uses (`crate::py_random`, `crate::get_weights_for_sampling`,
-// `crate::sample_sub_epoch`) — one implementation on both sides, so the builder's sampled sub-epoch set
-// is byte-for-byte the set any conforming validator derives from the same seed (same rng call order:
-// seed → the `int(queries)+1` `random()` draws → sort).
-
 use crate::WeightProofError;
 use dg_xch_core::blockchain::block_record::BlockRecord;
 use dg_xch_core::blockchain::end_of_subslot_bundle::EndOfSubSlotBundle;
@@ -35,9 +25,6 @@ use tokio::sync::Mutex;
 // across current protocol versions, but a pin keeps persisted bytes stable by construction.
 const SEGMENT_STORE_VERSION: ChiaProtocolVersion = ChiaProtocolVersion::Chia0_0_37;
 
-/// Why a proof could not be produced. The `is_refusal` variants mirror the reference node's
-/// silent no-reply paths (unknown tip, short chain); everything else is a real build failure
-/// worth logging loudly.
 #[derive(Debug)]
 pub enum ServeError {
     /// The requested tip is not a block we hold (no reply).
@@ -202,13 +189,6 @@ where
         }
     }
 
-    /// Refuse an unknown
-    /// tip or a chain shorter than `WEIGHT_PROOF_RECENT_BLOCKS`, then — under the single-flight lock —
-    /// return the cached proof when it already attests this tip, else build and cache.
-    ///
-    /// # Errors
-    /// Returns a refusal variant ([`ServeError::is_refusal`]) on the chia no-reply paths, otherwise a
-    /// store/build error.
     pub async fn get_proof_of_weight(&self, tip: Bytes32) -> Result<Arc<WeightProof>, ServeError> {
         // `try_block_record(tip)` unknown → refuse.
         let tip_rec = self
@@ -223,9 +203,6 @@ where
                 required: self.constants.weight_proof_recent_blocks,
             });
         }
-        // The lock + tip-keyed cache. Held across the whole build on
-        // purpose: that IS the single-flight (chia holds `self.lock` across `_create_proof_of_weight`
-        // the same way), and the builder task is the only latency-tolerant consumer.
         let mut st = self.state.lock().await;
         if let Some((cached_tip, wp)) = &st.proof
             && *cached_tip == tip
@@ -1266,10 +1243,6 @@ mod tests {
                 .find(|(sh, _)| *sh == h)
                 .map(|(_, s)| *s);
             let is_challenge = spec.challenge_heights.contains(&h);
-            // A ses-carrying block is the first block of the slot that commits the summary: its
-            // opening finished sub slot carries `subepoch_summary_hash = hash(ses)` on chain. The
-            // validator's `_get_last_ses_hash` mirror reads exactly that commitment, so ses heights
-            // must be slot starts here (as on the real chain).
             let finished_sub_slots = if first_in_sub_slot {
                 let mut bundle = slot_bundle();
                 if let Some(s) = &ses_included {
@@ -1548,7 +1521,6 @@ mod tests {
         let server = WeightProofServer::new(Arc::new(store), MAINNET);
         let wp = server.get_proof_of_weight(tip).await.expect("proof builds");
 
-        // Sub-epoch data mirrors the two summaries at-or-below the tip.
         assert_eq!(wp.sub_epochs.len(), 2);
         assert_eq!(wp.sub_epochs[0], create_sub_epoch_data(&ses(0)));
         assert_eq!(wp.sub_epochs[1], create_sub_epoch_data(&ses(1)));
@@ -1595,8 +1567,6 @@ mod tests {
             "challenge entry carries the record's total_iters"
         );
 
-        // The whole-proof cache: a second request for the same tip returns the SAME proof (chia
-        // `self.proof` under the handler lock).
         let again = server.get_proof_of_weight(tip).await.expect("cached");
         assert!(
             Arc::ptr_eq(&wp, &again),
@@ -1604,15 +1574,6 @@ mod tests {
         );
     }
 
-    // A proof built by the SERVER must pass the VALIDATOR's phase 2:
-    // `_get_last_ses_hash` reads the on-chain summary commitment out of the recent
-    // chain's finished sub slots, `_map_sub_epoch_summaries` rebuilds the summary chain
-    // from our emitted SubEpochData anchored on GENESIS_CHALLENGE, and the last reconstructed hash
-    // must equal the commitment. Red on any builder defect in summary selection, ordering, or
-    // field mapping.
-    //
-    // The chain carries properly LINKED summaries: ses0.prev = GENESIS_CHALLENGE,
-    // ses1.prev = hash(ses0), and the ses blocks' opening slots commit the hashes on chain.
     #[tokio::test]
     async fn built_proof_passes_validator_phase2_summary_anchor() {
         let ses0 = SubEpochSummary {

@@ -107,13 +107,6 @@ async fn add_real_mainnet_block_matches_reference_and_advances_peak() {
     assert_eq!(again, AddBlockOutcome::AlreadyHave);
 }
 
-// ---------------------------------------------------------------------------
-// Data-level block-validation rules. These are the pure
-// prev-linkage / height / weight checks the engine performs in `derive_delta` + `prev_record_by`,
-// which run BEFORE any VDF/PoSpace/plot infrastructure the native node lacks — so they port directly.
-// A validated mainnet parent (height 5_000_000) is the confirmed peak; each child violates exactly one
-// rule.
-
 fn child_of(
     parent: &dg_xch_core::blockchain::full_block::FullBlock,
 ) -> dg_xch_core::blockchain::full_block::FullBlock {
@@ -139,8 +132,6 @@ async fn peak_engine() -> (
     (engine, parent)
 }
 
-// Port of `test_invalid_prev` (Err.INVALID_PREV_BLOCK_HASH): a block whose prev_block_hash points at
-// no known record is rejected. With a peak established, dg_xch surfaces this as an orphan.
 #[tokio::test]
 async fn block_with_unknown_prev_hash_is_rejected() {
     let (mut engine, parent) = peak_engine().await;
@@ -157,8 +148,6 @@ async fn block_with_unknown_prev_hash_is_rejected() {
     );
 }
 
-// Port of `test_height` (Err.INVALID_HEIGHT): a child that does not extend its parent's height by
-// exactly one is rejected.
 #[tokio::test]
 async fn block_height_must_extend_parent_by_one() {
     let (mut engine, parent) = peak_engine().await;
@@ -178,8 +167,6 @@ async fn block_height_must_extend_parent_by_one() {
     }
 }
 
-// Port of `test_weight` (Err.INVALID_WEIGHT): a child whose weight does not strictly increase over its
-// parent is rejected.
 #[tokio::test]
 async fn block_weight_must_strictly_increase_over_parent() {
     let (mut engine, parent) = peak_engine().await;

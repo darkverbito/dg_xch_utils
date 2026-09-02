@@ -1,29 +1,3 @@
-//! Differential gate for the CLVM BLS operators against clvmr 0.17.7 semantics.
-//!
-//! The oracle below implements *clvmr 0.17.7*'s `op_pubkey_for_exp` / `op_point_add`
-//! (`src/more_ops.rs:1129` / `:1149`, the clvm_rs chia mainnet runs via chia_rs 0.42.x)
-//! on top of the independent bls12_381 crate (`Scalar::from_bytes` canonical scalars,
-//! `G1Affine::from_compressed`, `G1Projective` accumulation; bls12_381 is a
-//! dev-dependency only) and is replayed against the shipped blst-backed operators over
-//! deterministic seeded case sets:
-//!
-//!   * exponents: fixed corners (0, ±1, r-1, r, r+1, 2r, -r, high-bit/negative, oversized)
-//!     plus thousands of random atoms of length 0..=64 — cost and output bytes must match;
-//!   * points: random valid G1 elements, the canonical infinity, and every invalid class
-//!     (wrong length, flag-bit corners, x = 0, non-canonical x >= p, off-curve x,
-//!     on-curve-but-wrong-subgroup, the full first-byte x-zero-tail sweep) — any invalid
-//!     encoding errors the whole operator, exactly like clvmr's `Allocator::g1` ->
-//!     chia-bls `G1Element::from_bytes`;
-//!   * mixed argument lists and max_cost exhaustion — POINT_ADD_COST_PER_ARG is charged
-//!     and checked BEFORE each argument is parsed, and `pubkey_for_exp` `check_cost`s
-//!     before the scalar-mul — identical Ok/Err outcome, identical cost, identical bytes.
-//!
-//! dg_xch used to (1) silently skip invalid 48-byte points, (2) charge per-arg cost only
-//! after a successful parse, and (3) ignore `max_cost` in `pubkey_for_exp`. Those semantics
-//! are FIXED to clvmr's; the `*_like_clvmr` tests at the bottom pin the clvmr-correct
-//! behavior and the `old_*_outcome_is_unreachable` inverse tests prove the old outcomes are
-//! no longer reachable.
-
 #![cfg(feature = "bls")]
 
 use bls12_381::{G1Affine, G1Projective, Scalar};
@@ -38,18 +12,12 @@ use rand::{RngExt, SeedableRng};
 
 const SEED: u64 = 0x0DDB_1A5E_D0DD_5EED;
 
-// Cost constants, mirroring core/src/clvm/more_ops.rs (private there) — clvmr values.
 const MALLOC_COST_PER_BYTE: u64 = 10;
 const PUBKEY_BASE_COST: u64 = 1_325_730;
 const PUBKEY_COST_PER_BYTE: u64 = 38;
 const POINT_ADD_BASE_COST: u64 = 101_094;
 const POINT_ADD_COST_PER_ARG: u64 = 1_343_980;
 const INFINITE_COST: u64 = 0x7FFF_FFFF_FFFF_FFFF;
-
-// ---------------------------------------------------------------------------------------
-// The oracle: the previous bls12_381 implementation, byte-level, copied structurally from
-// the pre-port core/src/clvm/more_ops.rs.
-// ---------------------------------------------------------------------------------------
 
 fn group_order() -> BigInt {
     let order_as_bytes = &[
@@ -92,9 +60,6 @@ enum PubkeyOracleOutcome {
     CostExceeded,
 }
 
-/// clvmr 0.17.7 `op_pubkey_for_exp` (src/more_ops.rs:1129): cost is
-/// `PUBKEY_BASE_COST + len * PUBKEY_COST_PER_BYTE`, `check_cost`ed against `max_cost`
-/// BEFORE the scalar-mul; the 48-byte malloc surcharge rides only the returned cost.
 fn oracle_pubkey_for_exp(atom: &[u8], max_cost: u64) -> PubkeyOracleOutcome {
     let cost = PUBKEY_BASE_COST + (atom.len() as u64) * PUBKEY_COST_PER_BYTE;
     if cost > max_cost {
@@ -111,15 +76,11 @@ enum OracleOutcome {
     Ok(u64, [u8; 48]),
     /// Wrong-length atom.
     WrongLength,
-    /// Invalid 48-byte G1 encoding (clvmr `Allocator::g1` error).
     InvalidPoint,
     /// The running cost exceeded max_cost.
     CostExceeded,
 }
 
-/// clvmr 0.17.7 `op_point_add` (src/more_ops.rs:1149): POINT_ADD_COST_PER_ARG is charged
-/// and `check_cost`ed for EVERY argument before it is parsed; any wrong length or invalid
-/// 48-byte encoding errors the whole operator (`Allocator::g1`, src/allocator.rs:1107).
 fn oracle_point_add(atoms: &[Vec<u8>], max_cost: u64) -> OracleOutcome {
     let mut cost = POINT_ADD_BASE_COST;
     let mut total: G1Projective = G1Projective::identity();
@@ -355,9 +316,6 @@ fn pubkey_for_exp_matches_bls12_381_reference() {
 
 #[test]
 fn pubkey_for_exp_max_cost_boundaries_match() {
-    // Sweep the budget across the check_cost boundary for several atom lengths: the check
-    // is on PUBKEY_BASE_COST + len * PUBKEY_COST_PER_BYTE (pre-malloc), clvmr 0.17.7
-    // src/more_ops.rs:1137.
     for len in [0usize, 1, 32, 64] {
         let atom = vec![0x01u8; len];
         let boundary = PUBKEY_BASE_COST + (len as u64) * PUBKEY_COST_PER_BYTE;
@@ -379,9 +337,9 @@ fn pubkey_for_exp_arg_count_is_enforced() {
     let mut arena = Arena::new();
     let dialect = ChiaDialect::new(0);
     let args = NodePtr::NIL;
-    assert!(op_pubkey_for_exp(&mut arena, args, INFINITE_COST, &dialect).is_err());
+    assert!(op_pubkey_for_exp(&arena, args, INFINITE_COST, &dialect).is_err());
     let two = atom_list(&mut arena, &[vec![0x01], vec![0x02]]);
-    assert!(op_pubkey_for_exp(&mut arena, two, INFINITE_COST, &dialect).is_err());
+    assert!(op_pubkey_for_exp(&arena, two, INFINITE_COST, &dialect).is_err());
 }
 
 #[test]
@@ -509,24 +467,12 @@ fn point_add_max_cost_exhaustion_matches() {
     assert_point_add_matches(&with_invalid, budget, "invalid consumes budget then errors");
 }
 
-// ---------------------------------------------------------------------------------------
-// clvmr 0.17.7 canonical behavior, ADOPTED (fix). These tests pin the clvmr semantics
-// directly; the `old_*_outcome_is_unreachable` inverse tests below prove the pre-fix
-// dg_xch outcomes are no longer reachable.
-// ---------------------------------------------------------------------------------------
-
 #[test]
 fn point_add_rejects_invalid_point_like_clvmr() {
-    // clvmr 0.17.7: `a.g1(arg)` -> chia-bls `G1Element::from_bytes` fails on any invalid
-    // 48-byte encoding and the whole operator errors — no silent skip.
     let mut garbage = vec![0u8; 48];
     garbage[0] = 0x80; // x = 0 without infinity: invalid in every implementation
     assert!(run_point_add(&[garbage], INFINITE_COST).is_err());
 
-    // Every characterized invalid class, alone and sandwiched between valid points.
-    // (`invalid_point_corners` includes flag-bit sweeps; a corner like compressed+sort
-    // over a valid x is a VALID encoding of the negated point, so gate each corner on
-    // the independent bls12_381 classification first.)
     let mut rng = StdRng::seed_from_u64(SEED ^ 24);
     let valid = random_valid_point(&mut rng).to_vec();
     let mut invalid_seen = 0usize;
@@ -555,8 +501,6 @@ fn point_add_rejects_invalid_point_like_clvmr() {
 
 #[test]
 fn point_add_charges_per_arg_before_parse_like_clvmr() {
-    // With no headroom for any per-arg cost, a single invalid argument must exceed the
-    // budget (clvmr src/more_ops.rs:1158-1159: cost precedes parse).
     let mut garbage = vec![0u8; 48];
     garbage[0] = 0x80;
     let budget = POINT_ADD_BASE_COST; // no headroom for any per-arg cost
@@ -576,8 +520,7 @@ fn pubkey_for_exp_enforces_max_cost_like_clvmr() {
     let mut arena = Arena::new();
     let dialect = ChiaDialect::new(0);
     let args = atom_list(&mut arena, &[vec![0x01]]);
-    // Budget below PUBKEY_BASE_COST: clvmr's check_cost fails before the scalar-mul.
-    assert!(op_pubkey_for_exp(&mut arena, args, 1000, &dialect).is_err());
+    assert!(op_pubkey_for_exp(&arena, args, 1000, &dialect).is_err());
 }
 
 // ---------------------------------------------------------------------------------------

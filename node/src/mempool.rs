@@ -703,11 +703,6 @@ impl MempoolItem {
             .collect()
     }
 
-    // The mempool priority key: fee per VIRTUAL cost, where
-    // `virtual_cost = cost + num_spends * SPEND_PENALTY_COST` and eviction/assembly order by
-    // `priority DESC, seq ASC`. Unconditional: the penalty is mempool policy with no activation
-    // gate — spends per block are capped, so spend count is the scarcer resource the penalty
-    // prices.
     #[must_use]
     #[allow(clippy::cast_precision_loss)]
     pub fn fee_per_virtual_cost(&self) -> f64 {
@@ -722,11 +717,6 @@ impl MempoolItem {
     }
 }
 
-// A fee-priority, capacity-bounded transaction pool over native SpendBundleConditions. Admission
-// validates against the current peak (the store is the confirmed set) and the pool's own conflict index;
-// at capacity the lowest fee-per-cost items are evicted (bound everything). A new peak
-// drops every item the peak spent or invalidated. No re-ported consensus: fee/cost come straight off the
-// native conds, removals via core's removals_for_conditions.
 pub struct Mempool {
     // MAX_BLOCK_COST_CLVM * MEMPOOL_BLOCK_BUFFER — the total-cost ceiling that triggers eviction.
     max_total_cost: u64,
@@ -943,9 +933,6 @@ impl Mempool {
         None
     }
 
-    /// The pre-fetch gate for gossiped transactions: anything with a cost gets in while there's
-    /// room; at capacity the advertised fee must clear the nonzero floor AND strictly beat the
-    /// pool's min fee rate.
     #[must_use]
     #[allow(clippy::cast_precision_loss)]
     pub fn is_fee_enough(&self, fees: u64, cost: u64) -> bool {
@@ -1641,34 +1628,6 @@ impl Mempool {
         self.peak
     }
 
-    /// Assemble a block generator from the resident mempool items — the produce-path feed.
-    /// Selection: fee-priority order ([`Mempool::items_by_fee`]), the fee-sum overflow guard, the
-    /// [`MAX_SPENDS_PER_BLOCK`] cap, the skip heuristic ([`MAX_SKIPPED_ITEMS`], break ON the tenth
-    /// skip), the low-budget stop ([`MIN_COST_THRESHOLD`]), and a wall-clock `timeout`. The cost
-    /// budget is `max_block_cost_clvm - BLOCK_OVERHEAD`, spent per item at the item's admission
-    /// cost (its conditions + execution + plain-serialized byte cost).
-    ///
-    /// The emitted generator is the back-reference-compressed byte format (the quoted spend list,
-    /// reversed spend order, subtree-deduplicated, canonical serialization, empty ref list).
-    /// While the plain per-item sum fits the budget an item is admitted directly
-    /// (compressed ≤ plain); only when that sum would overflow is the true compressed size
-    /// measured and re-checked — back-ref compression lets extra transactions in near the cost
-    /// limit. One conservative delta vs an incremental builder: we re-serialize the whole
-    /// (compressed) spend set at the fit boundary — same admission decision, more work near the
-    /// limit.
-    ///
-    /// After selection the generator is RE-RUN through our own validator
-    /// ([`execute_block_generator_result`], `height`-keyed flags); the re-run cost is the
-    /// authoritative `BlockTransactions::cost` the candidate's `TransactionsInfo` carries. A
-    /// re-run failure is an assertion-failure-grade bug — log and return `None`.
-    ///
-    /// Resident ⇒ includable: every resident item's effective time-locks were validated against
-    /// this pool's peak — the SAME previous-transaction-block frame the assembled block validates
-    /// under — so no per-item re-check is needed here. The CALLER must gate on [`Mempool::peak`]
-    /// matching the candidate's previous transaction block; `height` is the height of the block
-    /// being built (the CLVM flag-ladder key).
-    ///
-    /// Returns `None` when nothing is includable — the candidate stays a valid empty block.
     #[must_use]
     pub fn create_block_generator(
         &self,

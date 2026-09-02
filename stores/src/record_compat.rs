@@ -1,22 +1,3 @@
-//! Version-tolerant decode for stored `block_record.record` blobs.
-//!
-//! A legacy layout serialized `BlockRecord.challenge_vdf_output` /
-//! `infused_challenge_vdf_output` as length-prefixed byte vectors (`VdfOutput { data:
-//! UnsizedBytes }` — a u32-BE `0x00000064` prefix ahead of each 100-byte VDF output). The wire
-//! layout carries bare fixed 100-byte `ClassgroupElement`s and the struct now matches it, but
-//! store legs in the fleet still hold records persisted in the legacy layout and a forced
-//! resync is not acceptable.
-//!
-//! Decode strategy: try the wire layout first (every new write, and the steady state once a
-//! leg's records have churned), requiring exact-fit framing — the parse must consume the blob
-//! exactly.
-//! On any failure, fall back to a field-by-field walk of the legacy layout (also exact-fit). The
-//! two layouts cannot be confused: a legacy blob read as the wire form misplaces every field after byte 101
-//! and must survive ~10 constrained Option/bool tag bytes AND land on the exact blob length; the
-//! exact-fit gate alone rejects it in every observed case because the legacy form is 4 (or 8)
-//! bytes longer than the wire form of the same record. New writes always use the wire layout, so
-//! legacy blobs age out as records are rewritten; reads never require a store migration.
-
 use crate::error::StoreError;
 use dg_xch_core::blockchain::block_record::BlockRecord;
 use dg_xch_core::blockchain::class_group_element::ClassgroupElement;

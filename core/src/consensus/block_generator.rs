@@ -75,11 +75,6 @@ impl BlockGeneratorFlags {
 
         Self {
             clvm_flags,
-            // Generator MODE keys on hard fork 1 — chia's validator selects
-            // run_block_generator2 at HARD_FORK_HEIGHT — while the CLVM flag set above stays
-            // empty until soft fork 8/9. The two ladders are separate: keying the mode on soft
-            // fork 9 walled a live sync at 5,496,002 with InvalidBlockCost, since the byte-cost
-            // charge differs between the ROM and direct paths.
             simple_generator: height >= constants.hard_fork_height,
         }
     }
@@ -240,11 +235,6 @@ pub fn validate_transaction_block(
     })
 }
 
-/// The generator identity root: `sha256` of the generator's **raw serialized bytes**.
-///
-/// There is **no height gate and no tree hash**: the on-wire generator bytes (which may
-/// carry CLVM back-references) are hashed verbatim, never the decompressed program's
-/// `sha256tree`. `SerializedProgram::as_ref()` is those raw wire bytes.
 pub fn transactions_generator_root(generator: &SerializedProgram) -> Bytes32 {
     Bytes32::new(hash_256(generator.as_ref()))
 }
@@ -417,8 +407,6 @@ fn check_simple_generator(
 // — `conditions_from_generator_output` errors on that same spend before it would need the
 // missing hash, and it falls back to a direct `tree_hash()` for any index not covered.
 fn simple_generator_reveal_hashes(generator: &SExp) -> Option<Vec<Bytes32>> {
-    // generator = (q . REST); the quote's output is REST; the validator reads
-    // output.first() as the spends list — mirror that walk exactly.
     let (_operator, rest) = generator.split().ok()?;
     let all_spends = rest.first().ok()?;
     let spends = all_spends.ref_list();
@@ -491,19 +479,6 @@ pub fn validate_block_aggregate_signature(
     }
 }
 
-// Aggregate-verify a block's AGG_SIG pair set, validating each DISTINCT public key once.
-//
-// Verdict-preserving: identical key bytes yield identical uncompress/infinity/subgroup
-// verdicts, so checking once per distinct key cannot change the accept/reject outcome.
-// `PublicKey::validate()` performs the same two checks the per-occurrence path performs
-// per pair (infinity, then in-group), and the deduped pairing runs with
-// `pks_validate = false` since every key it receives has already passed them. A malformed
-// key is rejected at deserialize — the same verdict the per-occurrence path reaches via
-// its decoy infinity point.
-//
-// The dedup branch validates the distinct keys on the CALLING thread, so it engages only
-// where it pays: at least half the occurrences are repeats and the distinct set is small.
-// Everything else takes the per-occurrence path.
 const DEDUP_MAX_DISTINCT_KEYS: usize = 64;
 
 fn aggregate_verify_deduped(keys: &[Bytes48], messages: &[Message], signature: &Signature) -> bool {
@@ -643,7 +618,6 @@ pub fn coin_spend_from_generator(
         // Pre-hard-fork ROM generators do not surface puzzle reveals; see the doc comment.
         return Err(ChiaError::GeneratorRuntimeError);
     }
-    // Same size gate as execute_block_generator_result.
     if input.transactions_generator.as_ref().len() > input.constants.max_generator_size as usize {
         return Err(ChiaError::InvalidTransactionsGeneratorHash);
     }
@@ -744,10 +718,6 @@ pub fn coin_spends_with_conditions_from_generator(
     run_simple_generator_spends(input, true)
 }
 
-// Shared body of the two trusted-block spend extractors: run the simple generator exactly as
-// `coin_spend_from_generator` does (same size gate, same backref decode, same cost budget), walk
-// the `(parent puzzle_reveal amount solution)` spend list, and — when `with_conditions` — re-run
-// each puzzle with its solution to parse the condition output.
 fn run_simple_generator_spends(
     input: &BlockGeneratorInput,
     with_conditions: bool,
@@ -1170,17 +1140,6 @@ fn build_generator_tree(spends: &[CoinSpend]) -> Result<SExp<'static>, ClvmError
     ))))
 }
 
-/// The block producer's plain (uncompressed) generator for an ORDERED spend sequence. The
-/// wire format holds the spends in REVERSE input order; [`simple_solution_generator`]
-/// preserves input order, so this wrapper reverses before assembling. Byte-parity against the
-/// reference encoder is pinned by the tests below.
-///
-/// The plain form is the uncompressed sibling of the back-reference-compressed generator:
-/// identical tree, identical consensus validity (post-SF9: starts `ff01`, canonical
-/// serialization, parses under the backrefs parser), higher byte cost.
-///
-/// # Errors
-/// Propagates [`simple_solution_generator`]'s CLVM parse/serialize errors.
 pub fn solution_generator_from_coin_spends(
     spends: &[CoinSpend],
 ) -> Result<SerializedProgram, ClvmError> {
@@ -1188,20 +1147,6 @@ pub fn solution_generator_from_coin_spends(
     simple_solution_generator(&reversed)
 }
 
-/// The BACK-REFERENCE-COMPRESSED block generator for `spends`. It
-/// builds the IDENTICAL `(q . (SPENDS))` tree as [`solution_generator_from_coin_spends`] (spends in
-/// reversed input order) and serializes it with [`sexp_to_bytes_backrefs`], deduplicating
-/// repeated subtrees (identical puzzle reveals, shared puzzle hashes) via CLVM back-references
-/// (`0xfe`). The result:
-/// - decodes (our `sexp_from_bytes_backrefs`, the same decoder validation uses) to the SAME program
-///   the plain form does — so it runs to the same conditions at the same execution/condition cost;
-/// - is never larger than the plain form, and strictly smaller whenever a ≥4-byte subtree repeats —
-///   which is what lets a block pack more spends under `MAX_BLOCK_COST_CLVM`.
-///
-/// Byte-parity against the reference back-reference encoder is pinned by the tests below.
-///
-/// # Errors
-/// Propagates [`build_generator_tree`]'s CLVM parse errors and the serializer's `io::Error`.
 pub fn compressed_solution_generator_from_coin_spends(
     spends: &[CoinSpend],
 ) -> Result<SerializedProgram, ClvmError> {
@@ -1211,11 +1156,6 @@ pub fn compressed_solution_generator_from_coin_spends(
         .map_err(|e| ClvmError::SerializationError(e.to_string()))
 }
 
-/// Serialized length of `spends` wrapped as a PLAIN (uncompressed) `solution_generator` program —
-/// the byte cost a bundle is charged as if it were a block generator.
-/// This is the plain length; the compressed generator (back-references) is never larger,
-/// so this is a sound upper bound on the compressed byte cost — the block producer uses it to gate
-/// cheaply and only measures the true compressed size at the cost limit.
 #[must_use]
 pub fn spend_bundle_generator_length(spends: &[crate::blockchain::coin_spend::CoinSpend]) -> usize {
     fn clvm_bytes_len(val: u64) -> usize {
@@ -1828,9 +1768,6 @@ fn arena_uint_condition(
             saturating_assert_u64(sanitize_uint_from_arena(arena, arg_node, 8)?)
                 .map(ConditionWithArgs::AssertSecondsRelative)
         }
-        // ASSERT_BEFORE_* invert the verdict: a positive overflow is trivially satisfied (skip),
-        // a negative / non-canonical value is unsatisfiable. Saturating to 0 makes
-        // `validate_block_conditions` reject it with the before-condition's own code.
         ConditionOpcode::AssertBeforeHeightAbsolute => {
             saturating_before_u32(sanitize_uint_from_arena(arena, arg_node, 4)?)
                 .map(ConditionWithArgs::AssertBeforeHeightAbsolute)
@@ -1851,10 +1788,6 @@ fn arena_uint_condition(
     })
 }
 
-// The ASSERT_BEFORE_* verdict: a positive overflow is a trivially-true bound -> skip (None); a
-// negative or non-canonical value is unsatisfiable. The failing verdict saturates to 0 so
-// `validate_block_conditions` (block_height >= 0 / prev_ts >= 0) raises the before-condition's
-// own code, keeping the parse infallible.
 fn saturating_before_u64(verdict: SanitizedUint) -> Option<u64> {
     match verdict {
         SanitizedUint::Ok(value) => Some(value),
@@ -2900,8 +2833,6 @@ mod producer_tests {
             "expected a simple (quoted) generator"
         );
 
-        // Run it through OUR validator on the simple path (height >= hard fork =>
-        // simple_generator, chia's run_block_generator2 selection).
         let height = MAINNET.hard_fork_height + 4000;
         let input = BlockGeneratorInput {
             transactions_generator: generator,
@@ -2930,11 +2861,8 @@ mod producer_tests {
         );
     }
 
-    // Byte-parity vector for the plain generator: the reference bytes carry the spends in
-    // REVERSE input order; `solution_generator_from_coin_spends` must reproduce them for
-    // the same ordered input.
     #[test]
-    fn chia_rs_solution_generator_byte_parity() {
+    fn solution_generator_wire_format_is_stable() {
         use crate::consensus::block_generator::solution_generator_from_coin_spends;
 
         let puzzle1 = hex::decode(concat!(
@@ -3044,15 +2972,11 @@ mod producer_tests {
         );
     }
 
-    // Byte-parity vector for the compressed generator: same two spends as the plain vector
-    // above; the compressed form replaces the two repeated puzzle-hash subtrees with
-    // `0xfe`-prefixed back-references. With the plain vector this proves the two forms
-    // encode the SAME program.
     #[test]
-    fn compressed_generator_matches_chia_rs_backrefs() {
+    fn compressed_generator_uses_backrefs() {
         use crate::consensus::block_generator::compressed_solution_generator_from_coin_spends;
 
-        let spends = chia_rs_backref_fixture_spends();
+        let spends = backref_fixture_spends();
         let generator =
             compressed_solution_generator_from_coin_spends(&spends).expect("assemble compressed");
         let expected = hex::decode(
@@ -3098,8 +3022,7 @@ mod producer_tests {
         );
     }
 
-    // The two test spends shared by the plain and compressed byte-parity vectors.
-    fn chia_rs_backref_fixture_spends() -> Vec<CoinSpend> {
+    fn backref_fixture_spends() -> Vec<CoinSpend> {
         use crate::clvm::program::SerializedProgram;
         let puzzle1 = hex::decode(concat!(
             "ff02ffff01ff02ffff01ff02ffff03ff0bffff01ff02ffff03ffff09ff05ffff",

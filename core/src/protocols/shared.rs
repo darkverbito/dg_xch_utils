@@ -14,9 +14,6 @@ pub enum Capability {
     MempoolUpdates = 5,
     // Signals Hard Fork 2 support — pre-activation on mainnet (HF2 standing bucket).
     HardFork2 = 6,
-    // When both peers advertise this, a ConfigureWindowSizes message follows the handshake and
-    // window-based (in-flight) rate limits replace v2 for the supported message types. Not in
-    // the default outgoing set: the responder mirrors it when the initiator advertises it.
     RateLimitsV3 = 7,
 }
 

@@ -293,9 +293,6 @@ pub async fn spawn_introducer(peer_list: Vec<TimestampedPeerInfo>) -> RunningSer
     server
 }
 
-// `spawn_introducer` on a FIXED port, returning the introducer-query counter. The t046 retry tests
-// bring the introducer up on a port the supervisor is ALREADY retrying (the boot-time
-// DNS-not-ready analog) and assert the query cadence.
 pub async fn spawn_introducer_on(
     port: u16,
     peer_list: Vec<TimestampedPeerInfo>,

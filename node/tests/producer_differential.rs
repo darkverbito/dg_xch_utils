@@ -1,45 +1,3 @@
-// Differential-harvest harness: prove our block producer against REAL mainnet blocks — the
-// oracle is the mainnet wire itself. A mainnet `FullBlock` is an
-// `UnfinishedBlock` plus the timelord's three infusion VDFs (challenge-chain / reward-chain /
-// infused-challenge-chain infusion-point VDFs + their proofs). Strip those and what remains — the
-// `RewardChainBlockUnfinished`, the whole `Foliage`, the `FoliageTransactionBlock`, the
-// `TransactionsInfo`, the generator + ref-list, the finished sub-slots — is EXACTLY what our producer
-// assembles.
-//
-// The method: for each real `FullBlock`, feed ITS OWN inputs (proof_of_space, the cc/rc signage-point
-// VDFs + proofs, signage_point_index, pos_ss_cc_challenge_hash, pool_target + pool_signature,
-// farmer_reward_puzzle_hash, total_iters, the REAL farmer signatures out of its own foliage, its real
-// timestamp, its generator, and — for a transaction block — its real spend additions/removals) into OUR
-// `create_unfinished_block_with_sigs`, and assert the produced `UnfinishedBlock` re-serializes
-// BYTE-IDENTICALLY to that block's unfinished portion. Because every farmer-chosen value (the four
-// signatures, extension_data, timestamp) is supplied from the real block, the ONLY thing under test is
-// our ASSEMBLY: foliage structure + field order, the hashing (unfinished_reward_block_hash,
-// foliage_transaction_block_hash, transactions_info_hash), the reward-claim walk (pool/farmer coinbase
-// minting), the additions/removals merkle roots, the BIP158 filter, and the RewardChainBlockUnfinished
-// packing. A single byte of divergence is a real producer bug.
-//
-// ── KNOWN, DOCUMENTED DIVERGENCE (consensus-irrelevant) ────────────────────────────────────────────
-// `foliage.foliage_block_data.extension_data`: the reference derives it from MT19937, our
-// producer derives it as `sha256(seed)` (core/src/consensus/producer.rs::extension_data_from_seed).
-// There is NO seed that makes sha256(seed) equal a
-// given MT19937 value, and — critically — the current producer public API takes `seed: &[u8]`, NOT
-// `extension_data: Bytes32`, so a real extension_data CANNOT be injected through it. This harness
-// therefore (1) asserts extension_data is the SOLE differing field, (2) splices the real value in, then
-// (3) asserts WHOLE-BLOCK byte identity of everything else. See the report for the API-gap flag.
-//
-// ── INFUSION-REWRITTEN FOLIAGE FIELD (not a divergence — a mapping rule) ────────────────────────────
-// `foliage.reward_block_hash` is NOT a pass-through: on finishing it is rewritten to the FINISHED
-// `reward_chain_block.get_hash()`, so a `FullBlock` carries the finished hash while the UnfinishedBlock
-// (and our producer, producer.rs:521) carries `get_unfinished().hash()`. The oracle reconstructs the
-// unfinished value via `unfinished_reward_block_hash()` — comparing against the block's finished value
-// would be a mapping bug. The other on-finish rewrites (prev_block_hash / foliage_transaction_block_hash
-// / _signature) resolve to the same values `create_foliage` already emits, so they compare directly; a
-// mismatch there would be a real reorg-handling difference and is left loud.
-//
-// ── HOW TO RUN ─────────────────────────────────────────────────────────────────────────────────────
-// Runs with no env: two real transaction blocks end to end:
-//   cargo test -p dg_xch_node --test producer_differential -- --nocapture
-
 mod common;
 
 use dg_xch_core::blockchain::coin::Coin;
@@ -260,16 +218,6 @@ fn hexs(bytes: &[u8]) -> String {
     s
 }
 
-/// The unfinished value of `foliage.reward_block_hash`. This field is INFUSION-REWRITTEN when a
-/// block is finished — it becomes the FINISHED `reward_chain_block.get_hash()`, and header
-/// validation enforces `full.foliage.reward_block_hash == full.reward_chain_block.get_hash()`.
-/// So a `FullBlock` carries the FINISHED hash, while the
-/// UnfinishedBlock our producer emits carries `get_unfinished().hash()` (producer.rs:521, correct). The
-/// oracle must reconstruct the unfinished value — comparing our unfinished hash against the block's
-/// finished hash would be a mapping bug (they MUST differ). It is an infusion-only field, like the IP
-/// VDFs, and is the only foliage field that needs reconstruction (prev_block_hash /
-/// foliage_transaction_block_hash / _signature are also rewritten on finishing but to the same final
-/// values `create_foliage` already produces, so they still compare directly).
 fn unfinished_reward_block_hash(full: &FullBlock) -> Bytes32 {
     full.reward_chain_block
         .get_unfinished()
@@ -277,11 +225,6 @@ fn unfinished_reward_block_hash(full: &FullBlock) -> Bytes32 {
         .expect("unfinished reward block hash")
 }
 
-/// The `UnfinishedBlock` the real `FullBlock` implies: drop the three infusion-point VDFs (and their
-/// proofs, and the transaction flag) via `RewardChainBlock::get_unfinished()`, and reconstruct the one
-/// infusion-rewritten foliage field (`reward_block_hash`, see [`unfinished_reward_block_hash`]).
-/// Everything else (the rest of foliage, foliage_transaction_block, transactions_info, generator,
-/// ref-list, finished sub-slots) is identical unfinished ↔ full. This is the ground-truth oracle.
 fn expected_unfinished(full: &FullBlock) -> UnfinishedBlock {
     let mut foliage = full.foliage;
     foliage.reward_block_hash = unfinished_reward_block_hash(full);

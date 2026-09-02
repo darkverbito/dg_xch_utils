@@ -9,11 +9,6 @@ use dg_xch_core::blockchain::sized_bytes::Bytes32;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
 
-/// A sqlx-Postgres backend for the coin + block stores — the industrial tier. Postgres is
-/// multi-writer, so there is no single-writer mutex: every write operation is an ordinary transaction
-/// from one pool, and an open [`crate::BatchHandle`] is a plain transaction. Schema and query shapes
-/// mirror the SQLite backend statement-for-statement (BYTEA/BIGINT for BLOB/INTEGER); both backends
-/// serve the identical trait contract.
 pub struct PostgresStore {
     pool: PgPool,
 }

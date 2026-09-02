@@ -1,7 +1,3 @@
-// Mempool manager over native SpendBundleConditions. Fee-order admission, double-spend rejection
-// (coin already spent at peak, or two bundles spending the same coin), and drop-on-new-peak. Mirrors
-// chia-blockchain mempool_manager.py's fee/cost + check_removals rules against a real store peak.
-
 use dg_xch_core::blockchain::coin::Coin;
 use dg_xch_core::blockchain::coin_record::CoinRecord;
 use dg_xch_core::blockchain::sized_bytes::{Bytes32, Bytes96};
@@ -267,12 +263,6 @@ async fn item_dropped_when_its_coin_is_spent_by_new_peak() {
     assert_eq!(mp.total_cost(), 0);
 }
 
-// ===========================================================================
-// Replace-by-fee — chia's can_replace rules (mempool_manager.py, PR #1971):
-// superset of conflicting removals, strictly higher fee-per-cost, at least
-// MEMPOOL_MIN_FEE_INCREASE (10M mojos) more total fee, unchanged time-locks.
-// ===========================================================================
-
 #[tokio::test]
 async fn replacement_with_sufficient_fee_bump_evicts_conflict() {
     let store = store().await;
@@ -349,8 +339,6 @@ async fn replacement_rejected_at_equal_fee_per_cost() {
     mp.admit(&store, bundle(0xd5), conds(vec![mk_spend(&c)], 100, 1_000))
         .await
         .expect("original admitted");
-    // Fee bump clears the 10M floor but the cost scales identically: fee-per-cost is EQUAL
-    // (100/1_000 == 10_000_100/100_001_000), and chia requires strictly higher.
     let err = mp
         .admit(
             &store,
@@ -376,9 +364,6 @@ async fn replacement_must_preserve_timelocks() {
     mp.admit(&store, bundle(0xd7), conds(vec![mk_spend(&c)], 100, 1_000))
         .await
         .expect("original admitted");
-    // Fees qualify, but the replacement carries a future ASSERT_HEIGHT_ABSOLUTE: chia's
-    // timelock check runs FIRST, so the bundle parks as Pending (not a Conflict) and the
-    // resident original is untouched; can_replace's timelock rule applies if it revives.
     let mut locked = conds(vec![mk_spend(&c)], 10_000_100, 1_000);
     locked.height_absolute = 123;
     let err = mp
@@ -388,10 +373,6 @@ async fn replacement_must_preserve_timelocks() {
     assert!(matches!(err, MempoolError::Pending(..)));
     assert_eq!(mp.len(), 1);
 }
-
-// ===========================================================================
-// Pending-tx cache (chia PendingTxCache): timelocked bundles park and retry.
-// ===========================================================================
 
 #[tokio::test]
 async fn future_assert_height_parks_and_revives_on_new_peak() {
@@ -416,8 +397,6 @@ async fn future_assert_height_parks_and_revives_on_new_peak() {
     assert!(matches!(err, MempoolError::Pending(..)));
     assert!(mp.get(&name).is_none());
 
-    // Peaks below the bound leave it parked; chia PendingTxCache.drain releases only
-    // `assert_height <= peak.height`, so 104 is still too early and 105 admits.
     let below = mp.new_peak(&store, 103, 0, &[]).await.expect("peak 103");
     assert!(below.admitted.is_empty());
     let still_below = mp.new_peak(&store, 104, 0, &[]).await.expect("peak 104");
@@ -430,16 +409,6 @@ async fn future_assert_height_parks_and_revives_on_new_peak() {
     assert_eq!(at.admitted[0].0, name);
     assert!(mp.get(&name).is_some());
 }
-
-// ===========================================================================
-// Timelock admission parity (chia mempool_manager.py 2.7.1).
-// GAP A: heights check strictly against the peak (`assert_height <= peak.height`
-// admits; chia check_time_locks passes peak.height as the previous-transaction-
-// block height). GAP B: seconds-absolute, birth, and every per-spend relative
-// lock are evaluated at admission against the removals' confirmed coin records
-// (chia compute_assert_height + check_time_locks); RBF timelock equality runs
-// on the EFFECTIVE values. Impossible before<=assert constraints fail outright.
-// ===========================================================================
 
 // The invariant that makes GAP A a consensus bug: every RESIDENT item must
 // validate in a block built on the admitting peak, per our own
@@ -476,9 +445,6 @@ async fn assert_pool_valid_at_peak(mp: &Mempool, store: &SqliteStore, peak: u32,
     }
 }
 
-// GAP A: ASSERT_HEIGHT_ABSOLUTE = peak + 1 must PARK (chia pends until
-// `assert_height <= peak.height`), not sit resident — a block built on this
-// peak would carry it and fail ASSERT_HEIGHT_ABSOLUTE at validation.
 #[tokio::test]
 async fn assert_height_at_peak_plus_one_parks_until_the_peak_reaches_it() {
     let store = store().await;
@@ -502,8 +468,6 @@ async fn assert_height_at_peak_plus_one_parks_until_the_peak_reaches_it() {
     assert!(mp.get(&name).is_none());
     assert_pool_valid_at_peak(&mp, &store, 100, 0).await;
 
-    // Drains exactly when the peak reaches the assert height (chia
-    // PendingTxCache.drain releases `assert_height <= peak.height`).
     let at = mp.new_peak(&store, 101, 0, &[]).await.expect("peak 101");
     assert_eq!(at.admitted.len(), 1, "drains at peak 101, not before");
     assert_eq!(at.admitted[0].0, name);
@@ -511,10 +475,6 @@ async fn assert_height_at_peak_plus_one_parks_until_the_peak_reaches_it() {
     assert_pool_valid_at_peak(&mp, &store, 101, 0).await;
 }
 
-// GAP B: an unmet ASSERT_SECONDS_ABSOLUTE must be rejected at admission (chia:
-// ASSERT_SECONDS_ABSOLUTE_FAILED is a FAILED status — only HEIGHT failures
-// pend), never admitted resident. Once the peak's timestamp satisfies the
-// lock, a resubmission admits.
 #[tokio::test]
 async fn unmet_assert_seconds_absolute_rejected_not_resident() {
     let store = store().await;
@@ -532,7 +492,6 @@ async fn unmet_assert_seconds_absolute_rejected_not_resident() {
         .admit(&store, bundle(0xf2), locked.clone())
         .await
         .expect_err("unmet ASSERT_SECONDS_ABSOLUTE must be rejected");
-    // chia fails (does not park) seconds-based locks: FAILED, the wallet resubmits.
     assert!(
         matches!(err, MempoolError::TimelockNotMet(..)),
         "must fail outright (not park, not expire): got {err:?}"
@@ -549,8 +508,6 @@ async fn unmet_assert_seconds_absolute_rejected_not_resident() {
     assert_eq!(mp.len(), 1);
 }
 
-// GAP B: an unmet ASSERT_SECONDS_RELATIVE (timestamp of the removal's
-// confirmed record + relative, chia check_time_locks) also fails outright.
 #[tokio::test]
 async fn unmet_assert_seconds_relative_rejected_not_resident() {
     let store = store().await;
@@ -575,9 +532,6 @@ async fn unmet_assert_seconds_relative_rejected_not_resident() {
     assert_eq!(mp.len(), 0);
 }
 
-// GAP B: an unmet ASSERT_HEIGHT_RELATIVE (young coin) must park with effective
-// assert height = confirmed_height + relative (chia compute_assert_height),
-// and drain exactly when the peak reaches it.
 #[tokio::test]
 async fn unmet_assert_height_relative_parks_and_drains_at_effective_height() {
     let store = store().await;
@@ -611,9 +565,6 @@ async fn unmet_assert_height_relative_parks_and_drains_at_effective_height() {
     assert_pool_valid_at_peak(&mp, &store, 105, 0).await;
 }
 
-// GAP B: a passed ASSERT_BEFORE_HEIGHT_RELATIVE (confirmed + relative already
-// behind the peak) is dead on arrival — rejected outright, like the absolute
-// form (chia ASSERT_BEFORE_HEIGHT_RELATIVE_FAILED is FAILED).
 #[tokio::test]
 async fn passed_assert_before_height_relative_rejects_outright() {
     let store = store().await;
@@ -635,9 +586,6 @@ async fn passed_assert_before_height_relative_rejects_outright() {
     assert_eq!(mp.len(), 0);
 }
 
-// Impossible constraint: assert_before_height <= assert_height can never be
-// satisfied — chia rejects outright (IMPOSSIBLE_HEIGHT_ABSOLUTE_CONSTRAINTS,
-// FAILED, never cached pending) even though the assert_height alone would park.
 #[tokio::test]
 async fn impossible_height_constraints_reject_outright_not_park() {
     let store = store().await;
@@ -669,10 +617,6 @@ async fn impossible_height_constraints_reject_outright_not_park() {
     assert_eq!(mp.len(), 0);
 }
 
-// RBF timelock equality runs on EFFECTIVE values (chia can_replace compares
-// MempoolItem.assert_height computed by compute_assert_height): an original
-// whose lock comes from ASSERT_HEIGHT_RELATIVE is replaceable by a bundle
-// whose ASSERT_HEIGHT_ABSOLUTE names the same effective height.
 #[tokio::test]
 async fn rbf_timelock_equality_compares_effective_values() {
     let store = store().await;
@@ -702,8 +646,6 @@ async fn rbf_timelock_equality_compares_effective_values() {
     assert!(mp.get(&old).is_none(), "original evicted");
     assert!(mp.get(&new).is_some());
 
-    // And the inverse: a further qualifying fee bump whose effective assert height DIFFERS
-    // (raw absolute 96 vs the resident's 95) must be rejected — chia's timelock-equality clause.
     let mut different = conds(vec![mk_spend(&c)], 20_000_200, 1_000);
     different.height_absolute = 96;
     let err = mp
@@ -714,8 +656,6 @@ async fn rbf_timelock_equality_compares_effective_values() {
     assert!(mp.get(&new).is_some(), "resident item untouched");
 }
 
-// A passed ASSERT_BEFORE_SECONDS_ABSOLUTE is dead on arrival against the peak's
-// timestamp (chia ASSERT_BEFORE_SECONDS_ABSOLUTE_FAILED, FAILED).
 #[tokio::test]
 async fn passed_assert_before_seconds_absolute_rejects_outright() {
     let store = store().await;
@@ -737,8 +677,6 @@ async fn passed_assert_before_seconds_absolute_rejects_outright() {
     assert_eq!(mp.len(), 0);
 }
 
-// Impossible seconds constraints (before_seconds <= assert_seconds) reject
-// outright — chia IMPOSSIBLE_SECONDS_ABSOLUTE_CONSTRAINTS, FAILED.
 #[tokio::test]
 async fn impossible_seconds_constraints_reject_outright() {
     let store = store().await;
@@ -764,10 +702,6 @@ async fn impossible_seconds_constraints_reject_outright() {
     assert_eq!(mp.len(), 0);
 }
 
-// Ephemeral removals get chia's synthesized coin record — confirmed at peak+1
-// with the PEAK's timestamp (mempool_manager.py:721-737): an ephemeral spend
-// with ASSERT_SECONDS_RELATIVE 0 is still admissible, and an ephemeral
-// ASSERT_HEIGHT_RELATIVE parks with effective height (peak+1) + relative.
 #[tokio::test]
 async fn ephemeral_removal_uses_synthesized_peak_record() {
     let store = store().await;
@@ -803,12 +737,6 @@ async fn ephemeral_removal_uses_synthesized_peak_record() {
     .expect("ephemeral spend with ASSERT_SECONDS_RELATIVE 0 admits");
     assert_eq!(mp.len(), 1);
 
-    // Same shape but height_relative 1 on the ephemeral spend: the synthesized record ALWAYS
-    // sits at peak+1, so the effective assert height (peak+2) is forever ahead of the peak —
-    // parks, and every drain attempt recomputes and re-parks (chia behaves identically: the
-    // PendingTxCache drains it at its recorded assert height, add_spend_bundle recomputes
-    // against the new peak, and it pends again — a nonzero ephemeral ASSERT_HEIGHT_RELATIVE
-    // is never admissible).
     let mut mp2 = Mempool::new(&MAINNET);
     mp2.set_peak(100, 500_000);
     let mut spend_a2 = mk_spend(&a);
@@ -835,9 +763,6 @@ async fn ephemeral_removal_uses_synthesized_peak_record() {
     assert_eq!(mp2.len(), 0);
 }
 
-// A new peak expires RESIDENT items whose effective ASSERT_BEFORE bound it
-// passed (chia mempool.new_tx_block EXPIRED sweep: `assert_before_seconds <=
-// timestamp OR assert_before_height <= block_height`).
 #[tokio::test]
 async fn new_peak_expires_resident_items_whose_before_bound_passed() {
     let store = store().await;
@@ -901,11 +826,6 @@ async fn passed_assert_before_rejects_outright() {
     assert_eq!(mp.len(), 0);
 }
 
-// ---- CNI constants (mempool) --------------------------------------------------
-
-// chia mempool_manager.py:348-350: `max_tx_clvm_cost = MAX_BLOCK_COST_CLVM // 2` (5.5B on mainnet),
-// enforced at :747-748 with BLOCK_COST_EXCEEDS_MAX. A 6B-cost transaction fits a block but NOT the
-// mempool's per-tx cap.
 #[tokio::test]
 async fn per_tx_cost_cap_is_half_max_block_cost() {
     let store = store().await;
@@ -931,7 +851,6 @@ async fn per_tx_cost_cap_is_half_max_block_cost() {
         other => panic!("expected CostExceedsMax, got {other:?}"),
     }
 
-    // Exactly at the cap is admitted (chia rejects strictly greater).
     mp.admit(
         &store,
         bundle(0x62),
@@ -941,8 +860,6 @@ async fn per_tx_cost_cap_is_half_max_block_cost() {
     .expect("5.5B-cost tx sits exactly at the cap");
 }
 
-// chia default_constants.py:63: MEMPOOL_BLOCK_BUFFER = 10 (the pre-2022 value was 50). The
-// mempool's total-cost ceiling is MAX_BLOCK_COST_CLVM * MEMPOOL_BLOCK_BUFFER = 110B, not 550B.
 #[tokio::test]
 async fn capacity_ceiling_is_ten_blocks() {
     let mp = Mempool::new(&MAINNET);
@@ -967,8 +884,6 @@ async fn seed_item(mp: &mut Mempool, store: &SqliteStore, tag: u8, fee: u64, cos
         .expect("seed item admitted")
 }
 
-// chia mempool.py:63: MEMPOOL_ITEM_FEE_LIMIT = 2^50 — a single item may not pay more than that
-// (mempool_manager.py:754-755, Err.INVALID_BLOCK_FEE_AMOUNT).
 #[tokio::test]
 async fn fee_above_mempool_item_fee_limit_rejected() {
     let store = store().await;
@@ -995,7 +910,6 @@ async fn fee_above_mempool_item_fee_limit_rejected() {
         "got {err:?} instead"
     );
 
-    // Exactly at the limit is allowed (chia rejects strictly greater).
     mp.admit(
         &store,
         bundle(0x64),
@@ -1005,9 +919,6 @@ async fn fee_above_mempool_item_fee_limit_rejected() {
     .expect("fee exactly 2^50 admitted");
 }
 
-// chia mempool_manager.py:341 + :759-761: when the pool is at capacity, an incoming item must pay a
-// fee-per-cost of at least nonzero_fee_minimum_fpc (5) even to be CONSIDERED for eviction —
-// Err.INVALID_FEE_TOO_CLOSE_TO_ZERO, distinct from the min-fee-rate INVALID_FEE_LOW_FEE.
 #[tokio::test]
 async fn full_pool_rejects_fee_per_cost_below_nonzero_minimum() {
     let store = store().await;
@@ -1061,9 +972,6 @@ async fn full_pool_rejects_fee_per_cost_below_nonzero_minimum() {
     assert!(mp.total_cost() <= mp.max_total_cost());
 }
 
-// chia is_fee_enough (mempool_manager.py:447-460): the pre-fetch gate new_transaction runs before
-// pulling a gossiped bundle — anything gets in while there's room; at capacity the advertised fee
-// must clear the nonzero floor AND strictly beat the min fee rate.
 #[tokio::test]
 async fn is_fee_enough_mirrors_chia_pre_fetch_gate() {
     let store = store().await;
@@ -1087,9 +995,6 @@ async fn is_fee_enough_mirrors_chia_pre_fetch_gate() {
     assert!(mp.is_fee_enough(11_000_000, 1_000_000));
 }
 
-// chia mempool.py:406-444: items expiring soon (within 48 blocks / 900 seconds) may collectively
-// hold at most ONE block's cost. An incoming expiring-soon item beyond that budget must beat the
-// resident expiring items' priority to displace them (EXPIRED eviction), else INVALID_FEE_LOW_FEE.
 #[tokio::test]
 async fn expiring_soon_items_capped_at_one_block_cost() {
     let store = store().await;
@@ -1153,18 +1058,6 @@ async fn expiring_soon_items_capped_at_one_block_cost() {
     .expect("non-expiring item unaffected by the expiring-soon budget");
 }
 
-// ===========================================================================
-// The MEMPOOL_CONFLICT cache (chia ConflictTxCache,
-// pending_tx_cache.py:12-47; add mempool_manager.py:609-613, drain :1042-1055).
-// A bundle rejected specifically because it double-spends a coin an EXISTING
-// mempool item spends (MempoolInclusionStatus.PENDING / Err.MEMPOOL_CONFLICT —
-// distinct from a hard DOUBLE_SPEND of an already-on-chain-spent coin) is set
-// aside, not dropped, and retried on every new peak: the conflicting resident
-// may leave the pool unconfirmed (expiry / RBF), freeing the coin. This is a
-// SEPARATE structure from the ASSERT_HEIGHT PendingTxCache.
-// ===========================================================================
-
-// Case 1: the losing conflict is CACHED, not dropped (chia ConflictTxCache.add).
 #[tokio::test]
 async fn conflict_losing_bundle_is_cached_not_dropped() {
     let store = store().await;
@@ -1188,7 +1081,6 @@ async fn conflict_losing_bundle_is_cached_not_dropped() {
         .expect_err("B conflicts with the resident item");
     assert!(matches!(err, MempoolError::Conflict(_)), "got {err:?}");
 
-    // chia :609-613 — the loser is put aside for retry, not dropped.
     assert_eq!(mp.conflict_cache_len(), 1, "losing conflict must be cached");
     assert_eq!(mp.conflict_cache_cost(), 1_000, "cache tracks its cost");
     assert!(mp.get(&b_name).is_none(), "B is only cached, not resident");
@@ -1248,8 +1140,6 @@ async fn conflict_cached_bundle_readmits_after_winner_leaves_unconfirmed() {
     assert_eq!(mp.conflict_cache_len(), 0, "conflict cache drained");
 }
 
-// Case 3: the cost bound (chia ConflictTxCache(MAX_BLOCK_COST_CLVM * 1, 1000)) — three ~0.4-block
-// losers sum past one block, so the third add evicts the oldest (FIFO), holding item count + cost.
 #[tokio::test]
 async fn conflict_cache_evicts_oldest_past_the_cost_bound() {
     let store = store().await;
@@ -1285,7 +1175,6 @@ async fn conflict_cache_evicts_oldest_past_the_cost_bound() {
         .await
         .expect_err("b3 conflicts");
 
-    // Over one block: chia pops first-inserted until back under. Two survive, cost <= one block.
     assert_eq!(mp.conflict_cache_len(), 2, "oldest evicted, count held");
     assert_eq!(mp.conflict_cache_cost(), big * 2);
     assert!(
@@ -1405,19 +1294,6 @@ async fn pending_height_cache_and_conflict_cache_are_independent() {
     );
 }
 
-// chia 481ccb305 "Mempool spend limit (#20703)": mempool priority is fee per VIRTUAL cost,
-// where virtual cost = CLVM cost + num_spends * SPEND_PENALTY_COST (500_000)
-// (chia/types/mempool_item.py::virtual_cost) — UNCONDITIONALLY: the penalty is mempool
-// policy with no activation gate, applied to eviction (both paths), and block-assembly order
-// (chia/full_node/mempool.py `ORDER BY priority DESC, seq ASC`). A many-spend bundle whose
-// RAW fee-per-cost beats a simple bundle must still lose the priority order when the
-// per-spend penalty outweighs its fee edge — the anti-spam intent: spends-per-block are
-// capped, so many-spend bundles consume the scarcer resource.
-//
-// Written RED against the SF9-gated ordering: ours computed the spend penalty only at/past
-// soft-fork 9 activation height, so below it (this test's peak era) priority degraded to raw
-// fee-per-cost and the many-spend bundle won — divergent eviction and block composition vs
-// chia under many-spend spam.
 #[tokio::test]
 async fn many_spend_bundle_is_deprioritized_by_the_spend_penalty() {
     let store = store().await;
@@ -1466,11 +1342,6 @@ async fn many_spend_bundle_is_deprioritized_by_the_spend_penalty() {
     );
 }
 
-// chia 481ccb305: the POOL_FULL eviction victim is the LOWEST-priority item by fee per VIRTUAL
-// cost — chia/full_node/mempool.py:447-459 keeps the highest-priority prefix
-// (`SUM(cost) OVER (ORDER BY priority DESC, seq ASC)`) and evicts the rest. Written RED against
-// the SF9-gated key: below SF9 activation the gate degraded priority to raw fee-per-cost, which
-// flips the victim — the simple bundle was evicted and the many-spend spam kept.
 #[tokio::test]
 async fn pool_full_eviction_removes_lowest_virtual_cost_priority() {
     let store = store().await;
@@ -1559,11 +1430,6 @@ async fn pool_full_eviction_removes_lowest_virtual_cost_priority() {
     );
 }
 
-// chia serves `request_mempool_transactions` in RAW fee-per-cost order: `items_by_feerate`
-// (chia/full_node/mempool.py:257-260 `ORDER BY fee_per_cost DESC, seq ASC`) feeds
-// `get_items_not_in_filter` (mempool_manager.py:1066-1082). 481ccb305 left serving on the RAW
-// key — only assembly and eviction moved to virtual-cost priority. The two orders must diverge
-// on the many-spend bundle.
 #[tokio::test]
 async fn items_by_feerate_orders_by_raw_fee_per_cost() {
     let store = store().await;

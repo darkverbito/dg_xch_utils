@@ -14,9 +14,6 @@ use dg_xch_core::consensus::block_header_validation::{
 use dg_xch_core::consensus::constants::ConsensusConstants;
 use std::collections::HashMap;
 
-// Bridges the engine's ConsensusPrimitives seam onto core's HeaderValidationVerifier so the VDF /
-// proof-of-space backends the engine already binds drive full-node header validation — same core validator
-// the weight proof runs, no second port.
 pub struct PrimitiveVerifier<'a, P>(pub &'a P);
 
 impl<P: ConsensusPrimitives> HeaderValidationVerifier for PrimitiveVerifier<'_, P> {
@@ -141,8 +138,6 @@ impl<P: ConsensusPrimitives> HeaderValidationVerifier for DeferredVdfVerifier<'_
             .pospace_quality_string(constants, proof_of_space, challenge, cc_sp_hash, height)
     }
 
-    // Deferred header-signature gate: queue (pk, msg, sig, tag) and answer true, exactly as
-    // `validate_vdf` defers a VDF proof; drained by `verify_sig_batch`.
     fn verify_bls_sig(&self, pk: &Bytes48, msg: &[u8], sig: &Bytes96, tag: HeaderSigTag) -> bool {
         self.sig_queue.borrow_mut().push(QueuedSig {
             pk: *pk,
@@ -194,10 +189,6 @@ pub(crate) fn verify_vdf_batch<P: ConsensusPrimitives + Sync>(
         let q = &queue[0];
         return primitives.verify_vdf(constants, &q.input, &q.info, &q.proof, q.target.as_ref());
     }
-    // Dedup before dispatch: blocks sharing a signage point carry the same sp VDF proofs. One
-    // representative per identical (input, info, proof, target) suffices — verification is a
-    // deterministic pure function, so the batch AND over duplicates equals the AND over uniques.
-    // The key is the exact field bytes (no hash shortcut on a consensus gate).
     let mut seen: std::collections::HashSet<Vec<u8>> =
         std::collections::HashSet::with_capacity(queue.len());
     let mut order: Vec<usize> = Vec::with_capacity(queue.len());
@@ -276,7 +267,6 @@ pub(crate) fn verify_vdf_batch<P: ConsensusPrimitives + Sync>(
     ok
 }
 
-// Verify one queued header signature through the EXACT function the inline gate uses.
 fn verify_one_sig(q: &QueuedSig) -> bool {
     bls_verify(&q.pk, &q.msg, &q.sig)
 }
@@ -326,10 +316,6 @@ pub(crate) fn verify_sig_batch(queue: &[QueuedSig]) -> bool {
     })
 }
 
-/// Attribute the FIRST failing signature in a per-block slice to its tag, mirroring the inline
-/// path's first-failure order (rc, cc, foliage-block-data, ftb, pool) since the queue preserves the
-/// sequential walk's push order. Returns `None` when every signature in the slice verifies. Used by
-/// the window drain's two-tier fallback to fail the right block with the right error.
 #[must_use]
 pub fn first_failing_sig(queue: &[QueuedSig]) -> Option<HeaderSigTag> {
     queue.iter().find(|q| !verify_one_sig(q)).map(|q| q.tag)
@@ -381,12 +367,6 @@ pub fn validate_finished_header<P: ConsensusPrimitives + Sync>(
     Ok(required_iters)
 }
 
-/// [`validate_finished_header`] with the VDF proofs deferred into the CALLER's sink instead of
-/// verified here — the cross-block pipeline stages a whole window this way and drains one
-/// all-cores batch at the end. Every non-VDF header gate still runs (and rejects) inline.
-///
-/// # Errors
-/// Returns [`NodeError::Invalid`] if any non-VDF header check fails or a walked ancestor is absent.
 pub fn validate_finished_header_deferred<P: ConsensusPrimitives + Sync>(
     primitives: &P,
     constants: &ConsensusConstants,

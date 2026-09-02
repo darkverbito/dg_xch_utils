@@ -1,15 +1,3 @@
-//! Fixed-width Montgomery arithmetic for the prime search's hot width.
-//!
-//! The search's cost is ~25 Miller–Rabin base-2 exponentiations per derivation, on 264-bit
-//! odd candidates — 5 limbs. The reference pays them through mpz, whose call overhead
-//! dominates at this operand size (the same verdict the form arithmetic reached in the GMP
-//! trial). This is a CIOS ladder on stack limbs with u128 accumulation: the multiply/carry
-//! shape both targets execute well, no allocation, no wide division.
-//!
-//! Scope is deliberately narrow: this code only ever computes the base-2 strong-probable-prime
-//! test, and its verdict is differentially gated against the bigint implementation of the same
-//! test — which is itself gated against the reference.
-
 /// One Montgomery context per candidate modulus. `N` limbs, little-endian.
 pub(crate) struct Mont<const N: usize> {
     n: [u64; N],

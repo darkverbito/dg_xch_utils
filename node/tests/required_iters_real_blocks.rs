@@ -1,20 +1,3 @@
-// Header/proof-of-space `required_iters` coverage: the path that the block-body harvest never
-// exercised. The live node cleared the block-body wall and advanced its peak, then stalled one
-// block later with:
-//
-//   Required iters 0 is not below the sp interval iters 2097152, 134217728 or not > 0.
-//
-// That verbatim message comes from `calculate_ip_iters` and fires ONLY when
-// `required_iters == 0`. But `calculate_iterations_quality` clamps its result with `max(_, 1)`,
-// so a real proof of space can NEVER produce 0 — a `required_iters` of 0 is always a
-// fabricated/stored value. Every BlockRecord must carry its true `required_iters`:
-// `get_next_sub_slot_iters_and_difficulty` reads it back through `prev_b.sp_total_iters()` ->
-// `ip_iters()` -> `calculate_ip_iters()`, which rejects 0.
-//
-// The chain here is the same real mainnet recent chain (heights 9054524..=9054620) the header-validation test uses,
-// sliced from the committed weight proof. `GOLDEN` are the weight-proof recent-block validator's reference
-// `required_iters` for two blocks — the independent oracle these tests check the block-sync path against.
-
 use std::collections::HashMap;
 use std::io::Cursor;
 

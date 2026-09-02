@@ -1,14 +1,3 @@
-//! Cross-window body precompute — the driver-side half of the body pipeline.
-//!
-//! The CNI bake-off exposed the serial window wall: body precompute + stage + vdf + sig +
-//! confirm ran strictly in sequence, so the moment transaction blocks appeared (~height 420k)
-//! throughput dropped ~40% with the validator's CPU going idle while the official node held its
-//! rate. The pipeline runs window N+1's body precompute while window N validates; these tests
-//! pin the standalone precompute's contract on a REAL mainnet window (cost-maxed era blocks
-//! 9,179,155–9,179,186): it must produce, for every in-window-resolvable transaction block,
-//! exactly the conditions the engine's own inline `run_body_expensive` produces — and it must
-//! SKIP (never guess) any block whose generator refs leave the window.
-
 mod common;
 
 use dg_xch_core::blockchain::full_block::FullBlock;

@@ -4,11 +4,14 @@ use common::{empty_api, fast_settings, peer, spawn_full_node, wait_until};
 use dg_xch_p2p::Supervisor;
 use std::time::Duration;
 
+static NETWORK_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 // NAT hairpin: once we advertise our WAN pair, our own address enters the gossip pool and
 // an outbound slot can try to dial us. The self-authority guard must refuse it even though
 // a real server is listening at that address and would otherwise accept the connection.
 #[tokio::test]
 async fn self_dial_via_advertised_authority_is_refused() {
+    let _guard = NETWORK_TEST_LOCK.lock().await;
     let server = spawn_full_node(empty_api()).await; // this IS us, reachable
     let mut sup = Supervisor::new(fast_settings());
     // advertise + seed our own reachable authority (the hairpin setup)
@@ -38,6 +41,7 @@ async fn self_dial_via_advertised_authority_is_refused() {
 // (eviction never revives the dead channel).
 #[tokio::test]
 async fn slow_peer_eviction_tears_down_and_the_slot_recovers() {
+    let _guard = NETWORK_TEST_LOCK.lock().await;
     let server = spawn_full_node(empty_api()).await;
     let mut sup = Supervisor::new(fast_settings());
     sup.seed_addresses(&[peer("127.0.0.1", server.port, 1)])

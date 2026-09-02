@@ -84,7 +84,6 @@ async fn checkpointer_records_passes_when_near_tip() {
     );
 }
 
-// With near_tip=false (catch-up) the checkpointer stays quiet — the phase gate itself.
 #[tokio::test]
 async fn checkpointer_is_quiet_during_catch_up() {
     let store = common::new_store().await;

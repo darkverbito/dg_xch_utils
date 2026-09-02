@@ -1,13 +1,3 @@
-// The entry gate. Diff dg_xch's condition handling against the current Chia condition set. Two
-// layers are distinct and both matter:
-//   (1) PARSE:   ConditionWithArgs recognizes an opcode and round-trips it.
-//   (2) ENFORCE: block_generator::spend_from_conditions collects it into SpendBundleConditions, and
-//                validate_block_conditions checks it.
-// ASSERT_CONCURRENT_SPEND 64, ASSERT_CONCURRENT_PUZZLE 65, SEND_MESSAGE 66, RECEIVE_MESSAGE 67,
-// and ASSERT_EPHEMERAL 76 carry fields on `Spend` and are checked in validate_block_conditions.
-// This test pins that every opcode in the current Chia set is Enforced or a recognized NoOp — no
-// silent drops.
-
 use dg_xch_core::blockchain::condition_opcode::ConditionOpcode;
 use dg_xch_core::blockchain::condition_with_args::{ConditionWithArgs, Message, MessageArgs};
 use dg_xch_core::blockchain::sized_bytes::{Bytes32, Bytes48};
@@ -25,7 +15,6 @@ fn msg() -> Message {
     Message::new(vec![1, 2, 3]).unwrap()
 }
 
-// One representative for every non-Unknown ConditionWithArgs variant — the full current Chia condition set.
 fn every_condition() -> Vec<ConditionWithArgs> {
     vec![
         ConditionWithArgs::Remark(msg()),
@@ -66,7 +55,6 @@ fn every_condition() -> Vec<ConditionWithArgs> {
     ]
 }
 
-// Layer (1): the parser round-trips every opcode in the current Chia set — none degrade to Unknown.
 #[test]
 fn every_opcode_round_trips_through_the_parser() {
     let version = ChiaProtocolVersion::default();
@@ -152,8 +140,6 @@ fn classification(op: ConditionOpcode) -> Enforcement {
     }
 }
 
-// Every opcode in the current Chia set is either Enforced or a recognized NoOp — there is no
-// dropped-but-parsed opcode.
 #[test]
 fn every_opcode_is_enforced_or_noop() {
     for op in every_condition().iter().map(ConditionWithArgs::op_code) {

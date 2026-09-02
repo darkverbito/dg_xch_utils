@@ -1,20 +1,3 @@
-// RATE_LIMITS_V3 — window-based (in-flight) rate limits.
-//
-// When BOTH peers advertise `Capability::RateLimitsV3`, a `ConfigureWindowSizes` message is
-// exchanged immediately after the handshake (each side sends its settings and validates the
-// peer's), and for the message types in [`v3_setting`]'s table the time-based v1/v2 limiter is
-// REPLACED by an in-flight window: a request type with `window_size = Some(n)` may have at most
-// `n` requests being processed (receiver side) / in flight (sender side) at once; response and
-// reject types are `None` (unlimited — implicitly bounded by their soliciting requests).
-//
-// The table, the 256-entry configure cap, and the validation rules are protocol constants and
-// must be copied, never defaulted; `core/tests/rate_limits_v3_table.rs` pins every entry.
-//
-// Capability posture: v3 is NOT in the default outgoing capability set, so an INITIATOR
-// advertises it only when explicitly configured. A RESPONDER auto-mirrors: when the inbound
-// handshake advertises v3, it is appended to the reply capabilities and the configure exchange
-// runs. Our outbound dials keep the default set.
-
 use crate::protocols::ProtocolMessageTypes;
 use crate::protocols::shared::{Capabilities, Capability, ConfigureWindowSizes};
 use std::collections::HashMap;
@@ -172,8 +155,6 @@ pub fn settings_from_configure(
 /// per link, minted in `WebsocketConnection::new`.
 #[derive(Default)]
 pub struct V3Link {
-    /// We offered/mirrored v3 on this link (responder appended the capability + sent our
-    /// ConfigureWindowSizes); the peer's configure message is expected.
     offered: AtomicBool,
     /// Both sides advertised v3 AND the configure exchange completed — v3 semantics live.
     active: AtomicBool,
@@ -193,8 +174,6 @@ struct V3Inner {
 }
 
 impl V3Link {
-    /// Mark that we mirrored v3 on this link (responder side) — the peer's configure is now
-    /// legitimate.
     pub fn offer(&self) {
         self.offered.store(true, Ordering::Release);
     }

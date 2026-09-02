@@ -106,8 +106,6 @@ pub struct ConsensusConstants {
     pub soft_fork8_height: u32,
     // Same release train: SIMPLE_GENERATOR + CANONICAL_INTS + LIMIT_SPENDS.
     pub soft_fork9_height: u32,
-    // Hard fork 2 ("Chia 3.0", unscheduled): keccak/secp outside the guard, COST_CONDITIONS,
-    // NEW_COST_MODEL, RELAXED_BLS; re-enables modpow under the bounded cost model.
     pub hard_fork2_height: u32,
 
     // the plot filter adjustment heights

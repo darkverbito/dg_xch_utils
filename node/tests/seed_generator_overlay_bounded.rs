@@ -31,9 +31,6 @@ fn synthetic_generator(seed: u32) -> SerializedProgram {
         ChiaProtocolVersion::default(),
     )
     .expect("decode via sexp_from_bytes_backrefs");
-    // Re-parse through the back-reference decoder, mirroring the window body precompute's
-    // `to_program_backrefs` — the frame the leak profile roots in. The parsed tree is transient
-    // (dropped here); the RETAINER under test is the engine's seed overlay, not this parse.
     decoded
         .to_program_backrefs()
         .expect("back-reference decode of synthetic generator");

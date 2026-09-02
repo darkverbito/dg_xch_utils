@@ -1,21 +1,3 @@
-// The trusted-peer tier. Trust keys on three inputs:
-//   `is_localhost(host) || node_id in trusted_peers || host in trusted_cidrs`.
-// Trust is evaluated fresh at each gate (never cached on the connection), so this policy is a
-// pure function of the peer's cert-hash node id, its remote HOST (IP), and the config.
-//
-// The host is carried on `SocketPeer.host` and threaded into each gate. A peer with no resolved
-// host (an outbound dial to a name we never resolved to an `IpAddr`) can still be trusted by
-// node id — never by host.
-//
-// What trust gates:
-//   1. `max_subscriptions(peer)`             — 200,000 untrusted → 2,000,000 trusted.
-//   2. `max_subscribe_response_items(peer)`  — 100,000 untrusted →   500,000 trusted.
-//   3. tx-queue admission                    — trusted peers' bundles get high-priority queue
-//      placement; see `tx_queue::TxQueue`.
-//
-// With NO config, localhost is auto-trusted (`is_localhost(host)` short-circuits before the
-// node-id map): a loopback wallet gets the trusted caps + tx priority out of the box.
-
 use dg_xch_core::blockchain::sized_bytes::Bytes32;
 use ipnet::IpNet;
 use log::warn;
@@ -145,9 +127,6 @@ impl TrustPolicy {
         self.trusted_cidrs.iter().any(|net| net.contains(&host))
     }
 
-    /// Host-only trust: localhost or a trusted-CIDR member — the gate inbound timelord
-    /// acceptance uses. Node-id trust deliberately does NOT apply: these gates key on the source
-    /// address, never on the cert identity.
     #[must_use]
     pub fn host_trusted(&self, host: Option<IpAddr>) -> bool {
         matches!(host, Some(ip) if Self::is_localhost(ip) || self.host_in_trusted_cidrs(ip))
@@ -202,8 +181,6 @@ mod tests {
         s.parse().expect("test IP literal")
     }
 
-    // Gate 4: is_trusted resolution — a node id in the configured set resolves trusted, a non-member
-    // untrusted, and (with no host) an empty config leaves every peer untrusted.
     #[test]
     fn is_trusted_resolves_on_node_id_membership() {
         let policy = TrustPolicy::new(HashSet::from([id(0xaa)]));
@@ -296,8 +273,6 @@ mod tests {
         assert!(!policy.is_trusted(&id(0x00), Some(ip("172.16.0.1"))));
     }
 
-    // Gate 1+2 cap selection: a trusted (node-id) peer gets the trusted caps, an untrusted peer the
-    // untrusted caps — max_subscriptions / max_subscribe_response_items.
     #[test]
     fn trusted_peer_gets_trusted_caps_untrusted_gets_untrusted() {
         let policy = TrustPolicy::new(HashSet::from([id(0xaa)]));

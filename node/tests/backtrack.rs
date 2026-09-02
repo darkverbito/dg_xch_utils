@@ -361,8 +361,6 @@ async fn tip_step_extends_a_direct_child_forward_only() {
     );
 }
 
-// PARITY: the ladder still resolves a real reorg — on the forward orphan it falls to the backtrack arm
-// and converges to the heavier branch tip, exactly as the standalone backtrack test does.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn tip_step_falls_back_to_backtrack_on_a_real_reorg() {
     let (chain_a, chain_b) = fixture_chains();

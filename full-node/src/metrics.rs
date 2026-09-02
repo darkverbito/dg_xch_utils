@@ -121,7 +121,6 @@ impl ProducerMetrics {
     }
 }
 
-// Increment a labelled producer counter by one (mirrors `NetCounters::count_in`'s entry-or-insert).
 fn producer_bump(
     map: &std::sync::Mutex<std::collections::HashMap<&'static str, u64>>,
     key: &'static str,
@@ -178,19 +177,6 @@ const STALL_SECS: u64 = 300;
 // verify before its first fast-sync peak lands. The probe cannot fail inside this window regardless of
 // progress — it covers the cold from-zero start where peak legitimately sits at 0 for a while.
 const BOOT_GRACE_SECS: u64 = 120;
-// In-flight confirm ceiling for the `/health` verdict. A window-batched confirm FREEZES both progress
-// witnesses while it runs: on a Postgres/SAN catch-up node the coin_record INSERT is I/O-bound (~70s
-// observed, IO:DataFileRead on the 134 GB / 434 M-row table), the confirmed peak jumps its 32 blocks
-// atomically only AFTER the commit lands, and blocks_downloaded already peaked before the write began.
-// So a node that is actively, correctly committing looks identical to a stall by peak/download alone.
-// `follow_inflight_since` (set for the whole drain+confirm window, daemon.rs block_processor) is the
-// backend-agnostic witness that a confirm is in flight — treat that as progress. This ceiling is the
-// anti-unkillable guard: a confirm still in flight past it with no peak advance is a genuine deadlock,
-// not a slow write, and must 503 so the orchestrator restarts it. 300s = ~4× the worst observed 70s
-// window commit — generous headroom for a heavier catch-up batch on a contended SAN (larger window,
-// autovacuum overlap, checkpoint pressure) while still bounding a real wedge to five minutes. It mirrors
-// the driver's own force-rebase watchdog, which already excludes confirm time via the same flag
-// (daemon.rs RECLAIM_TIMEOUT rationale).
 const CONFIRM_MAX_SECS: u64 = 300;
 
 // Seconds since the Unix epoch (0 on a clock before the epoch — never panics).
@@ -222,7 +208,6 @@ pub struct HealthState {
     stall_dumped: AtomicBool,
 }
 
-// The probe verdict: an HTTP status line + a human-readable body. `200 OK` = healthy, `503` = stalled.
 struct Health {
     status: &'static str,
     body: String,
@@ -262,7 +247,6 @@ impl HealthState {
         !self.stall_dumped.swap(true, Ordering::Relaxed)
     }
 
-    // A healthy verdict re-arms the dump for the next episode.
     fn clear_stall(&self) {
         self.stall_dumped.store(false, Ordering::Relaxed);
     }
@@ -292,15 +276,6 @@ impl HealthState {
         }
     }
 
-    // The liveness verdict. Healthy (200) when ANY of:
-    //   - inside the boot grace window (cold start: dialing peers + first weight-proof verify);
-    //   - caught up to the best peer-announced tip (peak >= claimed, peak > 0) — a synced node that
-    //     pauses between blocks is NOT stalled, it just has no newer block yet;
-    //   - no outbound peers to sync FROM — a restart cannot repopulate an empty address book, so do
-    //     not thrash the pod for a network-side condition;
-    //   - the confirmed peak (or download counter) advanced within STALL_SECS.
-    // Unhealthy (503) is exactly the complement: below tip, WITH peers, PAST grace, and no advance for
-    // more than STALL_SECS — the silent-stall signature the orchestrator should restart.
     fn verdict(&self, snap: &MetricsSnapshot, now: u64, follow_inflight_since: u64) -> Health {
         if now.saturating_sub(self.boot_unix) < BOOT_GRACE_SECS {
             return Health::ok("boot grace");
@@ -460,9 +435,6 @@ impl<S: BlockStore + Send + Sync> MetricsSources<S> {
         render_metrics(&self.sample().await)
     }
 
-    /// The `/health` verdict as (status line, body), with the stall self-report exactly as the
-    /// accept-loop responder had it: the FIRST 503 of an episode logs one structured dump, a
-    /// healthy verdict re-arms it.
     pub async fn health_check(&self) -> (&'static str, String) {
         let now = unix_now();
         let snap = self.sample_liveness().await;
@@ -593,10 +565,6 @@ impl<S: BlockStore + Send + Sync> MetricsSources<S> {
 }
 
 impl<S: BlockStore + Send + Sync> MetricsSources<S> {
-    // Lean sample for the `/health` liveness probe: only the three fields `HealthState::verdict` reads,
-    // plus the progress observation. Deliberately skips the mempool lock, the RSS read, and the jemalloc
-    // epoch-advance that a full `/metrics` scrape does — the kubelet polls this every ~15s and it must
-    // stay lock-light (one store peak query + a couple of atomics + one RwLock read for the peer count).
     pub(crate) async fn sample_liveness(&self) -> MetricsSnapshot {
         let peak_height = self
             .store
@@ -1390,8 +1358,6 @@ mod tests {
     };
     use dg_xch_stores::HistogramSnapshot;
 
-    // A below-tip snapshot with peers: the precondition for the stall verdict (everything else that
-    // makes /health return 200 is an explicit override tested below).
     fn below_tip_with_peers() -> MetricsSnapshot {
         MetricsSnapshot {
             peak_height: 50,
@@ -1709,10 +1675,6 @@ mod tests {
         assert!(!text.contains("fullnode_sync_base_height"));
     }
 
-    // Below tip, with peers, past grace, peak frozen well past STALL_SECS — but a confirm is
-    // actively in flight (a window-batched coin_record INSERT freezes both progress witnesses on
-    // the Postgres path). An in-flight confirm is progress, so the verdict must be 200: killing
-    // here would SIGKILL the node mid-commit.
     #[test]
     fn confirm_in_flight_is_healthy_though_peak_is_frozen() {
         let hs = HealthState::new_at(BOOT);
@@ -1740,8 +1702,6 @@ mod tests {
         assert!(v.body.contains("stalled"), "body: {}", v.body);
     }
 
-    // The stall dump fires exactly once per stall episode: first 503 wins, repeats are suppressed,
-    // and a healthy verdict re-arms it for the next episode.
     #[test]
     fn stall_dump_debounces_per_episode() {
         let hs = HealthState::new_at(BOOT);

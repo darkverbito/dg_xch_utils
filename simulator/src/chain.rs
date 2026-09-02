@@ -442,9 +442,6 @@ impl<S: BlockStore + CoinStore + Sync> ChainBuilder<S> {
         Ok((bundle, cc_hash, rc_hash, icc_hash.unwrap_or(icc_challenge)))
     }
 
-    /// Build the end-of-sub-slot bundle that closes `prev`'s sub-slot, with the new challenge-chain,
-    /// reward-chain, and infused-challenge-chain slot hashes the next slot's first block infuses
-    /// against. Mirrors the header validator's end-of-slot rules for a single closed slot.
     fn build_end_of_sub_slot(
         &self,
         prev: &BlockRecord,
