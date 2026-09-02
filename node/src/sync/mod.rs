@@ -519,6 +519,12 @@ where
         self.engine.store().near_tip()
     }
 
+    /// Seed the engine's weight-proof-attested summary chain — the mid-chain anchor's
+    /// last-resort source for an included SES whose sub-epoch lies below the anchor span.
+    pub fn seed_summary_chain(&mut self, summaries: Vec<SubEpochSummary>) {
+        self.engine.seed_summary_chain(summaries);
+    }
+
     /// Retract every staged-but-unconfirmed overlay entry — the pipeline's teardown after a
     /// stage failure (the failing window re-stages wholesale after the queue reset).
     pub fn clear_staged_overlay(&mut self) {
