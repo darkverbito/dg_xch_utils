@@ -37,6 +37,10 @@ members = [
 ]
 
 [workspace.dependencies]
+# SQLx 0.9 with upstream support for patched SQLite 3.54 (libsqlite3-sys 0.39).
+# Direct workspace dependencies propagate this pin to downstream Git consumers.
+sqlx = { git = "https://github.com/launchbadge/sqlx", rev = "987b8c5a74b6da8b71da6b5549925a7f6e59aac9", default-features = false }
+sqlx-core = { git = "https://github.com/launchbadge/sqlx", rev = "987b8c5a74b6da8b71da6b5549925a7f6e59aac9", default-features = false }
 blake3 = "1.8.3"
 dg_xch_core = { path = "core", version = "3.0.0", default-features = false }
 

@@ -142,7 +142,9 @@ fn farmer_cli_exports_farming_metrics_and_runtime_health() {
 fn both_timelord_modes_export_metrics_and_disconnected_readiness() {
     let directory = tempfile::tempdir().unwrap();
     tls(directory.path());
-    for mode in ["run", "compact"] {
+    // Exercise both signal listeners repeatedly: the service and its monitor
+    // can become ready to exit together while the node connection is refused.
+    for mode in ["run", "compact"].into_iter().cycle().take(20) {
         let addr = address();
         let config = serde_json::json!({"fullnode_host":"127.0.0.1","fullnode_port":1,"server_name":"chia.net",
             "tls":{"certificate":directory.path().join("farmer/public_farmer.crt"),"private_key":directory.path().join("farmer/public_farmer.key"),"ca_certificate":directory.path().join("ca/chia_ca.crt")},

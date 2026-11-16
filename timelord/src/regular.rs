@@ -314,15 +314,21 @@ pub async fn serve(config: Config) -> Result<(), Error> {
         )
     };
     dg_xch_servers::observability::run_with(async {
+    // Keep one listener across reconnects so a signal cannot fall into the gap
+    // between dropping one select branch and registering the next listener.
+    let shutdown = shutdown_signal();
+    tokio::pin!(shutdown);
     loop {
         tokio::select! {
-            result = shutdown_signal() => return result,
+            biased;
+            result = &mut shutdown => return result,
             result = session(&config, tls.clone(), metrics.clone()) => {
                 if let Err(error) = result { eprintln!("timelord event=disconnected error={error}"); }
             }
         }
         tokio::select! {
-            result = shutdown_signal() => return result,
+            biased;
+            result = &mut shutdown => return result,
             _ = tokio::time::sleep(Duration::from_secs(config.reconnect_seconds)) => {},
         }
     }

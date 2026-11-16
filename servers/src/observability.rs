@@ -135,6 +135,9 @@ pub async fn run_with(
         .ok_or_else(|| Error::other("monitoring task missing"))?;
     tokio::pin!(operation);
     tokio::select! {
+        // Portfu also observes termination signals. Let the service finish its
+        // shutdown when both it and the monitor complete on the same signal.
+        biased;
         result=&mut operation => { result.and(monitor.stop().await) },
         result=task => {
             result.map_err(Error::other)?.map_err(|e|Error::other(e.to_string()))?;

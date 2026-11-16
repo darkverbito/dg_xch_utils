@@ -75,8 +75,8 @@ impl<const N: usize> Sw<N> {
     #[must_use]
     pub fn to_bigint(self) -> BigInt {
         let mut bytes = Vec::with_capacity(self.len * 8);
-        for i in 0..self.len {
-            bytes.extend_from_slice(&self.d[i].to_le_bytes());
+        for limb in &self.d[..self.len] {
+            bytes.extend_from_slice(&limb.to_le_bytes());
         }
         let mag = num_bigint::BigUint::from_bytes_le(&bytes);
         if self.neg && self.len > 0 {
@@ -505,10 +505,10 @@ impl<const N: usize> Sw<N> {
             let (mut cp, mut cq, mut borrow) =
                 Self::submul2(&self.d, &other.d, n, a1, a2, &mut out.d);
             // Drain the carries: two more digits of P − Q − borrow.
-            for i in n..n + 2 {
+            for limb in &mut out.d[n..n + 2] {
                 let (d, b1) = cp.overflowing_sub(cq);
                 let (d, b2) = d.overflowing_sub(borrow);
-                out.d[i] = d;
+                *limb = d;
                 borrow = u64::from(b1) + u64::from(b2);
                 cp = 0;
                 cq = 0;
@@ -516,9 +516,9 @@ impl<const N: usize> Sw<N> {
             if borrow != 0 {
                 // Negative two's complement: take the magnitude (invert + increment).
                 let mut inc: u64 = 1;
-                for i in 0..n + 2 {
-                    let (v, o) = (!out.d[i]).overflowing_add(inc);
-                    out.d[i] = v;
+                for limb in &mut out.d[..n + 2] {
+                    let (v, o) = (!*limb).overflowing_add(inc);
+                    *limb = v;
                     inc = u64::from(o);
                 }
                 out.neg = s2;

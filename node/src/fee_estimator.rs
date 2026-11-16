@@ -330,8 +330,8 @@ impl FeeStat {
         let mut tx_sum = 0.0;
         let min_bucket = best_near_bucket.min(best_far_bucket);
         let max_bucket = best_near_bucket.max(best_far_bucket);
-        for i in min_bucket..=max_bucket {
-            tx_sum += self.tx_ct_avg[i];
+        for count in &self.tx_ct_avg[min_bucket..=max_bucket] {
+            tx_sum += count;
         }
         if found_answer && tx_sum != 0.0 {
             tx_sum /= 2.0;

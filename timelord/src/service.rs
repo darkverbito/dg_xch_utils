@@ -260,15 +260,19 @@ pub async fn serve(config: Config) -> Result<(), Error> {
     };
     dg_xch_servers::observability::run_with(
         async {
+            let shutdown = shutdown_signal();
+            tokio::pin!(shutdown);
             loop {
                 tokio::select! {
-                    result = shutdown_signal() => return result,
+                    biased;
+                    result = &mut shutdown => return result,
                     result = session(&config, tls.clone(), metrics.clone()) => {
                         if let Err(error) = result { eprintln!("Timelord disconnected: {error}"); }
                     }
                 }
                 tokio::select! {
-                    result = shutdown_signal() => return result,
+                    biased;
+                    result = &mut shutdown => return result,
                     _ = tokio::time::sleep(Duration::from_secs(config.reconnect_seconds)) => {}
                 }
             }

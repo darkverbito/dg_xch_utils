@@ -325,8 +325,8 @@ impl Decompressor {
             self.meta_buffer_tmp = vec![K32Meta4::zero(); max_pairs_per_table];
             // Allocate proof tables
             // Table 1 needs no groups, as we write to the R table's merged group, always
-            for i in 1..7 {
-                self.tables[i] = ProofTable {
+            for table in &mut self.tables[1..7] {
+                *table = ProofTable {
                     pairs: vec![],
                     capacity: 0,
                     length: 0,
@@ -335,8 +335,8 @@ impl Decompressor {
                         offset: 0,
                     }; 16],
                 };
-                self.tables[i].pairs = vec![Pair::zero(); max_pairs_per_table];
-                self.tables[i].capacity = max_pairs_per_table as u32;
+                table.pairs = vec![Pair::zero(); max_pairs_per_table];
+                table.capacity = max_pairs_per_table as u32;
                 // Reduce the match count for each subsequent table by nearly half
                 max_pairs_per_table = max(
                     (max_pairs_per_table as f64 * 0.6) as usize,
@@ -600,8 +600,8 @@ impl Decompressor {
             let mut table_pairs_sorted = Span::new(table.pairs.as_mut_ptr(), table_length);
             let key_unsorted = x_buffer_tmp.slice_size(table_length);
             let key_sorted = x_buffer.slice_size(table_length);
-            for i in 0..group_count {
-                let group_length = table.groups[i].count as usize;
+            for (i, group) in table.groups[..group_count].iter().enumerate() {
+                let group_length = group.count as usize;
                 let group_threads = min(thread_count as usize, group_length);
                 let mut sorter = RadixSorter::new(group_threads, group_length);
                 let mut y_unsorted = table_yunsorted.slice_size(group_length);
@@ -671,8 +671,8 @@ impl Decompressor {
             let mut table_pairs_sorted = Span::new(table.pairs.as_mut_ptr(), table_length);
             let key_unsorted = x_buffer_tmp.slice_size(table_length);
             let key_sorted = x_buffer.slice_size(table_length);
-            for i in 0..group_count {
-                let group_length = table.groups[i].count as usize;
+            for (i, group) in table.groups[..group_count].iter().enumerate() {
+                let group_length = group.count as usize;
                 let group_threads = min(thread_count as usize, group_length);
                 let mut sorter = RadixSorter::new(group_threads, group_length);
                 let mut y_unsorted = table_yunsorted.slice_size(group_length);
@@ -742,8 +742,8 @@ impl Decompressor {
             let mut table_pairs_sorted = Span::new(table.pairs.as_mut_ptr(), table_length);
             let key_unsorted = x_buffer_tmp.slice_size(table_length);
             let key_sorted = x_buffer.slice_size(table_length);
-            for i in 0..group_count {
-                let group_length = table.groups[i].count as usize;
+            for (i, group) in table.groups[..group_count].iter().enumerate() {
+                let group_length = group.count as usize;
                 let group_threads = min(thread_count as usize, group_length);
                 let mut sorter = RadixSorter::new(group_threads, group_length);
                 let mut y_unsorted = table_yunsorted.slice_size(group_length);
@@ -811,8 +811,8 @@ impl Decompressor {
             let mut table_pairs_sorted = Span::new(table.pairs.as_mut_ptr(), table_length);
             let key_unsorted = x_buffer_tmp.slice_size(table_length);
             let key_sorted = x_buffer.slice_size(table_length);
-            for i in 0..group_count {
-                let group_length = table.groups[i].count as usize;
+            for (i, group) in table.groups[..group_count].iter().enumerate() {
+                let group_length = group.count as usize;
                 let group_threads = min(thread_count as usize, group_length);
                 let mut sorter = RadixSorter::new(group_threads, group_length);
                 let mut y_unsorted = table_yunsorted.slice_size(group_length);
@@ -888,8 +888,8 @@ impl Decompressor {
             let mut table_pairs_sorted = Span::new(table.pairs.as_mut_ptr(), table_length);
             let key_unsorted = x_buffer_tmp.slice_size(table_length);
             let key_sorted = x_buffer.slice_size(table_length);
-            for i in 0..group_count {
-                let group_length = table.groups[i].count as usize;
+            for (i, group) in table.groups[..group_count].iter().enumerate() {
+                let group_length = group.count as usize;
                 let group_threads = min(thread_count as usize, group_length);
                 let mut sorter = RadixSorter::new(group_threads, group_length);
                 let mut y_unsorted = table_yunsorted.slice_size(group_length);
