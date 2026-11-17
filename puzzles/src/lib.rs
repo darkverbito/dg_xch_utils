@@ -33,3 +33,5 @@ pub mod pool_launch;
 pub mod pool_v2;
 
 pub mod programs;
+
+pub mod offer_codec;

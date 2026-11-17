@@ -20,7 +20,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use std::io::Error;
 
-const MAX_OFFER_BYTES: usize = 1024 * 1024;
 const MAX_SPENDS: usize = 64;
 const MAX_COST: u64 = 500_000_000;
 

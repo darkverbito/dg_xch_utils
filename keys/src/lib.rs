@@ -14,6 +14,8 @@ use std::mem::size_of;
 use std::str::FromStr;
 use zeroize::Zeroizing;
 
+pub mod bls;
+
 fn _version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
