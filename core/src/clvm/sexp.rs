@@ -1212,6 +1212,15 @@ macro_rules! impl_ints {
                         return NULL_SEXP;
                     }
                     let as_ary = num.to_be_bytes();
+                    // CLVM atoms are signed integers, including values supplied
+                    // through Rust's unsigned types. Preserve a positive sign
+                    // before applying the signed leading-byte normalization.
+                    if num > 0 && as_ary[0] & 0x80 != 0 {
+                        let mut bytes = Vec::with_capacity(as_ary.len() + 1);
+                        bytes.push(0);
+                        bytes.extend_from_slice(&as_ary);
+                        return SExp::Atom(AtomBuf::new(bytes));
+                    }
                     let mut as_bytes = as_ary.as_slice();
                     while as_bytes.len() > 1 && as_bytes[0] == ( (as_bytes[1] & 0x80 > 0) as u8 * 0xFF) {
                         as_bytes = &as_bytes[1..];

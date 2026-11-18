@@ -78,8 +78,6 @@ struct ValidationState {
     pub total_announcements: u64,
     pub total_cost: u64,
     pub total_reserved_fee: u64,
-    pub total_removed: u64,
-    pub total_created: u64,
     pub seconds_relative: Option<u64>,
     pub seconds_absolute: u64,
     pub height_relative: Option<u32>,
@@ -418,7 +416,6 @@ impl SpendBundle {
                 &solution,
             )?;
             state.total_cost += cost;
-            state.total_removed += spend.coin.amount;
             if state.total_cost > max_cost {
                 Err(ClvmError::CostExceeded(max_cost, state.total_cost))?;
             }
@@ -472,7 +469,6 @@ impl SpendBundle {
                             puzzle_hash: *puzzle_hash,
                             amount: *amount,
                         };
-                        state.total_created += created_coin.amount;
                         if !state.coins_created.insert(created_coin) {
                             Err(ClvmError::DuplicateCreate(format!(
                                 "Duplicate CreateCoin Condition: {}",
